@@ -4,7 +4,7 @@
 //! adapted to IR statements). Unreducible edges degrade to `goto`, so the
 //! output is always faithful. Runs after SSA destruction.
 
-use super::{collect_callees, collect_values, destruct_ssa, expr_c};
+use super::{collect_callees, collect_values, destruct_ssa, expr_c, frame_decls, frame_name};
 use crate::cfg::dom;
 use crate::ir::types::*;
 use std::collections::{BTreeSet, HashMap};
@@ -28,6 +28,9 @@ fn body_line(s: &Stmt) -> Option<String> {
         )),
         Stmt::CallStmt(e) => Some(format!("(void)({});", expr_c(e))),
         Stmt::Asm(t) => Some(format!("/* asm: {} */", t)),
+        Stmt::Set { dst: Location::Frame(d), expr } => {
+            Some(format!("{} = {};", frame_name(*d), expr_c(expr)))
+        }
         Stmt::Set { .. } | Stmt::Nop => None,
         _ => None, // Branch/Jump/Return/Switch handled by the structurer
     }
@@ -121,6 +124,9 @@ pub fn emit_function(func: &IrFunction, forward: &mut BTreeSet<u64>) -> String {
     if !values.is_empty() {
         let decls: Vec<String> = values.iter().map(|v| format!("v{} = 0", v)).collect();
         let _ = writeln!(out, "    uint64_t {};", decls.join(", "));
+    }
+    if let Some(fd) = frame_decls(&f) {
+        let _ = writeln!(out, "{}", fd);
     }
     let entry = s.entry;
     s.emit_seq(entry, Ctx::root(), 1);

@@ -306,7 +306,12 @@ fn rewrite_stmt(
         },
         Stmt::Return(Some(e)) => Stmt::Return(Some(rewrite_reads(e, stacks, undef, counter))),
         Stmt::CallStmt(e) => Stmt::CallStmt(rewrite_reads(e, stacks, undef, counter)),
-        // Set with a non-versioned dst can't occur (memory uses Store); pass through.
+        // A non-versioned Set (a Frame slot) keeps its location but its read
+        // operands are still renamed.
+        Stmt::Set { dst, expr } => Stmt::Set {
+            dst,
+            expr: rewrite_reads(expr, stacks, undef, counter),
+        },
         other => other,
     }
 }

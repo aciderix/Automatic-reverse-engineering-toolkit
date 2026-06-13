@@ -130,12 +130,24 @@ fn const_c(v: i128) -> String {
     }
 }
 
+/// Name a recovered stack-frame slot.
+pub(crate) fn frame_name(d: i64) -> String {
+    if d == 0 {
+        "saved_bp".into()
+    } else if d > 0 {
+        format!("arg_{:x}", d)
+    } else {
+        format!("local_{:x}", -d)
+    }
+}
+
 pub(crate) fn expr_c(e: &Expr) -> String {
     match e {
         Expr::Const(v, _) => const_c(*v),
         Expr::Use(v) => format!("v{}", v.0),
         Expr::Undef => "0 /*undef*/".into(),
-        Expr::Read(_) => "0 /*reg*/".into(), // none remain post-SSA
+        Expr::Read(Location::Frame(d)) => frame_name(*d),
+        Expr::Read(_) => "0 /*reg*/".into(), // other reads don't remain post-SSA
         Expr::Load { addr, ty } => format!("(*({}*)({}))", ctype(int_bits(ty)), expr_c(addr)),
         Expr::Unary(op, x) => {
             let xs = expr_c(x);
@@ -148,6 +160,7 @@ pub(crate) fn expr_c(e: &Expr) -> String {
         }
         Expr::Binary(op, a, b) => binary_c(*op, &expr_c(a), &expr_c(b)),
         Expr::Cast { to, expr } => format!("(({})({}))", ty_ctype(to), expr_c(expr)),
+        Expr::Addr(Location::Frame(d)) => format!("(uint64_t)(&{})", frame_name(*d)),
         Expr::Addr(_) => "0 /*addr*/".into(),
         Expr::Call { target, args, .. } => {
             let a: Vec<String> = args.iter().map(expr_c).collect();
@@ -255,6 +268,59 @@ pub(crate) fn collect_values(func: &IrFunction, out: &mut BTreeSet<u32>) {
     }
 }
 
+/// Collect recovered stack-frame slot displacements (for declaration).
+pub(crate) fn collect_frame_vars(func: &IrFunction, out: &mut BTreeSet<i64>) {
+    fn walk(e: &Expr, out: &mut BTreeSet<i64>) {
+        match e {
+            Expr::Read(Location::Frame(d)) | Expr::Addr(Location::Frame(d)) => {
+                out.insert(*d);
+            }
+            Expr::Load { addr, .. } => walk(addr, out),
+            Expr::Unary(_, x) | Expr::Cast { expr: x, .. } => walk(x, out),
+            Expr::Binary(_, a, b) => {
+                walk(a, out);
+                walk(b, out);
+            }
+            Expr::Call { args, .. } => {
+                for a in args {
+                    walk(a, out);
+                }
+            }
+            _ => {}
+        }
+    }
+    for b in &func.blocks {
+        for s in &b.stmts {
+            if let Stmt::Set { dst: Location::Frame(d), .. } = s {
+                out.insert(*d);
+            }
+            match s {
+                Stmt::Set { expr, .. }
+                | Stmt::Assign { expr, .. }
+                | Stmt::CallStmt(expr) => walk(expr, out),
+                Stmt::Store { addr, value, .. } => {
+                    walk(addr, out);
+                    walk(value, out);
+                }
+                Stmt::Branch { cond, .. } => walk(cond, out),
+                Stmt::Return(Some(e)) => walk(e, out),
+                _ => {}
+            }
+        }
+    }
+}
+
+/// Render the local declaration line for frame variables, if any.
+pub(crate) fn frame_decls(func: &IrFunction) -> Option<String> {
+    let mut fv = BTreeSet::new();
+    collect_frame_vars(func, &mut fv);
+    if fv.is_empty() {
+        return None;
+    }
+    let decls: Vec<String> = fv.iter().map(|d| format!("{} = 0", frame_name(*d))).collect();
+    Some(format!("    uint64_t {};", decls.join(", ")))
+}
+
 /// Collect direct call targets, to forward-declare them.
 pub(crate) fn collect_callees(func: &IrFunction, out: &mut BTreeSet<u64>) {
     fn walk(e: &Expr, out: &mut BTreeSet<u64>) {
@@ -301,7 +367,10 @@ fn stmt_c(s: &Stmt, out: &mut String) {
         Stmt::Assign { dst, expr } => {
             let _ = writeln!(out, "    v{} = {};", dst.0, expr_c(expr));
         }
-        Stmt::Set { .. } => {} // none remain post-SSA
+        Stmt::Set { dst: Location::Frame(d), expr } => {
+            let _ = writeln!(out, "    {} = {};", frame_name(*d), expr_c(expr));
+        }
+        Stmt::Set { .. } => {}
         Stmt::Store { addr, value, ty } => {
             let _ = writeln!(
                 out,
@@ -352,6 +421,9 @@ pub fn emit_function(func: &IrFunction, forward: &mut BTreeSet<u64>) -> String {
     if !values.is_empty() {
         let decls: Vec<String> = values.iter().map(|v| format!("v{} = 0", v)).collect();
         let _ = writeln!(out, "    uint64_t {};", decls.join(", "));
+    }
+    if let Some(fd) = frame_decls(&f) {
+        let _ = writeln!(out, "{}", fd);
     }
     // Enter at the function's entry block.
     let entry_id = f

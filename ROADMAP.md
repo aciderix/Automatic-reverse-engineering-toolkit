@@ -314,8 +314,15 @@ Stratégie incrémentale recommandée :
       adapté à l'IR (sur l'IR post-destruction-SSA), `if`/`else`/`while`/`break`,
       dégradation `goto` sûre. `factorial` se lit comme du C structuré. Vérifié :
       **2000/2000 fonctions du jeu recompilent (100 %)** via le chemin structuré.
-- [ ] Variables typées par inférence (§5) + signatures (args) + idiomes, pour la
-      parité lisibilité complète, puis bascule du pipeline par défaut sur l'IR.
+- [x] **Variables de frame récupérées dans l'IR** : le lifter reconnaît les
+      accès `[ebp/rbp ± disp]` comme des emplacements `Frame(disp)` (lecture/
+      écriture/adresse), nommés `arg_N`/`local_N` à l'émission et déclarés.
+      Approche **saine** (pas de promotion SSA, les slots restent mémoire). Plus
+      une correction DCE : un load mort est supprimable (≠ non-hoistable) →
+      disparition des calculs de flags morts. `sub_401670` : `arg_8` récupéré,
+      condition réduite à `if (*arg_8 == 0)`. Recompilabilité 600/600 (100 %).
+- [ ] Promotion des slots non-aliasés en SSA (§4.1) + inférence de types (§5) +
+      signatures réelles, pour la parité/dépassement, puis bascule par défaut.
 
 ---
 

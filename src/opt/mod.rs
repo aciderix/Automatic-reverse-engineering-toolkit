@@ -30,11 +30,26 @@ pub fn optimize(func: &mut IrFunction) {
 
 // --- constant / copy / single-use propagation -----------------------------
 
+/// Cannot be *hoisted/duplicated* (memory reads, calls): used to gate
+/// propagation, so a load is never moved across a store.
 fn contains_side_effect(e: &Expr) -> bool {
     match e {
-        Expr::Load { .. } | Expr::Call { .. } => true,
+        Expr::Load { .. } | Expr::Call { .. } | Expr::Read(_) => true,
         Expr::Unary(_, x) | Expr::Cast { expr: x, .. } => contains_side_effect(x),
         Expr::Binary(_, a, b) => contains_side_effect(a) || contains_side_effect(b),
+        _ => false,
+    }
+}
+
+/// Cannot be *removed* even if its result is unused (only calls have an
+/// observable effect; a dead memory load is safe to drop, as every decompiler
+/// does — we do not model faulting/volatile reads).
+fn contains_call(e: &Expr) -> bool {
+    match e {
+        Expr::Call { .. } => true,
+        Expr::Load { addr, .. } => contains_call(addr),
+        Expr::Unary(_, x) | Expr::Cast { expr: x, .. } => contains_call(x),
+        Expr::Binary(_, a, b) => contains_call(a) || contains_call(b),
         _ => false,
     }
 }
@@ -331,7 +346,7 @@ fn dce(func: &mut IrFunction) -> bool {
         let before = b.stmts.len();
         b.stmts.retain(|s| match s {
             Stmt::Assign { dst, expr } => {
-                uses.get(&dst.0).copied().unwrap_or(0) > 0 || contains_side_effect(expr)
+                uses.get(&dst.0).copied().unwrap_or(0) > 0 || contains_call(expr)
             }
             _ => true,
         });

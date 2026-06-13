@@ -81,6 +81,19 @@ fn read_reg(r: Register) -> Option<Expr> {
     }
 }
 
+/// If operand `i` is a pure frame slot `[ebp/rbp ± disp]` (base = frame pointer,
+/// no index), return its displacement. These become named `Frame` locations.
+fn frame_disp(ins: &Instruction, i: u32) -> Option<i64> {
+    if ins.op_kind(i) != OpKind::Memory || ins.is_ip_rel_memory_operand() {
+        return None;
+    }
+    let base = ins.memory_base();
+    if (base != Register::RBP && base != Register::EBP) || ins.memory_index() != Register::None {
+        return None;
+    }
+    Some(ins.memory_displacement64() as i64)
+}
+
 /// Build the address expression and access size (bits) of a memory operand.
 fn mem_addr(ins: &Instruction) -> Option<(Expr, u32)> {
     let size_bits = (ins.memory_size().size() * 8) as u32;
@@ -130,6 +143,15 @@ fn op_value(ins: &Instruction, i: u32) -> Option<Expr> {
         | OpKind::Immediate8to64
         | OpKind::Immediate32to64 => Some(konst(ins.immediate(i) as i128)),
         OpKind::Memory => {
+            if let Some(d) = frame_disp(ins, i) {
+                let w = (ins.memory_size().size() * 8) as u32;
+                let full = Expr::Read(Location::Frame(d));
+                return Some(if w >= 64 {
+                    full
+                } else {
+                    Expr::Binary(BinOp::And, Box::new(full), Box::new(konst(mask(w))))
+                });
+            }
             let (addr, sz) = mem_addr(ins)?;
             Some(Expr::Load {
                 addr: Box::new(addr),
@@ -185,6 +207,12 @@ fn write_op0(ins: &Instruction, value: Expr, bits: u32) -> Option<Vec<Stmt>> {
             Some(vec![Stmt::Set { dst, expr }])
         }
         OpKind::Memory => {
+            if let Some(d) = frame_disp(ins, 0) {
+                let dst = Location::Frame(d);
+                let w = (ins.memory_size().size() * 8) as u32;
+                let expr = combine_write(&dst, w, value, bits);
+                return Some(vec![Stmt::Set { dst, expr }]);
+            }
             let (addr, sz) = mem_addr(ins)?;
             Some(vec![Stmt::Store {
                 addr,
@@ -390,7 +418,11 @@ pub fn lift(insn: &Insn, bits: u32) -> Vec<Stmt> {
             some_or_asm!(write_op0(ins, sv, bits))
         }
         Mnemonic::Lea => {
-            let (addr, _) = some_or_asm!(mem_addr(ins));
+            let addr = if let Some(d) = frame_disp(ins, 1) {
+                Expr::Addr(Location::Frame(d))
+            } else {
+                some_or_asm!(mem_addr(ins)).0
+            };
             some_or_asm!(write_op0(ins, addr, bits))
         }
 
