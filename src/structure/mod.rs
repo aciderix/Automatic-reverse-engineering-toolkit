@@ -8,7 +8,8 @@
 //! recovered.
 
 use crate::analysis::Function;
-use crate::decompile::{block_statements, label, return_reg, signature_and_locals};
+use crate::dataflow::{optimize_function, FunctionCode};
+use crate::decompile::{label, return_reg, signature_and_locals};
 use crate::disasm::Flow;
 use crate::loader::Program;
 use std::collections::HashMap;
@@ -34,6 +35,8 @@ struct Structurer<'a> {
     indeg: Vec<usize>,
     entry: usize,
     emitted: Vec<bool>,
+    /// Dataflow-optimised statements + condition per block start address.
+    code: FunctionCode,
     out: String,
 }
 
@@ -58,7 +61,69 @@ impl Ctx {
 /// Structure and render a single function as pseudo-C.
 pub fn structure_function(prog: &Program, func: &Function) -> String {
     let s = Structurer::new(prog, func);
-    s.run()
+    drop_redundant_continues(s.run())
+}
+
+/// Remove a `continue;` that is followed only by the closing braces leading out
+/// of its enclosing `while (true)` loop — falling through is then identical to
+/// continuing, so the statement is pure noise. Provably semantics-preserving.
+fn drop_redundant_continues(text: String) -> String {
+    let lines: Vec<&str> = text.lines().collect();
+    // Track the block-nesting stack: true = a `while (true)` loop.
+    let mut stack: Vec<bool> = Vec::new();
+    let mut drop: Vec<bool> = vec![false; lines.len()];
+
+    for (i, raw) in lines.iter().enumerate() {
+        let t = raw.trim();
+        if t == "continue;" {
+            // Closes needed to fall out past the innermost enclosing loop.
+            if let Some(loop_depth) = stack.iter().rposition(|&is_loop| is_loop) {
+                let closes_needed = stack.len() - loop_depth;
+                // The next `closes_needed` non-empty lines must all be `}`.
+                let mut seen = 0;
+                let mut ok = true;
+                for next in lines.iter().skip(i + 1) {
+                    let nt = next.trim();
+                    if nt.is_empty() {
+                        continue;
+                    }
+                    if nt == "}" {
+                        seen += 1;
+                        if seen == closes_needed {
+                            break;
+                        }
+                    } else {
+                        ok = false;
+                        break;
+                    }
+                }
+                if ok && seen == closes_needed {
+                    drop[i] = true;
+                }
+            }
+            continue;
+        }
+        // Maintain the nesting stack.
+        if t.ends_with('{') {
+            if t == "} else {" {
+                // closes an if, opens an if — net stack type unchanged
+            } else {
+                stack.push(t.starts_with("while (true)"));
+            }
+        } else if t == "}" {
+            stack.pop();
+        }
+    }
+
+    let mut out = String::with_capacity(text.len());
+    for (i, raw) in lines.iter().enumerate() {
+        if drop[i] {
+            continue;
+        }
+        out.push_str(raw);
+        out.push('\n');
+    }
+    out
 }
 
 impl<'a> Structurer<'a> {
@@ -97,6 +162,7 @@ impl<'a> Structurer<'a> {
             indeg,
             entry,
             emitted: vec![false; n],
+            code: optimize_function(prog, func),
             out: String::new(),
         };
         me.compute_dominators();
@@ -376,7 +442,7 @@ impl<'a> Structurer<'a> {
     /// with, or None if this region is finished.
     fn emit_block(&mut self, i: usize, ctx: Ctx, depth: usize) -> Option<usize> {
         let term = self.blk(i).terminator;
-        let (stmts, cond) = block_statements(self.prog, self.blk(i));
+        let (stmts, cond) = self.code[&self.nodes[i]].clone();
         for s in stmts {
             self.line(depth, &s);
         }
@@ -481,7 +547,7 @@ impl<'a> Structurer<'a> {
 
         // Emit the header body itself (already marked emitted by the caller).
         let term = self.blk(header).terminator;
-        let (stmts, cond) = block_statements(self.prog, self.blk(header));
+        let (stmts, cond) = self.code[&self.nodes[header]].clone();
         let succ = self.blk(header).successors.clone();
         for s in stmts {
             self.line(depth + 1, &s);

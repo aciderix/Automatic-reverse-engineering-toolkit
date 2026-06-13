@@ -48,6 +48,11 @@ exactly what a young decompiler's output looks like before full structuring.
   natural-loop detection drive a recursive emitter that produces `if`/`else`
   and `while` loops. Edges it cannot reduce degrade to explicit `goto`, so the
   output is always semantically faithful. (Cut gotos by ~80% on the game.)
+- **Dataflow** (`src/dataflow`): global register **liveness** over the CFG,
+  **dead-assignment elimination**, and conservative **single-use expression
+  propagation** — gated on provable safety (a def is only removed when unused
+  on every path; an expression is only inlined when it has one consumer and
+  nothing between can change it).
 - **Decompiler** (`src/decompile`): the flat goto-based emitter (`--flat`),
   plus shared per-block lifting used by the structured emitter.
 
@@ -106,15 +111,15 @@ aret <binary> --split out_dir/      # one .c per function + index.csv
 
 Done: control-flow structuring (`if`/`while`), frame-variable recovery
 (args/locals), branch-condition recovery, cdecl call-site argument recovery,
-prologue/epilogue cleanup, prologue-scan coverage, large-binary scaling.
+prologue/epilogue cleanup, prologue-scan coverage, large-binary scaling,
+global liveness + dead-code elimination + single-use expression propagation.
 
 Remaining, in priority order:
 
-1. **SSA-based IR** with register/stack-slot tracking, so values flow across
-   instructions instead of literal register names — the foundation for real
-   expression recovery (e.g. collapsing `eax = a; eax += b;` into `a + b`).
-2. **Dataflow**: dead-code elimination, expression/constant propagation —
-   collapses the verbose per-instruction output into real statements.
+1. **Cross-block (full SSA) propagation** with φ-nodes, to fold expressions
+   across basic blocks, not just within one — and 64-bit register-argument
+   recovery (System V / Win64 calling conventions).
+2. Constant propagation/folding and broader algebraic simplification.
 3. Conservative **type inference** beyond the current width-based types.
 4. **`switch`/jump-table recovery** and full indirect-call resolution via
    vtable analysis (names the indirect call sites, not just the targets).
