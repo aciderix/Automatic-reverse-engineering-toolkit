@@ -8,6 +8,8 @@
 //! comments (their clobbers were already `Undef`), so the output compiles.
 #![allow(dead_code)]
 
+pub mod structured;
+
 use crate::ir::types::*;
 use std::collections::BTreeSet;
 use std::fmt::Write;
@@ -16,7 +18,7 @@ use std::fmt::Write;
 /// that copies each φ argument into the φ's value, then jumps to the join.
 /// Inserting on *every* edge (not only critical ones) keeps it simple and
 /// correct: copies always live in a dedicated single-pred/single-succ block.
-fn destruct_ssa(func: &mut IrFunction) {
+pub(crate) fn destruct_ssa(func: &mut IrFunction) {
     let n = func.blocks.len();
     let mut next_id = func.blocks.iter().map(|b| b.id).max().unwrap_or(0) + 1;
     let mut new_blocks: Vec<Block> = Vec::new();
@@ -102,7 +104,7 @@ fn redirect_terminator(last: Option<&mut Stmt>, from: u32, to: u32) {
     }
 }
 
-fn ctype(bits: u8) -> &'static str {
+pub(crate) fn ctype(bits: u8) -> &'static str {
     match bits {
         8 => "uint8_t",
         16 => "uint16_t",
@@ -128,7 +130,7 @@ fn const_c(v: i128) -> String {
     }
 }
 
-fn expr_c(e: &Expr) -> String {
+pub(crate) fn expr_c(e: &Expr) -> String {
     match e {
         Expr::Const(v, _) => const_c(*v),
         Expr::Use(v) => format!("v{}", v.0),
@@ -162,7 +164,7 @@ fn expr_c(e: &Expr) -> String {
     }
 }
 
-fn int_bits(t: &Ty) -> u8 {
+pub(crate) fn int_bits(t: &Ty) -> u8 {
     match t {
         Ty::Int { bits, .. } => *bits,
         _ => 64,
@@ -203,7 +205,7 @@ fn binary_c(op: BinOp, a: &str, b: &str) -> String {
 
 /// Collect every `ValueId` referenced anywhere (defs, uses, φ args) so they can
 /// all be declared (including undef versions that are read but never assigned).
-fn collect_values(func: &IrFunction, out: &mut BTreeSet<u32>) {
+pub(crate) fn collect_values(func: &IrFunction, out: &mut BTreeSet<u32>) {
     fn walk(e: &Expr, out: &mut BTreeSet<u32>) {
         match e {
             Expr::Use(v) => {
@@ -254,7 +256,7 @@ fn collect_values(func: &IrFunction, out: &mut BTreeSet<u32>) {
 }
 
 /// Collect direct call targets, to forward-declare them.
-fn collect_callees(func: &IrFunction, out: &mut BTreeSet<u64>) {
+pub(crate) fn collect_callees(func: &IrFunction, out: &mut BTreeSet<u64>) {
     fn walk(e: &Expr, out: &mut BTreeSet<u64>) {
         match e {
             Expr::Call { target: CallTarget::Direct(a), args, .. } => {

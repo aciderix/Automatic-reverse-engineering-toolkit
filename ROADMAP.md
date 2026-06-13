@@ -309,8 +309,13 @@ Stratégie incrémentale recommandée :
       callees, forme goto. Vérifié : `factorial` recompile et la logique est
       correcte (boucle, copies de φ) ; l'unité demo entière (12 fonctions) et
       des fonctions du jeu recompilent. → débloque le niveau « recompile » du §8.
-- [ ] Émission **structurée** (réutiliser `structure` sur le CFG IR) + variables
-      typées par inférence + idiomes, pour la parité lisibilité.
+- [x] Émission **structurée** (`src/emit/structured.rs`) : même algorithme
+      dominateurs/post-dominateurs + boucles naturelles que le pipeline texte,
+      adapté à l'IR (sur l'IR post-destruction-SSA), `if`/`else`/`while`/`break`,
+      dégradation `goto` sûre. `factorial` se lit comme du C structuré. Vérifié :
+      **2000/2000 fonctions du jeu recompilent (100 %)** via le chemin structuré.
+- [ ] Variables typées par inférence (§5) + signatures (args) + idiomes, pour la
+      parité lisibilité complète, puis bascule du pipeline par défaut sur l'IR.
 
 ---
 

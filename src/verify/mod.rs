@@ -105,7 +105,7 @@ pub fn run(prog: &Program, funcs: &[&Function], limit: usize) -> Report {
         let mut irf = ir::build::build_ir(prog, f);
         ssa::to_ssa(&mut irf);
         crate::opt::optimize(&mut irf);
-        let src = emit::emit_unit(std::slice::from_ref(&irf));
+        let src = emit::structured::emit_unit(std::slice::from_ref(&irf));
         match try_compile(&cc, &src) {
             Ok(()) => compiled += 1,
             Err(e) => {

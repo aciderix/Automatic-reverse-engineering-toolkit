@@ -166,7 +166,11 @@ fn main() -> Result<()> {
                     irf
                 })
                 .collect();
-            out.push_str(&emit::emit_unit(&irfs));
+            if args.flat {
+                out.push_str(&emit::emit_unit(&irfs));
+            } else {
+                out.push_str(&emit::structured::emit_unit(&irfs));
+            }
         }
         Mode::Verify => {
             let limit = args.limit.unwrap_or(200);
