@@ -45,9 +45,11 @@ pub struct AnalysisResult {
     pub instruction_count: usize,
 }
 
-/// Entry point: global decode, then build each function's CFG.
-pub fn analyze(prog: &Program, disasm: &Disassembler) -> AnalysisResult {
-    let (global, entries) = global_decode(prog, disasm);
+/// Entry point: global decode, then build each function's CFG. When
+/// `prologue_scan` is set, also recover functions reached only indirectly by
+/// scanning executable sections for function prologues.
+pub fn analyze(prog: &Program, disasm: &Disassembler, prologue_scan: bool) -> AnalysisResult {
+    let (global, entries) = global_decode(prog, disasm, prologue_scan);
     let instruction_count = global.len();
 
     let mut functions = Vec::new();
@@ -68,23 +70,46 @@ pub fn analyze(prog: &Program, disasm: &Disassembler) -> AnalysisResult {
 fn global_decode(
     prog: &Program,
     disasm: &Disassembler,
+    prologue_scan: bool,
 ) -> (BTreeMap<u64, Insn>, BTreeSet<u64>) {
     let mut global: BTreeMap<u64, Insn> = BTreeMap::new();
     let mut entries: BTreeSet<u64> = prog.seed_functions().into_iter().collect();
     if entries.is_empty() && prog.is_executable(prog.entry) {
         entries.insert(prog.entry);
     }
-    let mut work: VecDeque<u64> = entries.iter().copied().collect();
 
+    // Pass 1: recursive descent from direct-call seeds.
+    let mut work: VecDeque<u64> = entries.iter().copied().collect();
+    drain(prog, disasm, &mut global, &mut entries, &mut work);
+
+    // Pass 2: prologue scanning recovers indirectly-reached functions. Only
+    // seed prologues we haven't already decoded as part of a known function.
+    if prologue_scan {
+        let mut extra: VecDeque<u64> = VecDeque::new();
+        for p in prog.prologue_seeds() {
+            if !global.contains_key(&p) && prog.is_executable(p) && entries.insert(p) {
+                extra.push_back(p);
+            }
+        }
+        drain(prog, disasm, &mut global, &mut entries, &mut extra);
+    }
+
+    (global, entries)
+}
+
+/// Drain a worklist of run starts, decoding each reachable instruction once
+/// into `global` and recording direct-call targets as new entries.
+fn drain(
+    prog: &Program,
+    disasm: &Disassembler,
+    global: &mut BTreeMap<u64, Insn>,
+    entries: &mut BTreeSet<u64>,
+    work: &mut VecDeque<u64>,
+) {
     while let Some(start) = work.pop_front() {
-        // Walk a straight-line run from `start`, stopping at already-decoded
-        // territory or a block terminator.
         let mut cur = start;
         loop {
-            if global.contains_key(&cur) {
-                break;
-            }
-            if !prog.is_executable(cur) {
+            if global.contains_key(&cur) || !prog.is_executable(cur) {
                 break;
             }
             let insn = match disasm.decode_at(prog, cur) {
@@ -122,8 +147,6 @@ fn global_decode(
             }
         }
     }
-
-    (global, entries)
 }
 
 /// Collect the instructions belonging to one function by walking intra-function

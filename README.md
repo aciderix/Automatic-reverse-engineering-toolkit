@@ -34,9 +34,11 @@ exactly what a young decompiler's output looks like before full structuring.
 - **Disassembler** (`src/disasm`): decodes x86 / x86-64 with `iced-x86` and
   classifies each instruction's control flow.
 - **Analysis** (`src/analysis`): recursive-descent **function discovery** from
-  the entry point + symbols + call targets, then **basic-block / CFG**
-  construction. Scales via a single global decode pass (a 27 MB game binary →
-  5781 functions / 795k instructions in ~5 s).
+  the entry point + symbols + call targets, plus **prologue scanning** to
+  recover functions reached only indirectly (vtables/callbacks), then
+  **basic-block / CFG** construction. Scales via a single global decode pass
+  (27 MB game binary → 43k functions / 3M instructions in ~50 s; `--no-prologue-scan`
+  for the ~5 s directly-called-only subset).
 - **IR lifting** (`src/ir`): local semantic translation of instructions into C
   (`mov`→`=`, `add`→`+=`, `lea`→address, memory operands→typed dereferences),
   **branch-condition recovery** (`cmp`/`test` + `jcc` → `eax <= 1`, correct
@@ -103,19 +105,19 @@ aret <binary> --split out_dir/      # one .c per function + index.csv
 ## Roadmap (the honest path to "real and powerful")
 
 Done: control-flow structuring (`if`/`while`), frame-variable recovery
-(args/locals), branch-condition recovery, large-binary scaling.
+(args/locals), branch-condition recovery, cdecl call-site argument recovery,
+prologue/epilogue cleanup, prologue-scan coverage, large-binary scaling.
 
 Remaining, in priority order:
 
 1. **SSA-based IR** with register/stack-slot tracking, so values flow across
-   instructions instead of literal register names (enables the cleanups below).
-2. **Dataflow**: dead-code elimination, expression propagation, constant
-   folding — collapses the verbose per-instruction output (and prologue/epilogue
-   `push`/`pop` noise) into real statements.
-3. **Argument-count recovery at call sites** and conservative **type inference**
-   beyond the current width-based types.
-4. **`switch`/jump-table recovery** and indirect-call resolution via vtable
-   analysis (reaches the functions only called indirectly — most of a C++ game).
+   instructions instead of literal register names — the foundation for real
+   expression recovery (e.g. collapsing `eax = a; eax += b;` into `a + b`).
+2. **Dataflow**: dead-code elimination, expression/constant propagation —
+   collapses the verbose per-instruction output into real statements.
+3. Conservative **type inference** beyond the current width-based types.
+4. **`switch`/jump-table recovery** and full indirect-call resolution via
+   vtable analysis (names the indirect call sites, not just the targets).
 5. **Library/CRT signature matching** (FLIRT-style) to name known functions and
    skip runtime boilerplate.
 

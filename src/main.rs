@@ -58,6 +58,11 @@ struct Args {
     /// Emit flat goto-based output instead of structured if/while.
     #[arg(long)]
     flat: bool,
+
+    /// Disable prologue scanning (faster, but only finds directly-called
+    /// functions; skips code reached solely through vtables/callbacks).
+    #[arg(long)]
+    no_prologue_scan: bool,
 }
 
 /// Render one function as pseudo-C, structured unless `--flat` was given.
@@ -82,7 +87,7 @@ fn main() -> Result<()> {
     }
 
     let disasm = Disassembler::new(prog.bitness);
-    let result = analysis::analyze(&prog, &disasm);
+    let result = analysis::analyze(&prog, &disasm, !args.no_prologue_scan);
 
     let functions: Vec<_> = result
         .functions

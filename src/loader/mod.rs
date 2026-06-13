@@ -180,4 +180,39 @@ impl Program {
     pub fn symbol_name(&self, addr: u64) -> Option<&str> {
         self.symbols.get(&addr).map(|s| s.name.as_str())
     }
+
+    /// Scan executable sections for common function prologues, to recover
+    /// functions that are only reached indirectly (vtables, callbacks) and so
+    /// never appear as a direct call target. This is a heuristic: false
+    /// positives just produce extra `sub_*` functions, they do not corrupt
+    /// the ones found by recursive descent.
+    pub fn prologue_seeds(&self) -> Vec<u64> {
+        // 32-bit: push ebp; mov ebp, esp        => 55 8B EC
+        // 64-bit: push rbp; mov rbp, rsp        => 55 48 89 E5
+        let mut seeds = Vec::new();
+        for sec in &self.sections {
+            if !sec.executable {
+                continue;
+            }
+            let d = &sec.data;
+            match self.bitness {
+                Bitness::Bits32 => {
+                    for i in 0..d.len().saturating_sub(2) {
+                        if d[i] == 0x55 && d[i + 1] == 0x8b && d[i + 2] == 0xec {
+                            seeds.push(sec.address + i as u64);
+                        }
+                    }
+                }
+                Bitness::Bits64 => {
+                    for i in 0..d.len().saturating_sub(3) {
+                        if d[i] == 0x55 && d[i + 1] == 0x48 && d[i + 2] == 0x89 && d[i + 3] == 0xe5
+                        {
+                            seeds.push(sec.address + i as u64);
+                        }
+                    }
+                }
+            }
+        }
+        seeds
+    }
 }
