@@ -190,11 +190,18 @@ remains is reimplementing this codec.
   `+0x14` valid-bit count. Refills a byte at a time (`buf |= byte <<
   (32-(bits+8))`, `bits += 8`) until `bits >= n`, returns `buf >> (32-n)`, then
   consumes n bits (`bits -= n`, `buf <<= n`). Byte stream is consumed forward.
-- **Core decoder** `sub_95a020` — builds a Huffman decode table of size
-  `0x2000` (2^13, i.e. max code length 13; lengths >16 handled specially),
-  reads symbols via `sub_95a240`, and performs LZ back-reference copies
-  (helpers `sub_95a8f0`, `sub_d7a82e` = block copy). Driver: `sub_95a780` ->
-  `sub_95a020`.
+- **Core decoder** `sub_95a020` — a **custom DEFLATE variant** (LZ77 +
+  canonical Huffman, table size `0x2000` = 2^13 max code length). It first
+  reads the Huffman **code-length table** with a deflate-style RLE alphabet
+  (one symbol decoded per `sub_959480` call):
+    - symbol `<= 0x10`  : a literal code length (0..16)
+    - symbol `0x11` (17): read **3** extra bits, value `+3`   (repeat)
+    - symbol `0x12` (18): read **7** extra bits, value `+11`  (repeat)
+    - symbol `0x13` (19): read **2** extra bits, value `+3`
+    - symbol `0x14` (20): read **6** extra bits, value `+7`
+  then decodes literals / LZ back-references with the built tables (copy
+  helpers `sub_95a8f0`, `sub_d7a82e`). Drivers: `sub_95a780` -> `sub_95a020`;
+  symbol decode `sub_959480`; setup `sub_95a890` / `sub_958480`.
 - **Channel/mode decoders** `sub_959fb0` -> `sub_959590` / `sub_9596d0` /
   `sub_959a20` / `sub_959ca0` (per pixel-channel or per-mode passes).
 
