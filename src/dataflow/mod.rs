@@ -320,6 +320,172 @@ fn count_word(s: &str, name: &str) -> usize {
     n
 }
 
+/// A constant-state map: exact register name -> literal it provably holds.
+type ConstState = HashMap<String, String>;
+
+/// Caller-saved register families a call makes non-constant.
+const CALL_CLOBBER: [&str; 9] = [
+    "rax", "rcx", "rdx", "rsi", "rdi", "r8", "r9", "r10", "r11",
+];
+
+/// Is `s` exactly an integer literal (`0x..` or decimal)?
+fn is_immediate(s: &str) -> bool {
+    let s = s.trim();
+    if let Some(h) = s.strip_prefix("0x") {
+        !h.is_empty() && h.bytes().all(|c| c.is_ascii_hexdigit())
+    } else {
+        !s.is_empty() && s.bytes().all(|c| c.is_ascii_digit())
+    }
+}
+
+/// Remove every entry whose register shares `name`'s family (aliasing).
+fn clear_family(state: &mut ConstState, name: &str) {
+    let fam = reg_family(name);
+    if fam.is_some() {
+        state.retain(|k, _| reg_family(k) != fam);
+    }
+}
+
+/// Apply one statement's effect to the constant state.
+fn cp_transfer(state: &mut ConstState, s: &Stmt) {
+    match s.kind {
+        Kind::Assign => {
+            if let Some((name, _)) = &s.write {
+                clear_family(state, name);
+                if let Some(rhs) = &s.rhs {
+                    let r = rhs.trim();
+                    if is_immediate(r) {
+                        state.insert(name.clone(), r.to_string());
+                    } else if reg_family(r).is_some() {
+                        if let Some(v) = state.get(r).cloned() {
+                            state.insert(name.clone(), v);
+                        }
+                    }
+                }
+            }
+        }
+        Kind::Compound => {
+            if let Some((name, _)) = &s.write {
+                clear_family(state, name);
+            }
+        }
+        Kind::Keep => {
+            if s.is_call {
+                state.retain(|k, _| !matches!(reg_family(k), Some(f) if CALL_CLOBBER.contains(&f)));
+            }
+            if let Some((name, _)) = &s.write {
+                clear_family(state, name);
+            }
+        }
+        Kind::Opaque => state.clear(),
+    }
+}
+
+/// Intersect two constant states (the dataflow meet): keep only agreeing entries.
+fn cp_meet(a: &ConstState, b: &ConstState) -> ConstState {
+    a.iter()
+        .filter(|(k, v)| b.get(*k) == Some(*v))
+        .map(|(k, v)| (k.clone(), v.clone()))
+        .collect()
+}
+
+/// Substitute every register that holds a known constant, in use positions only.
+fn cp_subst(text: &str, state: &ConstState) -> String {
+    if state.is_empty() {
+        return text.to_string();
+    }
+    let trimmed = text.trim_start();
+    if trimmed.starts_with("//") || text.contains("__asm__") {
+        return text.to_string();
+    }
+    let subst_all = |s: &str| {
+        let mut out = s.to_string();
+        for (name, lit) in state {
+            out = replace_word(&out, name, lit);
+        }
+        out
+    };
+    // `lhs = rhs` — substitute rhs only (a store's `*(addr)` lhs is itself a use).
+    if let Some(p) = text.find(" = ") {
+        let lhs = &text[..p];
+        if lhs.trim_start().starts_with("*(") {
+            return subst_all(text);
+        }
+        return format!("{}{}", &text[..p + 3], subst_all(&text[p + 3..]));
+    }
+    // Compound `lhs OP= rhs` — substitute rhs only (lhs is the destination).
+    for op in [" += ", " -= ", " *= ", " &= ", " |= ", " ^= ", " <<= ", " >>= "] {
+        if let Some(p) = text.find(op) {
+            return format!("{}{}", &text[..p + op.len()], subst_all(&text[p + op.len()..]));
+        }
+    }
+    // inc/dec have no use operands to substitute.
+    let t = text.trim_end();
+    if t.ends_with("++;") || t.ends_with("--;") {
+        return text.to_string();
+    }
+    // Calls / pushes: every register is a use.
+    subst_all(text)
+}
+
+/// Forward constant-propagation fixpoint over the CFG, then rewrite statements.
+fn const_propagate(stmts: &mut [Vec<Stmt>], succ: &[Vec<usize>], entry: usize) {
+    let n = stmts.len();
+    let mut preds = vec![Vec::new(); n];
+    for i in 0..n {
+        for &s in &succ[i] {
+            preds[s].push(i);
+        }
+    }
+
+    // out_state[b] = None until first computed (top); fixpoint to convergence.
+    let mut out_state: Vec<Option<ConstState>> = vec![None; n];
+    let mut in_state: Vec<ConstState> = vec![ConstState::new(); n];
+    let mut changed = true;
+    let mut guard = 0;
+    while changed && guard < 200 {
+        changed = false;
+        guard += 1;
+        for i in 0..n {
+            let mut inb: Option<ConstState> = None;
+            if i != entry {
+                for &p in &preds[i] {
+                    if let Some(po) = &out_state[p] {
+                        inb = Some(match inb {
+                            None => po.clone(),
+                            Some(cur) => cp_meet(&cur, po),
+                        });
+                    }
+                }
+            }
+            let inb = inb.unwrap_or_default();
+            let mut st = inb.clone();
+            for s in &stmts[i] {
+                cp_transfer(&mut st, s);
+            }
+            if out_state[i].as_ref() != Some(&st) {
+                out_state[i] = Some(st);
+                changed = true;
+            }
+            in_state[i] = inb;
+        }
+    }
+
+    // Rewrite each block using its converged entry state.
+    for i in 0..n {
+        let mut st = in_state[i].clone();
+        for s in &mut stmts[i] {
+            let new_text = cp_subst(&s.text, &st);
+            cp_transfer(&mut st, s);
+            if new_text != s.text {
+                let origin = s.origin;
+                *s = parse_stmt(&new_text);
+                s.origin = origin;
+            }
+        }
+    }
+}
+
 /// Optimised code for the whole function: block-start -> (statements, condition).
 pub type FunctionCode = HashMap<u64, (Vec<String>, Option<String>)>;
 
@@ -375,6 +541,11 @@ pub fn optimize_function(prog: &Program, func: &Function) -> FunctionCode {
             }
         }
     }
+
+    // Global constant propagation (handles branch joins via the meet) — rewrite
+    // statements in place, substituting registers that hold a known constant.
+    let entry = idx.get(&func.entry).copied().unwrap_or(0);
+    const_propagate(&mut stmts, &succ, entry);
 
     // Per-block use/def (gen/kill) for liveness.
     let all = all_families();

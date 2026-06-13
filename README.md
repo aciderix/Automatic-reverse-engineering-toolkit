@@ -48,12 +48,14 @@ exactly what a young decompiler's output looks like before full structuring.
   natural-loop detection drive a recursive emitter that produces `if`/`else`
   and `while` loops. Edges it cannot reduce degrade to explicit `goto`, so the
   output is always semantically faithful. (Cut gotos by ~80% on the game.)
-- **Dataflow** (`src/dataflow`): global register **liveness** over the CFG,
-  **dead-assignment elimination**, **single-use expression propagation**, and
-  **call-result binding** (`f(args)` → `eax = f(args)` when the result is used).
-  Propagation also crosses **single-predecessor/single-successor block chains**
-  (artificial block boundaries are merged for analysis, then split back) — all
-  gated on provable safety.
+- **Dataflow** (`src/dataflow`): global **constant propagation** (a meet-based
+  forward analysis that is exact across branch joins), global register
+  **liveness**, **dead-assignment elimination**, **single-use expression
+  propagation** (also across straight-line block chains), and **call-result
+  binding** (`f(args)` → `eax = f(args)` when the result is used). All gated on
+  provable safety — constants track exact register names with family-aware
+  aliasing and call-clobber invalidation, so a value is only substituted when
+  every path agrees on it.
 - **Decompiler** (`src/decompile`): the flat goto-based emitter (`--flat`),
   plus shared per-block lifting used by the structured emitter.
 
@@ -117,10 +119,11 @@ global liveness + dead-code elimination + single-use expression propagation.
 
 Remaining, in priority order:
 
-1. **Full SSA propagation** with φ-nodes, to fold expressions across *merging*
-   control flow (the current cross-block propagation only handles straight-line
-   chains, not branch joins) — and 64-bit register-argument recovery.
-2. Constant propagation/folding and broader algebraic simplification.
+1. **Full SSA propagation** with φ-nodes, to fold general (non-constant)
+   expressions across *merging* control flow — and 64-bit register-argument
+   recovery (System V / Win64).
+2. Constant **folding** (arithmetic on propagated constants) and broader
+   algebraic simplification.
 3. Conservative **type inference** beyond the current width-based types.
 4. **`switch`/jump-table recovery** and full indirect-call resolution via
    vtable analysis (names the indirect call sites, not just the targets).
