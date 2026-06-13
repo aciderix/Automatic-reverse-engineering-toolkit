@@ -261,8 +261,22 @@ Verified working: `build_table` reproduces all four sub-streams' tables, and
 sub-block to the byte (`tools/bigfile/hx_codec.py`). `sub_959a20` uses two
 tables and a 6-value mixed-mask delta pattern (above). Counts (e.g. 36/41/47/34
 for a 32×32) are below the 64 BC blocks, so a palette + per-block index
-indirection maps decoded entries to blocks — the final piece to trace before
-BC interleaving.
+indirection maps decoded entries to blocks.
+
+Decoder complexity varies sharply:
+- `sub_959590` (colour endpoints): simple 1-table 2-byte delta — **done**.
+- `sub_959a20` (alpha indices): 2 tables, 6 mixed-mask deltas — mapped.
+- `sub_9596d0` (colour indices): **2-D spatial context model** — it builds a
+  ~900-byte coordinate/state grid (`[ebp-0x3e4]`/`[ebp-0x768]`) and manages
+  dynamic structures (`sub_95a2b0`), i.e. context-modelled entropy coding, far
+  beyond simple delta. Faithful reimplementation of this one from raw asm is
+  impractical; it is the case where the improved SSA decompiler is essential.
+
+**Bottom line**: the codec's entropy core (bit reader, dynamic Huffman, table
+builder, delta channels) is reverse-engineered and validated as working code.
+The colour-index context model + palette/block indexing + BC interleaving
+remain; these are best finished with the improved decompiler rather than by
+hand-tracing assembly.
 
 Delta decode (per `sub_959590`): `acc = (acc + huff_sym()) & 0xff` for each
 byte; two bytes packed per u16 entry.
