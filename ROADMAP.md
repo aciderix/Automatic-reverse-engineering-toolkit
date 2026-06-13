@@ -321,8 +321,17 @@ Stratégie incrémentale recommandée :
       une correction DCE : un load mort est supprimable (≠ non-hoistable) →
       disparition des calculs de flags morts. `sub_401670` : `arg_8` récupéré,
       condition réduite à `if (*arg_8 == 0)`. Recompilabilité 600/600 (100 %).
-- [ ] Promotion des slots non-aliasés en SSA (§4.1) + inférence de types (§5) +
-      signatures réelles, pour la parité/dépassement, puis bascule par défaut.
+- [~] Couverture lifter étendue : **cmov** (via une primitive `Expr::Select`,
+      émise en `? :`) et **setcc** ajoutés ; reste mul/idiv/div (résultat
+      double-largeur → `asm_fallback` sain pour l'instant), SSE.
+- [ ] **Promotion des slots non-aliasés en SSA (§4.1) — DIFFÉRÉE volontairement.**
+      La faire *sainement* exige une vraie analyse d'alias : le frame base peut
+      s'échapper sans `lea` (`mov reg, ebp` puis `[reg-4]`), et un slot promu
+      pourrait alors être aliasé par un store générique → code faux. Plutôt que
+      bâcler (violation du principe « jamais de sortie incorrecte »), prérequis =
+      l'analyse d'alias frame/heap/inconnu du §4.1. À faire avant la promotion.
+- [ ] Inférence de types (§5) + signatures réelles, pour la parité/dépassement,
+      puis bascule du pipeline par défaut sur l'IR.
 
 ---
 

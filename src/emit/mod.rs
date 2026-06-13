@@ -173,6 +173,9 @@ pub(crate) fn expr_c(e: &Expr) -> String {
                 CallTarget::Indirect(_) => "0 /*indirect call*/".into(),
             }
         }
+        Expr::Select { cond, then_, else_ } => {
+            format!("({} ? {} : {})", expr_c(cond), expr_c(then_), expr_c(else_))
+        }
         Expr::Phi(_) => "0 /*phi*/".into(),
     }
 }
@@ -243,6 +246,11 @@ pub(crate) fn collect_values(func: &IrFunction, out: &mut BTreeSet<u32>) {
                     walk(a, out);
                 }
             }
+            Expr::Select { cond, then_, else_ } => {
+                walk(cond, out);
+                walk(then_, out);
+                walk(else_, out);
+            }
             _ => {}
         }
     }
@@ -285,6 +293,11 @@ pub(crate) fn collect_frame_vars(func: &IrFunction, out: &mut BTreeSet<i64>) {
                 for a in args {
                     walk(a, out);
                 }
+            }
+            Expr::Select { cond, then_, else_ } => {
+                walk(cond, out);
+                walk(then_, out);
+                walk(else_, out);
             }
             _ => {}
         }
@@ -341,6 +354,11 @@ pub(crate) fn collect_callees(func: &IrFunction, out: &mut BTreeSet<u64>) {
             Expr::Binary(_, a, b) => {
                 walk(a, out);
                 walk(b, out);
+            }
+            Expr::Select { cond, then_, else_ } => {
+                walk(cond, out);
+                walk(then_, out);
+                walk(else_, out);
             }
             _ => {}
         }

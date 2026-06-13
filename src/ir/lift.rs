@@ -579,14 +579,26 @@ pub fn lift(insn: &Insn, bits: u32) -> Vec<Stmt> {
         Mnemonic::Ret => vec![Stmt::Return(None)],
 
         _ => {
-            // setcc: a single byte destination set from a condition.
-            if ins.op_count() == 1
-                && ins.condition_code() != ConditionCode::None
-                && insn.flow == crate::disasm::Flow::Fallthrough
-            {
-                let cond = cc_to_cond(ins.condition_code());
-                if let Some(s) = write_op0(ins, cond, bits) {
-                    return s;
+            let cc = ins.condition_code();
+            if cc != ConditionCode::None && insn.flow == crate::disasm::Flow::Fallthrough {
+                // setcc: single byte destination from a condition.
+                if ins.op_count() == 1 {
+                    if let Some(s) = write_op0(ins, cc_to_cond(cc), bits) {
+                        return s;
+                    }
+                }
+                // cmovcc dst, src:  dst = cond ? src : dst
+                if ins.op_count() == 2 {
+                    if let (Some(src), Some(cur)) = (op_value(ins, 1), op_value(ins, 0)) {
+                        let sel = Expr::Select {
+                            cond: Box::new(cc_to_cond(cc)),
+                            then_: Box::new(src),
+                            else_: Box::new(cur),
+                        };
+                        if let Some(s) = write_op0(ins, sel, bits) {
+                            return s;
+                        }
+                    }
                 }
             }
             asm()

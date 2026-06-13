@@ -37,6 +37,9 @@ fn contains_side_effect(e: &Expr) -> bool {
         Expr::Load { .. } | Expr::Call { .. } | Expr::Read(_) => true,
         Expr::Unary(_, x) | Expr::Cast { expr: x, .. } => contains_side_effect(x),
         Expr::Binary(_, a, b) => contains_side_effect(a) || contains_side_effect(b),
+        Expr::Select { cond, then_, else_ } => {
+            contains_side_effect(cond) || contains_side_effect(then_) || contains_side_effect(else_)
+        }
         _ => false,
     }
 }
@@ -50,6 +53,9 @@ fn contains_call(e: &Expr) -> bool {
         Expr::Load { addr, .. } => contains_call(addr),
         Expr::Unary(_, x) | Expr::Cast { expr: x, .. } => contains_call(x),
         Expr::Binary(_, a, b) => contains_call(a) || contains_call(b),
+        Expr::Select { cond, then_, else_ } => {
+            contains_call(cond) || contains_call(then_) || contains_call(else_)
+        }
         _ => false,
     }
 }
@@ -127,6 +133,11 @@ fn subst(e: &Expr, defs: &HashMap<u32, Expr>, uses: &HashMap<u32, u32>) -> Expr 
                 ret: ret.clone(),
             }
         }
+        Expr::Select { cond, then_, else_ } => Expr::Select {
+            cond: Box::new(subst(cond, defs, uses)),
+            then_: Box::new(subst(then_, defs, uses)),
+            else_: Box::new(subst(else_, defs, uses)),
+        },
         other => other.clone(),
     }
 }
@@ -191,6 +202,19 @@ fn fold(e: &Expr) -> Expr {
             args: args.iter().map(fold).collect(),
             ret: ret.clone(),
         },
+        Expr::Select { cond, then_, else_ } => {
+            let c = fold(cond);
+            // Fold a constant condition away.
+            match is_const(&c) {
+                Some(0) => fold(else_),
+                Some(_) => fold(then_),
+                None => Expr::Select {
+                    cond: Box::new(c),
+                    then_: Box::new(fold(then_)),
+                    else_: Box::new(fold(else_)),
+                },
+            }
+        }
         other => other.clone(),
     }
 }
@@ -397,6 +421,11 @@ fn for_each_use(s: &Stmt, f: &mut impl FnMut(u32)) {
                 for a in args {
                     walk(a, f);
                 }
+            }
+            Expr::Select { cond, then_, else_ } => {
+                walk(cond, f);
+                walk(then_, f);
+                walk(else_, f);
             }
             _ => {}
         }

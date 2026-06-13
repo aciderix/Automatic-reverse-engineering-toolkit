@@ -254,6 +254,11 @@ fn rewrite_reads(
             to,
             expr: Box::new(rewrite_reads(*expr, stacks, undef, counter)),
         },
+        Expr::Select { cond, then_, else_ } => Expr::Select {
+            cond: Box::new(rewrite_reads(*cond, stacks, undef, counter)),
+            then_: Box::new(rewrite_reads(*then_, stacks, undef, counter)),
+            else_: Box::new(rewrite_reads(*else_, stacks, undef, counter)),
+        },
         Expr::Call { target, args, ret } => {
             let target = match target {
                 CallTarget::Indirect(x) => {

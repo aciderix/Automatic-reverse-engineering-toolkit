@@ -172,6 +172,9 @@ fn expr_str(e: &Expr) -> String {
             let a: Vec<String> = args.iter().map(expr_str).collect();
             format!("{}({})", target_str(target), a.join(", "))
         }
+        Expr::Select { cond, then_, else_ } => {
+            format!("({} ? {} : {})", expr_str(cond), expr_str(then_), expr_str(else_))
+        }
         Expr::Phi(args) => {
             let a: Vec<String> = args.iter().map(|v| format!("v{}", v.0)).collect();
             format!("phi({})", a.join(", "))

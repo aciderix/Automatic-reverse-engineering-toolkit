@@ -151,6 +151,12 @@ pub enum Expr {
         args: Vec<Expr>,
         ret: Ty,
     },
+    /// Conditional select (`cmov`, `? :`): `cond ? then_ : else_`.
+    Select {
+        cond: Box<Expr>,
+        then_: Box<Expr>,
+        else_: Box<Expr>,
+    },
     /// SSA φ-node merging values from predecessor blocks.
     Phi(Vec<ValueId>),
     /// Unknown / uninitialised.
