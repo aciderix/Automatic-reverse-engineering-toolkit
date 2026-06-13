@@ -287,9 +287,15 @@ Stratégie incrémentale recommandée :
       `jcc` dérivée des flags). Observable via `aret <bin> --mode ir`. Vérifié
       de bout en bout : code machine → IR typé SSA avec φ sur `factorial` et sur
       de vraies fonctions du jeu (pas de panique).
-- [ ] Passes SSA : SCCP (const-prop + branches mortes) + DCE (§4). C'est ici
-      que le bruit visible dans `--mode ir` (flags morts, idiomes) disparaît et
-      que les conditions flag → relationnel sont reconstruites par dataflow.
+- [x] Passes SSA : propagation (constantes/copies/mono-usage) + folding +
+      simplification algébrique + DCE (`src/opt/mod.rs`). Sur `factorial`, B2
+      passe de ~14 à 4 statements (flags morts supprimés) et le `jne` est
+      reconstruit en `!=` par dataflow. Conditions non-signées/égalité
+      reconstruites (not-through-relational, `CF|ZF`→`<=`). Tests verts.
+- [ ] Reconstruction des conditions **signées** (`SF!=OF` → `<s`) — nécessite
+      d'améliorer le modèle de flags du lifter ou un pattern dédié (§4.5).
+- [ ] Élargir la couverture du lifter (imul/mul/idiv, setcc, cmov, SSE) +
+      barrière `Asm` pour la DCE, prérequis à l'émission.
 - [ ] `emit` IR→C à parité avec la sortie texte actuelle sur le corpus.
 
 ---
@@ -322,6 +328,19 @@ d'application typique (itérer jusqu'à point fixe) :
 > Garde-fou : chaque passe doit préserver la sémantique observable
 > (stores, appels, valeurs de retour, accès volatils). En cas de doute → ne
 > pas transformer. La sûreté prime sur la beauté.
+
+> **Garde-fou `Asm` (constaté en implémentant §4).** Un `Stmt::Asm` est opaque :
+> il ne référence pas les `ValueId` des registres qu'il lit/écrit réellement.
+> Donc tant qu'une instruction tombe en `Asm`, la DCE peut supprimer une
+> définition que l'asm consomme (vu sur `imul` non lifté → l'init de `edx`
+> disparaît). Conséquences :
+> 1. **Avant toute émission C (§7)**, traiter `Asm` comme une barrière qui
+>    *lit et écrit tous les emplacements* (ou ne pas optimiser autour).
+> 2. La vraie solution est d'**élargir la couverture du lifter** (imul/mul/idiv,
+>    setcc, cmov, SSE…) pour que `Asm` devienne rare. C'est la priorité avant
+>    de brancher l'IR sur la sortie par défaut.
+> Aujourd'hui sans conséquence : l'IR optimisé n'est visible que via `--mode ir`
+> (inspection), la sortie par défaut passe toujours par le pipeline texte.
 
 ### 4.1 Analyse d'alias mémoire (`src/opt/alias.rs`)
 

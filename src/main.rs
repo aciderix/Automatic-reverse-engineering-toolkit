@@ -10,6 +10,7 @@ mod decompile;
 mod disasm;
 mod ir;
 mod loader;
+mod opt;
 mod ssa;
 mod structure;
 
@@ -140,6 +141,7 @@ fn main() -> Result<()> {
             for f in &functions {
                 let mut irf = ir::build::build_ir(&prog, f);
                 ssa::to_ssa(&mut irf);
+                opt::optimize(&mut irf);
                 out.push_str(&ir::build::dump(&irf));
                 out.push('\n');
             }
