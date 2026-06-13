@@ -47,17 +47,141 @@ pub fn operand_to_c(op: &str) -> String {
     let op = op.trim();
     if let (Some(lb), Some(rb)) = (op.find('['), op.rfind(']')) {
         let prefix = &op[..lb];
-        let inner = &op[lb + 1..rb];
+        let inner = op[lb + 1..rb].trim();
+        // A pure frame slot (ebp/rbp +/- disp) becomes a named variable.
+        if let Some((name, _, _)) = frame_var(inner) {
+            return name;
+        }
         let ty = c_type_for_prefix(prefix);
-        return format!("*({}*)({})", ty, inner.trim());
+        return format!("*({}*)({})", ty, inner);
     }
     op.to_string()
 }
 
-/// For `lea`, we want the *address* expression, not a dereference.
+/// Classification of a stack-frame slot.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FrameKind {
+    Arg,
+    Local,
+}
+
+/// Recognise a *pure* `ebp`/`rbp`-relative slot and name it. Returns
+/// `(name, signed_displacement, kind)`, or `None` for indexed expressions,
+/// the saved frame pointer, and the return-address slot. Pointer width is
+/// inferred from the base register (`ebp` = 4, `rbp` = 8).
+pub fn frame_var(inner: &str) -> Option<(String, i64, FrameKind)> {
+    let s = inner.trim();
+    let (reg, ptr): (&str, i64) = if s.starts_with("rbp") {
+        ("rbp", 8)
+    } else if s.starts_with("ebp") {
+        ("ebp", 4)
+    } else {
+        return None;
+    };
+    let rest = &s[reg.len()..];
+    let disp: i64 = if rest.is_empty() {
+        0
+    } else {
+        let sign = match rest.as_bytes()[0] {
+            b'+' => 1,
+            b'-' => -1,
+            _ => return None,
+        };
+        let body = &rest[1..];
+        // iced prints small displacements bare (e.g. `8`) and larger ones with
+        // a `0x` prefix; accept both, but reject indexed/compound expressions.
+        let magnitude = if let Some(hex) = body.strip_prefix("0x") {
+            if hex.is_empty() || !hex.bytes().all(|c| c.is_ascii_hexdigit()) {
+                return None;
+            }
+            i64::from_str_radix(hex, 16).ok()?
+        } else if !body.is_empty() && body.bytes().all(|c| c.is_ascii_digit()) {
+            body.parse::<i64>().ok()?
+        } else {
+            return None; // indexed / compound expression, not a plain slot
+        };
+        sign * magnitude
+    };
+
+    if disp == 0 {
+        return None; // saved frame pointer
+    }
+    if disp > 0 {
+        if disp == ptr {
+            return None; // return address
+        }
+        Some((format!("arg_{:x}", disp), disp, FrameKind::Arg))
+    } else {
+        Some((format!("local_{:x}", -disp), disp, FrameKind::Local))
+    }
+}
+
+/// Map a size prefix to a `(C type, width-in-bytes)`.
+fn type_and_width(prefix: &str) -> (&'static str, u8) {
+    match c_type_for_prefix(prefix) {
+        "uint8_t" => ("uint8_t", 1),
+        "uint16_t" => ("uint16_t", 2),
+        "uint64_t" => ("uint64_t", 8),
+        _ => ("uint32_t", 4),
+    }
+}
+
+/// Scan a function's instructions for frame variables, returning the recovered
+/// argument and local declarations as `(name, c_type)`, each sorted by offset.
+pub fn scan_frame_vars(
+    func: &crate::analysis::Function,
+) -> (Vec<(String, &'static str)>, Vec<(String, &'static str)>) {
+    use std::collections::BTreeMap;
+    // disp -> (name, kind, type, width)
+    let mut map: BTreeMap<i64, (String, FrameKind, &'static str, u8)> = BTreeMap::new();
+
+    for blk in func.blocks.values() {
+        for insn in &blk.insns {
+            let (_, ops) = split_insn(&insn.text);
+            for op in &ops {
+                let (lb, rb) = match (op.find('['), op.rfind(']')) {
+                    (Some(l), Some(r)) => (l, r),
+                    _ => continue,
+                };
+                let prefix = &op[..lb];
+                let inner = op[lb + 1..rb].trim();
+                if let Some((name, disp, kind)) = frame_var(inner) {
+                    let (ty, w) = type_and_width(prefix);
+                    let e = map.entry(disp).or_insert((name, kind, ty, w));
+                    if w > e.3 {
+                        e.2 = ty;
+                        e.3 = w;
+                    }
+                }
+            }
+        }
+    }
+
+    let mut args: Vec<(i64, String, &'static str)> = Vec::new();
+    let mut locals: Vec<(i64, String, &'static str)> = Vec::new();
+    for (disp, (name, kind, ty, _)) in map {
+        match kind {
+            FrameKind::Arg => args.push((disp, name, ty)),
+            FrameKind::Local => locals.push((-disp, name, ty)),
+        }
+    }
+    args.sort_by_key(|(d, _, _)| *d);
+    locals.sort_by_key(|(d, _, _)| *d);
+    (
+        args.into_iter().map(|(_, n, t)| (n, t)).collect(),
+        locals.into_iter().map(|(_, n, t)| (n, t)).collect(),
+    )
+}
+
+/// For `lea`, we want the *address* expression, not a dereference. A frame
+/// slot becomes `&local_x` / `&arg_x`.
 fn lea_src(op: &str) -> String {
     if let (Some(lb), Some(rb)) = (op.find('['), op.rfind(']')) {
-        op[lb + 1..rb].trim().to_string()
+        let inner = op[lb + 1..rb].trim();
+        if let Some((name, _, _)) = frame_var(inner) {
+            return format!("&{}", name);
+        }
+        inner.to_string()
     } else {
         op.to_string()
     }

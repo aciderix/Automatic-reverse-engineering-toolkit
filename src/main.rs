@@ -8,6 +8,7 @@ mod decompile;
 mod disasm;
 mod ir;
 mod loader;
+mod structure;
 
 use anyhow::{Context, Result};
 use clap::{Parser, ValueEnum};
@@ -53,6 +54,19 @@ struct Args {
     /// plus an index.csv. Produces a browsable tree instead of one huge file.
     #[arg(long)]
     split: Option<PathBuf>,
+
+    /// Emit flat goto-based output instead of structured if/while.
+    #[arg(long)]
+    flat: bool,
+}
+
+/// Render one function as pseudo-C, structured unless `--flat` was given.
+fn render_function(prog: &Program, func: &analysis::Function, flat: bool) -> String {
+    if flat {
+        decompile::decompile_function(prog, func)
+    } else {
+        structure::structure_function(prog, func)
+    }
 }
 
 fn main() -> Result<()> {
@@ -100,7 +114,7 @@ fn main() -> Result<()> {
         }
         Mode::Decompile => {
             if let Some(dir) = &args.split {
-                return write_split(dir, &prog, &functions, result.instruction_count);
+                return write_split(dir, &prog, &functions, result.instruction_count, args.flat);
             }
             out.push_str(&format!(
                 "// Decompiled by ARET — {} functions recovered, {} instructions decoded\n\n",
@@ -108,7 +122,7 @@ fn main() -> Result<()> {
                 result.instruction_count
             ));
             for f in &functions {
-                out.push_str(&decompile::decompile_function(&prog, f));
+                out.push_str(&render_function(&prog, f, args.flat));
                 out.push('\n');
             }
         }
@@ -146,6 +160,7 @@ fn write_split(
     prog: &Program,
     functions: &[&analysis::Function],
     insn_count: usize,
+    flat: bool,
 ) -> Result<()> {
     std::fs::create_dir_all(dir)
         .with_context(|| format!("failed to create {}", dir.display()))?;
@@ -153,7 +168,7 @@ fn write_split(
     let mut index = String::from("name,entry,basic_blocks,callees\n");
     for f in functions {
         let fname = format!("{}.c", sanitize(&f.name));
-        let body = decompile::decompile_function(prog, f);
+        let body = render_function(prog, f, flat);
         std::fs::write(dir.join(&fname), body)
             .with_context(|| format!("failed to write {}", fname))?;
         index.push_str(&format!(

@@ -10,8 +10,58 @@ use crate::loader::{Bitness, Program};
 use std::collections::BTreeSet;
 use std::fmt::Write;
 
-fn label(addr: u64) -> String {
+pub fn label(addr: u64) -> String {
     format!("L_{:08x}", addr)
+}
+
+/// Render the per-instruction statements of a block plus, for a conditional
+/// terminator, the recovered branch condition. Shared by the flat and the
+/// structured emitters.
+pub fn block_statements(prog: &Program, blk: &BasicBlock) -> (Vec<String>, Option<String>) {
+    let control = is_control_terminator(blk.terminator);
+    let body_len = if control {
+        blk.insns.len().saturating_sub(1)
+    } else {
+        blk.insns.len()
+    };
+    let mut last_cmp = None;
+    let mut stmts = Vec::new();
+    for insn in &blk.insns[..body_len] {
+        if let Some(c) = parse_cmp(&insn.text) {
+            last_cmp = Some(c);
+        }
+        for line in lift_insn(insn, prog) {
+            stmts.push(line);
+        }
+    }
+    let cond = if blk.terminator == Flow::CondJump {
+        Some(branch_condition(blk.insns.last().unwrap(), last_cmp.as_ref()))
+    } else {
+        None
+    };
+    (stmts, cond)
+}
+
+/// Build a function's C signature (with recovered arguments) and the list of
+/// local-variable declarations, shared by both emitters.
+pub fn signature_and_locals(func: &Function) -> (String, Vec<String>) {
+    let (args, locals) = crate::ir::scan_frame_vars(func);
+    let sig = if args.is_empty() {
+        format!("int64_t {}(void)", func.name)
+    } else {
+        let params: Vec<String> = args.iter().map(|(n, t)| format!("{} {}", t, n)).collect();
+        format!("int64_t {}({})", func.name, params.join(", "))
+    };
+    let decls = locals.iter().map(|(n, t)| format!("{} {};", t, n)).collect();
+    (sig, decls)
+}
+
+/// The register holding a function's return value, for this target width.
+pub fn return_reg(prog: &Program) -> &'static str {
+    match prog.bitness {
+        Bitness::Bits64 => "rax",
+        Bitness::Bits32 => "eax",
+    }
 }
 
 /// Parse a `cmp`/`test` instruction text into `(lhs, rhs, is_test)`.
@@ -179,7 +229,11 @@ pub fn decompile_function(prog: &Program, func: &Function) -> String {
         func.entry,
         func.blocks.len()
     );
-    let _ = writeln!(out, "int64_t {}(void) {{", func.name);
+    let (sig, decls) = signature_and_locals(func);
+    let _ = writeln!(out, "{} {{", sig);
+    for d in &decls {
+        let _ = writeln!(out, "    {}", d);
+    }
 
     for (i, &start) in order.iter().enumerate() {
         let blk = &func.blocks[&start];
