@@ -134,6 +134,8 @@ struct Stmt {
     rhs_loads_mem: bool,
     /// This statement defines the caller-saved set (a call).
     is_call: bool,
+    /// Index of the block this statement originated from (for chain merging).
+    origin: usize,
 }
 
 fn parse_stmt(text: &str) -> Stmt {
@@ -146,6 +148,7 @@ fn parse_stmt(text: &str) -> Stmt {
         rhs: None,
         rhs_loads_mem: false,
         is_call,
+        origin: 0,
     };
 
     if t.starts_with("//") {
@@ -172,6 +175,7 @@ fn parse_stmt(text: &str) -> Stmt {
                 rhs: None,
                 rhs_loads_mem: false,
                 is_call: false,
+                origin: 0,
             };
         }
     }
@@ -196,6 +200,7 @@ fn parse_stmt(text: &str) -> Stmt {
                     rhs: None,
                     rhs_loads_mem: false,
                     is_call: false,
+                    origin: 0,
                 };
             }
             return keep(read_families(body), false, false);
@@ -219,6 +224,7 @@ fn parse_stmt(text: &str) -> Stmt {
                     rhs: None,
                     rhs_loads_mem: false,
                     is_call: false,
+                    origin: 0,
                 };
             }
             return Stmt {
@@ -229,6 +235,7 @@ fn parse_stmt(text: &str) -> Stmt {
                 rhs: Some(rhs.to_string()),
                 rhs_loads_mem: rhs.contains("*("),
                 is_call: false,
+                origin: 0,
             };
         }
         // lhs is memory/local/arg — keep as a side-effecting write.
@@ -354,6 +361,10 @@ pub fn optimize_function(prog: &Program, func: &Function) -> FunctionCode {
         if parsed.iter().any(|s| s.kind == Kind::Opaque) {
             keep_all[i] = true;
         }
+        let mut parsed = parsed;
+        for s in &mut parsed {
+            s.origin = i;
+        }
         end_uses.push(eu);
         conds.push(cond);
         stmts.push(parsed);
@@ -427,21 +438,76 @@ pub fn optimize_function(prog: &Program, func: &Function) -> FunctionCode {
         }
     }
 
-    // Per-block DCE then propagation.
+    // Build maximal straight-line chains across "artificial" block boundaries:
+    // an edge B -> U is mergeable when B's only successor is U and U's only
+    // predecessor is B (so no path merges and no extra entry). Optimizing the
+    // concatenation is then exactly equivalent to optimizing one block.
+    let mut pred_count = vec![0usize; n];
+    for i in 0..n {
+        for &s in &succ[i] {
+            pred_count[s] += 1;
+        }
+    }
+    let mergeable = |b: usize| -> Option<usize> {
+        if keep_all[b] || succ[b].len() != 1 {
+            return None;
+        }
+        let u = succ[b][0];
+        if u != b && pred_count[u] == 1 && !keep_all[u] {
+            Some(u)
+        } else {
+            None
+        }
+    };
+    // A block is a chain head unless it is the unique mergeable target of its pred.
+    let chains: Vec<Vec<usize>> = {
+        let mut is_continuation = vec![false; n];
+        for i in 0..n {
+            if let Some(u) = mergeable(i) {
+                is_continuation[u] = true;
+            }
+        }
+        let mut out = Vec::new();
+        for i in 0..n {
+            if is_continuation[i] {
+                continue;
+            }
+            let mut chain = vec![i];
+            let mut visited: HashSet<usize> = [i].into_iter().collect();
+            let mut cur = i;
+            while let Some(u) = mergeable(cur) {
+                if !visited.insert(u) {
+                    break; // cycle guard
+                }
+                chain.push(u);
+                cur = u;
+            }
+            out.push(chain);
+        }
+        out
+    };
+
     let retreg = match prog.bitness {
         crate::loader::Bitness::Bits64 => "rax",
         crate::loader::Bitness::Bits32 => "eax",
     };
+
     let mut code: FunctionCode = HashMap::new();
-    for i in 0..n {
-        let mut block = stmts[i].clone();
+    for chain in &chains {
+        let last = *chain.last().unwrap();
+        // Liveness after the whole chain = live out of its final block.
         let lout = {
-            let mut s = live_out[i].clone();
-            s.extend(end_uses[i].iter().copied());
+            let mut s = live_out[last].clone();
+            s.extend(end_uses[last].iter().copied());
             s
         };
-        if !keep_all[i] {
-            // Iterate DCE + propagation to a fixpoint (capped).
+        // Concatenate the chain's statements (each tagged with its origin block).
+        let mut block: Vec<Stmt> = Vec::new();
+        for &b in chain {
+            block.extend(stmts[b].iter().cloned());
+        }
+        let any_keep_all = chain.iter().any(|&b| keep_all[b]);
+        if !any_keep_all {
             for _ in 0..4 {
                 let a = dce(&mut block, &lout);
                 let b = propagate(&mut block, &lout);
@@ -450,9 +516,27 @@ pub fn optimize_function(prog: &Program, func: &Function) -> FunctionCode {
                 }
             }
         }
-        let mut lines: Vec<String> = block.into_iter().map(|s| s.text).collect();
-        bind_call_results(&mut lines, &lout, retreg);
-        code.insert(nodes[i], (lines, conds[i].clone()));
+        // Bind call results across the whole chain (correct backward liveness),
+        // then redistribute surviving statements to their origin blocks.
+        let mut chain_lines: Vec<String> = Vec::with_capacity(block.len());
+        let mut chain_origin: Vec<usize> = Vec::with_capacity(block.len());
+        for s in block {
+            chain_lines.push(s.text);
+            chain_origin.push(s.origin);
+        }
+        bind_call_results(&mut chain_lines, &lout, retreg);
+
+        let mut per_block: HashMap<usize, Vec<String>> = HashMap::new();
+        for &b in chain {
+            per_block.insert(b, Vec::new());
+        }
+        for (line, o) in chain_lines.into_iter().zip(chain_origin) {
+            per_block.entry(o).or_default().push(line);
+        }
+        for &b in chain {
+            let lines = per_block.remove(&b).unwrap_or_default();
+            code.insert(nodes[b], (lines, conds[b].clone()));
+        }
     }
     code
 }

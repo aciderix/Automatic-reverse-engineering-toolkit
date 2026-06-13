@@ -49,10 +49,11 @@ exactly what a young decompiler's output looks like before full structuring.
   and `while` loops. Edges it cannot reduce degrade to explicit `goto`, so the
   output is always semantically faithful. (Cut gotos by ~80% on the game.)
 - **Dataflow** (`src/dataflow`): global register **liveness** over the CFG,
-  **dead-assignment elimination**, and conservative **single-use expression
-  propagation** — gated on provable safety (a def is only removed when unused
-  on every path; an expression is only inlined when it has one consumer and
-  nothing between can change it).
+  **dead-assignment elimination**, **single-use expression propagation**, and
+  **call-result binding** (`f(args)` → `eax = f(args)` when the result is used).
+  Propagation also crosses **single-predecessor/single-successor block chains**
+  (artificial block boundaries are merged for analysis, then split back) — all
+  gated on provable safety.
 - **Decompiler** (`src/decompile`): the flat goto-based emitter (`--flat`),
   plus shared per-block lifting used by the structured emitter.
 
@@ -116,9 +117,9 @@ global liveness + dead-code elimination + single-use expression propagation.
 
 Remaining, in priority order:
 
-1. **Cross-block (full SSA) propagation** with φ-nodes, to fold expressions
-   across basic blocks, not just within one — and 64-bit register-argument
-   recovery (System V / Win64 calling conventions).
+1. **Full SSA propagation** with φ-nodes, to fold expressions across *merging*
+   control flow (the current cross-block propagation only handles straight-line
+   chains, not branch joins) — and 64-bit register-argument recovery.
 2. Constant propagation/folding and broader algebraic simplification.
 3. Conservative **type inference** beyond the current width-based types.
 4. **`switch`/jump-table recovery** and full indirect-call resolution via
