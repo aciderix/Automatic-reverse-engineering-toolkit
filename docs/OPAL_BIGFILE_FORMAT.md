@@ -131,7 +131,10 @@ child/transform references around `[0x42]`.
 opal_bigfile.py PACKAGE.BFPC                 # describe container + node tables
 opal_bigfile.py PACKAGE.BFPC --extract out/  # one .node file per node + index
 opal_bigfile.py <dir> --batch out/           # extract every bigfile in a dir
-                                             # + global manifest.csv
+                                             # + global manifest.csv (named types)
+opal_nodes.py out/                           # common-header decode + reference
+                                             # graph (Material->Texture/Shader…)
+opal_nodes.py out/ --graph deps.csv          # write the node dependency graph
 ```
 
 ## Remaining work — full per-type field layouts
