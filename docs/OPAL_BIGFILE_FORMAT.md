@@ -205,10 +205,27 @@ remains is reimplementing this codec.
 - **Channel/mode decoders** `sub_959fb0` -> `sub_959590` / `sub_9596d0` /
   `sub_959a20` / `sub_959ca0` (per pixel-channel or per-mode passes).
 
-With the bit reader and Huffman/LZ structure mapped, the remaining work is a
-faithful Python reimplementation validated against the known output size
-(decompressed bytes == width*height*blockBytes/16 over the mip chain), then DDS
-wrapping (DXT5/BC3 for format!=9, DXT1/BC1 for format 9).
+**Confirmed: it is a DEFLATE variant.** The code-length code order table at
+`.rdata 0xf3ce98` is
+`[17,18,19,20, 0,8,7,9,6,10,5,11,4,12,3,13,2,14,1,15,16]` — DEFLATE's
+code-length permutation, extended with RLE symbols 17–20. So a standard inflate
+can be adapted with these differences:
+
+- **Bit order**: MSB-first (not DEFLATE's LSB-first) — see `sub_95a240`.
+- **Code-length alphabet**: 21 symbols read (3 bits each) in the order above to
+  build the code-length Huffman table.
+- **Code-length RLE** (decoding the main alphabet's lengths):
+  17→+3 (3 extra bits), 18→+11 (7 bits), 19→+3 (2 bits), 20→+7 (6 bits).
+- **Huffman**: canonical, decoded by `sub_959480` (fast table @struct+0xa8,
+  symbol table u16 @+0xb0); built by `sub_95a890` → `sub_95a3d0`.
+- **Channels**: `sub_95a780` runs the decoder (`sub_95a020`) once per plane
+  (counts at Hx `+0x27`/`+0x37`), writing each channel's bytes; planes are then
+  interleaved into the BC1/BC3 surface.
+
+Remaining: port an MSB-first inflate with the above alphabet, decode each
+channel, interleave to BC blocks, and validate the output size against
+`width*height*blockBytes/16` over the mip chain — then DDS-wrap (BC3 for
+format≠9, BC1 for format 9).
 
 ### Other remaining layouts
 - **Mesh_Z / Skin_Z / SkinData_Z**: vertex/index buffer layout (→ OBJ/glTF).
