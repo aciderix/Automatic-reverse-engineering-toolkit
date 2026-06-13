@@ -11,7 +11,7 @@ use crate::loader::Program;
 use iced_x86::ConditionCode;
 
 /// Split an Intel-formatted instruction into `(mnemonic, operands)`.
-fn split_insn(text: &str) -> (String, Vec<String>) {
+pub fn split_insn(text: &str) -> (String, Vec<String>) {
     let text = text.trim();
     match text.split_once(' ') {
         Some((mn, rest)) => {
@@ -185,6 +185,12 @@ fn lea_src(op: &str) -> String {
     } else {
         op.to_string()
     }
+}
+
+/// Resolve a call instruction to its callable C name.
+pub fn call_name_of(insn: &Insn, prog: &Program) -> String {
+    let (_, ops) = split_insn(&insn.text);
+    call_name(insn, prog, &ops)
 }
 
 /// Resolve a call target to a callable C name.

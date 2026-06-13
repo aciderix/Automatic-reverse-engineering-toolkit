@@ -5,6 +5,7 @@
 
 use crate::analysis::{BasicBlock, Function};
 use crate::disasm::Flow;
+use crate::ir;
 use crate::ir::{branch_condition, lift_insn, operand_to_c};
 use crate::loader::{Bitness, Program};
 use std::collections::BTreeSet;
@@ -14,26 +15,134 @@ pub fn label(addr: u64) -> String {
     format!("L_{:08x}", addr)
 }
 
+/// Callee-saved registers whose lone `push`/`pop` is frame save/restore noise.
+fn is_callee_saved(reg: &str) -> bool {
+    matches!(
+        reg,
+        "ebp" | "esi" | "edi" | "ebx"
+            | "rbp" | "rsi" | "rdi" | "rbx"
+            | "r12" | "r13" | "r14" | "r15"
+    )
+}
+
+fn is_stack_ptr(op: &str) -> bool {
+    matches!(op.trim(), "esp" | "rsp")
+}
+
+/// Parse a hex (`0x..`) or decimal immediate.
+fn parse_uint(s: &str) -> Option<u64> {
+    let s = s.trim();
+    if let Some(h) = s.strip_prefix("0x") {
+        u64::from_str_radix(h, 16).ok()
+    } else if s.bytes().all(|c| c.is_ascii_digit()) && !s.is_empty() {
+        s.parse().ok()
+    } else {
+        None
+    }
+}
+
+/// If the instruction after index `i` is `add esp/rsp, K`, return the implied
+/// cdecl argument count (`K / pointer_size`).
+fn cdecl_arg_count(body: &[crate::disasm::Insn], i: usize, ptr: u64) -> Option<usize> {
+    let nxt = body.get(i + 1)?;
+    let (mn, ops) = ir::split_insn(&nxt.text);
+    if mn != "add" || ops.len() != 2 || !is_stack_ptr(&ops[0]) {
+        return None;
+    }
+    let k = parse_uint(&ops[1])?;
+    if ptr == 0 {
+        return None;
+    }
+    Some((k / ptr) as usize)
+}
+
+/// True for residual frame-management lines we suppress for readability.
+fn is_frame_noise(s: &str) -> bool {
+    matches!(
+        s,
+        "ebp = esp;" | "rbp = rsp;" | "esp = ebp;" | "rsp = rbp;" | "// leave (restore frame)"
+    ) || s
+        .strip_prefix("push(")
+        .and_then(|r| r.strip_suffix(");"))
+        .map(is_callee_saved)
+        .unwrap_or(false)
+        || s.strip_suffix(" = pop();")
+            .map(is_callee_saved)
+            .unwrap_or(false)
+}
+
 /// Render the per-instruction statements of a block plus, for a conditional
-/// terminator, the recovered branch condition. Shared by the flat and the
-/// structured emitters.
+/// terminator, the recovered branch condition.
+///
+/// Beyond raw lifting this performs light dataflow cleanup used by the
+/// structured emitter: cdecl call-site argument recovery (via the trailing
+/// `add esp, N`), suppression of stack-pointer bookkeeping, and removal of
+/// prologue/epilogue save/restore noise. The `--flat` emitter keeps the raw
+/// per-instruction form instead.
 pub fn block_statements(prog: &Program, blk: &BasicBlock) -> (Vec<String>, Option<String>) {
+    let ptr = (prog.bitness.bits() / 8) as u64;
     let control = is_control_terminator(blk.terminator);
     let body_len = if control {
         blk.insns.len().saturating_sub(1)
     } else {
         blk.insns.len()
     };
+    let body = &blk.insns[..body_len];
+
+    // `out` holds emitted lines; `None` marks a line consumed as a call argument.
+    let mut out: Vec<Option<String>> = Vec::new();
+    // (index into `out`, pushed expression) for pushes since the last call.
+    let mut pending: Vec<(usize, String)> = Vec::new();
     let mut last_cmp = None;
-    let mut stmts = Vec::new();
-    for insn in &blk.insns[..body_len] {
+
+    for (i, insn) in body.iter().enumerate() {
         if let Some(c) = parse_cmp(&insn.text) {
             last_cmp = Some(c);
         }
-        for line in lift_insn(insn, prog) {
-            stmts.push(line);
+        let (mn, ops) = ir::split_insn(&insn.text);
+        match mn.as_str() {
+            "push" if ops.len() == 1 => {
+                let e = ir::operand_to_c(&ops[0]);
+                out.push(Some(format!("push({});", e)));
+                pending.push((out.len() - 1, e));
+            }
+            "call" => {
+                let name = ir::call_name_of(insn, prog);
+                let args = match cdecl_arg_count(body, i, ptr) {
+                    Some(n) => {
+                        let take = n.min(pending.len());
+                        let consumed = pending.split_off(pending.len() - take);
+                        let mut argv = Vec::new();
+                        for (idx, expr) in &consumed {
+                            out[*idx] = None; // remove the push line; it's an argument
+                            argv.push(expr.clone());
+                        }
+                        argv.reverse(); // cdecl pushes right-to-left
+                        argv
+                    }
+                    None => Vec::new(),
+                };
+                pending.clear();
+                out.push(Some(format!("{}({});", name, args.join(", "))));
+            }
+            "add" | "sub" if ops.len() == 2 && is_stack_ptr(&ops[0]) && parse_uint(&ops[1]).is_some() => {
+                // Stack-pointer bookkeeping (locals alloc / cdecl cleanup): drop it.
+            }
+            "cmp" | "test" => out.push(Some(format!("// flags = {}", insn.text))),
+            _ => {
+                for line in lift_insn(insn, prog) {
+                    out.push(Some(line));
+                }
+            }
         }
     }
+
+    let stmts: Vec<String> = out
+        .into_iter()
+        .flatten()
+        .filter(|s| !is_frame_noise(s))
+        .collect();
+
     let cond = if blk.terminator == Flow::CondJump {
         Some(branch_condition(blk.insns.last().unwrap(), last_cmp.as_ref()))
     } else {
