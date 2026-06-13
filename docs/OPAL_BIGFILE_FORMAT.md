@@ -251,10 +251,18 @@ delta-decodes `count` entries:
 
 | decoder      | header fields (off/size/count) | output | BC role |
 |--------------|--------------------------------|--------|---------|
-| `sub_959590` | be24@0x31 / be24@0x34 / be16@0x37 | `count` u16, two delta bytes each | colour endpoints |
-| `sub_9596d0` | be24@0x39 / be24@0x3c / be16@0x3f | 3-bit packed (table @0xf3ce80) | colour indices |
-| `sub_959a20` | be24@0x21 / be24@0x24 / be16@0x27 | 6× symbols, shl 5/6 | alpha indices |
+| `sub_959590` | be24@0x31 / be24@0x34 / be16@0x37 | `count` u16, two delta bytes each (1 table) | colour endpoints |
+| `sub_9596d0` | be24@0x39 / be24@0x3c / be16@0x3f | 3-bit packed (remap table @0xf3ce80, shl 3) | colour indices |
+| `sub_959a20` | be24@0x21 / be24@0x24 / be16@0x27 | **2 tables**; per entry 6 deltas, masks 5-bit (`&0x1f`) / 6-bit (`&0x3f`), packed shl 5/6 | alpha indices |
 | `sub_959ca0` | (its own @0x29.. block)           | delta bytes | alpha endpoints |
+
+Verified working: `build_table` reproduces all four sub-streams' tables, and
+`sub_959590` (colour endpoints) decodes its full entry count consuming its
+sub-block to the byte (`tools/bigfile/hx_codec.py`). `sub_959a20` uses two
+tables and a 6-value mixed-mask delta pattern (above). Counts (e.g. 36/41/47/34
+for a 32×32) are below the 64 BC blocks, so a palette + per-block index
+indirection maps decoded entries to blocks — the final piece to trace before
+BC interleaving.
 
 Delta decode (per `sub_959590`): `acc = (acc + huff_sym()) & 0xff` for each
 byte; two bytes packed per u16 entry.
