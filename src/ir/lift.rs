@@ -16,7 +16,10 @@
 
 use super::types::*;
 use crate::disasm::Insn;
-use iced_x86::{Instruction, Mnemonic, OpKind, Register};
+use iced_x86::{
+    ConditionCode, Instruction, InstructionInfoFactory, Mnemonic, OpAccess, OpKind, Register,
+    RflagsBits,
+};
 
 /// Canonical register-family id (al/ax/eax/rax all share one). XMM families
 /// start at 16.
@@ -204,6 +207,118 @@ fn set_flag(k: FlagKind, e: Expr) -> Stmt {
     }
 }
 
+fn read_flag(k: FlagKind) -> Expr {
+    Expr::Read(Location::Flag(k))
+}
+
+/// Logical negation of a 0/1 flag expression.
+fn lnot(e: Expr) -> Expr {
+    Expr::Binary(BinOp::Eq, Box::new(e), Box::new(konst(0)))
+}
+
+fn lor(a: Expr, b: Expr) -> Expr {
+    Expr::Binary(BinOp::Or, Box::new(a), Box::new(b))
+}
+
+/// The boolean condition of a `jcc`/`setcc`/`cmovcc`, expressed over the CPU
+/// flags. A later pass folds it back to a relational (`SF!=OF` → `a < b`, etc.).
+pub fn cc_to_cond(cc: ConditionCode) -> Expr {
+    use ConditionCode as C;
+    use FlagKind::*;
+    let ne = |a: Expr, b: Expr| Expr::Binary(BinOp::Ne, Box::new(a), Box::new(b));
+    match cc {
+        C::e => read_flag(Zf),
+        C::ne => lnot(read_flag(Zf)),
+        C::b => read_flag(Cf),
+        C::ae => lnot(read_flag(Cf)),
+        C::be => lor(read_flag(Cf), read_flag(Zf)),
+        C::a => lnot(lor(read_flag(Cf), read_flag(Zf))),
+        C::s => read_flag(Sf),
+        C::ns => lnot(read_flag(Sf)),
+        C::o => read_flag(Of),
+        C::no => lnot(read_flag(Of)),
+        C::p => read_flag(Pf),
+        C::np => lnot(read_flag(Pf)),
+        C::l => ne(read_flag(Sf), read_flag(Of)),
+        C::ge => lnot(ne(read_flag(Sf), read_flag(Of))),
+        C::le => lor(read_flag(Zf), ne(read_flag(Sf), read_flag(Of))),
+        C::g => lnot(lor(read_flag(Zf), ne(read_flag(Sf), read_flag(Of)))),
+        C::None => konst(1),
+    }
+}
+
+fn reads_access(a: OpAccess) -> bool {
+    matches!(
+        a,
+        OpAccess::Read | OpAccess::CondRead | OpAccess::ReadWrite | OpAccess::ReadCondWrite
+    )
+}
+
+fn writes_access(a: OpAccess) -> bool {
+    matches!(
+        a,
+        OpAccess::Write | OpAccess::CondWrite | OpAccess::ReadWrite | OpAccess::ReadCondWrite
+    )
+}
+
+const FLAG_BITS: [(u32, FlagKind); 6] = [
+    (RflagsBits::ZF, FlagKind::Zf),
+    (RflagsBits::SF, FlagKind::Sf),
+    (RflagsBits::OF, FlagKind::Of),
+    (RflagsBits::CF, FlagKind::Cf),
+    (RflagsBits::PF, FlagKind::Pf),
+    (RflagsBits::AF, FlagKind::Af),
+];
+
+/// Sound fallback for an instruction we don't model: capture its real register/
+/// flag effects (via iced) so dataflow stays correct. The inputs are kept alive
+/// by an opaque call; each written location is clobbered to `Undef` so later
+/// reads get a fresh (honestly unknown) version rather than a stale one.
+fn asm_fallback(insn: &Insn) -> Vec<Stmt> {
+    let ins = &insn.raw;
+    let mut factory = InstructionInfoFactory::new();
+    let info = factory.info(ins);
+
+    let mut reads: Vec<Expr> = Vec::new();
+    let mut writes: Vec<Location> = Vec::new();
+    for ur in info.used_registers() {
+        if let Some(id) = reg_id(ur.register()) {
+            let loc = Location::Reg(id);
+            if reads_access(ur.access()) {
+                let r = Expr::Read(loc.clone());
+                if !reads.contains(&r) {
+                    reads.push(r);
+                }
+            }
+            if writes_access(ur.access()) && !writes.contains(&loc) {
+                writes.push(loc);
+            }
+        }
+    }
+    let (rr, rw) = (ins.rflags_read(), ins.rflags_written());
+    for (bit, k) in FLAG_BITS {
+        if rr & bit != 0 {
+            reads.push(Expr::Read(Location::Flag(k)));
+        }
+        if rw & bit != 0 && !writes.contains(&Location::Flag(k)) {
+            writes.push(Location::Flag(k));
+        }
+    }
+
+    let mut out = vec![Stmt::CallStmt(Expr::Call {
+        target: CallTarget::Named(format!("asm:{}", insn.text)),
+        args: reads,
+        ret: Ty::Unknown,
+    })];
+    for w in writes {
+        out.push(Stmt::Set {
+            dst: w,
+            expr: Expr::Undef,
+        });
+    }
+    out
+}
+
 /// Flags for a subtraction `a - b` with result `r` (covers `cmp`, `sub`, `neg`).
 fn sub_flags(a: &Expr, b: &Expr, r: &Expr) -> Vec<Stmt> {
     let of = Expr::Binary(
@@ -245,7 +360,7 @@ fn bin(op: BinOp, a: Expr, b: Expr) -> Expr {
 /// target pointer width (32 or 64). Returns `[Asm]` for anything not modelled.
 pub fn lift(insn: &Insn, bits: u32) -> Vec<Stmt> {
     let ins = &insn.raw;
-    let asm = || vec![Stmt::Asm(insn.text.clone())];
+    let asm = || asm_fallback(insn);
 
     // Helper to require Some or bail to Asm.
     macro_rules! some_or_asm {
@@ -431,7 +546,19 @@ pub fn lift(insn: &Insn, bits: u32) -> Vec<Stmt> {
         }
         Mnemonic::Ret => vec![Stmt::Return(None)],
 
-        _ => asm(),
+        _ => {
+            // setcc: a single byte destination set from a condition.
+            if ins.op_count() == 1
+                && ins.condition_code() != ConditionCode::None
+                && insn.flow == crate::disasm::Flow::Fallthrough
+            {
+                let cond = cc_to_cond(ins.condition_code());
+                if let Some(s) = write_op0(ins, cond, bits) {
+                    return s;
+                }
+            }
+            asm()
+        }
     }
 }
 

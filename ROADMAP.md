@@ -296,8 +296,13 @@ Stratégie incrémentale recommandée :
       → `<=s`) par pattern sur les expressions de flags du lifter (`src/opt`).
       Sur `factorial` : `if (n <= 1)` et la boucle `if (i != n+1)` reconstruites,
       `imul` lifté → `result *= i` ; l'algorithme complet est récupéré en SSA.
-- [~] Élargir la couverture du lifter : imul 2/3-op fait ; reste mul/idiv/div,
-      setcc, cmov, SSE. + barrière `Asm` pour la DCE, prérequis à l'émission.
+- [x] Sûreté `Asm` : instructions non liftées modélisées par leurs effets
+      (appel opaque des entrées + clobber `Undef` des sorties) → DCE/opt saines.
+- [x] Valeur de retour modélisée (`Return` lit `rax`) → le calcul du résultat
+      n'est plus supprimé (ex. `classify` : `setne` → `(x != 0)`, φ du retour).
+- [~] Couverture lifter : mov/movzx/sx, lea, add/sub/and/or/xor (+flags),
+      cmp/test, inc/dec, neg/not, shl/shr/sar, push/pop, call, ret, imul 2/3-op,
+      **setcc** faits ; reste mul/idiv/div, cmov, SSE.
 - [ ] `emit` IR→C à parité avec la sortie texte actuelle sur le corpus.
 
 ---
@@ -331,18 +336,16 @@ d'application typique (itérer jusqu'à point fixe) :
 > (stores, appels, valeurs de retour, accès volatils). En cas de doute → ne
 > pas transformer. La sûreté prime sur la beauté.
 
-> **Garde-fou `Asm` (constaté en implémentant §4).** Un `Stmt::Asm` est opaque :
-> il ne référence pas les `ValueId` des registres qu'il lit/écrit réellement.
-> Donc tant qu'une instruction tombe en `Asm`, la DCE peut supprimer une
-> définition que l'asm consomme (vu sur `imul` non lifté → l'init de `edx`
-> disparaît). Conséquences :
-> 1. **Avant toute émission C (§7)**, traiter `Asm` comme une barrière qui
->    *lit et écrit tous les emplacements* (ou ne pas optimiser autour).
-> 2. La vraie solution est d'**élargir la couverture du lifter** (imul/mul/idiv,
->    setcc, cmov, SSE…) pour que `Asm` devienne rare. C'est la priorité avant
->    de brancher l'IR sur la sortie par défaut.
-> Aujourd'hui sans conséquence : l'IR optimisé n'est visible que via `--mode ir`
-> (inspection), la sortie par défaut passe toujours par le pipeline texte.
+> **Garde-fou `Asm` — RÉSOLU.** Une instruction non liftée est désormais
+> modélisée par ses **effets réels** (lus via `iced` `instr_info` :
+> `used_registers`, `rflags_read/written`) plutôt que par un `Stmt::Asm` opaque :
+> - un appel opaque `asm:<texte>(entrées)` qui **garde les sources vivantes**,
+> - un clobber `Set(W, Undef)` par registre/flag écrit, de sorte que toute
+>   lecture ultérieure obtient une **version fraîche honnête** (pas de valeur
+>   périmée). Vérifié sur `lock cmpxchg` : la branche dépendante devient
+>   `if (undef == 0)` (drapeau inconnu), correct.
+> La DCE/propagation sont donc saines même en présence d'instructions non
+> modélisées. Reste à élargir la couverture du lifter pour réduire les `undef`.
 
 ### 4.1 Analyse d'alias mémoire (`src/opt/alias.rs`)
 

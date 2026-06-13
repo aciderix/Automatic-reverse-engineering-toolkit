@@ -9,54 +9,13 @@
 //! Parallel to the working text pipeline; reachable via `--mode ir`.
 #![allow(dead_code)]
 
-use super::lift::lift;
+use super::lift::{cc_to_cond, lift};
 use super::types::*;
 use crate::analysis::Function;
 use crate::disasm::Flow;
 use crate::loader::Program;
-use iced_x86::ConditionCode;
 use std::collections::HashMap;
 use std::fmt::Write;
-
-fn read_flag(k: FlagKind) -> Expr {
-    Expr::Read(Location::Flag(k))
-}
-
-/// Logical negation of a 0/1 flag expression.
-fn lnot(e: Expr) -> Expr {
-    Expr::Binary(BinOp::Eq, Box::new(e), Box::new(Expr::konst(0, 8)))
-}
-
-fn lor(a: Expr, b: Expr) -> Expr {
-    Expr::Binary(BinOp::Or, Box::new(a), Box::new(b))
-}
-
-/// The branch condition for a `jcc`, expressed over the CPU flags. A later pass
-/// substitutes the flag definitions and simplifies (e.g. `SF != OF` → `a < b`).
-fn cc_to_cond(cc: ConditionCode) -> Expr {
-    use ConditionCode as C;
-    use FlagKind::*;
-    let ne = |a: Expr, b: Expr| Expr::Binary(BinOp::Ne, Box::new(a), Box::new(b));
-    match cc {
-        C::e => read_flag(Zf),
-        C::ne => lnot(read_flag(Zf)),
-        C::b => read_flag(Cf),
-        C::ae => lnot(read_flag(Cf)),
-        C::be => lor(read_flag(Cf), read_flag(Zf)),
-        C::a => lnot(lor(read_flag(Cf), read_flag(Zf))),
-        C::s => read_flag(Sf),
-        C::ns => lnot(read_flag(Sf)),
-        C::o => read_flag(Of),
-        C::no => lnot(read_flag(Of)),
-        C::p => read_flag(Pf),
-        C::np => lnot(read_flag(Pf)),
-        C::l => ne(read_flag(Sf), read_flag(Of)),
-        C::ge => lnot(ne(read_flag(Sf), read_flag(Of))),
-        C::le => lor(read_flag(Zf), ne(read_flag(Sf), read_flag(Of))),
-        C::g => lnot(lor(read_flag(Zf), ne(read_flag(Sf), read_flag(Of)))),
-        C::None => Expr::konst(1, 8),
-    }
-}
 
 /// Lift a recovered function into an SSA-ready IR CFG (pre-SSA: `Set`/`Read`).
 pub fn build_ir(prog: &Program, func: &Function) -> IrFunction {
@@ -115,7 +74,10 @@ pub fn build_ir(prog: &Program, func: &Function) -> IrFunction {
                     None => stmts.push(Stmt::Asm(blk.insns.last().unwrap().text.clone())),
                 }
             }
-            Flow::Return => stmts.push(Stmt::Return(None)),
+            // Model the return value as the result register (rax/eax family),
+            // so its computation stays live (analogous to the text pipeline's
+            // `return eax`).
+            Flow::Return => stmts.push(Stmt::Return(Some(Expr::Read(Location::Reg(RegId(0)))))),
             Flow::Indirect | Flow::Interrupt => {
                 stmts.push(Stmt::Asm(blk.insns.last().unwrap().text.clone()))
             }
