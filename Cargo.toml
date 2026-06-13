@@ -1,0 +1,29 @@
+[package]
+name = "aret"
+version = "0.1.0"
+edition = "2021"
+authors = ["aciderix"]
+description = "Automatic Reverse Engineering Toolkit — machine code to readable pseudo-code"
+license = "MIT"
+repository = "https://github.com/aciderix/Automatic-reverse-engineering-toolkit"
+
+[[bin]]
+name = "aret"
+path = "src/main.rs"
+
+[dependencies]
+# Binary container parsing (PE / ELF / Mach-O)
+object = { version = "0.36", default-features = false, features = ["read", "std"] }
+# Pure-Rust x86/x64 disassembler — the reference for accuracy/coverage
+iced-x86 = { version = "1.21", default-features = false, features = ["std", "decoder", "instr_info", "op_code_info", "fast_fmt", "intel"] }
+# CLI parsing
+clap = { version = "4", features = ["derive"] }
+# Error handling
+anyhow = "1"
+# Ordered maps for deterministic output
+indexmap = "2"
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
