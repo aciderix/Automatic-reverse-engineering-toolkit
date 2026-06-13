@@ -162,15 +162,50 @@ def extract(path, outdir):
             fh.write(f"{fn},{g:016x},{i:016x},{sz}\n")
     print(f"extracted {n} nodes -> {outdir}")
 
+def batch_extract(indir, outdir):
+    """Extract every .BF* bigfile in indir into outdir/<package>/, and write a
+    global manifest covering all packages (works on the whole game data set)."""
+    import os, glob
+    os.makedirs(outdir, exist_ok=True)
+    manifest = open(os.path.join(outdir, "manifest.csv"), "w")
+    manifest.write("package,chunk,index,class_guid,node_id,payload_bytes\n")
+    total_files = total_nodes = 0
+    for path in sorted(glob.glob(os.path.join(indir, "*.BF*"))):
+        d = open(path, 'rb').read()
+        if not parse_text_header(d).startswith("Opal"):
+            continue
+        pkg = os.path.splitext(os.path.basename(path))[0]
+        pdir = os.path.join(outdir, pkg)
+        os.makedirs(pdir, exist_ok=True)
+        n = 0
+        for ci, (off, _c) in enumerate(find_chunks(d)):
+            for ni, node in enumerate(walk_nodes(d, off)):
+                payload = d[node.offset + 24:node.offset + node.size]
+                fn = f"c{ci}_{ni:05d}_{node.guid:016x}_{node.node_id:016x}.node"
+                with open(os.path.join(pdir, fn), 'wb') as fh:
+                    fh.write(payload)
+                manifest.write(f"{pkg},{ci},{ni},{node.guid:016x},"
+                               f"{node.node_id:016x},{len(payload)}\n")
+                n += 1
+        total_files += 1
+        total_nodes += n
+        print(f"  {pkg:<28} {n:>6} nodes")
+    manifest.close()
+    print(f"\n{total_nodes} nodes from {total_files} packages -> {outdir}")
+
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("file")
+    ap.add_argument("file", help="a .BF* bigfile, or a directory for --batch")
     ap.add_argument("--hex", type=int, default=0,
                     help="dump N words after each chunk magic+count")
     ap.add_argument("--extract", metavar="DIR",
                     help="extract every node payload into DIR (+ index.csv)")
+    ap.add_argument("--batch", metavar="OUTDIR",
+                    help="treat <file> as a directory of bigfiles; extract all")
     a = ap.parse_args()
-    if a.extract:
+    if a.batch:
+        batch_extract(a.file, a.batch)
+    elif a.extract:
         extract(a.file, a.extract)
     else:
         describe(a.file, a.hex)
