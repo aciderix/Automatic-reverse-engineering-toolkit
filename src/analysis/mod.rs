@@ -1,5 +1,10 @@
 //! Control-flow analysis: function discovery (recursive descent) and
 //! basic-block / CFG construction.
+//!
+//! Strategy for scaling to large binaries: decode every reachable address
+//! exactly once into a global instruction map (Phase A), then partition that
+//! map into functions with cheap map lookups (Phase B). This keeps the whole
+//! pipeline ~O(code reached) instead of O(functions × size).
 
 use crate::disasm::{Disassembler, Flow, Insn};
 use crate::loader::Program;
@@ -36,51 +41,99 @@ pub struct Function {
 /// Result of analysing a whole program.
 pub struct AnalysisResult {
     pub functions: Vec<Function>,
+    /// Total instructions decoded across the program.
+    pub instruction_count: usize,
 }
 
-/// Entry point: discover functions then build each one's CFG.
+/// Entry point: global decode, then build each function's CFG.
 pub fn analyze(prog: &Program, disasm: &Disassembler) -> AnalysisResult {
-    let entries = discover_functions(prog, disasm);
+    let (global, entries) = global_decode(prog, disasm);
+    let instruction_count = global.len();
+
     let mut functions = Vec::new();
     for &entry in &entries {
-        if let Some(f) = build_function(prog, disasm, entry, &entries) {
+        if let Some(f) = build_function(prog, &global, entry, &entries) {
             functions.push(f);
         }
     }
     functions.sort_by_key(|f| f.entry);
-    AnalysisResult { functions }
+    AnalysisResult {
+        functions,
+        instruction_count,
+    }
 }
 
-/// Phase 1 — find every plausible function entry by following direct calls
-/// transitively from the seed set (entry point + symbols).
-fn discover_functions(prog: &Program, disasm: &Disassembler) -> BTreeSet<u64> {
+/// Phase A — decode every reachable instruction once, collecting the set of
+/// function entry points (entry + direct/indirect-target call sites).
+fn global_decode(
+    prog: &Program,
+    disasm: &Disassembler,
+) -> (BTreeMap<u64, Insn>, BTreeSet<u64>) {
+    let mut global: BTreeMap<u64, Insn> = BTreeMap::new();
     let mut entries: BTreeSet<u64> = prog.seed_functions().into_iter().collect();
+    if entries.is_empty() && prog.is_executable(prog.entry) {
+        entries.insert(prog.entry);
+    }
     let mut work: VecDeque<u64> = entries.iter().copied().collect();
 
-    while let Some(entry) = work.pop_front() {
-        let (_, callees) = sweep(prog, disasm, entry, &BTreeSet::new());
-        for callee in callees {
-            if prog.is_executable(callee) && entries.insert(callee) {
-                work.push_back(callee);
+    while let Some(start) = work.pop_front() {
+        // Walk a straight-line run from `start`, stopping at already-decoded
+        // territory or a block terminator.
+        let mut cur = start;
+        loop {
+            if global.contains_key(&cur) {
+                break;
+            }
+            if !prog.is_executable(cur) {
+                break;
+            }
+            let insn = match disasm.decode_at(prog, cur) {
+                Some(i) => i,
+                None => break,
+            };
+            let next = insn.next_addr();
+            let flow = insn.flow;
+            let target = insn.target;
+            global.insert(cur, insn);
+
+            match flow {
+                Flow::Fallthrough => cur = next,
+                Flow::Call => {
+                    if let Some(t) = target {
+                        if prog.is_executable(t) && entries.insert(t) {
+                            work.push_back(t);
+                        }
+                    }
+                    cur = next; // call returns to fallthrough
+                }
+                Flow::CondJump => {
+                    if let Some(t) = target {
+                        work.push_back(t);
+                    }
+                    cur = next;
+                }
+                Flow::Jump => {
+                    if let Some(t) = target {
+                        work.push_back(t);
+                    }
+                    break;
+                }
+                Flow::Return | Flow::Indirect | Flow::Interrupt => break,
             }
         }
     }
-    entries
+
+    (global, entries)
 }
 
-/// Linearly explore a function body via recursive descent, returning every
-/// decoded instruction (keyed by address) and the set of direct call targets.
-///
-/// `boundary` lists addresses owned by *other* functions; traversal never
-/// decodes across them (prevents two functions from being merged).
-fn sweep(
-    prog: &Program,
-    disasm: &Disassembler,
+/// Collect the instructions belonging to one function by walking intra-function
+/// edges over the already-decoded global map, stopping at other entries.
+fn collect_function(
+    global: &BTreeMap<u64, Insn>,
     entry: u64,
     boundary: &BTreeSet<u64>,
-) -> (BTreeMap<u64, Insn>, BTreeSet<u64>) {
+) -> BTreeMap<u64, Insn> {
     let mut insns: BTreeMap<u64, Insn> = BTreeMap::new();
-    let mut callees = BTreeSet::new();
     let mut work: VecDeque<u64> = VecDeque::new();
     work.push_back(entry);
 
@@ -89,25 +142,16 @@ fn sweep(
             continue;
         }
         if addr != entry && boundary.contains(&addr) {
-            continue;
+            continue; // belongs to another function
         }
-        if !prog.is_executable(addr) {
-            continue;
-        }
-        let insn = match disasm.decode_at(prog, addr) {
-            Some(i) => i,
+        let insn = match global.get(&addr) {
+            Some(i) => i.clone(),
             None => continue,
         };
-
         let next = insn.next_addr();
         match insn.flow {
             Flow::Fallthrough => work.push_back(next),
-            Flow::Call => {
-                if let Some(t) = insn.target {
-                    callees.insert(t);
-                }
-                work.push_back(next); // call returns
-            }
+            Flow::Call => work.push_back(next),
             Flow::CondJump => {
                 if let Some(t) = insn.target {
                     work.push_back(t);
@@ -123,24 +167,31 @@ fn sweep(
         }
         insns.insert(addr, insn);
     }
-
-    (insns, callees)
+    insns
 }
 
-/// Phase 2 — build the CFG of a single function.
+/// Phase B — build the CFG of a single function from the global map.
 fn build_function(
     prog: &Program,
-    disasm: &Disassembler,
+    global: &BTreeMap<u64, Insn>,
     entry: u64,
     all_entries: &BTreeSet<u64>,
 ) -> Option<Function> {
-    // Boundary = every other function entry.
     let mut boundary = all_entries.clone();
     boundary.remove(&entry);
 
-    let (insns, callees) = sweep(prog, disasm, entry, &boundary);
+    let insns = collect_function(global, entry, &boundary);
     if insns.is_empty() {
         return None;
+    }
+
+    let mut callees = BTreeSet::new();
+    for insn in insns.values() {
+        if insn.flow == Flow::Call {
+            if let Some(t) = insn.target {
+                callees.insert(t);
+            }
+        }
     }
 
     // Determine basic-block leaders.
@@ -148,17 +199,7 @@ fn build_function(
     leaders.insert(entry);
     for insn in insns.values() {
         match insn.flow {
-            Flow::CondJump => {
-                if let Some(t) = insn.target {
-                    if insns.contains_key(&t) {
-                        leaders.insert(t);
-                    }
-                }
-                if insns.contains_key(&insn.next_addr()) {
-                    leaders.insert(insn.next_addr());
-                }
-            }
-            Flow::Jump => {
+            Flow::CondJump | Flow::Jump => {
                 if let Some(t) = insn.target {
                     if insns.contains_key(&t) {
                         leaders.insert(t);
@@ -177,7 +218,6 @@ fn build_function(
         }
     }
 
-    // Walk instructions in address order, cutting at leaders / terminators.
     let ordered: Vec<u64> = insns.keys().copied().collect();
     let mut blocks: IndexMap<u64, BasicBlock> = IndexMap::new();
     let mut cur_start: Option<u64> = None;
@@ -187,7 +227,7 @@ fn build_function(
         if body.is_empty() {
             return;
         }
-        let last = body.last().unwrap();
+        let last: &Insn = body.last().unwrap();
         let terminator = last.flow;
         let next = last.next_addr();
         let successors = match terminator {
@@ -201,7 +241,6 @@ fn build_function(
             }
             Flow::Jump => last.target.into_iter().collect(),
             Flow::Return | Flow::Indirect | Flow::Interrupt => Vec::new(),
-            // Block was cut because the next instruction is a leader: fall through.
             Flow::Fallthrough | Flow::Call => vec![next],
         };
         blocks.insert(
@@ -220,15 +259,15 @@ fn build_function(
         let is_leader = leaders.contains(&addr);
         if is_leader && cur_start.is_some() {
             flush(&mut blocks, cur_start.unwrap(), std::mem::take(&mut cur));
+            cur_start = None;
         }
-        if cur_start.is_none() || is_leader {
+        if cur_start.is_none() {
             cur_start = Some(addr);
         }
         let terminates = matches!(
             insn.flow,
             Flow::CondJump | Flow::Jump | Flow::Return | Flow::Indirect | Flow::Interrupt
         );
-        // Detect a boundary where the *next* ordered instruction is a leader.
         let next_is_leader = ordered
             .get(i + 1)
             .map(|n| leaders.contains(n))

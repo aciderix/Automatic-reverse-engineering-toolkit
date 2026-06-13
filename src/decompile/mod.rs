@@ -6,7 +6,7 @@
 use crate::analysis::{BasicBlock, Function};
 use crate::disasm::Flow;
 use crate::ir::{branch_condition, lift_insn, operand_to_c};
-use crate::loader::Program;
+use crate::loader::{Bitness, Program};
 use std::collections::BTreeSet;
 use std::fmt::Write;
 
@@ -142,7 +142,11 @@ fn emit_block(
             }
         }
         Flow::Return => {
-            let _ = writeln!(out, "{}return rax;", ind);
+            let ret_reg = match prog.bitness {
+                Bitness::Bits64 => "rax",
+                Bitness::Bits32 => "eax",
+            };
+            let _ = writeln!(out, "{}return {};", ind, ret_reg);
         }
         Flow::Indirect => {
             let insn = blk.insns.last().unwrap();

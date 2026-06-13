@@ -48,6 +48,11 @@ struct Args {
     /// Write output to a file instead of stdout.
     #[arg(short, long)]
     output: Option<PathBuf>,
+
+    /// Decompile mode only: write one .c file per function into this directory,
+    /// plus an index.csv. Produces a browsable tree instead of one huge file.
+    #[arg(long)]
+    split: Option<PathBuf>,
 }
 
 fn main() -> Result<()> {
@@ -94,9 +99,13 @@ fn main() -> Result<()> {
             }
         }
         Mode::Decompile => {
+            if let Some(dir) = &args.split {
+                return write_split(dir, &prog, &functions, result.instruction_count);
+            }
             out.push_str(&format!(
-                "// Decompiled by ARET — {} functions recovered\n\n",
-                result.functions.len()
+                "// Decompiled by ARET — {} functions recovered, {} instructions decoded\n\n",
+                result.functions.len(),
+                result.instruction_count
             ));
             for f in &functions {
                 out.push_str(&decompile::decompile_function(&prog, f));
@@ -121,6 +130,48 @@ fn emit(args: &Args, out: String) -> Result<()> {
         }
         None => print!("{}", out),
     }
+    Ok(())
+}
+
+/// Replace characters that are unsafe in a filename.
+fn sanitize(name: &str) -> String {
+    name.chars()
+        .map(|c| if c.is_ascii_alphanumeric() || c == '_' { c } else { '_' })
+        .collect()
+}
+
+/// Write one .c file per function plus an index.csv into `dir`.
+fn write_split(
+    dir: &std::path::Path,
+    prog: &Program,
+    functions: &[&analysis::Function],
+    insn_count: usize,
+) -> Result<()> {
+    std::fs::create_dir_all(dir)
+        .with_context(|| format!("failed to create {}", dir.display()))?;
+
+    let mut index = String::from("name,entry,basic_blocks,callees\n");
+    for f in functions {
+        let fname = format!("{}.c", sanitize(&f.name));
+        let body = decompile::decompile_function(prog, f);
+        std::fs::write(dir.join(&fname), body)
+            .with_context(|| format!("failed to write {}", fname))?;
+        index.push_str(&format!(
+            "{},0x{:x},{},{}\n",
+            f.name,
+            f.entry,
+            f.blocks.len(),
+            f.callees.len()
+        ));
+    }
+    std::fs::write(dir.join("index.csv"), index)?;
+
+    eprintln!(
+        "wrote {} function files (+ index.csv) to {} — {} instructions decoded",
+        functions.len(),
+        dir.display(),
+        insn_count
+    );
     Ok(())
 }
 
