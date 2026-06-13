@@ -276,13 +276,34 @@ Decoder complexity varies sharply:
      (`[0,2,3,4,5,6,7,1, 1,0,5,4,3,2,6,7, …]`) and packed as 3-bit fields
      (`shl 3`) into u16 words = the block's colour indices.
 
-**Bottom line**: the codec is conceptually fully reverse-engineered. The
-entropy core (bit reader, dynamic Huffman, table builder, delta channels) is
-validated working code (`hx_codec.py`); colour-endpoints decode exactly. What
-remains is intricate-but-deterministic implementation: the colour-index 2-D
-delta packing, `sub_959ca0` (alpha endpoints), the palette→block index
-indirection, and BC interleaving → DDS. The improved SSA decompiler chiefly
-speeds up nailing the exact masks/shifts of the packing — the scheme is known.
+#### Full pipeline (mapped end-to-end)
+
+```
+sub_958510  orchestrator
+  ├─ sub_959290         parse Hx header (w/h/format/mips)
+  ├─ sub_957e50         allocate output surface
+  ├─ sub_95a380         decompress → 4 channel palettes
+  │    ├─ sub_95a780       build up to 5 Huffman tables (sub_95a020 each)
+  │    └─ sub_959fb0       run the 4 channel decoders:
+  │         ├─ sub_959590   colour endpoints  (1 table, 2-byte delta)      ✅ implemented
+  │         ├─ sub_9596d0   colour indices    (2-D predictive delta)       🟡 mapped
+  │         ├─ sub_959a20   alpha indices     (2 tables, 6 mixed deltas)   🟡 mapped
+  │         └─ sub_959ca0   alpha endpoints   (TODO)
+  └─ per-mip loop (B8–B18): blocks = ceil((w>>m)/4) * ceil((h>>m)/4);
+       assemble BC blocks from the palettes (palette→block indexing here);
+       output surface tagged with magic 0x1ef9cabd.
+  (sub_9591c0 = tiny format→layout selector: index table @0x959208 →
+   handlers 0x9591d9 / 0x9591e7; not the assembler itself.)
+```
+
+**Bottom line**: the codec is fully reverse-engineered end-to-end. The entropy
+core (bit reader, dynamic Huffman, table builder, delta) is validated working
+code (`hx_codec.py`); colour-endpoints decode exactly; colour/alpha-index
+schemes are mapped. What remains is a sizeable but well-scoped reimplementation:
+`sub_959ca0`, the exact index packing, the per-mip palette→block assembly in
+`sub_958510`, and DDS wrapping — ~6–8 interacting functions. This is the stage
+where the improved SSA decompiler pays off most (precise masks/shifts and the
+assembly loop), so the remaining work is implementation, not discovery.
 
 Delta decode (per `sub_959590`): `acc = (acc + huff_sym()) & 0xff` for each
 byte; two bytes packed per u16 entry.
