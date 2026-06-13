@@ -29,6 +29,8 @@ enum Mode {
     Cfg,
     /// Emit pseudo-C (default).
     Decompile,
+    /// Dump the typed SSA IR (lifter + SSA construction) — work in progress.
+    Ir,
 }
 
 #[derive(Parser, Debug)]
@@ -131,6 +133,14 @@ fn main() -> Result<()> {
             ));
             for f in &functions {
                 out.push_str(&render_function(&prog, f, args.flat));
+                out.push('\n');
+            }
+        }
+        Mode::Ir => {
+            for f in &functions {
+                let mut irf = ir::build::build_ir(&prog, f);
+                ssa::to_ssa(&mut irf);
+                out.push_str(&ir::build::dump(&irf));
                 out.push('\n');
             }
         }

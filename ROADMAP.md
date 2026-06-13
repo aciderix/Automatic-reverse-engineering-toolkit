@@ -282,10 +282,14 @@ Stratégie incrémentale recommandée :
 - [x] Construction SSA avec φ vérifiée sur petits cas (`src/ssa/mod.rs`,
       algorithme de Cytron sur `cfg::dom`). Tests : φ placé à la jonction d'un
       diamant et référencé par l'usage ; unicité des définitions SSA.
-- [ ] Construction de l'IR-CFG depuis `analysis::Function` (lifting des blocs +
-      terminateurs `Branch`/`Jump`/`Return`) — pour faire tourner SSA sur du
-      vrai code (prochaine étape).
-- [ ] Passes SSA : SCCP (const-prop + branches mortes) + DCE (§4).
+- [x] Construction de l'IR-CFG depuis `analysis::Function` (`src/ir/build.rs` :
+      lifting des blocs + terminateurs `Branch`/`Jump`/`Return`, condition de
+      `jcc` dérivée des flags). Observable via `aret <bin> --mode ir`. Vérifié
+      de bout en bout : code machine → IR typé SSA avec φ sur `factorial` et sur
+      de vraies fonctions du jeu (pas de panique).
+- [ ] Passes SSA : SCCP (const-prop + branches mortes) + DCE (§4). C'est ici
+      que le bruit visible dans `--mode ir` (flags morts, idiomes) disparaît et
+      que les conditions flag → relationnel sont reconstruites par dataflow.
 - [ ] `emit` IR→C à parité avec la sortie texte actuelle sur le corpus.
 
 ---

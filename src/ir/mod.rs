@@ -11,6 +11,8 @@
 pub mod types;
 /// IR lifter (machine code -> typed IR), parallel to the text lifting below.
 pub mod lift;
+/// IR CFG builder + pretty-printer.
+pub mod build;
 
 use crate::disasm::Insn;
 use crate::loader::Program;

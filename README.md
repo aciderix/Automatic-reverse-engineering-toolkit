@@ -133,8 +133,17 @@ started, **in parallel** with the working text pipeline (so nothing regresses):
 - `src/ir/types.rs` — the typed SSA IR (`Expr`/`Stmt`/`Ty`/`Location`/`ValueId`,
   explicit CPU flags), the foundation the rest of the roadmap builds on.
 
-Immediate next steps: an IR lifter (machine code → `Vec<Stmt>` via `iced-x86`
-register/flag info), SSA construction, then SCCP + DCE on SSA.
+- `src/ir/lift.rs` — lifts instructions to typed IR via `iced-x86`'s structured
+  operand API, with explicit flag definitions (`Stmt::Asm` fallback for the
+  rest, so output is never silently wrong).
+- `src/ssa/mod.rs` — SSA construction (Cytron φ-placement + renaming).
+- `src/ir/build.rs` — builds the IR CFG from a recovered function and runs the
+  whole chain; inspect it with `aret <binary> --mode ir --function <name>`
+  (machine code → typed SSA IR with φ-nodes, verified on real binaries).
+
+Immediate next steps: SCCP (sparse conditional constant propagation + dead
+branch elimination) and DCE on the SSA, then recovering branch conditions from
+the flag definitions, then an IR→C emitter at parity with the text pipeline.
 4. **`switch`/jump-table recovery** and full indirect-call resolution via
    vtable analysis (names the indirect call sites, not just the targets).
 5. **Library/CRT signature matching** (FLIRT-style) to name known functions and
