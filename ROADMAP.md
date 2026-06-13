@@ -1,0 +1,638 @@
+# ARET — Roadmap technique vers la décompilation vérifiée
+
+> Document de conception destiné à l'agent de code qui développe ARET.
+> Objectif : aller plus loin et faire mieux que tous les décompilateurs
+> existants (Ghidra/Hex-Rays/rev.ng/LLM4Decompile), en récupérant
+> **automatiquement** un code source **réel, compilable et prouvé équivalent**
+> au binaire d'origine.
+
+---
+
+## 0. Lire ceci en premier : la définition du succès
+
+Le but final — « obtenir automatiquement le code source » — doit être redéfini
+de façon **mesurable**, sinon il est impossible de savoir si on progresse ou si
+on régresse.
+
+### 0.1 Ce qui est physiquement impossible (ne jamais le promettre)
+
+La compilation **détruit** de l'information qui n'est plus dans les octets :
+
+- noms de variables / fonctions / champs,
+- commentaires,
+- types sémantiques (un `int` qui était un `enum Color`, un `char*` qui était
+  un `const char* nom_utilisateur`),
+- la structure exacte des templates C++, des macros, du découpage en fichiers.
+
+Aucun outil ne peut *récupérer* cette information : au mieux il l'**invente** de
+façon plausible. Toute autre prétention est du marketing.
+
+### 0.2 Ce qui EST récupérable et vérifiable (la vraie frontière)
+
+Ce qui reste entièrement déterminé par les octets, et qu'on peut viser à 100 % :
+
+- la **sémantique** exacte (ce que le code calcule),
+- la **structure de contrôle** (boucles, conditions, switch),
+- les **bornes de types** (largeurs, signé/non-signé, pointeur vs scalaire,
+  agrégats accédés par offset),
+- les **conventions d'appel** et signatures (nombre/largeur d'arguments).
+
+### 0.3 La métrique nord (north-star metric)
+
+> **Re-exécutabilité prouvée** : le pourcentage de fonctions dont le C émis
+> (a) recompile sans erreur avec le même compilateur/flags, et (b) est prouvé
+> sémantiquement équivalent au bloc binaire d'origine (différentiel ou SMT).
+
+C'est la métrique que **personne ne publie honnêtement en boucle fermée**.
+Quand ARET pourra dire *« 78 % des fonctions de ce binaire recompilent en code
+prouvé équivalent »*, le projet aura dépassé l'état de l'art grand public.
+
+Métriques secondaires (lisibilité, pour la couche LLM) :
+- **recompilabilité** seule (compile, sans preuve d'équivalence),
+- **similarité d'édition** au source d'origine quand on l'a (benchmark),
+- densité de `goto` résiduels, de `__asm__` résiduels, de casts.
+
+---
+
+## 1. État actuel et le plafond architectural
+
+### 1.1 Ce qui marche déjà (à préserver)
+
+- `src/loader/mod.rs` — parsing PE/ELF/Mach-O via `object`, vue mémoire unifiée.
+- `src/disasm/mod.rs` — décodage x86/x64 via `iced-x86`, classification du flot.
+- `src/analysis/mod.rs` — decode global unique (scalable), découverte de
+  fonctions par descente récursive + scan de prologues, construction CFG.
+- `src/structure/mod.rs` — dominateurs/post-dominateurs (Cooper-Harvey-Kennedy),
+  détection de boucles naturelles, émission récursive `if`/`while` avec
+  dégradation en `goto` sûre.
+- `src/dataflow/mod.rs` — liveness globale, DCE, propagation mono-usage,
+  binding des valeurs de retour d'appel — **le tout prouvé sûr**.
+
+C'est une base solide. **On ne jette rien** : on insère un IR sous la couche
+de lifting et on rebranche l'émission par-dessus.
+
+### 1.2 Le plafond : l'IR est du texte C
+
+Le problème structurel n°1, à corriger avant tout le reste :
+
+- `src/ir/mod.rs:213` — `lift_insn` produit directement des `Vec<String>` de C.
+- `src/dataflow/mod.rs:141` — `parse_stmt` **re-parse** ce C avec `find(" = ")`,
+  `strip_suffix(';')`, etc.
+- `src/dataflow/mod.rs:726` — la propagation fait du `replace_word()` (substitution
+  textuelle) sur les lignes de C.
+
+Manipuler des chaînes de C interdit fondamentalement :
+
+- le **constant folding** (`eax = 2; edx *= eax` → `edx *= 2`),
+- la **propagation à travers les jointures** de branches (φ-nodes),
+- l'**inférence de types** réelle,
+- la **simplification algébrique** (`x ^ x → 0`, `(a+0) → a`, `x*2 → x<<1` inverse),
+- la **désambiguïsation d'alias** mémoire propre.
+
+Tous les décompilateurs sérieux ont un IR **typé en arbres d'expressions + SSA**
+comme structure centrale, et ne génèrent le C qu'à la toute fin :
+
+- Hex-Rays → *microcode* (mba),
+- Ghidra → *P-Code* (+ Varnodes, HighFunction),
+- rev.ng / RetDec → *LLVM IR*.
+
+**Conclusion : le premier chantier est un vrai IR. Tout le reste en dépend.**
+
+---
+
+## 2. Architecture cible
+
+Nouveau pipeline (les modules existants en gras sont conservés, les autres
+sont nouveaux ou refondus) :
+
+```
+**loader** → **disasm** → **analysis (CFG)**
+   → lift  : machine code → IR concret (par instruction, sémantique des flags)
+   → ssa   : construction SSA (φ-nodes) sur le CFG
+   → opt   : passes sur SSA (const-prop, folding, copy-prop, DCE, GVN, simplif)
+   → types : inférence de types par contraintes (largeur, signe, ptr, agrégats)
+   → recover : switch/jump-tables, conventions d'appel, idiomes, strings, globals
+   → **structure** : if/while/switch (réutilise dominateurs existants)
+   → emit  : IR typé → C **compilable**
+   → verify : recompile + équivalence (boucle de raffinement)
+   → llm   : noms/commentaires/types plausibles par-dessus la structure vérifiée
+```
+
+Le cœur : **un IR unique** qui circule de `lift` jusqu'à `emit`, transformé par
+des passes successives, chacune **prouvée correcte** ou **gardée derrière un
+flag de confiance**.
+
+---
+
+## 3. Pilier 1 — IR SSA typé (la fondation)
+
+### 3.1 Pourquoi
+
+C'est le déblocage de tout. Sans IR, chaque feature ci-dessous se bat contre
+des strings. Avec IR, elles deviennent des passes de quelques centaines de
+lignes chacune.
+
+### 3.2 Structures de données (proposition Rust)
+
+Créer `src/ir/types.rs` (ou un nouveau crate-module `ir2` pendant la migration) :
+
+```rust
+/// Identifiant SSA : un (registre/emplacement) versionné.
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+pub struct ValueId(pub u32);
+
+/// Emplacement abstrait avant SSA (registre, slot de pile, flag, mémoire).
+#[derive(Clone, PartialEq, Eq, Hash)]
+pub enum Location {
+    Reg(RegId),          // famille canonique + sous-registre (cf. reg_family existant)
+    Flag(FlagKind),      // ZF, SF, OF, CF, PF — modélisés explicitement !
+    Frame(i64),          // [rbp+disp] / [rsp+disp] normalisé
+    Mem,                 // mémoire générique (raffinée par l'alias analysis)
+    Temp(u32),           // temporaires introduits par le lifting
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum FlagKind { ZF, SF, OF, CF, PF, AF }
+
+/// Type récupéré (treillis ; cf. pilier 3).
+#[derive(Clone, PartialEq, Eq)]
+pub enum Ty {
+    Unknown,
+    Int { bits: u8, signed: Option<bool> }, // signed=None tant qu'indéterminé
+    Ptr(Box<Ty>),
+    Float { bits: u8 },
+    Aggregate(AggId),    // struct/array reconstruit
+    Code,                // pointeur de fonction
+    Bool,
+}
+
+/// Expression : arbre, pas du texte.
+#[derive(Clone)]
+pub enum Expr {
+    Const(i128, Ty),
+    Use(ValueId),
+    Load { addr: Box<Expr>, ty: Ty },
+    Unary(UnOp, Box<Expr>),
+    Binary(BinOp, Box<Expr>, Box<Expr>),
+    Cast { to: Ty, expr: Box<Expr> },
+    Addr(Location),                       // &local, &global
+    Call { target: CallTarget, args: Vec<Expr>, ret: Ty },
+    Phi(Vec<ValueId>),                    // SSA join
+    Undef,
+}
+
+#[derive(Clone)]
+pub enum Stmt {
+    Assign { dst: ValueId, expr: Expr },  // SSA : dst défini ici
+    Store { addr: Expr, value: Expr, ty: Ty },
+    Branch { cond: Expr, taken: BlockId, fallthrough: BlockId },
+    Jump(BlockId),
+    Switch { value: Expr, cases: Vec<(i128, BlockId)>, default: BlockId },
+    Return(Option<Expr>),
+    CallStmt(Expr),                       // appel dont le retour est ignoré
+    Asm(String),                          // irréductible : on garde l'asm brut
+    Nop,
+}
+```
+
+Points clés de conception :
+
+1. **Modéliser les flags explicitement** (`FlagKind`). Aujourd'hui les
+   conditions sont reconstruites en re-parsant le dernier `cmp`
+   (`decompile/mod.rs:177 parse_cmp`, `ir/mod.rs:309 branch_condition`). Avec
+   l'IR, `cmp a,b` écrit `ZF = (a-b)==0`, `CF = a<b` (unsigned), etc., et
+   `jcc` lit ces définitions de flags. La passe de folding élimine ensuite les
+   flags morts et reconstruit `if (a <= b)` **par dataflow**, pas par regex.
+   C'est plus correct (gère les flags définis loin du `jcc`, réutilisés, etc.).
+
+2. **Tout en SSA** : chaque écriture crée un nouveau `ValueId`. Les `Phi`
+   matérialisent les jointures. C'est ce qui permet la propagation **à travers
+   les branches** que la roadmap actuelle liste comme manquante.
+
+3. **`Asm(String)`** : la soupape de sûreté. Tout ce qu'on ne sait pas lifter
+   (SIMD complexe, instructions privilégiées) reste de l'asm inline → la sortie
+   est **toujours sémantiquement honnête**, jamais fausse.
+
+### 3.3 Lifting (refonte de `src/ir/mod.rs`)
+
+Remplacer `lift_insn(&Insn) -> Vec<String>` par
+`lift_insn(&Insn, &mut LiftCtx) -> Vec<Stmt>` qui produit de l'IR.
+
+- Idéal : utiliser les `instr_info` d'`iced-x86` (déjà activé dans `Cargo.toml`)
+  pour énumérer **registres lus/écrits et flags affectés** par instruction, au
+  lieu de re-parser le texte Intel. iced expose `RflagsModified`,
+  `used_registers()`, etc. → lifting beaucoup plus robuste que le split textuel
+  actuel (`ir/mod.rs:14 split_insn`).
+- Chaque instruction définit ses flags. Exemple `sub eax, ebx` :
+  ```
+  t0 = eax - ebx
+  ZF = (t0 == 0); SF = (t0 < 0); CF = (eax <u ebx); OF = signed_overflow(eax,ebx)
+  eax = t0
+  ```
+- `lea` → `Addr`/arithmétique d'adresse (pas un load). Déjà géré textuellement
+  en `ir/mod.rs:178 lea_src`, à porter sur l'IR.
+
+### 3.4 Construction SSA (`src/ssa/mod.rs`, nouveau)
+
+Algorithme standard, on a déjà tout l'outillage de dominateurs :
+
+1. Réutiliser `Structurer::compute_dominators` (`structure/mod.rs:255`) — le
+   sortir dans un module partagé `src/cfg/dom.rs` pour qu'`analysis`, `ssa` et
+   `structure` le partagent.
+2. Calculer la **dominance frontier** (Cytron et al.).
+3. Placer les φ-nodes pour chaque `Location` aux frontières de dominance.
+4. Renommer en versions SSA (parcours du dominator tree).
+
+Référence : Cytron-Ferrante-Rosen-Wegman-Zadeck, *Efficiently Computing SSA*.
+
+### 3.5 Migration sans tout casser
+
+Stratégie incrémentale recommandée :
+
+1. Construire l'IR + SSA **en parallèle** du pipeline texte existant.
+2. Ajouter un `emit_c_from_ir()` minimal qui reproduit la sortie actuelle.
+3. Mettre les deux derrière un flag (`--ir` vs legacy), comparer sur le corpus.
+4. Quand l'IR atteint la parité, basculer `structure`/`decompile` dessus et
+   supprimer la manipulation de strings de `dataflow/mod.rs`.
+
+### 3.6 Jalons
+
+- [ ] `Expr`/`Stmt`/`Ty`/SSA définis et documentés.
+- [ ] Lifting IR de ~95 % des mnémoniques x64 courants (le reste → `Asm`).
+- [ ] Construction SSA avec φ vérifiée sur petits cas.
+- [ ] `emit` IR→C à parité avec la sortie texte actuelle sur le corpus.
+
+---
+
+## 4. Pilier 2 — Passes d'optimisation sur SSA (`src/opt/`)
+
+Une fois en SSA, chaque passe est petite, locale, et composable. Ordre
+d'application typique (itérer jusqu'à point fixe) :
+
+1. **Constant propagation + folding** : `Const op Const → Const`. Élimine la
+   majorité du bruit (`xor eax,eax` → `0`, calculs d'offsets constants).
+   Algorithme : **SCCP** (Sparse Conditional Constant Propagation, Wegman-Zadeck)
+   — élimine aussi les branches mortes (conditions constantes) gratuitement.
+2. **Copy propagation** : `b = a; use(b)` → `use(a)`. Trivial en SSA.
+3. **Expression propagation cross-block** : remplace la propagation textuelle
+   straight-line actuelle (`dataflow/mod.rs:658`). En SSA, traverse les φ.
+4. **Simplification algébrique** : `x+0`, `x*1`, `x^x`, `x&0`, `(x<<n)>>n`,
+   reconstruction de `x*2 → x+x` inverse, idiomes de division par constante
+   (multiplication magique → `x / k`), `x & (p-1)` quand `p` puissance de 2.
+5. **Reconstruction de conditions depuis les flags** : pattern-match sur les
+   définitions de flags consommées par un `Branch` → opérateur relationnel C
+   correct (porte la table signé/non-signé de `ir/mod.rs:317 render_with_cmp`).
+6. **Global Value Numbering (GVN)** : fusionne les expressions équivalentes.
+7. **DCE** sur SSA : trivial (une valeur sans use est morte) — remplace
+   `dataflow/mod.rs:598 dce`, en gérant correctement les effets de bord
+   (stores, calls, asm jamais supprimés).
+8. **Élimination du code de flags mort** : les flags non lus disparaissent,
+   nettoyant la majeure partie du bruit du lifting de §3.3.
+
+> Garde-fou : chaque passe doit préserver la sémantique observable
+> (stores, appels, valeurs de retour, accès volatils). En cas de doute → ne
+> pas transformer. La sûreté prime sur la beauté.
+
+### 4.1 Analyse d'alias mémoire (`src/opt/alias.rs`)
+
+Nécessaire pour propager à travers les `Load`/`Store` sans bug. Niveau
+pragmatique suffisant au début :
+
+- distinguer **frame** (pile, `rbp/rsp + disp` connu) vs **heap/global** vs
+  **inconnu** ;
+- deux accès frame à des offsets/largeurs disjoints **ne s'aliasent pas** ;
+- tout accès via pointeur inconnu aliase tout (conservateur).
+
+Cela permet de promouvoir des slots de pile non-aliasés en variables SSA
+(« stack variable promotion ») — gros gain de lisibilité.
+
+---
+
+## 5. Pilier 3 — Inférence de types par contraintes (`src/types/`)
+
+### 5.1 Pourquoi
+
+Transformer `*(uint64_t*)(rdi + 8)` en `rdi->field_8` (puis, via LLM, en
+`user->id`). C'est ce qui fait passer la sortie de « asm habillé en C » à
+« code structuré ».
+
+### 5.2 Approche : génération + résolution de contraintes
+
+Treillis de types (`Ty` du §3.2) avec ⊤ = `Unknown`, ⊥ = conflit. Générer des
+contraintes depuis l'usage, puis unifier (union-find) :
+
+| Construit IR | Contrainte |
+|---|---|
+| `Load { addr, .. }` / `Store { addr, .. }` | `typeof(addr) <: Ptr(_)` |
+| `addr = base + k` puis `Load(addr)` | `base` est `Ptr` vers agrégat ; champ à l'offset `k` |
+| comparaison signée (`jl/jg`) | l'opérande est `signed` |
+| comparaison non-signée (`jb/ja`) | l'opérande est `unsigned` |
+| division `idiv`/`div` | signé / non-signé respectivement |
+| argument passé à une fonction connue (libc) | type du prototype (cf. pilier 6.4) |
+| registre XMM / instruction SSE | `Float` |
+| valeur utilisée comme cible d'appel indirect | `Code` (ptr de fonction) |
+
+### 5.3 Reconstruction d'agrégats
+
+Quand un même pointeur de base est accédé à plusieurs offsets `{0, 8, 16}` avec
+des largeurs cohérentes → synthétiser une `struct` :
+
+```c
+struct s_rdi { uint64_t field_0; void* field_8; uint32_t field_10; };
+```
+
+Accès tableau : base + `i*stride` (stride constant, `i` variable) → `T arr[]`.
+Étend `scan_frame_vars` (`ir/mod.rs:131`), qui ne fait aujourd'hui que la
+largeur sur des slots `[rbp±disp]` purs.
+
+### 5.4 Jalons
+
+- [ ] Treillis + union-find + résolution.
+- [ ] Pointeurs vs scalaires distingués sur le corpus.
+- [ ] Synthèse de structs pour accès multi-offset.
+- [ ] Détection de tableaux à stride constant.
+
+---
+
+## 6. Pilier 4 — Récupération de constructs haut-niveau (`src/recover/`)
+
+### 6.1 Switch / jump tables (priorité haute)
+
+Aujourd'hui un `jmp [table + idx*8]` devient `Flow::Indirect` → `/* indirect */`
+(`structure/mod.rs:457`). Détecter le pattern :
+
+```
+cmp idx, N ; ja default ; jmp [base + idx*ptr]
+```
+
+1. Reconnaître l'idiome (borne + jump indexé).
+2. Lire la table dans la section `.rodata` (via `loader`).
+3. Résoudre les `N` cibles → ajouter les arêtes au CFG **avant** structuration.
+4. Émettre un `Stmt::Switch` → `switch/case` C.
+
+Gère aussi les tables relatives (offsets 32-bit ajoutés à une base, courant sur
+x64/PIC) et les tables imbriquées.
+
+### 6.2 Conventions d'appel et signatures
+
+Remplacer le `ARG_REGS` conservateur (`dataflow/mod.rs:59`) par une vraie
+**analyse de liveness inter-procédurale** des registres d'arguments :
+
+- détecter quels registres d'argument (System V : rdi,rsi,rdx,rcx,r8,r9,xmm0-7 ;
+  Win64 : rcx,rdx,r8,r9) sont **lus avant écrits** dans une fonction → ce sont
+  ses paramètres ;
+- détecter le registre de retour réellement défini-puis-live à la sortie ;
+- propager ces signatures aux sites d'appel pour reconstruire les **vrais
+  arguments** des appels indirects/registres (le `cdecl_arg_count` actuel,
+  `decompile/mod.rs:46`, ne gère que la pile 32-bit).
+
+### 6.3 Appels indirects et vtables (C++)
+
+- résoudre `call [vtable + k]` quand la vtable est identifiable en `.rodata` ;
+- nommer les sites d'appel virtuels même quand la cible exacte est inconnue
+  (`obj->vtable->method_k(...)`).
+
+### 6.4 Signatures de bibliothèque (FLIRT-like) et données
+
+- **Matching de fonctions connues** : empreintes de la CRT/libc (memcpy, malloc,
+  printf…) pour les nommer et **sauter le boilerplate runtime**. Démarrer avec
+  une petite base d'empreintes par hash de motif d'octets masqués.
+- **Strings** : résoudre les références à `.rodata` en littéraux C
+  (`"%d\n"`), via `loader`. Gros gain de lisibilité immédiat.
+- **Globals** : nommer/typer les accès aux données statiques.
+- **PLT/GOT/imports** : résoudre les appels externes vers leurs noms importés.
+
+---
+
+## 7. Pilier 5 — Émission de C compilable (`src/emit/`)
+
+Aujourd'hui la sortie est du pseudo-C (`int64_t`, registres bruts `eax`,
+`__asm__("...")`). Pour fermer la boucle de vérification (§8), il faut du C qui
+**compile vraiment**.
+
+Exigences :
+
+1. **En-tête de prélude** auto-généré : `#include <stdint.h>`, typedefs
+   (`uint128`, helpers), déclarations forward de toutes les `sub_xxxx`, structs
+   reconstruites, déclarations des globals.
+2. **Variables, pas registres** : après SSA + types, émettre des variables C
+   nommées et typées, pas `eax`/`rax`. Les registres bruts ne survivent que
+   dans les blocs `Asm` irréductibles.
+3. **Helpers sémantiques** pour les idiomes non exprimables directement en C :
+   `__rol32`, `__sar`, `__builtin_*` pour les flags d'overflow, intrinsics SSE
+   (`<immintrin.h>`) pour le SIMD lifté.
+4. **Asm inline GCC** pour les blocs `Asm` (`asm volatile(...)`), de sorte que
+   même une fonction partiellement décompilée **compile et s'exécute**.
+5. Mode `--strict` : n'émettre une fonction que si elle est 100 % liftée (pas
+   d'`Asm` résiduel) — utile pour mesurer la re-exécutabilité « pure ».
+
+---
+
+## 8. Pilier 6 — Boucle de recompilation vérifiée (`src/verify/`) — LE différenciateur
+
+C'est ici qu'ARET dépasse l'état de l'art grand public. Personne n'offre une
+boucle fermée *décompile → recompile → prouve équivalence → raffine*.
+
+### 8.1 Harness de round-trip
+
+```
+binaire d'origine
+   → ARET → fonction.c (compilable, §7)
+   → recompile (même compilateur/flags si connus, sinon gcc/clang -O0..-O2)
+   → objet/fonction recompilé
+   → comparaison (§8.2)
+   → score + diff exploitable comme signal de raffinement
+```
+
+Implémentation : un sous-module qui invoque `cc`, isole une fonction (objet
+relogeable), et compare.
+
+### 8.2 Niveaux d'équivalence (du plus faible au plus fort)
+
+1. **Recompile** : ça compile sans erreur. (Niveau minimal, déjà discriminant.)
+2. **Différentiel par exécution** : générer des entrées aléatoires/structurées,
+   exécuter la fonction d'origine (dans un mini-émulateur ou via harnais
+   d'exécution) et la fonction recompilée, comparer sorties + effets mémoire.
+   Inspiration : fuzzing différentiel. Donne une **forte confiance empirique**.
+3. **Équivalence symbolique (SMT)** : lever les deux fonctions en formules et
+   demander à un solveur (Z3 via crate `z3`, ou export SMT-LIB) de prouver
+   `∀ entrées. orig(x) == recompiled(x)`. **Garantie formelle**, par fonction.
+   Faisable pour les fonctions sans boucle / à boucles bornées ; pour le reste,
+   se rabattre sur le niveau 2.
+
+### 8.3 Boucle de raffinement
+
+Quand l'équivalence échoue, le diff localise la divergence (quel bloc, quelle
+valeur). Cela pilote :
+- le choix de la passe d'optimisation à désactiver/activer,
+- la détection d'un lifting incorrect d'instruction (régression test),
+- l'escalade vers `Asm` brut pour le fragment fautif (garantit la correction).
+
+### 8.4 Pourquoi c'est décisif
+
+Cela transforme ARET d'un outil « best-effort » en un outil **mesurable et
+auto-vérifiant**. La métrique nord (§0.3) tombe directement de ce harness.
+C'est aussi un filet anti-régression : chaque amélioration de lifting est
+validée par round-trip.
+
+---
+
+## 9. Pilier 7 — Couche neuro-symbolique (`src/llm/`)
+
+L'information détruite par la compilation (noms, commentaires, intention) ne
+peut être que **prédite**. Un LLM est l'outil idéal — **mais uniquement
+par-dessus une structure déjà vérifiée**, jamais à la place de l'analyse.
+
+### 9.1 Principe : structure prouvée + sémantique plausible
+
+- L'analyse déterministe (piliers 1–6) garantit la **correction** : le code
+  fait bien ce que fait le binaire.
+- Le LLM **renomme** (`sub_401000` → `parse_header`, `local_18` → `buf_len`),
+  **commente**, **propose des types sémantiques** (`int` → `enum State`), et
+  **regroupe** les fonctions en fichiers/modules plausibles.
+- **Invariant de sûreté** : le LLM ne touche qu'aux *étiquettes* (noms,
+  commentaires, types non contraints). Il ne réécrit jamais la logique. Après
+  son pass, on **re-vérifie l'équivalence** (§8) : un renommage ne doit pas
+  changer la sémantique. Si la sortie LLM ne compile pas / diverge → rejet.
+
+### 9.2 Intégration concrète
+
+- Construire le prompt à partir de l'IR typé (pas du texte brut) : signature
+  récupérée, types, chaînes référencées, fonctions appelées (avec leurs noms
+  déjà résolus), structure de contrôle.
+- Utiliser un modèle Claude récent via l'API Anthropic (le plus capable
+  disponible). Traitement par lots, cache de prompt pour le prélude commun
+  (types/structs partagés), propagation des noms entre fonctions appelantes et
+  appelées (analyse du graphe d'appel pour nommer de façon cohérente).
+- Sortie : un *patch de noms/commentaires* appliqué à l'AST C, pas une
+  régénération libre du code (qui casserait l'équivalence vérifiée).
+
+### 9.3 Pourquoi c'est « jamais bien fait »
+
+Les décompilateurs LLM actuels (LLM4Decompile, etc.) génèrent du C *de bout en
+bout* par le modèle → souvent ni équivalent, ni garanti. Les décompilateurs
+classiques (Ghidra/IDA) n'ont pas de couche sémantique. **L'intégration des
+deux** — analyse formelle vérifiée pour la correction + LLM pour la lisibilité,
+avec re-vérification — est exactement le créneau non couvert.
+
+---
+
+## 10. Pilier 8 — Benchmark et métriques (`bench/`)
+
+Sans mesure, « plus loin que jamais » est invérifiable. À construire **tôt**
+(en parallèle du pilier 1) pour piloter par les chiffres.
+
+### 10.1 Corpus
+
+- un ensemble de programmes C/C++ dont on a la **source** (coreutils, zlib,
+  SQLite, petits programmes synthétiques couvrant chaque construit) ;
+- compilés avec plusieurs (compilateur × niveau d'opti × arch) :
+  gcc/clang, -O0/-O1/-O2/-O3, x86/x64 ;
+- on garde source + binaire + infos de debug (oracle de noms/types/lignes pour
+  *évaluer*, jamais en entrée de la décompilation).
+
+### 10.2 Métriques automatisées
+
+- **re-exécutabilité prouvée** (§0.3) — la principale ;
+- **recompilabilité** seule ;
+- **précision des types** (vs DWARF) : % de largeurs/signes/pointeurs corrects ;
+- **précision des signatures** : arité/types d'arguments corrects ;
+- **similarité d'édition** au source (CodeBLEU ou distance d'édition AST) pour
+  la lisibilité ;
+- **densité de bruit** : `goto`/`__asm__`/casts résiduels par fonction ;
+- **couverture** : % de fonctions/instructions liftées sans `Asm`.
+
+### 10.3 CI
+
+Brancher le bench sur un `SessionStart` hook / job CI pour suivre les métriques
+à chaque commit et **bloquer les régressions** (cf. la skill
+`session-start-hook` du projet pour configurer l'environnement de test).
+
+---
+
+## 11. Roadmap ordonnée (dépendances et jalons)
+
+```
+P1 IR SSA typé ───────────────┬─→ P2 Passes SSA (opt) ─┐
+                              │                         ├─→ P4 Constructs HN
+P8 Benchmark (en parallèle) ──┘   P3 Types (constraints)┘     (switch, sigs, vtables)
+                                                              │
+                                          P5 Émission C compilable
+                                                              │
+                                          P6 Recompile + vérif ←── boucle de raffinement
+                                                              │
+                                          P7 Couche LLM (re-vérifiée)
+```
+
+Ordre recommandé d'exécution :
+
+1. **P1 (IR SSA)** + **P8 (bench minimal)** en parallèle. Rien de sérieux n'est
+   possible sans IR ; rien n'est mesurable sans bench.
+2. **P2 (passes SSA)** : const-prop/folding/DCE/conditions-depuis-flags. Gros
+   saut de qualité immédiat, et nettoie le bruit du lifting.
+3. **P5 (C compilable)** + **P6 (boucle de vérif)** : dès que la sortie compile,
+   la métrique nord devient mesurable et pilote tout le reste.
+4. **P4 (switch/sigs/strings)** : déverrouille de vraies fonctions complètes.
+5. **P3 (types/agrégats)** : lisibilité structurelle (structs, tableaux).
+6. **P7 (LLM)** : la couche sémantique, par-dessus une base vérifiée.
+
+Principe directeur à chaque étape : **mesurer avant/après sur le bench**, et ne
+jamais régresser la re-exécutabilité prouvée.
+
+---
+
+## 12. Anti-objectifs et garde-fous (à ne jamais violer)
+
+- **Jamais de sortie incorrecte présentée comme correcte.** Tout fragment non
+  prouvé reste en `Asm` brut ou est marqué `/* unverified */`. La confiance de
+  l'utilisateur est le seul actif qui ne se reconstruit pas.
+- **Pas de promesse de récupérer noms/commentaires d'origine.** On les
+  *prédit* (LLM) et on le dit explicitement.
+- **La sûreté prime sur la beauté.** Une passe qui rend le code plus joli mais
+  pas prouvée sûre est désactivée par défaut (flag opt-in).
+- **Chaque transformation est testée par round-trip** (§8) — c'est le filet.
+- **Pas de mélange entrée/oracle** : les infos de debug (DWARF) servent à
+  *évaluer*, jamais à alimenter la décompilation (sinon le bench ment).
+
+---
+
+## 13. État de l'art (pour situer « plus loin que jamais »)
+
+- **Hex-Rays (IDA)** : microcode IR, très bon, propriétaire, pas de boucle de
+  vérification formelle ni de couche sémantique LLM intégrée.
+- **Ghidra** : P-Code, open-source, excellent CFG/types, idem pas de round-trip
+  vérifié ni de garanties formelles.
+- **rev.ng / RetDec** : lift vers LLVM IR, recompilable partiellement, mais
+  l'équivalence prouvée par fonction n'est pas le produit.
+- **LLM4Decompile et consorts** : génération C end-to-end par LLM ; mesurent la
+  re-exécutabilité (bonne idée à reprendre) mais **sans garantie** — le modèle
+  peut produire du code plausible mais faux.
+- **Verified lifting / decompilation (recherche)** : prouve l'équivalence, mais
+  outils de recherche, pas de pipeline complet et utilisable.
+
+> Le créneau non occupé, et donc l'objectif d'ARET : **un pipeline complet,
+> open-source, qui combine (a) lifting + SSA + types déterministes, (b) une
+> boucle de recompilation avec équivalence prouvée par fonction, et (c) une
+> couche LLM re-vérifiée pour la lisibilité.** Aucun outil ne réunit les trois.
+> C'est là que « plus loin et mieux que tout ce qui existe » devient concret et
+> mesurable.
+
+---
+
+## 14. Premiers pas concrets pour l'agent de code
+
+1. Extraire les dominateurs de `structure/mod.rs` vers `src/cfg/dom.rs` partagé.
+2. Créer `src/ir/types.rs` avec `Expr`/`Stmt`/`Ty`/`Location`/`ValueId` (§3.2).
+3. Réécrire `lift_insn` pour produire des `Vec<Stmt>` en s'appuyant sur
+   `iced-x86 instr_info` (registres/flags lus-écrits) plutôt que sur le split
+   textuel.
+4. Implémenter la construction SSA (dominance frontier + φ + renommage).
+5. Implémenter SCCP (const-prop + branches mortes) et DCE SSA — première passe
+   visible.
+6. En parallèle : monter `bench/` avec 5–10 binaires + source et un script de
+   mesure recompilabilité.
+7. Émettre du C compilable minimal et brancher la boucle de round-trip (§8.1)
+   au niveau « recompile ».
+
+À partir de là, chaque pilier s'ajoute en mesurant systématiquement l'impact
+sur la métrique nord.
