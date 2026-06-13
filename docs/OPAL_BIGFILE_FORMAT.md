@@ -179,10 +179,29 @@ output was ambiguous). Header layout (from parser `sub_959290`, BE-u32 reader
 ```
 
 The block data is **not raw DXT and not zlib/deflate/lz4** — it is a custom
-compression. The decompressor is `sub_95a380` -> `sub_95a780` / `sub_959fb0`
-(reached after `sub_959220` validation); reversing that loop is the final step
-to emit raw BC1/BC3 and wrap as DDS/PNG. `opal_nodes.py --textures` already
-extracts the Hx blob + width/height/format metadata.
+**LZ + Huffman** codec (recovered with the SSA decompiler). `opal_nodes.py
+--textures` already extracts the Hx blob + width/height/format metadata; what
+remains is reimplementing this codec.
+
+#### Hx codec internals (recovered)
+
+- **Bit reader** `sub_95a240(state, n)` — MSB-first. State struct:
+  `+0x04` read ptr, `+0x08` end ptr, `+0x10` bit buffer (32-bit, left-aligned),
+  `+0x14` valid-bit count. Refills a byte at a time (`buf |= byte <<
+  (32-(bits+8))`, `bits += 8`) until `bits >= n`, returns `buf >> (32-n)`, then
+  consumes n bits (`bits -= n`, `buf <<= n`). Byte stream is consumed forward.
+- **Core decoder** `sub_95a020` — builds a Huffman decode table of size
+  `0x2000` (2^13, i.e. max code length 13; lengths >16 handled specially),
+  reads symbols via `sub_95a240`, and performs LZ back-reference copies
+  (helpers `sub_95a8f0`, `sub_d7a82e` = block copy). Driver: `sub_95a780` ->
+  `sub_95a020`.
+- **Channel/mode decoders** `sub_959fb0` -> `sub_959590` / `sub_9596d0` /
+  `sub_959a20` / `sub_959ca0` (per pixel-channel or per-mode passes).
+
+With the bit reader and Huffman/LZ structure mapped, the remaining work is a
+faithful Python reimplementation validated against the known output size
+(decompressed bytes == width*height*blockBytes/16 over the mip chain), then DDS
+wrapping (DXT5/BC3 for format!=9, DXT1/BC1 for format 9).
 
 ### Other remaining layouts
 - **Mesh_Z / Skin_Z / SkinData_Z**: vertex/index buffer layout (→ OBJ/glTF).
