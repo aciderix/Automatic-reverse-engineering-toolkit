@@ -222,9 +222,18 @@ can be adapted with these differences:
   (counts at Hx `+0x27`/`+0x37`), writing each channel's bytes; planes are then
   interleaved into the BC1/BC3 surface.
 
-Remaining: port an MSB-first inflate with the above alphabet, decode each
-channel, interleave to BC blocks, and validate the output size against
-`width*height*blockBytes/16` over the mip chain — then DDS-wrap (BC3 for
+**Decoder model validated** (partial implementation tested): the per-channel
+bitstream starts at Hx offset `base + be24(@0x43)` (e.g. 558 in a 32×32 blob);
+reading the first **14 bits** (= `bitlen(0x2000)`, computed by `sub_95a020`'s
+shift loop) yields the channel's **alphabet size** (e.g. 512). The MSB-first
+bit reader reproduces these values, confirming the entry point and bit order.
+
+Remaining (a focused implementation, ideal for the improved SSA decompiler):
+trace `sub_95a020`'s nested dynamic-Huffman flow — meta code-length alphabet →
+decode the N main code lengths (RLE 17–20) → build the main canonical table →
+decode literals + LZ back-references into the channel buffer. Then interleave
+the channels into BC1/BC3 blocks, validate output size against
+`width*height*blockBytes/16` over the mip chain, and DDS-wrap (BC3 for
 format≠9, BC1 for format 9).
 
 ### Other remaining layouts
