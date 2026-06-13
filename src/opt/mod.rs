@@ -180,6 +180,40 @@ fn fold(e: &Expr) -> Expr {
     }
 }
 
+fn zero64() -> Expr {
+    Expr::Const(0, Ty::int(64))
+}
+
+fn as_binop<'a>(e: &'a Expr, op: BinOp) -> Option<(&'a Expr, &'a Expr)> {
+    match e {
+        Expr::Binary(o, x, y) if *o == op => Some((x, y)),
+        _ => None,
+    }
+}
+
+fn is_zero(e: &Expr) -> bool {
+    matches!(e, Expr::Const(0, _))
+}
+
+/// Recognise the lifter's `SF != OF` idiom for `a - b` and recover `a <s b`.
+/// `sf` must be `Slt(a-b, 0)` and `of` the signed-overflow expression of `a-b`.
+fn match_signed_lt(sf: &Expr, of: &Expr) -> Option<(Expr, Expr)> {
+    let (r, z) = as_binop(sf, BinOp::Slt)?;
+    if !is_zero(z) {
+        return None;
+    }
+    let (a, b) = as_binop(r, BinOp::Sub)?;
+    let (x, y) = as_binop(of, BinOp::And)?;
+    let slt0 = |e: &Expr| Expr::Binary(BinOp::Slt, Box::new(e.clone()), Box::new(zero64()));
+    let exp_x = Expr::Binary(BinOp::Ne, Box::new(slt0(a)), Box::new(slt0(b)));
+    let exp_y = Expr::Binary(BinOp::Ne, Box::new(slt0(r)), Box::new(slt0(a)));
+    if *x == exp_x && *y == exp_y {
+        Some((a.clone(), b.clone()))
+    } else {
+        None
+    }
+}
+
 fn fold_binary(op: BinOp, a: Expr, b: Expr) -> Expr {
     use BinOp::*;
     let i32ty = Ty::int(32);
@@ -245,28 +279,38 @@ fn fold_binary(op: BinOp, a: Expr, b: Expr) -> Expr {
         }
     }
 
-    // Recognise unsigned/equality combinations of compare flags.
-    //   Ult(x,y) | Eq(x,y)  ->  Ule(x,y)      (jbe)
-    if op == Or {
-        if let (Expr::Binary(Ult, x1, y1), Expr::Binary(Eq, x2, y2)) = (&a, &b) {
-            if x1 == x2 && y1 == y2 {
-                return Expr::Binary(Ule, x1.clone(), y1.clone());
-            }
+    // Recover the signed `a <s b` idiom: `SF != OF`.
+    if op == Ne {
+        if let Some((x, y)) = match_signed_lt(&a, &b).or_else(|| match_signed_lt(&b, &a)) {
+            return Expr::Binary(Slt, Box::new(x), Box::new(y));
         }
-        if let (Expr::Binary(Eq, x1, y1), Expr::Binary(Ult, x2, y2)) = (&a, &b) {
-            if x1 == x2 && y1 == y2 {
-                return Expr::Binary(Ule, x1.clone(), y1.clone());
+    }
+
+    // Recognise combinations of compare flags into a single relational.
+    //   Ult|Eq -> Ule (jbe, unsigned) ;  Slt|Eq -> Sle (jle, signed)
+    if op == Or {
+        for (lo, hi) in [(Ult, Ule), (Slt, Sle)] {
+            if let (Expr::Binary(o, x1, y1), Expr::Binary(Eq, x2, y2)) = (&a, &b) {
+                if *o == lo && x1 == x2 && y1 == y2 {
+                    return Expr::Binary(hi, x1.clone(), y1.clone());
+                }
+            }
+            if let (Expr::Binary(Eq, x1, y1), Expr::Binary(o, x2, y2)) = (&a, &b) {
+                if *o == lo && x1 == x2 && y1 == y2 {
+                    return Expr::Binary(hi, x1.clone(), y1.clone());
+                }
             }
         }
     }
 
-    // x == x -> 1 ; x != x -> 0
+    // Idempotent / reflexive identities on equal operands.
     if a == b {
-        if op == Eq {
-            return Expr::Const(1, i32ty);
-        }
-        if op == Ne {
-            return Expr::Const(0, i32ty);
+        match op {
+            And | Or => return a, // x & x -> x ; x | x -> x  (e.g. `test r,r`)
+            Eq | Ule | Uge | Sle | Sge => return Expr::Const(1, i32ty),
+            Ne | Ult | Ugt | Slt | Sgt => return Expr::Const(0, i32ty),
+            Sub | Xor => return Expr::Const(0, i32ty),
+            _ => {}
         }
     }
 
@@ -411,6 +455,36 @@ mod tests {
         assert_eq!(
             fold(&cond),
             Expr::Binary(BinOp::Ule, Box::new(a), Box::new(b))
+        );
+    }
+
+    /// Build the lifter's flag expressions for `a - b` and check signed branch
+    /// reconstruction: `SF != OF` -> `a <s b`, and `ZF | (SF!=OF)` -> `a <=s b`.
+    #[test]
+    fn reconstructs_signed_conditions() {
+        let a = Expr::Read(Location::Reg(RegId(0)));
+        let b = Expr::Read(Location::Reg(RegId(1)));
+        let z = || Expr::Const(0, Ty::int(64));
+        let slt0 = |e: &Expr| Expr::Binary(BinOp::Slt, Box::new(e.clone()), Box::new(z()));
+        let r = Expr::Binary(BinOp::Sub, Box::new(a.clone()), Box::new(b.clone()));
+        let sf = slt0(&r);
+        let of = Expr::Binary(
+            BinOp::And,
+            Box::new(Expr::Binary(BinOp::Ne, Box::new(slt0(&a)), Box::new(slt0(&b)))),
+            Box::new(Expr::Binary(BinOp::Ne, Box::new(slt0(&r)), Box::new(slt0(&a)))),
+        );
+        // jl: SF != OF
+        let jl = Expr::Binary(BinOp::Ne, Box::new(sf.clone()), Box::new(of.clone()));
+        assert_eq!(
+            fold(&jl),
+            Expr::Binary(BinOp::Slt, Box::new(a.clone()), Box::new(b.clone()))
+        );
+        // jle: ZF | (SF != OF)
+        let zf = Expr::Binary(BinOp::Eq, Box::new(a.clone()), Box::new(b.clone()));
+        let jle = Expr::Binary(BinOp::Or, Box::new(zf), Box::new(jl));
+        assert_eq!(
+            fold(&jle),
+            Expr::Binary(BinOp::Sle, Box::new(a), Box::new(b))
         );
     }
 

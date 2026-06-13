@@ -353,6 +353,16 @@ pub fn lift(insn: &Insn, bits: u32) -> Vec<Stmt> {
             let r = Expr::Unary(UnOp::Not, Box::new(a));
             some_or_asm!(write_op0(ins, r, bits))
         }
+        // 2-operand `imul dst, src` and 3-operand `imul dst, src, imm`.
+        // (1-operand form writes a double-width result -> Asm fallback.)
+        Mnemonic::Imul if ins.op_count() == 2 => {
+            let r = bin(BinOp::Mul, some_or_asm!(op_value(ins, 0)), some_or_asm!(op_value(ins, 1)));
+            some_or_asm!(write_op0(ins, r, bits))
+        }
+        Mnemonic::Imul if ins.op_count() == 3 => {
+            let r = bin(BinOp::Mul, some_or_asm!(op_value(ins, 1)), some_or_asm!(op_value(ins, 2)));
+            some_or_asm!(write_op0(ins, r, bits))
+        }
 
         Mnemonic::Shl => {
             let a = some_or_asm!(op_value(ins, 0));

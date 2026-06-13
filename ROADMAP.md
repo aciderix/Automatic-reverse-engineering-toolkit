@@ -292,10 +292,12 @@ Stratégie incrémentale recommandée :
       passe de ~14 à 4 statements (flags morts supprimés) et le `jne` est
       reconstruit en `!=` par dataflow. Conditions non-signées/égalité
       reconstruites (not-through-relational, `CF|ZF`→`<=`). Tests verts.
-- [ ] Reconstruction des conditions **signées** (`SF!=OF` → `<s`) — nécessite
-      d'améliorer le modèle de flags du lifter ou un pattern dédié (§4.5).
-- [ ] Élargir la couverture du lifter (imul/mul/idiv, setcc, cmov, SSE) +
-      barrière `Asm` pour la DCE, prérequis à l'émission.
+- [x] Reconstruction des conditions **signées** (`SF!=OF` → `<s`, `ZF|(SF!=OF)`
+      → `<=s`) par pattern sur les expressions de flags du lifter (`src/opt`).
+      Sur `factorial` : `if (n <= 1)` et la boucle `if (i != n+1)` reconstruites,
+      `imul` lifté → `result *= i` ; l'algorithme complet est récupéré en SSA.
+- [~] Élargir la couverture du lifter : imul 2/3-op fait ; reste mul/idiv/div,
+      setcc, cmov, SSE. + barrière `Asm` pour la DCE, prérequis à l'émission.
 - [ ] `emit` IR→C à parité avec la sortie texte actuelle sur le corpus.
 
 ---
