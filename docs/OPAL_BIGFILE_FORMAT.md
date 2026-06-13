@@ -158,15 +158,36 @@ opal_nodes.py out/ --graph deps.csv          # write the node dependency graph
 
 ## Remaining work — full per-type field layouts
 
-The type system, dispatch, common header, reference graph, and the Texture_Z
-node header are recovered. What remains:
+### "Hx" texture codec (the Texture_Z pixel container)
 
-- **"Hx" texture codec**: decompress the `48 78 00 ..` blob inside Texture_Z to
-  BC/raw pixels, then wrap as DDS/PNG. (Decoder: the texture build path
-  `sub_9fc6a0`, which uses D3D helpers `sub_1597116`/`sub_15dd80b`.)
+The pixel blob inside Texture_Z is an **"Hx" container, big-endian** (recovered
+with the SSA decompiler — `--mode ir` — which read it cleanly where the textual
+output was ambiguous). Header layout (from parser `sub_959290`, BE-u32 reader
+`sub_9584f0`, validator `sub_959220`):
+
+```
+0x00  "Hx"  magic (0x48 0x78)
+0x02  u8    version/variant (>= 0x4a)
+0x06  u8    high byte of a size, checked against the blob length
+0x0c  u16BE width
+0x0e  u16BE height
+0x10  u8    (1)
+0x11  u8    (1)
+0x12  u8    pixel format: 9 => BC1/DXT1 (8-byte blocks); else BC3/DXT5
+            (16-byte blocks). Observed value 2 => DXT5.
+0x14+ big-endian per-mip size fields, then the (further-compressed) block data
+```
+
+The block data is **not raw DXT and not zlib/deflate/lz4** — it is a custom
+compression. The decompressor is `sub_95a380` -> `sub_95a780` / `sub_959fb0`
+(reached after `sub_959220` validation); reversing that loop is the final step
+to emit raw BC1/BC3 and wrap as DDS/PNG. `opal_nodes.py --textures` already
+extracts the Hx blob + width/height/format metadata.
+
+### Other remaining layouts
 - **Mesh_Z / Skin_Z / SkinData_Z**: vertex/index buffer layout (→ OBJ/glTF).
-- Field layouts of the rarer types (Conductor_Z, Override_Z,
-  SpecialEffectNode_Z, UI*).
+- Field layouts of the rarer types (Conductor_Z, Override_Z, SpecialEffectNode_Z…).
 
-Each reader is reached through the runtime registry (`sub_96a060` → factory →
-reader), so mapping each TypeInfo singleton to its reader VA is the route.
+Each type reader is reached through the runtime registry (`sub_96a060` →
+factory → reader). The SSA/IR decompiler (`--mode ir`) is the right tool for
+reading these: it folds the big-endian/bit-twiddling code into readable form.
