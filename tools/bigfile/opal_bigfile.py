@@ -24,16 +24,25 @@ Container layout (recovered, validated):
                          u32 count
                          … node records …
 
-Each node record begins with a class GUID (the package's fixed type id),
-a node id, the ASCII tag "_OBJ", and per-node metadata (sizes/offsets).
-The exact per-field semantics of the metadata are only partially recovered;
-this tool surfaces them as raw words so they can be finished against the
-node-reader code. The payload data is **not encrypted or compressed**
-(measured entropy ≈ 4.4), so node bytes can be sliced out directly.
+Each 0xDEADBEEF table is a sequence of variable-length node records, walked by
+following the leading size field (validated: tiles all 255 nodes of
+PACKAGE_PRELOAD.BFPC exactly, every record tagged "_OBJ"):
+
+    u32  size            total block length (header included)
+    u64  class_guid      node type id (texture / mesh / shader / object / …)
+    u64  node_id         the ">NODE_xxx" identity
+    char tag[4]          "_OBJ"
+    …    payload         size-24 bytes (type-specific; shaders embed
+                         "DB:>RAW>SHADERS>SHADER_…" paths)
+
+The payload is **not encrypted or compressed** (measured entropy ≈ 4.4), so
+node bytes are sliced out directly. The per-type payload sub-formats are the
+next layer to decode (per class_guid).
 
 Usage:
-    opal_bigfile.py <file.BFPC>            # describe the container
-    opal_bigfile.py <file.BFPC> --hex N    # also dump N words per chunk head
+    opal_bigfile.py <file.BFPC>              # describe the container + nodes
+    opal_bigfile.py <file.BFPC> --hex N      # dump N words per chunk head
+    opal_bigfile.py <file.BFPC> --extract D  # write every node payload into D
 """
 import struct, sys, argparse, math, collections
 
@@ -66,6 +75,41 @@ def find_chunks(d):
         i += 4
     return out
 
+# A node record is a variable-length block:
+#   u32 size            total block length (this header included)
+#   u32 class_guid_lo   type id of the node (mesh/texture/object/…)
+#   u32 class_guid_hi
+#   u32 node_id_lo      64-bit node id (the ">NODE_xxx" identity)
+#   u32 node_id_hi
+#   char tag[4]         "_OBJ"
+#   … metadata + payload …  (size-24 bytes)
+NODE_TAG = b'_OBJ'
+
+class Node:
+    __slots__ = ("offset", "size", "guid", "node_id", "tag")
+    def __init__(self, offset, size, guid, node_id, tag):
+        self.offset, self.size, self.guid = offset, size, guid
+        self.node_id, self.tag = node_id, tag
+    @property
+    def name(self):
+        return f"{self.guid:016x}_{self.node_id:016x}"
+
+def walk_nodes(d, chunk_off):
+    """Yield the Node records of a 0xDEADBEEF chunk by following [size] links."""
+    count = u32(d, chunk_off + 4)
+    off = chunk_off + 8
+    for _ in range(count):
+        if off + 24 > len(d):
+            break
+        size = u32(d, off)
+        guid = u32(d, off + 4) | (u32(d, off + 8) << 32)
+        nid  = u32(d, off + 12) | (u32(d, off + 16) << 32)
+        tag  = d[off + 20:off + 24]
+        if size < 24 or off + size > len(d):
+            break
+        yield Node(off, size, guid, nid, tag)
+        off += size
+
 def describe(path, hexwords=0):
     d = open(path, 'rb').read()
     print(f"file        : {path}")
@@ -79,12 +123,14 @@ def describe(path, hexwords=0):
     chunks = find_chunks(d)
     print(f"\nnode tables (0xDEADBEEF): {len(chunks)}")
     for off, count in chunks:
-        print(f"  @0x{off:08x}  count={count}")
-        if hexwords:
-            for k in range(off + 8, off + 8 + hexwords * 4, 4):
-                v = u32(d, k)
-                asc = ''.join(chr(b) if 32 <= b < 127 else '.' for b in d[k:k+4])
-                print(f"      +0x{k-off:03x}  0x{v:08x}  {asc}")
+        nodes = list(walk_nodes(d, off))
+        tagged = sum(1 for n in nodes if n.tag == NODE_TAG)
+        end = nodes[-1].offset + nodes[-1].size if nodes else off + 8
+        print(f"  @0x{off:08x}  count={count}  walked={len(nodes)}  "
+              f"_OBJ={tagged}  ends@0x{end:08x}")
+        classes = collections.Counter(n.guid for n in nodes)
+        for g, c in classes.most_common(6):
+            print(f"      class {g:016x}: {c} nodes")
 
     # Entropy probe (encryption/compression detector).
     print("\nentropy probe (8.0 = random/encrypted):")
@@ -95,13 +141,39 @@ def describe(path, hexwords=0):
         print(f"  {name:10} @0x{off:08x}: {entropy(d[off:off+65536]):.3f}")
     print("\n=> low middle entropy means payloads are NOT encrypted/compressed.")
 
+def extract(path, outdir):
+    import os
+    d = open(path, 'rb').read()
+    os.makedirs(outdir, exist_ok=True)
+    n = 0
+    index = []
+    for ci, (off, _count) in enumerate(find_chunks(d)):
+        for ni, node in enumerate(walk_nodes(d, off)):
+            # Faithful node block, payload after the 24-byte record header.
+            payload = d[node.offset + 24:node.offset + node.size]
+            fn = f"chunk{ci}_{ni:04d}_{node.name}.node"
+            with open(os.path.join(outdir, fn), 'wb') as fh:
+                fh.write(payload)
+            index.append((fn, node.guid, node.node_id, len(payload)))
+            n += 1
+    with open(os.path.join(outdir, "index.csv"), 'w') as fh:
+        fh.write("file,class_guid,node_id,payload_bytes\n")
+        for fn, g, i, sz in index:
+            fh.write(f"{fn},{g:016x},{i:016x},{sz}\n")
+    print(f"extracted {n} nodes -> {outdir}")
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("file")
     ap.add_argument("--hex", type=int, default=0,
                     help="dump N words after each chunk magic+count")
+    ap.add_argument("--extract", metavar="DIR",
+                    help="extract every node payload into DIR (+ index.csv)")
     a = ap.parse_args()
-    describe(a.file, a.hex)
+    if a.extract:
+        extract(a.file, a.extract)
+    else:
+        describe(a.file, a.hex)
 
 if __name__ == "__main__":
     main()
