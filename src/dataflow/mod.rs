@@ -47,8 +47,16 @@ const XMM: [&str; 16] = [
     "xmm11", "xmm12", "xmm13", "xmm14", "xmm15",
 ];
 
-/// Registers a call clobbers (caller-saved) under common x86 ABIs.
-const CALLER_SAVED: [&str; 3] = ["rax", "rcx", "rdx"];
+/// Registers a call clobbers that we treat as *killed* for liveness. Kept
+/// minimal (just the return register) — under-killing is always safe, while
+/// over-killing could wrongly mark a live value dead.
+const CALL_KILLS: [&str; 1] = ["rax"];
+
+/// Registers a call may *read* as arguments (System V + Win64 supersets). We
+/// can't tell which are real arguments, so conservatively treat all as read so
+/// their setup is never eliminated. (For 32-bit cdecl, stack `push`es already
+/// cover this; these extra reads are harmless there.)
+const ARG_REGS: [&str; 6] = ["rdi", "rsi", "rdx", "rcx", "r8", "r9"];
 
 /// Every register family we track (used as the conservative "everything live").
 fn all_families() -> HashSet<&'static str> {
@@ -229,8 +237,15 @@ fn parse_stmt(text: &str) -> Stmt {
 
     // Call statement `name(args);`
     if is_call_expr(body) {
-        // Reads = families inside the argument list.
-        return keep(read_families(body), true, false);
+        // Reads = families in the textual args, plus all potential argument
+        // registers (we can't tell which are real args, so keep their setup).
+        let mut reads = read_families(body);
+        for r in ARG_REGS {
+            if !reads.contains(&r) {
+                reads.push(r);
+            }
+        }
+        return keep(reads, true, false);
     }
 
     // Anything else (push, leave-comment already handled): keep, read all named regs.
@@ -373,7 +388,7 @@ pub fn optimize_function(prog: &Program, func: &Function) -> FunctionCode {
         };
         for s in &stmts[i] {
             let defs: Vec<&'static str> = if s.is_call {
-                CALLER_SAVED.to_vec()
+                CALL_KILLS.to_vec()
             } else {
                 s.write.iter().map(|(_, f)| *f).collect()
             };
@@ -413,16 +428,20 @@ pub fn optimize_function(prog: &Program, func: &Function) -> FunctionCode {
     }
 
     // Per-block DCE then propagation.
+    let retreg = match prog.bitness {
+        crate::loader::Bitness::Bits64 => "rax",
+        crate::loader::Bitness::Bits32 => "eax",
+    };
     let mut code: FunctionCode = HashMap::new();
     for i in 0..n {
         let mut block = stmts[i].clone();
+        let lout = {
+            let mut s = live_out[i].clone();
+            s.extend(end_uses[i].iter().copied());
+            s
+        };
         if !keep_all[i] {
             // Iterate DCE + propagation to a fixpoint (capped).
-            let lout = {
-                let mut s = live_out[i].clone();
-                s.extend(end_uses[i].iter().copied());
-                s
-            };
             for _ in 0..4 {
                 let a = dce(&mut block, &lout);
                 let b = propagate(&mut block, &lout);
@@ -431,10 +450,64 @@ pub fn optimize_function(prog: &Program, func: &Function) -> FunctionCode {
                 }
             }
         }
-        let lines: Vec<String> = block.into_iter().map(|s| s.text).collect();
+        let mut lines: Vec<String> = block.into_iter().map(|s| s.text).collect();
+        bind_call_results(&mut lines, &lout, retreg);
         code.insert(nodes[i], (lines, conds[i].clone()));
     }
     code
+}
+
+/// Bind a call's return value to the result register when it is used: rewrite
+/// `f(args);` to `eax = f(args);` if `rax`/`eax` is live after the call. A call
+/// always sets the result register, so this is semantically exact; the liveness
+/// check only avoids noise on calls whose result is discarded.
+fn bind_call_results(lines: &mut [String], live_out: &HashSet<&'static str>, retreg: &str) {
+    let mut live = live_out.contains("rax");
+    for line in lines.iter_mut().rev() {
+        let reads_rax = read_families(line).contains(&"rax");
+        if is_void_call_line(line) {
+            if live {
+                let indent: String = line.chars().take_while(|c| *c == ' ').collect();
+                *line = format!("{}{} = {}", indent, retreg, line.trim_start());
+            }
+            // The call defines rax; upstream liveness is just its argument reads.
+            live = reads_rax;
+        } else {
+            let writes_rax = line_writes_rax(line);
+            live = reads_rax || (live && !writes_rax);
+        }
+    }
+}
+
+/// A bare `name(args);` call statement (not a cast, store, control keyword,
+/// assignment, push, or asm).
+fn is_void_call_line(line: &str) -> bool {
+    let t = line.trim();
+    if !t.ends_with(");") {
+        return false;
+    }
+    let p = match t.find('(') {
+        Some(p) if p > 0 => p,
+        _ => return false,
+    };
+    let name = &t[..p];
+    if !name.bytes().all(|c| c.is_ascii_alphanumeric() || c == b'_') {
+        return false; // contains space/'='/'*' etc. → assignment, store, indirect
+    }
+    !matches!(
+        name,
+        "if" | "while" | "for" | "switch" | "return" | "sizeof" | "push" | "__asm__"
+    )
+}
+
+/// Does a line assign to the `rax` family (`eax = ...` / `rax = ...`)?
+fn line_writes_rax(line: &str) -> bool {
+    let t = line.trim();
+    if let Some(pos) = t.find(" = ") {
+        let lhs = &t[..pos];
+        return reg_family(lhs.trim()) == Some("rax");
+    }
+    false
 }
 
 /// Remove dead pure register assignments. Returns true if anything changed.
@@ -465,7 +538,7 @@ fn dce(block: &mut Vec<Stmt>, live_out: &HashSet<&'static str>) -> bool {
             }
             Kind::Keep => {
                 if s.is_call {
-                    for f in CALLER_SAVED {
+                    for f in CALL_KILLS {
                         live.remove(f);
                     }
                 }
@@ -529,7 +602,7 @@ fn propagate(block: &mut Vec<Stmt>, live_out: &HashSet<&'static str>) -> bool {
             }
             // Value ends when its family is rewritten or a call clobbers it.
             let redefines_fam = s.write.as_ref().map(|(_, wf)| *wf == fam).unwrap_or(false);
-            if redefines_fam || (s.is_call && CALLER_SAVED.contains(&fam)) {
+            if redefines_fam || (s.is_call && CALL_KILLS.contains(&fam)) {
                 break;
             }
         }
