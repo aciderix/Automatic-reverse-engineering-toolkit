@@ -26,6 +26,7 @@ Usage:
 import os, sys, csv, struct, argparse, collections
 
 def u64(b, o=0): return struct.unpack_from('<Q', b, o)[0]
+def u32(b, o):   return struct.unpack_from('<I', b, o)[0]
 def f32(b, o):   return struct.unpack_from('<f', b, o)[0]
 
 def common_header(payload):
@@ -33,6 +34,65 @@ def common_header(payload):
     if len(payload) < 0x1a:
         return None
     return u64(payload, 0), f32(payload, 0x16)
+
+# --- Texture_Z (guid e9fd6fb3d594e145) ----------------------------------
+# Image-form payload header (recovered, validated on 411 textures: dataSize
+# always == len - 0x26, dims plausible on every sample):
+#   0x00 u64 instance id
+#   0x0a u8  mip count
+#   0x0d u32 width
+#   0x11 u32 height
+#   0x15 u32 data size  (== payload_len - 0x26)
+#   0x19 u32 format enum (observed 8, 12, 14 — DXT/BC family)
+#   0x26 ...  pixel data, wrapped in the engine "Hx" codec (magic 48 78 00 ..)
+# The "Hx" wrapper is a further compression layer still to be decoded; this
+# function returns the metadata and the raw "Hx" blob (ready for that step).
+TEX_DATA_OFFSET = 0x26
+
+def parse_texture(payload):
+    """Parse a Texture_Z image-form payload. Returns dict or None (descriptor
+    form / too small)."""
+    if len(payload) < TEX_DATA_OFFSET + 4:
+        return None
+    size = u32(payload, 0x15)
+    if size != len(payload) - TEX_DATA_OFFSET:
+        return None  # descriptor form (reference), not an image
+    return {
+        "instance_id": u64(payload, 0),
+        "mips":   payload[0x0a],
+        "width":  u32(payload, 0x0d),
+        "height": u32(payload, 0x11),
+        "format": u32(payload, 0x19),
+        "data_size": size,
+        "hx_blob": payload[TEX_DATA_OFFSET:],   # raw "Hx"-wrapped pixel data
+    }
+
+def export_textures(extract_dir, nodes, outdir):
+    """Decode every image-form Texture_Z: write its raw 'Hx' pixel blob and a
+    textures.csv of width/height/format/mips."""
+    import struct as _s
+    os.makedirs(outdir, exist_ok=True)
+    rows = []
+    for n in nodes:
+        if n["type_name"] != "Texture_Z":
+            continue
+        p = node_path(extract_dir, n)
+        if not p:
+            continue
+        tex = parse_texture(open(p, 'rb').read())
+        if not tex:
+            continue
+        name = f"{tex['width']}x{tex['height']}_f{tex['format']}_{n['node_id']}.hx"
+        with open(os.path.join(outdir, name), 'wb') as fh:
+            fh.write(tex["hx_blob"])
+        rows.append((n["node_id"], tex["width"], tex["height"],
+                     tex["format"], tex["mips"], tex["data_size"]))
+    with open(os.path.join(outdir, "textures.csv"), "w") as fh:
+        fh.write("node_id,width,height,format,mips,data_size\n")
+        for r in rows:
+            fh.write(",".join(map(str, r)) + "\n")
+    print(f"decoded {len(rows)} image textures -> {outdir} "
+          f"(raw 'Hx' blobs + textures.csv)")
 
 def load_manifest(extract_dir):
     """Read manifest.csv -> list of node dicts with file paths."""
@@ -95,10 +155,16 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("extract_dir", help="output dir of opal_bigfile.py --batch")
     ap.add_argument("--graph", metavar="OUT", help="write reference graph CSV")
+    ap.add_argument("--textures", metavar="DIR",
+                    help="decode Texture_Z metadata + raw 'Hx' blobs into DIR")
     a = ap.parse_args()
 
     nodes = load_manifest(a.extract_dir)
     print(f"nodes: {len(nodes)}")
+
+    if a.textures:
+        export_textures(a.extract_dir, nodes, a.textures)
+        return
     by_type = collections.Counter(n["type_name"] for n in nodes)
     print("\ntop types:")
     for t, c in by_type.most_common(12):

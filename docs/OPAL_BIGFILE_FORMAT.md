@@ -118,12 +118,31 @@ Points_Z, ModifierContainer_Z, … — hashable the same way.)
 [0x1A:…]          per-type flags + data
 ```
 
-Type notes: **Texture_Z** has a small descriptor form (~78 B, references the
-big data node by byte-reversed node_id + UV/colour scale floats) and a large
-form (mip-count byte at `[0x0a]`, then width/height/format words and per-mip
-sizes, then BC/DXT pixel data). **Material_Z** (~82 B) embeds u64 references to
-its Texture_Z/Shader_Z at `[0x24]` and `[0x4A]`. **Node_Z** (~175 B) embeds
-child/transform references around `[0x42]`.
+### Texture_Z (image form) — recovered & validated (411 textures)
+
+```
+0x00 u64 instance id
+0x0a u8  mip count
+0x0d u32 width
+0x11 u32 height
+0x15 u32 data size   (always == payload_len - 0x26)
+0x19 u32 format enum (observed 8, 12, 14 — BC/DXT family)
+0x26 ...  pixel data, wrapped in the engine "Hx" codec (magic 48 78 00 ..)
+```
+
+Validated: dims are exact and sensible across every sample (1920×1080,
+1280×720, 256×256, 760×240, …). The pixel payload is smaller than raw BC data
+(e.g. 1920×1080 in 417 KB), so **"Hx" is a compression layer** — decoding it to
+BC/raw pixels (then DDS/PNG) is the remaining texture step. `opal_nodes.py
+--textures` extracts each texture's metadata + raw "Hx" blob now.
+Texture_Z also has a small **descriptor form** (references the image node by
+byte-reversed node_id + UV/colour scale floats) — `parse_texture` returns None
+for it.
+
+Other types: **Material_Z** (~82 B) embeds u64 references to its
+Texture_Z/Shader_Z at `[0x24]`/`[0x4A]`; **Node_Z** (~175 B) embeds
+child/transform references around `[0x42]` (recovered automatically by the
+reference graph in `opal_nodes.py`).
 
 ## Tooling
 
@@ -139,16 +158,15 @@ opal_nodes.py out/ --graph deps.csv          # write the node dependency graph
 
 ## Remaining work — full per-type field layouts
 
-The type system and dispatch are recovered; what remains is the exact field
-layout of each type's reader beyond the common header — notably:
+The type system, dispatch, common header, reference graph, and the Texture_Z
+node header are recovered. What remains:
 
-- **Texture_Z** large form: byte-locking width/height/format-enum/mip-size
-  table (start from the `0x10da1c8` Texture_Z TypeInfo callers `sub_9c83d0`,
-  `sub_9e3870`, `sub_9fc6a0`, `sub_9fd4b0`), so pixel data can be exported
-  (e.g. to DDS).
-- **Mesh_Z / Skin_Z / SkinData_Z**: vertex/index buffer layout.
-- The rarer types (Conductor_Z, Override_Z, SpecialEffectNode_Z, UI*).
+- **"Hx" texture codec**: decompress the `48 78 00 ..` blob inside Texture_Z to
+  BC/raw pixels, then wrap as DDS/PNG. (Decoder: the texture build path
+  `sub_9fc6a0`, which uses D3D helpers `sub_1597116`/`sub_15dd80b`.)
+- **Mesh_Z / Skin_Z / SkinData_Z**: vertex/index buffer layout (→ OBJ/glTF).
+- Field layouts of the rarer types (Conductor_Z, Override_Z,
+  SpecialEffectNode_Z, UI*).
 
 Each reader is reached through the runtime registry (`sub_96a060` → factory →
-reader), so mapping each TypeInfo singleton to its reader VA is the next step.
-With the layouts, each `--extract`ed `.node` becomes a fully parsed asset.
+reader), so mapping each TypeInfo singleton to its reader VA is the route.
