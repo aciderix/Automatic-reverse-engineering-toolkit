@@ -175,85 +175,11 @@ impl<'a> Structurer<'a> {
         &self.func.blocks[&self.nodes[i]]
     }
 
-    // ---- dominator computation (Cooper–Harvey–Kennedy) -------------------
-
-    /// Reverse-postorder of `adj` reachable from `root`, with position lookup.
-    fn rpo(adj: &[Vec<usize>], root: usize, n: usize) -> (Vec<usize>, Vec<usize>) {
-        let mut visited = vec![false; n];
-        let mut post = Vec::new();
-        // Iterative DFS postorder.
-        let mut stack = vec![(root, 0usize)];
-        visited[root] = true;
-        while let Some(&(node, ci)) = stack.last() {
-            if ci < adj[node].len() {
-                stack.last_mut().unwrap().1 += 1;
-                let nx = adj[node][ci];
-                if !visited[nx] {
-                    visited[nx] = true;
-                    stack.push((nx, 0));
-                }
-            } else {
-                post.push(node);
-                stack.pop();
-            }
-        }
-        let mut rpo = post;
-        rpo.reverse();
-        let mut num = vec![UNDEF; n];
-        for (i, &node) in rpo.iter().enumerate() {
-            num[node] = i;
-        }
-        (rpo, num)
-    }
-
-    fn run_dominators(
-        n: usize,
-        root: usize,
-        succ: &[Vec<usize>],
-        preds: &[Vec<usize>],
-    ) -> Vec<usize> {
-        let (rpo, num) = Self::rpo(succ, root, n);
-        let mut idom = vec![UNDEF; n];
-        idom[root] = root;
-        let intersect = |mut a: usize, mut b: usize, idom: &Vec<usize>| -> usize {
-            while a != b {
-                while num[a] > num[b] {
-                    a = idom[a];
-                }
-                while num[b] > num[a] {
-                    b = idom[b];
-                }
-            }
-            a
-        };
-        let mut changed = true;
-        while changed {
-            changed = false;
-            for &node in rpo.iter() {
-                if node == root {
-                    continue;
-                }
-                let mut new_idom = UNDEF;
-                for &p in &preds[node] {
-                    if idom[p] != UNDEF {
-                        new_idom = if new_idom == UNDEF {
-                            p
-                        } else {
-                            intersect(p, new_idom, &idom)
-                        };
-                    }
-                }
-                if new_idom != UNDEF && idom[node] != new_idom {
-                    idom[node] = new_idom;
-                    changed = true;
-                }
-            }
-        }
-        idom
-    }
+    // ---- dominator computation (shared crate::cfg::dom) ------------------
 
     fn compute_dominators(&mut self) {
-        self.idom = Self::run_dominators(self.nodes.len(), self.entry, &self.succ, &self.preds);
+        self.idom =
+            crate::cfg::dom::dominators(self.nodes.len(), self.entry, &self.succ, &self.preds);
     }
 
     /// Post-dominators via dominators on the reversed graph with a virtual exit.
@@ -285,7 +211,7 @@ impl<'a> Structurer<'a> {
             }
         }
 
-        let ipdom_full = Self::run_dominators(total, virt, &rev_succ, &rev_pred);
+        let ipdom_full = crate::cfg::dom::dominators(total, virt, &rev_succ, &rev_pred);
         self.ipdom = ipdom_full[..n].to_vec();
         // Map the virtual exit (and unreachable) to UNDEF so callers treat it
         // as "no real post-dominator".
@@ -297,20 +223,7 @@ impl<'a> Structurer<'a> {
     }
 
     fn dominates(&self, a: usize, b: usize) -> bool {
-        let mut x = b;
-        loop {
-            if x == a {
-                return true;
-            }
-            if self.idom[x] == UNDEF || x == self.entry {
-                return a == x;
-            }
-            let nx = self.idom[x];
-            if nx == x {
-                return a == x;
-            }
-            x = nx;
-        }
+        crate::cfg::dom::dominates(a, b, &self.idom)
     }
 
     /// Mark loop headers: a back edge u->h exists when h dominates u.

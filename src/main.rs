@@ -4,6 +4,7 @@
 //! functions & CFG -> lift -> emit pseudo-C.
 
 mod analysis;
+mod cfg;
 mod dataflow;
 mod decompile;
 mod disasm;

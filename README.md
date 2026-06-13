@@ -117,14 +117,24 @@ Done: control-flow structuring (`if`/`while`), frame-variable recovery
 prologue/epilogue cleanup, prologue-scan coverage, large-binary scaling,
 global liveness + dead-code elimination + single-use expression propagation.
 
-Remaining, in priority order:
+### Next: a typed SSA IR
 
-1. **Full SSA propagation** with φ-nodes, to fold general (non-constant)
-   expressions across *merging* control flow — and 64-bit register-argument
-   recovery (System V / Win64).
-2. Constant **folding** (arithmetic on propagated constants) and broader
-   algebraic simplification.
-3. Conservative **type inference** beyond the current width-based types.
+See [`ROADMAP.md`](ROADMAP.md) for the full technical plan (typed SSA IR →
+optimisation passes → type inference → high-level construct recovery →
+compilable C → a verified recompile/equivalence loop → an LLM naming layer).
+
+The central insight from that review: the current text-based IR is the
+architectural ceiling — real constant folding, propagation across branch joins,
+and type inference all need an expression-tree + SSA IR. That migration has
+started, **in parallel** with the working text pipeline (so nothing regresses):
+
+- `src/cfg/dom.rs` — shared dominators / post-dominators / **dominance
+  frontiers** (Cytron), for φ-node placement; the structurer now uses it.
+- `src/ir/types.rs` — the typed SSA IR (`Expr`/`Stmt`/`Ty`/`Location`/`ValueId`,
+  explicit CPU flags), the foundation the rest of the roadmap builds on.
+
+Immediate next steps: an IR lifter (machine code → `Vec<Stmt>` via `iced-x86`
+register/flag info), SSA construction, then SCCP + DCE on SSA.
 4. **`switch`/jump-table recovery** and full indirect-call resolution via
    vtable analysis (names the indirect call sites, not just the targets).
 5. **Library/CRT signature matching** (FLIRT-style) to name known functions and

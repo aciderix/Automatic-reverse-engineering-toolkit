@@ -6,6 +6,10 @@
 //! dereferences. Control-flow instructions are handled by the decompiler, not
 //! here.
 
+/// Typed SSA IR (roadmap foundation; being built in parallel with the text
+/// pipeline below until it reaches parity).
+pub mod types;
+
 use crate::disasm::Insn;
 use crate::loader::Program;
 use iced_x86::ConditionCode;
