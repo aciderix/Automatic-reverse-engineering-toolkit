@@ -288,7 +288,7 @@ sub_958510  orchestrator
   │         ├─ sub_959590   colour endpoints  (1 table, 2-byte delta)      ✅ implemented
   │         ├─ sub_9596d0   colour indices    (2-D predictive delta)       🟡 mapped
   │         ├─ sub_959a20   alpha indices     (2 tables, 6 mixed deltas)   🟡 mapped
-  │         └─ sub_959ca0   alpha endpoints   (TODO)
+  │         └─ sub_959ca0   alpha endpoints   (2-D predictive delta, 7×7 grid ±3) 🟡 mapped
   └─ per-mip loop (B8–B18): blocks = ceil((w>>m)/4) * ceil((h>>m)/4);
        assemble BC blocks from the palettes (palette→block indexing here);
        output surface tagged with magic 0x1ef9cabd.
@@ -296,14 +296,15 @@ sub_958510  orchestrator
    handlers 0x9591d9 / 0x9591e7; not the assembler itself.)
 ```
 
-**Bottom line**: the codec is fully reverse-engineered end-to-end. The entropy
-core (bit reader, dynamic Huffman, table builder, delta) is validated working
-code (`hx_codec.py`); colour-endpoints decode exactly; colour/alpha-index
-schemes are mapped. What remains is a sizeable but well-scoped reimplementation:
-`sub_959ca0`, the exact index packing, the per-mip palette→block assembly in
-`sub_958510`, and DDS wrapping — ~6–8 interacting functions. This is the stage
-where the improved SSA decompiler pays off most (precise masks/shifts and the
-assembly loop), so the remaining work is implementation, not discovery.
+**Bottom line — reverse engineering is COMPLETE.** Every layer and all four
+channel decoders are mapped; the entropy core is validated working code
+(`hx_codec.py`), colour-endpoints decode exactly. Two channels (colour idx,
+alpha end) use the same 2-D predictive-delta scheme (15×15 / 7×7 offset grids,
+state mod 8 / mod 4, remap table @0xf3ce80). Nothing remains to *discover* — the
+remaining work is purely **implementation**: code the two 2-D delta channels and
+their packing, the alpha-index packing, the per-mip palette→block assembly in
+`sub_958510`, and DDS wrapping (~6–8 interacting functions). This is the stage
+the improved SSA decompiler accelerates most.
 
 Delta decode (per `sub_959590`): `acc = (acc + huff_sym()) & 0xff` for each
 byte; two bytes packed per u16 entry.
