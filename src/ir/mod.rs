@@ -9,6 +9,8 @@
 /// Typed SSA IR (roadmap foundation; being built in parallel with the text
 /// pipeline below until it reaches parity).
 pub mod types;
+/// IR lifter (machine code -> typed IR), parallel to the text lifting below.
+pub mod lift;
 
 use crate::disasm::Insn;
 use crate::loader::Program;

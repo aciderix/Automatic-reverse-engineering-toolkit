@@ -130,6 +130,9 @@ pub enum CallTarget {
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum Expr {
     Const(i128, Ty),
+    /// Pre-SSA read of a location (before SSA renaming turns it into `Use`).
+    Read(Location),
+    /// Post-SSA read of a versioned value.
     Use(ValueId),
     Load {
         addr: Box<Expr>,
@@ -167,6 +170,9 @@ pub struct BlockId(pub u32);
 /// An IR statement.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum Stmt {
+    /// Pre-SSA assignment to a location (produced by the lifter; SSA
+    /// construction rewrites it into `Assign`).
+    Set { dst: Location, expr: Expr },
     /// SSA definition: `dst` is defined here as `expr`.
     Assign { dst: ValueId, expr: Expr },
     Store { addr: Expr, value: Expr, ty: Ty },

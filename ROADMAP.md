@@ -213,6 +213,21 @@ Points clés de conception :
    (SIMD complexe, instructions privilégiées) reste de l'asm inline → la sortie
    est **toujours sémantiquement honnête**, jamais fausse.
 
+4. **Deux formes dans un seul IR (amélioration apportée à l'implémentation).**
+   Le §3.2 d'origine ne décrivait que la forme *SSA* (`Assign{dst: ValueId}`,
+   `Use(ValueId)`), mais le lifter produit du **pré-SSA** : destinations =
+   `Location`, lectures = `Location`. On a donc ajouté `Expr::Read(Location)` et
+   `Stmt::Set{dst: Location, expr}`. Le lifter émet `Read`/`Set` ; la
+   construction SSA (§3.4) les réécrit en `Use`/`Assign`/`Phi`. Les deux formes
+   cohabitent dans les mêmes enums `Expr`/`Stmt` — implémenté dans
+   `src/ir/types.rs`.
+
+5. **Sémantique partielle de registre (point de correction important).** Les
+   écritures 32-bit zéro-étendent (x64), les écritures 8/16-bit préservent les
+   bits hauts (`combine_write` dans `src/ir/lift.rs`). Les octets *hauts*
+   (`ah/bh/ch/dh`) en lecture/écriture ne sont pas encore modélisés → repli
+   `Asm` (sûr). À compléter.
+
 ### 3.3 Lifting (refonte de `src/ir/mod.rs`)
 
 Remplacer `lift_insn(&Insn) -> Vec<String>` par
@@ -257,9 +272,14 @@ Stratégie incrémentale recommandée :
 
 ### 3.6 Jalons
 
-- [ ] `Expr`/`Stmt`/`Ty`/SSA définis et documentés.
-- [ ] Lifting IR de ~95 % des mnémoniques x64 courants (le reste → `Asm`).
-- [ ] Construction SSA avec φ vérifiée sur petits cas.
+- [x] `Expr`/`Stmt`/`Ty` définis et documentés (`src/ir/types.rs`, + formes
+      pré-SSA `Read`/`Set`). Tests unitaires verts.
+- [x] Module dominateurs partagé + frontière de dominance (`src/cfg/dom.rs`).
+- [~] Lifting IR des mnémoniques courants (en cours, `src/ir/lift.rs`) : mov,
+      movzx/sx, lea, add/sub/and/or/xor (+ flags), cmp/test (flags), inc/dec,
+      neg/not, shl/shr/sar, push/pop, call, ret. Le reste → `Asm`. À étendre
+      (idiv/mul, setcc, cmov, SIMC, octets hauts).
+- [ ] Construction SSA avec φ vérifiée sur petits cas (prochaine étape).
 - [ ] `emit` IR→C à parité avec la sortie texte actuelle sur le corpus.
 
 ---
