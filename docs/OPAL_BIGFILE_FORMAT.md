@@ -266,17 +266,23 @@ indirection maps decoded entries to blocks.
 Decoder complexity varies sharply:
 - `sub_959590` (colour endpoints): simple 1-table 2-byte delta — **done**.
 - `sub_959a20` (alpha indices): 2 tables, 6 mixed-mask deltas — mapped.
-- `sub_9596d0` (colour indices): **2-D spatial context model** — it builds a
-  ~900-byte coordinate/state grid (`[ebp-0x3e4]`/`[ebp-0x768]`) and manages
-  dynamic structures (`sub_95a2b0`), i.e. context-modelled entropy coding, far
-  beyond simple delta. Faithful reimplementation of this one from raw asm is
-  impractical; it is the case where the improved SSA decompiler is essential.
+- `sub_9596d0` (colour indices): a **2-D predictive delta coder** (intricate
+  but tractable, NOT an opaque arithmetic model). Closer reading:
+  1. A 15×15 offset grid (`[ebp-0x3e4]` = dx, `[ebp-0x768]` = dy, each in
+     [-7,7]) is built once; a Huffman symbol indexes it to a `(dx,dy)`.
+  2. Per block: decode 8 Huffman symbols; each advances 8 running `(x,y)`
+     states, accumulated **mod 8** (`& 7`).
+  3. Each state is remapped through table `0xf3ce80`
+     (`[0,2,3,4,5,6,7,1, 1,0,5,4,3,2,6,7, …]`) and packed as 3-bit fields
+     (`shl 3`) into u16 words = the block's colour indices.
 
-**Bottom line**: the codec's entropy core (bit reader, dynamic Huffman, table
-builder, delta channels) is reverse-engineered and validated as working code.
-The colour-index context model + palette/block indexing + BC interleaving
-remain; these are best finished with the improved decompiler rather than by
-hand-tracing assembly.
+**Bottom line**: the codec is conceptually fully reverse-engineered. The
+entropy core (bit reader, dynamic Huffman, table builder, delta channels) is
+validated working code (`hx_codec.py`); colour-endpoints decode exactly. What
+remains is intricate-but-deterministic implementation: the colour-index 2-D
+delta packing, `sub_959ca0` (alpha endpoints), the palette→block index
+indirection, and BC interleaving → DDS. The improved SSA decompiler chiefly
+speeds up nailing the exact masks/shifts of the packing — the scheme is known.
 
 Delta decode (per `sub_959590`): `acc = (acc + huff_sym()) & 0xff` for each
 byte; two bytes packed per u16 entry.
