@@ -14,6 +14,7 @@ mod loader;
 mod opt;
 mod ssa;
 mod structure;
+mod verify;
 
 use anyhow::{Context, Result};
 use clap::{Parser, ValueEnum};
@@ -35,6 +36,8 @@ enum Mode {
     Ir,
     /// Emit compilable C from the SSA IR (goto form) — work in progress.
     Emit,
+    /// Verify recompilability: emit C per function, recompile, report the rate.
+    Verify,
 }
 
 #[derive(Parser, Debug)]
@@ -72,6 +75,10 @@ struct Args {
     /// functions; skips code reached solely through vtables/callbacks).
     #[arg(long)]
     no_prologue_scan: bool,
+
+    /// Cap the number of functions processed (used by --mode verify).
+    #[arg(long)]
+    limit: Option<usize>,
 }
 
 /// Render one function as pseudo-C, structured unless `--flat` was given.
@@ -160,6 +167,11 @@ fn main() -> Result<()> {
                 })
                 .collect();
             out.push_str(&emit::emit_unit(&irfs));
+        }
+        Mode::Verify => {
+            let limit = args.limit.unwrap_or(200);
+            let report = verify::run(&prog, &functions, limit);
+            out.push_str(&report.render());
         }
     }
 

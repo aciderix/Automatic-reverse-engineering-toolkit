@@ -494,6 +494,13 @@ Exigences :
 C'est ici qu'ARET dépasse l'état de l'art grand public. Personne n'offre une
 boucle fermée *décompile → recompile → prouve équivalence → raffine*.
 
+> **Implémenté (niveau 1).** `src/verify/mod.rs` + `aret <bin> --mode verify`
+> émet le C de chaque fonction, le recompile (`cc -x c - -c`, via stdin, sans
+> fichiers temporaires ni édition de liens) et rapporte le taux de
+> recompilabilité — la première forme de la métrique nord. Résultats : **demo
+> 12/12 (100 %)**, **échantillon du jeu 500/500 (100 %)**. `--limit N` borne le
+> nombre de fonctions. Reste : niveaux 2 (différentiel par exécution) et 3 (SMT).
+
 ### 8.1 Harness de round-trip
 
 ```
