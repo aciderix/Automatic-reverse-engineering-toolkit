@@ -303,7 +303,14 @@ Stratégie incrémentale recommandée :
 - [~] Couverture lifter : mov/movzx/sx, lea, add/sub/and/or/xor (+flags),
       cmp/test, inc/dec, neg/not, shl/shr/sar, push/pop, call, ret, imul 2/3-op,
       **setcc** faits ; reste mul/idiv/div, cmov, SSE.
-- [ ] `emit` IR→C à parité avec la sortie texte actuelle sur le corpus.
+- [x] `emit` IR→C **qui compile** (`src/emit/mod.rs`, `--mode emit`) : destruction
+      SSA (abaissement des φ en blocs de copie sur chaque arête), variables
+      `uint64_t` typées, prélude `#include <stdint.h>` + forward-decls des
+      callees, forme goto. Vérifié : `factorial` recompile et la logique est
+      correcte (boucle, copies de φ) ; l'unité demo entière (12 fonctions) et
+      des fonctions du jeu recompilent. → débloque le niveau « recompile » du §8.
+- [ ] Émission **structurée** (réutiliser `structure` sur le CFG IR) + variables
+      typées par inférence + idiomes, pour la parité lisibilité.
 
 ---
 

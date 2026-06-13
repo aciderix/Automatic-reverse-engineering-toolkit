@@ -8,6 +8,7 @@ mod cfg;
 mod dataflow;
 mod decompile;
 mod disasm;
+mod emit;
 mod ir;
 mod loader;
 mod opt;
@@ -32,6 +33,8 @@ enum Mode {
     Decompile,
     /// Dump the typed SSA IR (lifter + SSA construction) — work in progress.
     Ir,
+    /// Emit compilable C from the SSA IR (goto form) — work in progress.
+    Emit,
 }
 
 #[derive(Parser, Debug)]
@@ -145,6 +148,18 @@ fn main() -> Result<()> {
                 out.push_str(&ir::build::dump(&irf));
                 out.push('\n');
             }
+        }
+        Mode::Emit => {
+            let irfs: Vec<_> = functions
+                .iter()
+                .map(|f| {
+                    let mut irf = ir::build::build_ir(&prog, f);
+                    ssa::to_ssa(&mut irf);
+                    opt::optimize(&mut irf);
+                    irf
+                })
+                .collect();
+            out.push_str(&emit::emit_unit(&irfs));
         }
     }
 
