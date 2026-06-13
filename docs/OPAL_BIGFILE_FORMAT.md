@@ -222,19 +222,49 @@ can be adapted with these differences:
   (counts at Hx `+0x27`/`+0x37`), writing each channel's bytes; planes are then
   interleaved into the BC1/BC3 surface.
 
-**Decoder model validated** (partial implementation tested): the per-channel
-bitstream starts at Hx offset `base + be24(@0x43)` (e.g. 558 in a 32×32 blob);
-reading the first **14 bits** (= `bitlen(0x2000)`, computed by `sub_95a020`'s
-shift loop) yields the channel's **alphabet size** (e.g. 512). The MSB-first
-bit reader reproduces these values, confirming the entry point and bit order.
+#### Full codec architecture (recovered end-to-end via SSA + asm)
 
-Remaining (a focused implementation, ideal for the improved SSA decompiler):
-trace `sub_95a020`'s nested dynamic-Huffman flow — meta code-length alphabet →
-decode the N main code lengths (RLE 17–20) → build the main canonical table →
-decode literals + LZ back-references into the channel buffer. Then interleave
-the channels into BC1/BC3 blocks, validate output size against
-`width*height*blockBytes/16` over the mip chain, and DDS-wrap (BC3 for
-format≠9, BC1 for format 9).
+The Hx codec is a **custom per-component DXT/BC transcoder**: each BC block
+component is stored in its own sub-stream, Huffman-coded with a per-stream
+DEFLATE-dynamic table, then **delta-decoded** (running sum mod 256). It is NOT
+LZ — the earlier "LZ" read was the dynamic-table RLE, not the data.
+
+Pipeline: `sub_95a380` = validate (`sub_959220`) → build tables (`sub_95a780`,
+up to 5× `sub_95a020`) → decode components (`sub_959fb0`).
+
+**Table builder `sub_95a020`** (DEFLATE-dynamic header, MSB-first):
+```
+N      = read_bits(14)                 # symbol-count (HLIT), max 0x2000
+alloc code_lengths[N]
+M      = read_bits(5)                  # code-length-code count (HCLEN), <=21
+for i in 0..M:  meta_len[PERM[i]] = read_bits(3)   # PERM = table @0xf3ce98
+build canonical meta-table
+decode N code lengths via meta-table with RLE: 17→+3(3b) 18→+11(7b) 19→+3(2b) 20→+7(6b)
+build canonical main table   (sub_95a890 -> sub_95a3d0)
+```
+Canonical symbol decode = `sub_959480` (fast table @+0xa8, u16 symbol table @+0xb0).
+
+**Component decoders** (`sub_959fb0` runs them; gated by header counts @0x27 / @0x37):
+each reads `(offset, size, count)` as **big-endian** from the header, sets a
+bitreader over `[base+offset, +size)`, builds a table with `sub_95a020`, then
+delta-decodes `count` entries:
+
+| decoder      | header fields (off/size/count) | output | BC role |
+|--------------|--------------------------------|--------|---------|
+| `sub_959590` | be24@0x31 / be24@0x34 / be16@0x37 | `count` u16, two delta bytes each | colour endpoints |
+| `sub_9596d0` | be24@0x39 / be24@0x3c / be16@0x3f | 3-bit packed (table @0xf3ce80) | colour indices |
+| `sub_959a20` | be24@0x21 / be24@0x24 / be16@0x27 | 6× symbols, shl 5/6 | alpha indices |
+| `sub_959ca0` | (its own @0x29.. block)           | delta bytes | alpha endpoints |
+
+Delta decode (per `sub_959590`): `acc = (acc + huff_sym()) & 0xff` for each
+byte; two bytes packed per u16 entry.
+
+**Remaining = implementation only** (the reverse engineering is complete):
+port the MSB-first bit reader + canonical Huffman + this dynamic-table builder +
+the four delta decoders, interleave the components into BC1/BC3 blocks per mip,
+validate against `width*height*blockBytes/16`, and DDS-wrap. This is a sizeable
+but mechanical build; the improved SSA decompiler makes the four component
+decoders' exact bit-packing fastest to finalise.
 
 ### Other remaining layouts
 - **Mesh_Z / Skin_Z / SkinData_Z**: vertex/index buffer layout (→ OBJ/glTF).
