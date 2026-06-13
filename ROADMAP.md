@@ -279,7 +279,13 @@ Stratégie incrémentale recommandée :
       movzx/sx, lea, add/sub/and/or/xor (+ flags), cmp/test (flags), inc/dec,
       neg/not, shl/shr/sar, push/pop, call, ret. Le reste → `Asm`. À étendre
       (idiv/mul, setcc, cmov, SIMC, octets hauts).
-- [ ] Construction SSA avec φ vérifiée sur petits cas (prochaine étape).
+- [x] Construction SSA avec φ vérifiée sur petits cas (`src/ssa/mod.rs`,
+      algorithme de Cytron sur `cfg::dom`). Tests : φ placé à la jonction d'un
+      diamant et référencé par l'usage ; unicité des définitions SSA.
+- [ ] Construction de l'IR-CFG depuis `analysis::Function` (lifting des blocs +
+      terminateurs `Branch`/`Jump`/`Return`) — pour faire tourner SSA sur du
+      vrai code (prochaine étape).
+- [ ] Passes SSA : SCCP (const-prop + branches mortes) + DCE (§4).
 - [ ] `emit` IR→C à parité avec la sortie texte actuelle sur le corpus.
 
 ---

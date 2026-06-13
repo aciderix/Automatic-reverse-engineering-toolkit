@@ -10,6 +10,7 @@ mod decompile;
 mod disasm;
 mod ir;
 mod loader;
+mod ssa;
 mod structure;
 
 use anyhow::{Context, Result};
