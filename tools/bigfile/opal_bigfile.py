@@ -51,6 +51,41 @@ MAGIC_BYTES = b'\xde\xad\xbe\xef'
 HEADER_SIZE = 0x100
 CHUNK0_OFF  = 0x800
 
+# --- node type ids -------------------------------------------------------
+# A node's class_guid is CRC-64/ECMA-182 of the UPPER-CASED type name
+# (recovered from the engine hash routine sub_9ce4b0). Reproduces all observed
+# guids with zero collisions, so we can name every node from its guid.
+_CRC64_POLY = 0x42F0E1EBA9EA3693
+_MASK64 = (1 << 64) - 1
+
+def opal_type_id(name):
+    """CRC-64/ECMA over name.upper() — the engine's type id for `name`."""
+    crc = 0xFFFFFFFFFFFFFFFF
+    for b in name.upper().encode():
+        crc ^= (b << 56) & _MASK64
+        for _ in range(8):
+            crc = ((crc << 1) ^ (_CRC64_POLY if crc & (1 << 63) else 0)) & _MASK64
+    return crc ^ 0xFFFFFFFFFFFFFFFF
+
+# Engine node type names (LyN/Opal "_Z" classes). class_guid -> name is derived
+# by hashing each; extend this list to name more types.
+KNOWN_TYPE_NAMES = [
+    "XRefNode_Z", "Node_Z", "Sound_Z", "Material_Z", "ParticlesData_Z",
+    "Particles_Z", "Texture_Z", "Mesh_Z", "SkinData_Z", "Animation_Z",
+    "SpecialEffectNode_Z", "Skin_Z", "EntityData_Z", "TriggerNode_Z",
+    "Override_Z", "Conductor_Z", "Entity_Z", "UIMaterial_Z", "ProjectorData_Z",
+    "Projector_Z", "UIPanel_Z", "AmbientLightmap_Z", "Package_Z",
+    "LensFlareData_Z", "LensFlare_Z", "UIFont_Z", "UINineSlice_Z",
+    "UIContainer_Z", "UITextPanel_Z", "SoundNode_Z", "Camera_Z",
+    "EmbeddedFile_Z", "SkelData_Z", "Shader_Z", "Skel_Z", "OmniData_Z",
+    "Omni_Z", "AnimationCollection_Z", "Object_Z", "BaseObject_Z", "World_Z",
+    "Points_Z", "PointsDatas_Z", "ModifierContainer_Z", "Game_Z",
+]
+TYPE_NAMES = {opal_type_id(n): n for n in KNOWN_TYPE_NAMES}
+
+def type_name(guid):
+    return TYPE_NAMES.get(guid, f"?{guid:016x}")
+
 def u32(d, o): return struct.unpack_from('<I', d, o)[0]
 
 def entropy(b):
@@ -129,8 +164,8 @@ def describe(path, hexwords=0):
         print(f"  @0x{off:08x}  count={count}  walked={len(nodes)}  "
               f"_OBJ={tagged}  ends@0x{end:08x}")
         classes = collections.Counter(n.guid for n in nodes)
-        for g, c in classes.most_common(6):
-            print(f"      class {g:016x}: {c} nodes")
+        for g, c in classes.most_common(8):
+            print(f"      {type_name(g):<22} {c:>6} nodes   ({g:016x})")
 
     # Entropy probe (encryption/compression detector).
     print("\nentropy probe (8.0 = random/encrypted):")
@@ -168,7 +203,7 @@ def batch_extract(indir, outdir):
     import os, glob
     os.makedirs(outdir, exist_ok=True)
     manifest = open(os.path.join(outdir, "manifest.csv"), "w")
-    manifest.write("package,chunk,index,class_guid,node_id,payload_bytes\n")
+    manifest.write("package,chunk,index,type_name,class_guid,node_id,payload_bytes\n")
     total_files = total_nodes = 0
     for path in sorted(glob.glob(os.path.join(indir, "*.BF*"))):
         d = open(path, 'rb').read()
@@ -181,10 +216,11 @@ def batch_extract(indir, outdir):
         for ci, (off, _c) in enumerate(find_chunks(d)):
             for ni, node in enumerate(walk_nodes(d, off)):
                 payload = d[node.offset + 24:node.offset + node.size]
-                fn = f"c{ci}_{ni:05d}_{node.guid:016x}_{node.node_id:016x}.node"
+                tn = type_name(node.guid)
+                fn = f"c{ci}_{ni:05d}_{tn}_{node.node_id:016x}.node"
                 with open(os.path.join(pdir, fn), 'wb') as fh:
                     fh.write(payload)
-                manifest.write(f"{pkg},{ci},{ni},{node.guid:016x},"
+                manifest.write(f"{pkg},{ci},{ni},{tn},{node.guid:016x},"
                                f"{node.node_id:016x},{len(payload)}\n")
                 n += 1
         total_files += 1
