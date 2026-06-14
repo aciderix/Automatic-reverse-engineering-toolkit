@@ -330,8 +330,15 @@ Stratégie incrémentale recommandée :
       pourrait alors être aliasé par un store générique → code faux. Plutôt que
       bâcler (violation du principe « jamais de sortie incorrecte »), prérequis =
       l'analyse d'alias frame/heap/inconnu du §4.1. À faire avant la promotion.
-- [ ] Inférence de types (§5) + signatures réelles, pour la parité/dépassement,
-      puis bascule du pipeline par défaut sur l'IR.
+- [x] **Récupération des arguments (signatures réelles).** Les slots `Frame`
+      positifs au-delà de `saved_bp`/retaddr deviennent de vrais paramètres :
+      `uint64_t sub_401670(uint64_t arg_8, uint64_t arg_c)`. Les unités à une
+      fonction utilisent les paramètres (le chemin de `verify` compile chaque
+      fonction isolément) ; les unités multi-fonctions restent en `(void)` tant
+      que la récupération des arguments aux sites d'appel n'est pas faite.
+      Recompilabilité maintenue 700/700 (100 %).
+- [ ] Inférence de types (§5) + récupération des arguments registres (System V/
+      Win64) + arguments aux sites d'appel, puis bascule du pipeline par défaut.
 
 ---
 

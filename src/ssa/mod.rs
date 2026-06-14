@@ -347,6 +347,7 @@ mod tests {
         let mut f = IrFunction {
             entry: 0,
             name: "t".into(),
+            bits: 64,
             blocks: vec![
                 blk(
                     0,
@@ -412,6 +413,7 @@ mod tests {
         let mut f = IrFunction {
             entry: 0,
             name: "t".into(),
+            bits: 64,
             blocks: vec![blk(
                 0,
                 vec![

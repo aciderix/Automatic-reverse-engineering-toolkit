@@ -451,6 +451,7 @@ mod tests {
         IrFunction {
             entry: 0,
             name: "t".into(),
+            bits: 64,
             blocks: vec![Block {
                 id: 0,
                 addr: 0,

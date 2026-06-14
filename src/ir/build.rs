@@ -114,6 +114,7 @@ pub fn build_ir(prog: &Program, func: &Function) -> IrFunction {
     IrFunction {
         entry: func.entry,
         name: func.name.clone(),
+        bits,
         blocks,
         next_value: 0,
         next_temp: 0,

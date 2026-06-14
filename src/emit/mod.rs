@@ -323,14 +323,54 @@ pub(crate) fn collect_frame_vars(func: &IrFunction, out: &mut BTreeSet<i64>) {
     }
 }
 
-/// Render the local declaration line for frame variables, if any.
-pub(crate) fn frame_decls(func: &IrFunction) -> Option<String> {
+/// Split recovered frame slots into `(params, locals)`. Parameters are the
+/// positive slots at/after the first argument (`saved_bp` at 0, return address
+/// at one pointer, first argument at two pointers); everything else is a local.
+pub(crate) fn frame_params_locals(func: &IrFunction) -> (Vec<i64>, Vec<i64>) {
     let mut fv = BTreeSet::new();
     collect_frame_vars(func, &mut fv);
-    if fv.is_empty() {
+    let ptr = (func.bits.max(32) / 8) as i64;
+    let first_arg = 2 * ptr;
+    let mut params = Vec::new();
+    let mut locals = Vec::new();
+    for d in fv {
+        if d >= first_arg {
+            params.push(d);
+        } else {
+            locals.push(d);
+        }
+    }
+    (params, locals)
+}
+
+/// The function's C signature. With `with_params`, recovered frame arguments
+/// become real parameters; otherwise `(void)`.
+pub(crate) fn signature(func: &IrFunction, with_params: bool) -> String {
+    let (params, _) = frame_params_locals(func);
+    if with_params && !params.is_empty() {
+        let p: Vec<String> = params
+            .iter()
+            .map(|d| format!("uint64_t {}", frame_name(*d)))
+            .collect();
+        format!("uint64_t sub_{:x}({})", func.entry, p.join(", "))
+    } else {
+        format!("uint64_t sub_{:x}(void)", func.entry)
+    }
+}
+
+/// Declaration line for frame slots that are *not* parameters (or all of them
+/// when `with_params` is false).
+pub(crate) fn frame_decls(func: &IrFunction, with_params: bool) -> Option<String> {
+    let (params, locals) = frame_params_locals(func);
+    let set: Vec<i64> = if with_params {
+        locals
+    } else {
+        params.into_iter().chain(locals).collect()
+    };
+    if set.is_empty() {
         return None;
     }
-    let decls: Vec<String> = fv.iter().map(|d| format!("{} = 0", frame_name(*d))).collect();
+    let decls: Vec<String> = set.iter().map(|d| format!("{} = 0", frame_name(*d))).collect();
     Some(format!("    uint64_t {};", decls.join(", ")))
 }
 
@@ -426,7 +466,7 @@ fn stmt_c(s: &Stmt, out: &mut String) {
 
 /// Emit one function as compilable C (goto form). `forward` receives the
 /// forward declarations this function needs (callees).
-pub fn emit_function(func: &IrFunction, forward: &mut BTreeSet<u64>) -> String {
+pub fn emit_function(func: &IrFunction, forward: &mut BTreeSet<u64>, with_params: bool) -> String {
     let mut f = func.clone();
     destruct_ssa(&mut f);
 
@@ -435,12 +475,12 @@ pub fn emit_function(func: &IrFunction, forward: &mut BTreeSet<u64>) -> String {
     collect_callees(&f, forward);
 
     let mut out = String::new();
-    let _ = writeln!(out, "uint64_t sub_{:x}(void) {{", f.entry);
+    let _ = writeln!(out, "{} {{", signature(&f, with_params));
     if !values.is_empty() {
         let decls: Vec<String> = values.iter().map(|v| format!("v{} = 0", v)).collect();
         let _ = writeln!(out, "    uint64_t {};", decls.join(", "));
     }
-    if let Some(fd) = frame_decls(&f) {
+    if let Some(fd) = frame_decls(&f, with_params) {
         let _ = writeln!(out, "{}", fd);
     }
     // Enter at the function's entry block.
@@ -474,11 +514,15 @@ fn ends_in_terminator(b: &Block) -> bool {
 
 /// Emit a complete compilable C translation unit for the given functions.
 pub fn emit_unit(funcs: &[IrFunction]) -> String {
+    // A single-function unit gets real parameter signatures; a multi-function
+    // unit keeps `(void)` so argless calls stay consistent (call-site argument
+    // recovery is future work).
+    let with_params = funcs.len() == 1;
     let mut body = String::new();
     let mut forward: BTreeSet<u64> = BTreeSet::new();
     let defined: BTreeSet<u64> = funcs.iter().map(|f| f.entry).collect();
     for f in funcs {
-        body.push_str(&emit_function(f, &mut forward));
+        body.push_str(&emit_function(f, &mut forward, with_params));
         body.push('\n');
     }
     let mut out = String::new();
@@ -504,6 +548,7 @@ mod tests {
         let mut f = IrFunction {
             entry: 0,
             name: "t".into(),
+            bits: 64,
             blocks: vec![
                 Block { id: 0, addr: 0, stmts: vec![Stmt::Set { dst: rax.clone(), expr: Expr::konst(1, 32) }, Stmt::Branch { cond: Expr::konst(1, 8), taken: BlockId(1), fallthrough: BlockId(2) }], succ: vec![1, 2], pred: vec![] },
                 Block { id: 1, addr: 1, stmts: vec![Stmt::Set { dst: rax.clone(), expr: Expr::konst(2, 32) }, Stmt::Jump(BlockId(3)) ], succ: vec![3], pred: vec![0] },
@@ -516,7 +561,7 @@ mod tests {
         crate::ssa::to_ssa(&mut f);
         crate::opt::optimize(&mut f);
         let mut fwd = BTreeSet::new();
-        let c = emit_function(&f, &mut fwd);
+        let c = emit_function(&f, &mut fwd, true);
         assert!(c.contains("uint64_t sub_0(void)"));
         assert!(!c.contains("phi"), "phi must be lowered, got:\n{}", c);
         assert!(c.contains("return"));

@@ -217,6 +217,8 @@ pub struct Block {
 pub struct IrFunction {
     pub entry: u64,
     pub name: String,
+    /// Target pointer width in bits (32 or 64), for frame-slot classification.
+    pub bits: u32,
     pub blocks: Vec<Block>,
     /// Next fresh SSA value id.
     pub next_value: u32,

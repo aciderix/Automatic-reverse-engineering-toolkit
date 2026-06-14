@@ -71,7 +71,7 @@ impl Ctx {
 }
 
 /// Emit a single function as structured C.
-pub fn emit_function(func: &IrFunction, forward: &mut BTreeSet<u64>) -> String {
+pub fn emit_function(func: &IrFunction, forward: &mut BTreeSet<u64>, with_params: bool) -> String {
     let mut f = func.clone();
     destruct_ssa(&mut f);
     collect_callees(&f, forward);
@@ -120,12 +120,12 @@ pub fn emit_function(func: &IrFunction, forward: &mut BTreeSet<u64>) -> String {
     s.detect_loops();
 
     let mut out = String::new();
-    let _ = writeln!(out, "uint64_t sub_{:x}(void) {{", f.entry);
+    let _ = writeln!(out, "{} {{", super::signature(&f, with_params));
     if !values.is_empty() {
         let decls: Vec<String> = values.iter().map(|v| format!("v{} = 0", v)).collect();
         let _ = writeln!(out, "    uint64_t {};", decls.join(", "));
     }
-    if let Some(fd) = frame_decls(&f) {
+    if let Some(fd) = frame_decls(&f, with_params) {
         let _ = writeln!(out, "{}", fd);
     }
     let entry = s.entry;
@@ -385,11 +385,12 @@ impl Structurer {
 
 /// Emit a complete structured C translation unit.
 pub fn emit_unit(funcs: &[IrFunction]) -> String {
+    let with_params = funcs.len() == 1;
     let mut body = String::new();
     let mut forward: BTreeSet<u64> = BTreeSet::new();
     let defined: BTreeSet<u64> = funcs.iter().map(|f| f.entry).collect();
     for f in funcs {
-        body.push_str(&emit_function(f, &mut forward));
+        body.push_str(&emit_function(f, &mut forward, with_params));
         body.push('\n');
     }
     let mut out = String::new();
