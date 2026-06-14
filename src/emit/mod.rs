@@ -149,15 +149,18 @@ pub(crate) fn expr_c(e: &Expr) -> String {
         Expr::Read(Location::Frame(d)) => frame_name(*d),
         Expr::Read(_) => "0 /*reg*/".into(), // other reads don't remain post-SSA
         Expr::Load { addr, ty } => format!("(*({}*)({}))", ctype(int_bits(ty)), expr_c(addr)),
-        Expr::Unary(op, x) => {
-            let xs = expr_c(x);
-            match op {
-                UnOp::Neg => format!("(-({}))", xs),
-                UnOp::Not => format!("(~({}))", xs),
-                // width lost; emit the value (approximate extension/truncation)
-                _ => format!("({})", xs),
-            }
-        }
+        Expr::Unary(op, x) => match op {
+            UnOp::Neg => format!("(-({}))", expr_c(x)),
+            UnOp::Not => format!("(~({}))", expr_c(x)),
+            // Sign-extension must actually sign-extend: emit a width-aware signed
+            // cast (the source width is carried by the masked value or typed
+            // load it wraps). Rendering it as identity zero-extends, which is
+            // wrong for negative narrow values (e.g. `movsx`).
+            UnOp::SignExtend => format!("({})", signed_cast(x)),
+            // Zero-extension / truncation: the operand is already masked to its
+            // width, so the value is correct as-is.
+            _ => format!("({})", expr_c(x)),
+        },
         Expr::Binary(op, a, b) => binary_c(*op, a, b),
         Expr::Cast { to, expr } => format!("(({})({}))", ty_ctype(to), expr_c(expr)),
         Expr::Addr(Location::Frame(d)) => format!("(uint64_t)(&{})", frame_name(*d)),
@@ -192,20 +195,42 @@ pub(crate) fn int_bits(t: &Ty) -> u8 {
 /// from that width (`(int64_t)(int32_t)x`), not treated as a positive 64-bit
 /// number — otherwise signed comparisons of negative 32-bit values are wrong.
 fn signed_cast(e: &Expr) -> String {
-    if let Expr::Binary(BinOp::And, x, m) = e {
-        if let Expr::Const(c, _) = m.as_ref() {
-            let st = match *c {
-                0xff => Some("int8_t"),
-                0xffff => Some("int16_t"),
-                0xffffffff => Some("int32_t"),
-                _ => None,
-            };
-            if let Some(t) = st {
-                return format!("(int64_t)({})({})", t, expr_c(x));
+    match e {
+        // A value masked to a sub-word width is sign-extended from that width.
+        Expr::Binary(BinOp::And, x, m) => {
+            if let Expr::Const(c, _) = m.as_ref() {
+                let st = match *c {
+                    0xff => Some("int8_t"),
+                    0xffff => Some("int16_t"),
+                    0xffffffff => Some("int32_t"),
+                    _ => None,
+                };
+                if let Some(t) = st {
+                    return format!("(int64_t)({})({})", t, expr_c(x));
+                }
             }
         }
+        // A sub-word memory load is read through a signed pointer so its sign bit
+        // extends correctly (the default `(*(uintN_t*)…)` would zero-extend).
+        Expr::Load { addr, ty } => {
+            let b = int_bits(ty);
+            if b < 64 {
+                return format!("(int64_t)(*({}*)({}))", sctype(b), expr_c(addr));
+            }
+        }
+        _ => {}
     }
     format!("(int64_t)({})", expr_c(e))
+}
+
+/// Signed C integer type name for a width in bits.
+fn sctype(bits: u8) -> &'static str {
+    match bits {
+        1..=8 => "int8_t",
+        9..=16 => "int16_t",
+        17..=32 => "int32_t",
+        _ => "int64_t",
+    }
 }
 
 fn binary_c(op: BinOp, a: &Expr, b: &Expr) -> String {

@@ -87,6 +87,12 @@ fn frame_disp(ins: &Instruction, i: u32) -> Option<i64> {
     if ins.op_kind(i) != OpKind::Memory || ins.is_ip_rel_memory_operand() {
         return None;
     }
+    // A segment override (`fs:`/`gs:` — e.g. the stack canary at `fs:0x28`, or
+    // TLS) changes the effective address; we don't model segment bases, so never
+    // treat such an operand as a plain frame slot.
+    if ins.segment_prefix() != Register::None {
+        return None;
+    }
     let base = ins.memory_base();
     if (base != Register::RBP && base != Register::EBP) || ins.memory_index() != Register::None {
         return None;
@@ -96,6 +102,13 @@ fn frame_disp(ins: &Instruction, i: u32) -> Option<i64> {
 
 /// Build the address expression and access size (bits) of a memory operand.
 fn mem_addr(ins: &Instruction) -> Option<(Expr, u32)> {
+    // Segment-overridden memory (`fs:`/`gs:`) has an effective address we don't
+    // model — falling through would silently read the wrong (absolute) address,
+    // which is exactly the kind of incorrect-but-compilable output the project
+    // forbids. Bail so the instruction becomes an honest `Stmt::Asm`.
+    if ins.segment_prefix() != Register::None {
+        return None;
+    }
     let size_bits = (ins.memory_size().size() * 8) as u32;
     if ins.is_ip_rel_memory_operand() {
         return Some((konst(ins.ip_rel_memory_address() as i128), size_bits));
