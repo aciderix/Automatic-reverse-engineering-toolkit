@@ -96,7 +96,10 @@ investir dans **B** sauf gain rapide et sûr pour l'utilisateur via A.
 
 `bench/` : `corpus.c` (fonctions de test), `difftest.sh` (niveau 2),
 `magicdiv.sh` (équivalence exhaustive 2^32 magic-division), `smt_rewrites.sh`
-(niveau 3 Z3).
+(niveau 3 Z3), `regression.sh` (**porte de non-régression unifiée** : build +
+tests + 3 niveaux ; `bash bench/regression.sh`).
+`.claude/hooks/session-start.sh` : hook SessionStart (web) qui build + assure z3
+pour que les benches tournent.
 
 ---
 
@@ -185,9 +188,9 @@ bash bench/smt_rewrites.sh                            # preuves SMT des règles 
   **boucle de raffinement** automatique.
 - **Pilier 7 (LLM §9)** : ❌ NON FAIT (pas d'API ici). À échafauder : prompt depuis
   l'IR typé, patch de noms/commentaires, re-vérification après renommage.
-- **Pilier 8 (bench/CI §10)** : ⚠️ scripts présents (difftest, smt_rewrites) mais
-  **pas de hook CI / SessionStart** pour suivre la métrique et bloquer les
-  régressions (skill `session-start-hook` disponible pour ça).
+- **Pilier 8 (bench/CI §10)** : ✅ **porte unifiée** `bench/regression.sh` (build +
+  tests + niveaux 1/2/3) et **hook SessionStart** `.claude/hooks/session-start.sh`
+  (build + z3) en place. Reste : la brancher en CI GitHub Actions sur push.
 
 ---
 
