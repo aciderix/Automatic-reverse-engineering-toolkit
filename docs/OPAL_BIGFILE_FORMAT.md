@@ -12,9 +12,13 @@ Reverse-engineered from *The Mighty Quest for Epic Loot* (engine
 - **Node type system: fully recovered.** The type-id hash is broken (CRC-64),
   so every node's `class_guid` is mapped to its engine type name with zero
   collisions (see below).
-- **Per-node-type sub-formats: partially recovered** (common object header +
-  several types characterised). Decoding each type's full internal layout is
-  the remaining work.
+- **Texture_Z "Hx" codec: DECODED.** `tools/bigfile/hx_export.py` decodes Hx
+  blobs to DXT5 and exports PNG; the per-block selector stream is consumed to
+  the byte on every texture and large textures decode to clean images
+  (1280×720 is pixel-smooth). The exact per-stream packings and the
+  `sub_95b160` block assembly were recovered with Ghidra's decompiler. A
+  format variant used by some small textures is still being finalised.
+- **Other per-node-type sub-formats** (mesh/skin/animation) remain.
 
 ## Container layout
 
