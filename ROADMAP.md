@@ -758,3 +758,56 @@ jamais régresser la re-exécutabilité prouvée.
 
 À partir de là, chaque pilier s'ajoute en mesurant systématiquement l'impact
 sur la métrique nord.
+
+---
+
+## 15. Intégration de l'analyse externe (4 rapports croisés)
+
+> Source : `ARET — Analyse complète & Propositions d'améliorations.md` (à la racine,
+> 25 propositions détaillées avec esquisses de code). Section de synthèse : ce qui
+> est **déjà fait depuis cette analyse**, les corrections, et les **nouveautés**
+> intégrées à notre plan.
+
+### 15.1 Corrections (l'analyse était partiellement datée)
+- ❌→✅ « `reg_params` jamais peuplé, signatures 64-bit toutes `(void)` » : **fait**.
+  `ssa::to_ssa` peuple `reg_params` (ordre SysV) ; `emit` les rend (`sub_x(uint64_t v0)`).
+- ✅ Imports **ELF PLT/GOT** : faits (151 sur gzip). Imports PE : faits.
+- ✅ **Niveau 3 SMT** : amorcé (`bench/smt_rewrites.sh`, 11/11 règles d'opt prouvées).
+  La Prop. 14 (lever des *fonctions entières* en SMT) reste, elle, à faire.
+
+### 15.2 Nouveautés à fort intérêt **non présentes** dans notre roadmap (intégrées)
+- **Division/modulo par constante (« magic multiply »)** [Prop. 3, P0] : reconnaître
+  `Sar(Mul(x, M), S)` → `x / D` (table magic Granlund-Möller / Hacker's Delight).
+  Très fréquent, très illisible sinon. Module `src/opt/divmagic.rs`. Vérifiable
+  par différentiel **et** SMT.
+- **Idiomes compilateur** [Prop. 5, P1] : `Or(Shl(x,k),Shr(x,32-k))` → `rol(x,k)` ;
+  `(x>0)-(x<0)` → `sign(x)` ; clamp ; popcount logiciel. Module `src/opt/idioms.rs`.
+- **Reconstruction `for`/`do-while`** [Prop. 17b] : à partir des boucles naturelles
+  (déjà détectées) + variable d'induction → `for(i=…;…;i++)`.
+- **Annotations de confiance** [Prop. 18, effort minimal] : commenter chaque fonction
+  `/* confidence: HIGH (SMT) / MEDIUM (diff) / LOW (asm résiduel) */`.
+- **Parallélisme Rayon** [Prop. 19] : `functions.par_iter()` dans emit/verify
+  (fonctions indépendantes, `prog` en lecture seule) → ~50 s → ~8 s.
+- **Backlog d'outillage (P4)** : export JSON/AST + HTML interactif [22], export
+  **LLVM IR** [23], serveur **LSP** [24], **binary diff** sémantique [25],
+  **taint analysis** [20], **ARM64** [21] (l'IR est déjà arch-agnostique).
+
+### 15.3 Confirmations (déjà dans notre roadmap, priorités affinées par l'analyse)
+- **P0 — Args aux sites d'appel** [Prop. 2b] : lire les registres d'arg vivants au
+  call-site → peupler `Call.args`. Débloque `func(a,b)` et l'inter-procédural.
+- **P0 — Basculer le défaut sur le pipeline IR** [Prop. 1] : MAIS nuance — l'émission
+  IR doit d'abord atteindre la **parité de lisibilité** (chaînes inline, switch,
+  noms de frame vars, types) que le pipeline texte a déjà. Sinon bascule = régression
+  de lisibilité. → polir l'émission IR **avant** de basculer ; garder `--legacy`.
+- **P2** — types (§5), alias+promotion (§4.1), SCCP/GVN (§4), switch→`Stmt::Switch` IR.
+- **P2/P3** — LLM (§9, nécessite API), FLIRT (§6.4), vtables C++ (§6.3), inter-proc (§6.2).
+
+### 15.4 Ordre d'exécution recommandé (révisé)
+1. **Magic division** [Prop. 3] — gain de lisibilité immédiat, sûr, vérifiable.
+2. **Args aux call-sites** [Prop. 2b] — `func(a, b)` au lieu de `func()`.
+3. **Compléter le lifter** (mul/idiv/div 1-op, rol/ror, rep→memcpy) [Prop. 4] +
+   **idiomes** [Prop. 5] — moins d'`Asm`, plus lisible.
+4. **Inférence de types** [Prop. 6/§5] — le grand saut (largeur/signe → ptr → structs).
+5. **Polissage émission IR** (chaînes/switch/confiance) puis **bascule défaut** [Prop. 1].
+6. **SCCP/GVN** [Prop. 8/9], **vtables** [Prop. 13/§6.3], **LLM** [Prop. 11/§9].
+7. Backlog P4 (Rayon tôt car trivial ; ARM64/LSP/diff/taint ensuite).

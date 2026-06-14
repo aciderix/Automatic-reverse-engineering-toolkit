@@ -215,6 +215,14 @@ bash bench/smt_rewrites.sh                            # preuves SMT des règles 
 
 ## 8. Prochaines étapes recommandées (par valeur/sûreté)
 
+> **Ordre faisant autorité** : voir `ROADMAP.md` §15.4 (révisé après l'analyse
+> croisée `ARET — Analyse complète & Propositions d'améliorations.md`). Résumé :
+> 1) division magique → 2) args aux call-sites → 3) compléter lifter + idiomes →
+> 4) inférence de types → 5) polir l'émission IR puis basculer le défaut →
+> 6) SCCP/GVN, vtables, LLM → 7) backlog P4 (Rayon tôt, ARM64/LSP/diff après).
+> Ci-dessous, le détail historique (toujours valide) :
+
+
 1. **§6.3 vtables / appels indirects C++** — injustement sauté alors que le test
    est un jeu C++. Résoudre `call [vtable+k]` quand la vtable est en `.rodata`,
    nommer `obj->vtable->method_k(...)`. Gros gain sur CE binaire.
