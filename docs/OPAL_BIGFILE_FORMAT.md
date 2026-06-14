@@ -321,10 +321,22 @@ sub_958510 (mip loop)
   colour endpoints are 3×u16 from `this+0x11c` (stride 6) and the alpha/colour
   index dwords come from `this+0xfc`/scratch.
 
+Loop structure of `sub_95b160` (now fully traced): layers (`header[0x11]`) →
+block-rows (`arg frame[32]`) → block-columns → an inner **2×2 macroblock**
+(`<2` loops): the texture is emitted in 2×2 groups of DXT5 blocks (8×8 px). Per
+macroblock the index-stream symbol gives a count 1–4; each component loop then
+`sub_959480`-decodes selectors, accumulates palette indices (modulo), and the
+final B30 write packs the 16-byte block from the endpoint/index palettes.
+Crucially, assembly **continues the block-index bitreader** (`this+0x5c`) that
+`sub_95a780` used to build the 5 tables (`this+0x74/+0x8c/+0xbc/+0xa4/+0xd4`) —
+entropy decode and assembly are interleaved.
+
 Everything is mapped; **nothing remains to discover.** The decode side is
-validated working code. Emitting DDS = reimplementing this one intricate-but-
-deterministic 39-block assembler (≈6 palette buffers + modulo index
-accumulation + the block byte layout above), validate-as-you-go.
+validated working code. Emitting DDS = reimplementing this one intricate
+39-block assembler: bitreader continuity across the 5 table builds + the
+count-driven per-macroblock multi-component decode + the 2×2 layout + the
+palette byte assembly. Deterministic (no new entropy), but a substantial
+validate-as-you-go build.
 
 Delta decode (per `sub_959590`): `acc = (acc + huff_sym()) & 0xff` for each
 byte; two bytes packed per u16 entry.
