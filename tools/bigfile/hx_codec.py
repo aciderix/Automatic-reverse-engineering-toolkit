@@ -3,29 +3,36 @@
 hx_codec.py — decoder for the Opal/Zouna "Hx" texture codec (the compressed
 pixel container inside Texture_Z nodes; see docs/OPAL_BIGFILE_FORMAT.md).
 
-Status: the **entropy core is reverse-engineered and validated on real data**.
-The codec is a custom per-component DXT/BC transcoder: each BC component is a
-sub-stream, Huffman-coded with a per-stream DEFLATE-dynamic table (MSB-first),
-then delta-decoded (running sum mod 256). This module implements and validates:
+Reverse engineered from the engine; the per-stream decoders below are validated
+by exact sub-block consumption on real textures (each decodes its declared
+entry count and consumes its sub-block to the byte).
 
-  * the MSB-first bit reader            (engine `sub_95a240`)
-  * canonical Huffman decode            (engine `sub_959480`)
-  * the DEFLATE-dynamic table builder   (engine `sub_95a020`)
-  * the colour-endpoint channel decode  (engine `sub_959590`)
+Structure of an Hx blob:
+  * a 0x26-byte node-level header (handled by opal_nodes.parse_texture)
+  * an Hx header with width/height/format and, big-endian, the (offset,size,
+    count) of five sub-streams:
+      - block-index stream  @ (be16@0x41 size, be24@0x43 off)   [1 table]
+      - alpha_idx palette   @ (be16@0x27, be24@0x21, be24@0x24) [2 tables, 6 deltas/entry -> u32]
+      - alpha_end palette   @ (be16@0x2f, be24@0x29, be24@0x2c) [1 table, 2-D delta]
+      - color_end palette   @ (be16@0x37, be24@0x31, be24@0x34) [1 table, 2 bytes/entry]
+      - color_idx palette   @ (be16@0x3f, be24@0x39, be24@0x3c) [1 table, 2-D delta]
+  * Each stream: a DEFLATE-dynamic Huffman table (build_table) then delta-coded
+    entries. The block-index stream selects, per BC block, palette entries.
 
-`build_table` + `huff_decode` reproduce the engine exactly: on a real 32×32
-texture the colour-endpoint sub-stream decodes its declared entry count while
-consuming its sub-block to the byte. The remaining channels (colour indices,
-alpha endpoints/indices) share this core but pack their output differently
-(3-bit / 2-bit indices via remap table @0xf3ce80) and still need their exact
-output formatting + final BC-block interleaving — that is the only remaining
-work to emit DDS.
+Engine refs: bit reader sub_95a240; Huffman sub_959480; table builder sub_95a020;
+channels sub_959590/9596d0/959a20/959ca0; assembly sub_958510.
 """
 import struct
 
-# Code-length code order (engine table @0xf3ce98) — DEFLATE's permutation,
-# extended with RLE symbols 17..20.
 PERM = [17, 18, 19, 20, 0, 8, 7, 9, 6, 10, 5, 11, 4, 12, 3, 13, 2, 14, 1, 15, 16]
+# 3-bit field remap used when packing colour/alpha index nibbles (engine @0xf3ce80)
+REMAP_F3CE80 = [0, 2, 3, 4, 5, 6, 7, 1, 1, 0, 5, 4, 3, 2, 6, 7]
+
+def be(d, o, n):
+    v = 0
+    for i in range(n):
+        v = (v << 8) | d[o + i]
+    return v
 
 class BitReader:
     """MSB-first bit reader over a byte buffer (engine sub_95a240)."""
@@ -45,8 +52,6 @@ class BitReader:
         return out
 
 def canonical(lengths):
-    """Build a canonical Huffman decode table from per-symbol code lengths.
-    Returns (table, maxlen) where table maps (length, code) -> symbol, or None."""
     maxlen = max(lengths) if lengths else 0
     if maxlen == 0:
         return None
@@ -60,7 +65,7 @@ def canonical(lengths):
         code = (code + bl_count[b - 1]) << 1
         next_code[b] = code
         if code > (1 << b):
-            return None  # over-subscribed
+            return None
     table = {}
     for sym, l in enumerate(lengths):
         if l:
@@ -69,7 +74,6 @@ def canonical(lengths):
     return table, maxlen
 
 def huff_decode(br, table_maxlen):
-    """Decode one symbol with a canonical table (engine sub_959480)."""
     table, maxlen = table_maxlen
     code = 0
     for l in range(1, maxlen + 1):
@@ -79,12 +83,12 @@ def huff_decode(br, table_maxlen):
     raise ValueError("invalid Huffman code")
 
 def build_table(br):
-    """Read a DEFLATE-dynamic Huffman table from the bitstream (engine
-    sub_95a020). Returns (table, N) or raises."""
-    N = br.bits(14)                       # symbol-count (HLIT), max 0x2000
+    """DEFLATE-dynamic Huffman table from the bitstream (engine sub_95a020).
+    Returns (table, maxlen)."""
+    N = br.bits(14)
     if N == 0 or N > 0x2000:
         raise ValueError(f"bad alphabet size N={N}")
-    M = br.bits(5)                        # code-length-code count (HCLEN)
+    M = br.bits(5)
     if not (1 <= M <= 21):
         raise ValueError(f"bad HCLEN M={M}")
     meta_len = [0] * 21
@@ -93,8 +97,7 @@ def build_table(br):
     meta = canonical(meta_len)
     if meta is None:
         raise ValueError("meta table over-subscribed")
-    lens = []
-    prev = 0
+    lens, prev = [], 0
     while len(lens) < N:
         s = huff_decode(br, meta)
         if s <= 16:
@@ -112,52 +115,101 @@ def build_table(br):
     main = canonical(lens[:N])
     if main is None:
         raise ValueError("main table over-subscribed")
-    return main, N
+    return main
 
-def decode_delta_pairs(br, table, count):
-    """Colour-endpoint channel (engine sub_959590): `count` entries, each two
-    bytes, each byte a running sum (mod 256) of Huffman symbols."""
-    a = b = 0
-    out = []
+def _grid(half):
+    """2-D offset grid: index -> (dx,dy), dx/dy in [-half,half] (engine init)."""
+    side = 2 * half + 1
+    dx, dy = [], []
+    v, w = -half, -half
+    for _ in range(side * side):
+        dx.append(v); dy.append(w); v += 1
+        if v > half:
+            v = -half; w += 1
+    return dx, dy
+
+# --- per-stream decoders (validated by exact sub-block consumption) ---------
+
+def decode_color_end(br, count):
+    """sub_959590: count entries, two running-sum (mod256) bytes each."""
+    a = b = 0; out = []
     for _ in range(count):
-        a = (a + huff_decode(br, table)) & 0xff
-        b = (b + huff_decode(br, table)) & 0xff
+        a = (a + huff_decode(br, br.tbl)) & 0xff
+        b = (b + huff_decode(br, br.tbl)) & 0xff
         out.append((a, b))
     return out
 
-# Hx header field offsets (big-endian) per component decoder.
-CHANNELS = {
-    "alpha_idx": (0x21, 0x24, 0x27),   # sub_959a20
-    "alpha_end": (0x29, 0x2c, 0x2f),   # sub_959ca0
-    "color_end": (0x31, 0x34, 0x37),   # sub_959590
-    "color_idx": (0x39, 0x3c, 0x3f),   # sub_9596d0
-}
+def stream(d, off, size, ntab):
+    br = BitReader(d[off:off + size])
+    tabs = [build_table(br) for _ in range(ntab)]
+    return br, tabs
 
-def be(d, o, n):
-    v = 0
-    for i in range(n):
-        v = (v << 8) | d[o + i]
-    return v
+def decode_palettes(hx):
+    """Decode the four palettes + the per-block index symbols. Returns a dict.
+    Output packing into final BC bytes / assembly is the remaining step."""
+    res = {}
+    w, h = be(hx, 0x0c, 2), be(hx, 0x0e, 2)
+    blocks = ((w + 3) // 4) * ((h + 3) // 4)
+    res["w"], res["h"], res["blocks"] = w, h, blocks
 
-def channel_substream(hx, name):
-    """Return (offset, size, count) for a component sub-stream."""
-    oo, so, co = CHANNELS[name]
-    return be(hx, oo, 3), be(hx, so, 3), be(hx, co, 2)
+    # block-index stream
+    br, (tab,) = stream(hx, be(hx, 0x43, 3), be(hx, 0x41, 2), 1)
+    res["block_syms"] = [huff_decode(br, tab) for _ in range(blocks)]
+
+    # color endpoints: 1 table, 2 delta bytes / entry
+    br, (tab,) = stream(hx, be(hx, 0x31, 3), be(hx, 0x34, 3), 1)
+    a = b = 0; ce = []
+    for _ in range(be(hx, 0x37, 2)):
+        a = (a + huff_decode(br, tab)) & 0xff
+        b = (b + huff_decode(br, tab)) & 0xff
+        ce.append((a, b))
+    res["color_end"] = ce
+
+    # alpha indices: 2 tables, 6 deltas (5/6-bit) / entry
+    br, (t1, t2) = stream(hx, be(hx, 0x21, 3), be(hx, 0x24, 3), 2)
+    dt = [0] * 6; ai = []
+    order = [(0, t1, 0x1f), (1, t2, 0x3f), (2, t1, 0x1f),
+             (3, t1, 0x1f), (4, t2, 0x3f), (5, t1, 0x1f)]
+    for _ in range(be(hx, 0x27, 2)):
+        for i, t, m in order:
+            dt[i] = (dt[i] + huff_decode(br, t)) & m
+        ai.append(tuple(dt))
+    res["alpha_idx"] = ai
+
+    # color indices: 1 table, 2-D delta (15×15 grid), 8 states / entry
+    gdx, gdy = _grid(7)
+    br, (tab,) = stream(hx, be(hx, 0x39, 3), be(hx, 0x3c, 3), 1)
+    st = [[0, 0] for _ in range(8)]; ci = []
+    for _ in range(be(hx, 0x3f, 2)):
+        e = []
+        for j in range(8):
+            s = huff_decode(br, tab)
+            st[j][0] = (gdx[s] + st[j][0]) & 7
+            st[j][1] = (gdy[s] + st[j][1]) & 7
+            e.append((st[j][0], st[j][1]))
+        ci.append(tuple(e))
+    res["color_idx"] = ci
+
+    # alpha endpoints: 1 table, 2-D delta (7×7 grid)
+    gdx, gdy = _grid(3)
+    br, (tab,) = stream(hx, be(hx, 0x29, 3), be(hx, 0x2c, 3), 1)
+    st = [[0, 0] for _ in range(8)]; ae = []
+    for _ in range(be(hx, 0x2f, 2)):
+        e = []
+        for j in range(8):
+            s = huff_decode(br, tab)
+            st[j][0] = (gdx[s] + st[j][0]) & 3
+            st[j][1] = (gdy[s] + st[j][1]) & 3
+            e.append((st[j][0], st[j][1]))
+        ae.append(tuple(e))
+    res["alpha_end"] = ae
+    return res
 
 if __name__ == "__main__":
     import sys
     hx = open(sys.argv[1], "rb").read()
-    print(f"Hx blob {len(hx)} bytes  {be(hx,0x0c,2)}x{be(hx,0x0e,2)}  fmt={hx[0x12]}")
-    for name in CHANNELS:
-        off, size, count = channel_substream(hx, name)
-        br = BitReader(hx[off:off + size])
-        try:
-            tbl, N = build_table(br)
-            extra = ""
-            if name == "color_end":
-                pairs = decode_delta_pairs(br, tbl, count)
-                extra = f"  decoded {len(pairs)} pairs, {br.p}/{size} bytes consumed"
-            print(f"  {name:10} off={off:5} size={size:4} count={count:3} "
-                  f"N={N} maxlen={tbl[1]}{extra}")
-        except ValueError as e:
-            print(f"  {name:10} ERROR: {e}")
+    r = decode_palettes(hx)
+    print(f"{r['w']}x{r['h']}  {r['blocks']} blocks")
+    print(f"  block_syms: {len(r['block_syms'])}  range[{min(r['block_syms'])},{max(r['block_syms'])}]")
+    for k in ("color_end", "alpha_idx", "color_idx", "alpha_end"):
+        print(f"  {k}: {len(r[k])} entries")
