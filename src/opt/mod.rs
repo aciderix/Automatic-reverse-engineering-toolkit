@@ -302,9 +302,117 @@ fn match_signed_lt(sf: &Expr, of: &Expr) -> Option<(Expr, Expr)> {
     }
 }
 
+/// Hacker's Delight `magicu` (Fig. 10-1) for unsigned 32-bit division by `d`.
+/// Returns `(M, s, add)` such that `floor(x/d)` is `mulhi(x,M) >> s` when
+/// `add` is false, or `((mulhi(x,M)+x) >> s')` when an extra add is required.
+/// All arithmetic is modulo 2^32 (matching C `unsigned`), so use wrapping ops.
+fn magicu32(d: u32) -> Option<(u32, u32, bool)> {
+    if d < 2 {
+        return None;
+    }
+    let two31: u32 = 0x8000_0000;
+    let nc = u32::MAX - (0u32.wrapping_sub(d)) % d;
+    let mut p: u32 = 31;
+    let mut q1: u32 = two31 / nc;
+    let mut r1: u32 = two31 - q1.wrapping_mul(nc);
+    let mut q2: u32 = 0x7FFF_FFFF / d;
+    let mut r2: u32 = 0x7FFF_FFFF - q2.wrapping_mul(d);
+    let mut add = false;
+    loop {
+        p += 1;
+        if r1 >= nc - r1 {
+            q1 = q1.wrapping_mul(2).wrapping_add(1);
+            r1 = r1.wrapping_mul(2).wrapping_sub(nc);
+        } else {
+            q1 = q1.wrapping_mul(2);
+            r1 = r1.wrapping_mul(2);
+        }
+        if r2 + 1 >= d - r2 {
+            if q2 >= 0x7FFF_FFFF {
+                add = true;
+            }
+            q2 = q2.wrapping_mul(2).wrapping_add(1);
+            r2 = r2.wrapping_mul(2).wrapping_add(1).wrapping_sub(d);
+        } else {
+            if q2 >= two31 {
+                add = true;
+            }
+            q2 = q2.wrapping_mul(2);
+            r2 = r2.wrapping_mul(2).wrapping_add(1);
+        }
+        let delta = d - 1 - r2;
+        if p >= 64 || !(q1 < delta || (q1 == delta && r1 == 0)) {
+            break;
+        }
+    }
+    Some((q2.wrapping_add(1), p - 32, add))
+}
+
+fn peel_cast(e: &Expr) -> &Expr {
+    match e {
+        Expr::Cast { expr, .. } => peel_cast(expr),
+        _ => e,
+    }
+}
+
+/// Recognise the compiler's unsigned division-by-constant idiom
+/// `(x * M) >> t` (the high-multiply form, `t >= 32`, no correction add) and
+/// recover `x / d`. The recovered `d` is *self-validated*: we recompute the
+/// canonical magic for `d` and require it to match `(M, t-32)` exactly, so a
+/// sequence that is not in fact a division by `d` is never rewritten.
+fn try_magic_udiv(shifted: &Expr, t: i128) -> Option<Expr> {
+    if !(32..=63).contains(&t) {
+        return None;
+    }
+    let inner = peel_cast(shifted);
+    let (x, m) = match inner {
+        Expr::Binary(BinOp::Mul, p, q) => {
+            if let Some(mc) = is_const(q) {
+                (p.as_ref(), mc)
+            } else if let Some(mc) = is_const(p) {
+                (q.as_ref(), mc)
+            } else {
+                return None;
+            }
+        }
+        _ => return None,
+    };
+    if m <= 0 || m > u32::MAX as i128 {
+        return None; // no-add form: M fits in 32 bits
+    }
+    let m = m as u32;
+    let s_obs = (t - 32) as u32;
+    let d0 = (1u128 << t) / m as u128;
+    for cand in [d0.wrapping_sub(1), d0, d0 + 1] {
+        if !(2..=u32::MAX as u128).contains(&cand) {
+            continue;
+        }
+        let d = cand as u32;
+        if let Some((mm, ss, add)) = magicu32(d) {
+            if !add && mm == m && ss == s_obs {
+                return Some(Expr::Binary(
+                    BinOp::UDiv,
+                    Box::new(x.clone()),
+                    Box::new(Expr::Const(d as i128, Ty::int(32))),
+                ));
+            }
+        }
+    }
+    None
+}
+
 fn fold_binary(op: BinOp, a: Expr, b: Expr) -> Expr {
     use BinOp::*;
     let i32ty = Ty::int(32);
+
+    // Unsigned division-by-constant: `(x * M) >> t` -> `x / d`.
+    if op == Shr {
+        if let Some(t) = is_const(&b) {
+            if let Some(rw) = try_magic_udiv(&a, t) {
+                return rw;
+            }
+        }
+    }
 
     // Const op Const — only width-independent ops (bitwise, equality).
     if let (Some(x), Some(y)) = (is_const(&a), is_const(&b)) {
@@ -581,6 +689,49 @@ mod tests {
             fold(&jle),
             Expr::Binary(BinOp::Sle, Box::new(a), Box::new(b))
         );
+    }
+
+    #[test]
+    fn recovers_unsigned_magic_division() {
+        // gcc's `x / 10` for unsigned 32-bit: (uint64)((x & 0xffffffff) * 0xCCCCCCCD) >> 35.
+        let x = Expr::Binary(
+            BinOp::And,
+            Box::new(Expr::Read(Location::Reg(RegId(7)))),
+            Box::new(Expr::konst(0xffff_ffff, 64)),
+        );
+        let mul = Expr::Binary(BinOp::Mul, Box::new(x.clone()), Box::new(Expr::konst(0xCCCC_CCCD, 64)));
+        let cast = Expr::Cast { to: Ty::int(64), expr: Box::new(mul) };
+        let shr = Expr::Binary(BinOp::Shr, Box::new(cast), Box::new(Expr::konst(35, 64)));
+        match fold(&shr) {
+            Expr::Binary(BinOp::UDiv, lhs, rhs) => {
+                assert_eq!(*lhs, x);
+                assert_eq!(*rhs, Expr::Const(10, Ty::int(32)));
+            }
+            other => panic!("expected x / 10, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn magic_recovery_is_exact_only() {
+        // magicu32 must reproduce the well-known constants, and a non-matching
+        // shift must NOT be misrecognised as a division.
+        assert_eq!(magicu32(10), Some((0xCCCC_CCCD, 3, false)));
+        assert_eq!(magicu32(3), Some((0xAAAA_AAAB, 1, false)));
+        // Low-multiply form (shift < 32) is not a high-multiply division idiom.
+        let mul = Expr::Binary(
+            BinOp::Mul,
+            Box::new(Expr::Read(Location::Reg(RegId(7)))),
+            Box::new(Expr::konst(0xCCCC_CCCD, 64)),
+        );
+        let shr = Expr::Binary(BinOp::Shr, Box::new(mul), Box::new(Expr::konst(31, 64)));
+        assert!(matches!(fold(&shr), Expr::Binary(BinOp::Shr, ..)));
+        // A plain shift with no multiply is never a division.
+        let plain = Expr::Binary(
+            BinOp::Shr,
+            Box::new(Expr::Read(Location::Reg(RegId(7)))),
+            Box::new(Expr::konst(35, 64)),
+        );
+        assert!(matches!(fold(&plain), Expr::Binary(BinOp::Shr, ..)));
     }
 
     #[test]

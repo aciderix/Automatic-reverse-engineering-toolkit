@@ -818,9 +818,23 @@ sur la métrique nord.
   empty-paren → gzip recompile **131/131**, différentiel **21/21**, SMT 11/11.
   Reste : **args 32-bit cdecl sur la pile** ; matching positionnel exact quand
   les `reg_params` du callee ne sont pas un préfixe contigu.
+- ✅ **Magic division (unsigned 32-bit)** [Prop. 3] : `opt::try_magic_udiv`
+  reconnaît `(x * M) >> t` (t≥32, forme high-multiply sans correction) et
+  recouvre `x / d`. `d` est **auto-validé** : on recalcule le magic canonique de
+  `d` (`opt::magicu32`, Hacker's Delight Fig. 10-1) et on exige un match exact
+  `(M, t-32, add=false)` → aucune séquence non-divisive n'est jamais réécrite.
+  Vérifié : équivalence **exhaustive sur les 2^32 entrées** (`bench/magicdiv.sh`,
+  9 diviseurs, 8/9 réécrits, l'add-form restant resté correct) + 2 tests
+  unitaires. (Z3 bit-blaste le `bvudiv` 32-bit symbolique et ne converge pas →
+  l'exhaustif est ici la preuve plus forte et plus rapide.)
 
 ### 15.4 Ordre d'exécution recommandé (révisé)
-1. **Magic division** [Prop. 3] — gain de lisibilité immédiat, sûr, vérifiable.
+1. ✅ **Magic division (unsigned 32-bit)** [Prop. 3] — `(x * M) >> t` → `x / d`,
+   recouvrement *auto-validé* (Hacker's Delight `magicu` recalculé, match exact
+   requis), équivalence **exhaustive 2^32** (`bench/magicdiv.sh`).
+   *(fait, cf. 15.4bis)*.
+   Reste : magic **signée**, magic **64-bit**, reconstruction du **modulo**
+   (`x - (x/d)*d` → `x % d`).
 2. ✅ **Args aux call-sites** [Prop. 2b] — `func(a, b)` au lieu de `func()` *(fait, cf. 15.4bis)*.
 3. **Compléter le lifter** (mul/idiv/div 1-op, rol/ror, rep→memcpy) [Prop. 4] +
    **idiomes** [Prop. 5] — moins d'`Asm`, plus lisible.

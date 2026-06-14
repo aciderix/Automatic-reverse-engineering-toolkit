@@ -32,8 +32,9 @@ décision (ex : promotion SSA différée faute d'analyse d'alias — cf. §6).
 % de fonctions dont le C émis (a) **recompile** et (b) est **prouvé équivalent**
 au binaire (différentiel ou SMT). Trois niveaux, **tous opérationnels** :
 1. **Recompile** — `--mode verify` : 100 % sur gzip/ls/cat/sha256sum/base64 + jeu.
-2. **Différentiel** (exécution, 50k entrées) — `bench/difftest.sh` : 16/16 (dont
-   pointeurs/tableaux/boucles/chaînes).
+2. **Différentiel** (exécution, 50k entrées) — `bench/difftest.sh` : 21/21 (dont
+   pointeurs/tableaux/boucles/chaînes) ; `bench/magicdiv.sh` : équivalence
+   **exhaustive 2^32** de la réécriture magic-division.
 3. **SMT formel** (Z3) — `bench/smt_rewrites.sh` : 11/11 règles d'opt prouvées.
 
 ---
@@ -87,14 +88,15 @@ investir dans **B** sauf gain rapide et sûr pour l'utilisateur via A.
 | `ir/lift.rs` | **lift IR** via API structurée iced (registres/flags/mémoire), `Frame` slots, `asm_fallback` sain, `cc_to_cond` | B |
 | `ir/build.rs` | Construit l'IR-CFG depuis `analysis::Function` + terminateurs ; `dump` (`--mode ir`) | B |
 | `ssa/mod.rs` | Construction SSA (Cytron) : φ + renommage ; récup args registres 64-bit | B |
-| `opt/mod.rs` | Passes SSA : const-prop, **folding/simplif algébrique** (reconstruit conditions signées/non), DCE, propagation mono-usage + chaînes, `prune_call_args` (ôte args `Undef`) | B |
+| `opt/mod.rs` | Passes SSA : const-prop, **folding/simplif algébrique** (reconstruit conditions signées/non), DCE, propagation mono-usage + chaînes, `prune_call_args` (ôte args `Undef`), **magic division** (`magicu32`/`try_magic_udiv`, auto-validée) | B |
 | `emit/mod.rs` | IR→C **compilable** (goto), destruction SSA (φ→copies), signatures (args), `signed_cast`, `fixup_call_arity` (aligne appels sur l'arité callee + arités libc) | B |
 | `emit/structured.rs` | IR→C **structuré** (if/while), réutilise `cfg::dom` | B |
 | `verify/mod.rs` | Harness recompilabilité (niveau 1), `--mode verify` | B |
 | `main.rs` | CLI (modes : info/asm/cfg/decompile/ir/emit/verify ; `--flat`/`--split`/`--function`/`--limit`/`--no-prologue-scan`) | — |
 
 `bench/` : `corpus.c` (fonctions de test), `difftest.sh` (niveau 2),
-`smt_rewrites.sh` (niveau 3 Z3).
+`magicdiv.sh` (équivalence exhaustive 2^32 magic-division), `smt_rewrites.sh`
+(niveau 3 Z3).
 
 ---
 
@@ -142,8 +144,11 @@ bash bench/smt_rewrites.sh                            # preuves SMT des règles 
 > en opt ôte les `Undef` ; `emit::fixup_call_arity` aligne chaque appel d'une
 > fonction définie sur l'arité de son callee ; table d'arités libc pour les
 > imports → `func(a,b)`, `memcpy(d,s,n)`, `strlen(s)`). gzip recompile
-> **131/131**, différentiel **21/21**, SMT 11/11.
-> Détail dans `ROADMAP.md §15.4bis`. Prochain : **magic division** (Prop. 3),
+> **131/131**, différentiel **21/21** ; ✅ **magic division unsigned 32-bit**
+> (`opt::try_magic_udiv` + `magicu32` auto-validant : `(x*M)>>t` → `x/d`, match
+> magic canonique exact requis ; vérifié **exhaustivement sur 2^32 entrées**
+> via `bench/magicdiv.sh` — Z3 ne converge pas sur le `bvudiv` symbolique).
+> Détail dans `ROADMAP.md §15.4bis`. Prochain : **magic signée / 64-bit + modulo**,
 > puis **inférence de types** (§5).
 
 

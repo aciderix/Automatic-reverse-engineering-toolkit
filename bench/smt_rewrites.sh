@@ -51,5 +51,10 @@ check "x | 0 = x"  unsat "$HDR (assert (not (= (bvor x $ZERO) x)))"
 check "sign-extend32 = mask-then-signed-of-32" unsat "$HDR
 (assert (not (= ((_ sign_extend 32) ((_ extract 31 0) x)) ((_ sign_extend 32) ((_ extract 31 0) (bvand x #x00000000ffffffff))))))"
 
+# NOTE: the unsigned magic-division rewrite (opt::try_magic_udiv) is verified
+# *exhaustively* over all 2^32 inputs by bench/magicdiv.sh — Z3 bit-blasts the
+# 64-bit multiply + symbolic 32-bit division and does not return in useful time,
+# so the exhaustive differential is the stronger, faster check here.
+
 # sanity: a wrong rewrite must be detected (a <s b  is NOT  a <u b)
 check "SANITY: signed != unsigned (must be sat)" sat "$HDR (assert (not (= (bvslt a b) (bvult a b))))"
