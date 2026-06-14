@@ -331,12 +331,25 @@ Crucially, assembly **continues the block-index bitreader** (`this+0x5c`) that
 `sub_95a780` used to build the 5 tables (`this+0x74/+0x8c/+0xbc/+0xa4/+0xd4`) —
 entropy decode and assembly are interleaved.
 
+All data streams located and validated:
+- block-index stream (`0x41/0x43`) is consumed **exactly** building **5**
+  Huffman tables (`this+0x74` always; `+0x8c,+0xbc` if `count@0x27`; `+0xa4,
+  +0xd4` if `count@0x37`) — verified 88/88, 90/90, 94/94, 100/100.
+- four channel streams → the four palettes (validated earlier).
+- the **per-block selector stream starts right after the index stream**
+  (offset = index_off + index_size, e.g. 646 = 558+88) and runs to end of blob.
+  The blob stores **mip 0 only**; smaller mips are regenerated at load (the
+  `header[0x0a]` mip count is the requested D3D level count, not stored data).
+  `sub_95b7e0` points `this+0x5c` at this stream before `sub_95b160` reads it
+  with the 5 tables.
+
 Everything is mapped; **nothing remains to discover.** The decode side is
-validated working code. Emitting DDS = reimplementing this one intricate
-39-block assembler: bitreader continuity across the 5 table builds + the
-count-driven per-macroblock multi-component decode + the 2×2 layout + the
-palette byte assembly. Deterministic (no new entropy), but a substantial
-validate-as-you-go build.
+validated working code and every stream is located. Emitting DDS = implementing
+the one 39-block assembler `sub_95b160`: per 2×2 macroblock, decode a count 1–4
+(`this+0x74`), run the count-driven component loops (`this+0xa4/+0xbc/+0xd4`)
+accumulating palette indices (modulo), look up the endpoint/index palettes
+(`this+0xfc/+0x10c/+0x11c`), and pack the four 16-byte DXT5 blocks. Fully
+specified; a substantial validate-as-you-go build.
 
 Delta decode (per `sub_959590`): `acc = (acc + huff_sym()) & 0xff` for each
 byte; two bytes packed per u16 entry.
