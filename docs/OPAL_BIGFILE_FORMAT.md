@@ -344,12 +344,33 @@ All data streams located and validated:
   with the 5 tables.
 
 Everything is mapped; **nothing remains to discover.** The decode side is
-validated working code and every stream is located. Emitting DDS = implementing
-the one 39-block assembler `sub_95b160`: per 2×2 macroblock, decode a count 1–4
-(`this+0x74`), run the count-driven component loops (`this+0xa4/+0xbc/+0xd4`)
-accumulating palette indices (modulo), look up the endpoint/index palettes
-(`this+0xfc/+0x10c/+0x11c`), and pack the four 16-byte DXT5 blocks. Fully
-specified; a substantial validate-as-you-go build.
+validated working code, every stream is located, and the assembler `sub_95b160`
+is traced register-exact:
+
+### Palette → buffer map (channel decoder → engine offset)
+- `this+0x10c` (u16),  count `this+0x110` ← `sub_959590` colour values
+- `this+0xec`  (u32),  count `this+0x100` ← `sub_959a20` alpha values
+- `this+0x11c` (3×u16/entry)             ← `sub_9596d0` (8 states → remap@0xf3ce80 pack)
+- `this+0xfc`  (u32/entry)               ← `sub_959ca0` (8 states → pack)
+
+### Per-2×2-macroblock decode (`sub_95b160`), all accumulators wrap by subtract
+1. `sym = huff(0x74)`; `cat = sym&7`; `count = COUNT[cat]` (`[1,2,2,3,3,3,3,4]`);
+   sub-block→endpoint remap = bytes at `0x105c2bc + cat*4` (4 entries, table:
+   `0,0,0,0 / 0,0,1,1 / 0,1,0,1 / 0,0,1,2 / 1,2,0,0 / 0,1,0,2 / 1,0,2,0 / 0,1,2,3`).
+2. B19, `count`×: `accC += huff(0xa4)` mod `count(0x110)`; `colorB19[i]=u16[0x10c][accC]`.
+3. B23, `count`×: `accA += huff(0x8c)` mod `count(0x100)`; `alphaB23[i]=u32[0xec][accA]`.
+4. 2×2 sub-blocks (s=0..3, edx = remap[s]):
+   - `accCI += huff(0xd4)` mod count(0x11c); `accAI += huff(0xbc)` mod count(0xfc)
+   - `ep = u16x3[0x11c][accCI]`  (ep0,ep1,ep2)
+   - **DXT5 block (standard order, alpha first):**
+     - alpha block = `alphaB23[edx]` (4 bytes) ++ `u32[0xfc][accAI]` (4 bytes)
+     - colour block = `(colorB19[edx] | ep0<<16)` (c0,c1) ++ `(ep1 | ep2<<16)` (indices)
+
+That is the complete pixel reconstruction. Remaining = a faithful
+implementation of the two 2-D-delta palette packings (`0x11c`,`0x0fc`; the exact
+remap slot order is fiddly) + this assembly + a DXT5→RGBA decode. The decode
+core, the colour/alpha palettes, and this mapping are all in hand; the colour
+preview (`hx_preview.py`) already renders coherent images, confirming the chain.
 
 Delta decode (per `sub_959590`): `acc = (acc + huff_sym()) & 0xff` for each
 byte; two bytes packed per u16 entry.
