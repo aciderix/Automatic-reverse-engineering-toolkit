@@ -27,3 +27,11 @@ int umod(unsigned a, unsigned b) { return b ? (int)(a % b) : 0; }
 int sdiv(int a, int b)           { return b ? a / b : 0; }
 int smod(int a, int b)           { return b ? a % b : 0; }
 int widemul(unsigned a, unsigned b) { return (int)((unsigned long long)a * b >> 4); }
+
+/* High-byte registers (ah/dh), sign-extension (cdqe/movsx). */
+int hibyte(unsigned x)           { return (int)((x >> 8) & 0xff); }       /* %ah read */
+int hibyte3(unsigned x)          { unsigned char h = (x >> 8); return h * 3; }
+int sxbyte(int x)                { return (int)(signed char)x; }          /* movsx */
+int sxword(int x)                { return (int)(short)x; }                /* movsx */
+int idxw(const int* a, int i)    { return a[i] + 1; }                     /* cdqe index */
+

@@ -68,12 +68,17 @@ fn konst(v: i128) -> Expr {
 
 /// Read a register operand as its correctly-masked value.
 fn read_reg(r: Register) -> Option<Expr> {
-    if is_high_byte(r) {
-        return None; // model partial high-byte reads later
-    }
     let id = reg_id(r)?;
-    let w = (r.size() * 8) as u32;
     let full = Expr::Read(Location::Reg(id));
+    if is_high_byte(r) {
+        // ah/bh/ch/dh are bits 8..=15 of the full register: (full >> 8) & 0xff.
+        return Some(Expr::Binary(
+            BinOp::And,
+            Box::new(Expr::Binary(BinOp::Shr, Box::new(full), Box::new(konst(8)))),
+            Box::new(konst(0xff)),
+        ));
+    }
+    let w = (r.size() * 8) as u32;
     if w >= 64 {
         Some(full)
     } else {
@@ -210,12 +215,24 @@ fn write_op0(ins: &Instruction, value: Expr, bits: u32) -> Option<Vec<Stmt>> {
     match ins.op_kind(0) {
         OpKind::Register => {
             let r = ins.op_register(0);
-            if is_high_byte(r) {
-                return None;
-            }
             let id = reg_id(r)?;
-            let w = (r.size() * 8) as u32;
             let dst = Location::Reg(id);
+            if is_high_byte(r) {
+                // dst = (dst & ~0xff00) | ((value & 0xff) << 8)
+                let keep = Expr::Binary(
+                    BinOp::And,
+                    Box::new(Expr::Read(dst.clone())),
+                    Box::new(konst(!0xff00i128 & mask(64))),
+                );
+                let newbits = Expr::Binary(
+                    BinOp::Shl,
+                    Box::new(Expr::Binary(BinOp::And, Box::new(value), Box::new(konst(0xff)))),
+                    Box::new(konst(8)),
+                );
+                let expr = Expr::Binary(BinOp::Or, Box::new(keep), Box::new(newbits));
+                return Some(vec![Stmt::Set { dst, expr }]);
+            }
+            let w = (r.size() * 8) as u32;
             let expr = combine_write(&dst, w, value, bits);
             Some(vec![Stmt::Set { dst, expr }])
         }
@@ -579,6 +596,38 @@ pub fn lift(insn: &Insn, bits: u32) -> Vec<Stmt> {
             let rax = Location::Reg(RegId(0));
             let rdx = Location::Reg(RegId(2));
             vec![Stmt::Set { dst: rdx, expr: bin(BinOp::Sar, Expr::Read(rax), konst(63)) }]
+        }
+
+        // cbw/cwde/cdqe: sign-extend the accumulator in place (al->ax, ax->eax,
+        // eax->rax).
+        Mnemonic::Cbw | Mnemonic::Cwde | Mnemonic::Cdqe => {
+            let (sw, dw) = match ins.mnemonic() {
+                Mnemonic::Cbw => (8u32, 16u32),
+                Mnemonic::Cwde => (16, 32),
+                _ => (32, 64), // Cdqe
+            };
+            let rax = Location::Reg(RegId(0));
+            let src = bin(BinOp::And, Expr::Read(rax.clone()), konst(mask(sw)));
+            let sv = Expr::Unary(UnOp::SignExtend, Box::new(src));
+            vec![Stmt::Set { dst: rax.clone(), expr: combine_write(&rax, dw, sv, bits) }]
+        }
+
+        // leave: mov rsp, rbp ; pop rbp.
+        Mnemonic::Leave => {
+            let ptr = (bits / 8) as i128;
+            let sp = Location::Reg(RegId(4));
+            let bp = Location::Reg(RegId(5));
+            vec![
+                Stmt::Set { dst: sp.clone(), expr: Expr::Read(bp.clone()) },
+                Stmt::Set {
+                    dst: bp,
+                    expr: Expr::Load {
+                        addr: Box::new(Expr::Read(sp.clone())),
+                        ty: Ty::int(bits as u8),
+                    },
+                },
+                Stmt::Set { dst: sp.clone(), expr: bin(BinOp::Add, Expr::Read(sp), konst(ptr)) },
+            ]
         }
 
         Mnemonic::Shl => {

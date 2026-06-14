@@ -827,6 +827,18 @@ sur la métrique nord.
   9 diviseurs, 8/9 réécrits, l'add-form restant resté correct) + 2 tests
   unitaires. (Z3 bit-blaste le `bvudiv` 32-bit symbolique et ne converge pas →
   l'exhaustif est ici la preuve plus forte et plus rapide.)
+- ✅ **Deux bugs de correction corrigés** (principe « jamais de code faux ») :
+  (a) la **mémoire à override de segment** (`fs:`/`gs:`, p.ex. canary `fs:0x28`)
+  était liftée comme un load absolu (segment perdu) → `mem_addr`/`frame_disp`
+  abandonnent désormais sur un préfixe de segment → `Stmt::Asm` honnête ;
+  (b) `Unary(SignExtend)` était émis en identité → `movsx`/`movsxd` zéro-
+  étendaient au lieu d'étendre en signe → émission via cast signé **conscient de
+  la largeur** (`signed_cast` gère aussi les loads sous-mot via pointeur signé).
+- ✅ **Lifter élargi** : registres **high-byte** (`ah/bh/ch/dh`, lecture
+  `(r>>8)&0xff` + écriture partielle exacte), `leave`, `cbw`/`cwde`/`cdqe`
+  (extension de signe de l'accumulateur). Fait tomber les fallbacks `asm` de
+  `movzx`/`movsx`/`test`/`leave`/`cdqe`. Différentiel élargi à **26/26**
+  (high-byte, sign-ext, index cdqe ajoutés au corpus).
 
 ### 15.4 Ordre d'exécution recommandé (révisé)
 1. ✅ **Magic division (unsigned 32-bit)** [Prop. 3] — `(x * M) >> t` → `x / d`,
@@ -836,8 +848,10 @@ sur la métrique nord.
    Reste : magic **signée**, magic **64-bit**, reconstruction du **modulo**
    (`x - (x/d)*d` → `x % d`).
 2. ✅ **Args aux call-sites** [Prop. 2b] — `func(a, b)` au lieu de `func()` *(fait, cf. 15.4bis)*.
-3. **Compléter le lifter** (mul/idiv/div 1-op, rol/ror, rep→memcpy) [Prop. 4] +
-   **idiomes** [Prop. 5] — moins d'`Asm`, plus lisible.
+3. ⏳ **Compléter le lifter** [Prop. 4] + **idiomes** [Prop. 5] — moins d'`Asm`.
+   Fait : high-byte, `leave`, `cbw/cwde/cdqe`, correction segment + sign-ext.
+   Reste : `rol`/`ror`, `adc`/`sbb`, `rep movs/stos`→`memcpy`/`memset`, SSE/float
+   (`movaps`/`pxor`/`mulsd`/`cvtsi2sd`… — le plus gros bloc restant).
 4. **Inférence de types** [Prop. 6/§5] — le grand saut (largeur/signe → ptr → structs).
 5. **Polissage émission IR** (chaînes/switch/confiance) puis **bascule défaut** [Prop. 1].
 6. **SCCP/GVN** [Prop. 8/9], **vtables** [Prop. 13/§6.3], **LLM** [Prop. 11/§9].
