@@ -151,20 +151,21 @@ fn main() -> Result<()> {
         Mode::Ir => {
             for f in &functions {
                 let mut irf = ir::build::build_ir(&prog, f);
-                // Memory alias analysis (§4.1) ran on the pre-SSA IR inside
-                // build_ir (frame_promotable). Verdict is a display-only
-                // diagnostic; it does not alter the IR.
-                let promotable = irf.frame_promotable;
+                // Frame-region analysis (§4.1) on the pre-SSA IR: which named
+                // local slots are provably free of any aliasing frame access.
+                // Display-only diagnostic; it does not alter the IR.
+                let promotable = opt::frame::promotable_slots(&irf);
                 ssa::to_ssa(&mut irf);
                 opt::optimize(&mut irf);
-                out.push_str(&format!(
-                    "// alias: frame slots {}\n",
-                    if promotable {
-                        "promotable (no escape, no aliasing access)"
-                    } else {
-                        "NOT promotable (address taken or unknown-pointer access)"
-                    }
-                ));
+                if !promotable.is_empty() {
+                    let names: Vec<String> =
+                        promotable.iter().map(|d| emit::frame_name(*d)).collect();
+                    out.push_str(&format!(
+                        "// frame: {} promotable local slot(s): {}\n",
+                        promotable.len(),
+                        names.join(", ")
+                    ));
+                }
                 out.push_str(&ir::build::dump(&irf));
                 out.push('\n');
             }

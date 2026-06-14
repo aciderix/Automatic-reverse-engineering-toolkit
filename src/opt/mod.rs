@@ -14,6 +14,7 @@
 #![allow(dead_code)]
 
 pub mod alias;
+pub mod frame;
 
 use crate::ir::types::*;
 use std::collections::HashMap;
@@ -612,7 +613,6 @@ mod tests {
             name: "t".into(),
             bits: 64,
             reg_params: vec![],
-            frame_promotable: false,
             blocks: vec![Block {
                 id: 0,
                 addr: 0,

@@ -1,0 +1,549 @@
+//! Frame-region analysis (roadmap §4.1) — the offset-aware layer that lets
+//! stack-slot promotion fire on real, heap-using functions.
+//!
+//! ## The problem it solves
+//!
+//! The coarse alias verdict (`opt::alias::frame_promotable`) disqualifies any
+//! function with an unknown-pointer access — which is *every* function that does
+//! heap work, i.e. essentially all of them. That is correct but useless: a heap
+//! pointer cannot actually alias a stack slot whose address never escaped, and a
+//! function's `rbp`-relative locals live in a different part of the frame than
+//! its `rsp`-relative spills / outgoing arguments.
+//!
+//! This module reasons about *offsets within the frame* so a non-aliased local
+//! can be promoted even when the function touches the heap and the stack:
+//!
+//! 1. **Taint** (flow-insensitive): which registers hold a value derived from
+//!    `rsp`/`rbp`. A generic access through a *non*-tainted base is a heap access
+//!    — provably disjoint from a non-escaped frame, so it is ignored.
+//! 2. **`rsp` offset** (flow-sensitive): the byte offset of `rsp` relative to
+//!    function entry, tracked through `push`/`pop`/`sub rsp`/`mov rsp,rbp`. This
+//!    places `rbp` (`mov rbp, rsp`) and every `rsp`/`rbp`-relative access on one
+//!    entry-relative axis.
+//! 3. **Overlap**: a named local `[rbp-d]` is promotable iff its byte range
+//!    overlaps no *generic* frame access (spill, outgoing arg, saved register).
+//!
+//! ## Soundness
+//!
+//! Conservative throughout: anything the model cannot follow (an `rsp` write it
+//! does not recognise, a conflicting `rsp` at a CFG join, a variable-indexed
+//! frame access, a frame pointer escaping via copy/store/call/`lea`) makes the
+//! whole analysis yield *no* promotable slots. A reported slot is guaranteed
+//! free of any aliasing frame access.
+#![allow(dead_code)]
+
+use crate::ir::types::*;
+use std::collections::{BTreeSet, HashSet};
+
+const RSP: u16 = 4;
+const RBP: u16 = 5;
+
+/// Outcome of the frame analysis.
+struct FrameInfo {
+    /// Whether the `rsp`/`rbp` model held everywhere (else: promote nothing).
+    ok: bool,
+    /// `rbp`'s byte offset relative to entry `rsp` (set at `mov rbp, rsp`).
+    rbp_off: Option<i64>,
+    /// Entry-relative `[start, end)` byte ranges of every *generic* frame access
+    /// (rsp/rbp-relative loads/stores, push/pop saves, spills, outgoing args).
+    generic_ranges: Vec<(i64, i64)>,
+    /// A frame pointer escaped (taken by `lea`, copied into a base, stored to or
+    /// passed beyond the frame): no local can be assumed un-aliased.
+    escaped: bool,
+}
+
+impl FrameInfo {
+    fn bail() -> Self {
+        FrameInfo { ok: false, rbp_off: None, generic_ranges: Vec::new(), escaped: true }
+    }
+}
+
+/// The set of local slot displacements (`Location::Frame(d)`, `d < 0`) that are
+/// provably free of any aliasing frame access — safe to promote. Empty if the
+/// analysis bailed or anything escaped.
+pub fn promotable_slots(func: &IrFunction) -> BTreeSet<i64> {
+    let info = analyze(func);
+    let empty = BTreeSet::new();
+    if !info.ok || info.escaped {
+        return empty;
+    }
+    let Some(rbp_off) = info.rbp_off else { return empty };
+
+    // Named local slots (negative displacement). Width is not carried on a Frame
+    // location, so assume a full 8-byte slot — conservative for overlap.
+    let mut slots = BTreeSet::new();
+    collect_local_slots(func, &mut slots);
+
+    slots
+        .into_iter()
+        .filter(|&disp| {
+            let s = rbp_off + disp;
+            let e = s + 8;
+            !info.generic_ranges.iter().any(|&(gs, ge)| gs < e && s < ge)
+        })
+        .collect()
+}
+
+/// Negative-displacement frame slots (the locals).
+fn collect_local_slots(func: &IrFunction, out: &mut BTreeSet<i64>) {
+    let mut note = |l: &Location| {
+        if let Location::Frame(d) = l {
+            if *d < 0 {
+                out.insert(*d);
+            }
+        }
+    };
+    for b in &func.blocks {
+        for s in &b.stmts {
+            if let Stmt::Set { dst, .. } = s {
+                note(dst);
+            }
+            each_expr(s, &mut |e| {
+                if let Expr::Read(l) | Expr::Addr(l) = e {
+                    note(l);
+                }
+            });
+        }
+    }
+}
+
+// --- taint ----------------------------------------------------------------
+
+/// Registers that may hold an `rsp`/`rbp`-derived value (flow-insensitive,
+/// over-approximate — safe for escape detection).
+fn tainted_regs(func: &IrFunction) -> HashSet<u16> {
+    let mut t: HashSet<u16> = HashSet::new();
+    t.insert(RSP);
+    t.insert(RBP);
+    loop {
+        let mut changed = false;
+        for b in &func.blocks {
+            for s in &b.stmts {
+                if let Stmt::Set { dst: Location::Reg(r), expr } = s {
+                    if !t.contains(&r.0) && mentions_tainted(expr, &t) {
+                        t.insert(r.0);
+                        changed = true;
+                    }
+                }
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+    t
+}
+
+fn mentions_tainted(e: &Expr, t: &HashSet<u16>) -> bool {
+    let mut hit = false;
+    walk(e, &mut |x| {
+        if let Expr::Read(Location::Reg(r)) = x {
+            if t.contains(&r.0) {
+                hit = true;
+            }
+        }
+    });
+    hit
+}
+
+// --- the model ------------------------------------------------------------
+
+fn analyze(func: &IrFunction) -> FrameInfo {
+    let n = func.blocks.len();
+    if n == 0 {
+        return FrameInfo { ok: true, rbp_off: None, generic_ranges: Vec::new(), escaped: false };
+    }
+    let tainted = tainted_regs(func);
+
+    // Block-entry rsp offsets via a worklist; None = not yet reached.
+    let entry = func.blocks.iter().position(|b| b.addr == func.entry).unwrap_or(0);
+    let mut rsp_in: Vec<Option<i64>> = vec![None; n];
+    rsp_in[entry] = Some(0);
+
+    let mut info =
+        FrameInfo { ok: true, rbp_off: None, generic_ranges: Vec::new(), escaped: false };
+
+    let mut work = vec![entry];
+    while let Some(bi) = work.pop() {
+        let mut rsp = rsp_in[bi].unwrap();
+        for s in &func.blocks[bi].stmts {
+            if !step(s, &mut rsp, &mut info, &tainted) {
+                return FrameInfo::bail();
+            }
+        }
+        // Propagate rsp to successors; a conflict means a non-static frame.
+        for &su in &func.blocks[bi].succ {
+            let su = su as usize;
+            if su >= n {
+                continue;
+            }
+            match rsp_in[su] {
+                None => {
+                    rsp_in[su] = Some(rsp);
+                    work.push(su);
+                }
+                Some(prev) if prev != rsp => return FrameInfo::bail(),
+                Some(_) => {}
+            }
+        }
+    }
+    info
+}
+
+/// Interpret one statement, updating `rsp` and recording accesses/escapes.
+/// Returns `false` to bail (model broken).
+fn step(s: &Stmt, rsp: &mut i64, info: &mut FrameInfo, tainted: &HashSet<u16>) -> bool {
+    match s {
+        Stmt::Set { dst: Location::Reg(r), expr } if r.0 == RSP => {
+            // rsp must move by a constant, or be reloaded from rbp (leave).
+            match rsp_delta(expr) {
+                Some(RspWrite::Delta(k)) => *rsp += k,
+                Some(RspWrite::FromRbp) => {
+                    if let Some(off) = info.rbp_off {
+                        *rsp = off;
+                    } else {
+                        return false;
+                    }
+                }
+                None => return false,
+            }
+            // The rhs may still embed a frame load (rare) — scan it.
+            scan_expr(expr, *rsp, info, tainted)
+        }
+        Stmt::Set { dst: Location::Reg(r), expr } if r.0 == RBP => {
+            // `mov rbp, rsp` establishes the frame base. A `pop rbp` (Load) is an
+            // epilogue restore — ignore. Anything else makes rbp non-static.
+            match expr {
+                Expr::Read(Location::Reg(b)) if b.0 == RSP => {
+                    match info.rbp_off {
+                        None => info.rbp_off = Some(*rsp),
+                        Some(prev) if prev != *rsp => return false,
+                        Some(_) => {}
+                    }
+                    true
+                }
+                Expr::Load { addr, ty } => {
+                    // restoring rbp from the stack: range the load, don't bail.
+                    range_access(addr, int_bytes(ty), *rsp, info, tainted)
+                }
+                _ => false,
+            }
+        }
+        Stmt::Set { expr, .. } => scan_expr(expr, *rsp, info, tainted),
+        Stmt::Assign { expr, .. } | Stmt::CallStmt(expr) => scan_expr(expr, *rsp, info, tainted),
+        Stmt::Store { addr, value, ty } => {
+            // A tainted value stored to a non-frame address leaks a frame pointer.
+            let cls = classify(addr, *rsp, info.rbp_off, tainted);
+            if mentions_tainted(value, tainted) || matches!(value, Expr::Addr(Location::Frame(_)))
+            {
+                if !matches!(cls, AddrClass::Frame(_)) {
+                    info.escaped = true;
+                }
+            }
+            if !apply_class(cls, int_bytes(ty), info) {
+                return false;
+            }
+            scan_expr(addr, *rsp, info, tainted) && scan_expr(value, *rsp, info, tainted)
+        }
+        Stmt::Branch { cond, .. } => scan_expr(cond, *rsp, info, tainted),
+        Stmt::Switch { value, .. } => scan_expr(value, *rsp, info, tainted),
+        Stmt::Return(Some(e)) => scan_expr(e, *rsp, info, tainted),
+        _ => true,
+    }
+}
+
+enum RspWrite {
+    Delta(i64),
+    FromRbp,
+}
+
+/// Recognise an `rsp` write: `rsp ± const`, or `rsp` reloaded from `rbp`.
+fn rsp_delta(e: &Expr) -> Option<RspWrite> {
+    match e {
+        Expr::Read(Location::Reg(r)) if r.0 == RBP => Some(RspWrite::FromRbp),
+        Expr::Read(Location::Reg(r)) if r.0 == RSP => Some(RspWrite::Delta(0)),
+        Expr::Binary(BinOp::Add, a, b) => match (a.as_ref(), b.as_ref()) {
+            (Expr::Read(Location::Reg(r)), Expr::Const(k, _)) if r.0 == RSP => {
+                Some(RspWrite::Delta(*k as i64))
+            }
+            _ => None,
+        },
+        Expr::Binary(BinOp::Sub, a, b) => match (a.as_ref(), b.as_ref()) {
+            (Expr::Read(Location::Reg(r)), Expr::Const(k, _)) if r.0 == RSP => {
+                Some(RspWrite::Delta(-(*k as i64)))
+            }
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+/// What a memory address refers to.
+enum AddrClass {
+    /// An rsp/rbp-relative frame access at this entry-relative byte offset.
+    Frame(i64),
+    /// A heap / global / constant address (disjoint from a non-escaped frame).
+    Heap,
+    /// A frame value reached through a copy register — offset unknown: escape.
+    CopyFrame,
+    /// A frame base plus a variable index — spans an unknown range: bail.
+    VarFrame,
+}
+
+fn classify(e: &Expr, rsp: i64, rbp_off: Option<i64>, tainted: &HashSet<u16>) -> AddrClass {
+    classify_off(e, 0, rsp, rbp_off, tainted)
+}
+
+fn classify_off(
+    e: &Expr,
+    off: i64,
+    rsp: i64,
+    rbp_off: Option<i64>,
+    tainted: &HashSet<u16>,
+) -> AddrClass {
+    match e {
+        Expr::Read(Location::Reg(r)) if r.0 == RSP => AddrClass::Frame(rsp + off),
+        Expr::Read(Location::Reg(r)) if r.0 == RBP => match rbp_off {
+            Some(b) => AddrClass::Frame(b + off),
+            None => AddrClass::CopyFrame, // rbp used before established
+        },
+        Expr::Read(Location::Reg(r)) if tainted.contains(&r.0) => AddrClass::CopyFrame,
+        Expr::Read(Location::Reg(_)) => AddrClass::Heap,
+        Expr::Addr(Location::Frame(d)) => AddrClass::Frame(rbp_off.unwrap_or(0) + d + off),
+        Expr::Const(_, _) => AddrClass::Heap,
+        Expr::Binary(BinOp::Add, a, b) => match (a.as_ref(), b.as_ref()) {
+            (_, Expr::Const(k, _)) => classify_off(a, off + *k as i64, rsp, rbp_off, tainted),
+            (Expr::Const(k, _), _) => classify_off(b, off + *k as i64, rsp, rbp_off, tainted),
+            _ => merge_var(
+                classify_off(a, off, rsp, rbp_off, tainted),
+                classify_off(b, 0, rsp, rbp_off, tainted),
+            ),
+        },
+        Expr::Binary(BinOp::Sub, a, b) => match b.as_ref() {
+            Expr::Const(k, _) => classify_off(a, off - *k as i64, rsp, rbp_off, tainted),
+            _ => merge_var(classify_off(a, off, rsp, rbp_off, tainted), AddrClass::Heap),
+        },
+        _ => AddrClass::Heap,
+    }
+}
+
+/// Combine a base with a variable second term: if the base is frame-related, the
+/// access spans an unknown range.
+fn merge_var(base: AddrClass, _other: AddrClass) -> AddrClass {
+    match base {
+        AddrClass::Frame(_) | AddrClass::CopyFrame | AddrClass::VarFrame => AddrClass::VarFrame,
+        AddrClass::Heap => AddrClass::Heap,
+    }
+}
+
+/// Record/observe an address classification. Returns `false` to bail.
+fn apply_class(cls: AddrClass, width_bytes: i64, info: &mut FrameInfo) -> bool {
+    match cls {
+        AddrClass::Frame(o) => {
+            info.generic_ranges.push((o, o + width_bytes.max(1)));
+            true
+        }
+        AddrClass::CopyFrame => {
+            info.escaped = true;
+            true
+        }
+        AddrClass::VarFrame => false,
+        AddrClass::Heap => true,
+    }
+}
+
+/// Classify a single load address and record it.
+fn range_access(
+    addr: &Expr,
+    width_bytes: i64,
+    rsp: i64,
+    info: &mut FrameInfo,
+    tainted: &HashSet<u16>,
+) -> bool {
+    let cls = classify(addr, rsp, info.rbp_off, tainted);
+    apply_class(cls, width_bytes, info)
+}
+
+/// Scan an expression for nested frame loads, escaping `lea`s, and frame
+/// pointers passed to calls. Returns `false` to bail.
+fn scan_expr(e: &Expr, rsp: i64, info: &mut FrameInfo, tainted: &HashSet<u16>) -> bool {
+    let mut ok = true;
+    match e {
+        Expr::Addr(Location::Frame(_)) => info.escaped = true,
+        Expr::Load { addr, ty } => {
+            if !range_access(addr, int_bytes(ty), rsp, info, tainted) {
+                ok = false;
+            }
+            if !scan_expr(addr, rsp, info, tainted) {
+                ok = false;
+            }
+        }
+        Expr::Unary(_, x) | Expr::Cast { expr: x, .. } => ok = scan_expr(x, rsp, info, tainted),
+        Expr::Binary(_, a, b) => {
+            ok = scan_expr(a, rsp, info, tainted) && scan_expr(b, rsp, info, tainted)
+        }
+        Expr::Select { cond, then_, else_ } => {
+            ok = scan_expr(cond, rsp, info, tainted)
+                && scan_expr(then_, rsp, info, tainted)
+                && scan_expr(else_, rsp, info, tainted)
+        }
+        Expr::Call { target, args, .. } => {
+            if let CallTarget::Indirect(x) = target {
+                if !scan_expr(x, rsp, info, tainted) {
+                    ok = false;
+                }
+            }
+            for a in args {
+                // A frame pointer passed to a call escapes.
+                if matches!(a, Expr::Addr(Location::Frame(_))) || mentions_tainted(a, tainted) {
+                    info.escaped = true;
+                }
+                if !scan_expr(a, rsp, info, tainted) {
+                    ok = false;
+                }
+            }
+        }
+        _ => {}
+    }
+    ok
+}
+
+fn int_bytes(t: &Ty) -> i64 {
+    (match t {
+        Ty::Int { bits, .. } => (*bits / 8).max(1),
+        _ => 8,
+    }) as i64
+}
+
+// --- small expression walkers --------------------------------------------
+
+fn walk(e: &Expr, f: &mut impl FnMut(&Expr)) {
+    f(e);
+    match e {
+        Expr::Load { addr, .. } => walk(addr, f),
+        Expr::Unary(_, x) | Expr::Cast { expr: x, .. } => walk(x, f),
+        Expr::Binary(_, a, b) => {
+            walk(a, f);
+            walk(b, f);
+        }
+        Expr::Select { cond, then_, else_ } => {
+            walk(cond, f);
+            walk(then_, f);
+            walk(else_, f);
+        }
+        Expr::Call { target, args, .. } => {
+            if let CallTarget::Indirect(x) = target {
+                walk(x, f);
+            }
+            for a in args {
+                walk(a, f);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn each_expr(s: &Stmt, f: &mut impl FnMut(&Expr)) {
+    match s {
+        Stmt::Set { expr, .. } | Stmt::Assign { expr, .. } | Stmt::CallStmt(expr) => walk(expr, f),
+        Stmt::Store { addr, value, .. } => {
+            walk(addr, f);
+            walk(value, f);
+        }
+        Stmt::Branch { cond, .. } => walk(cond, f),
+        Stmt::Switch { value, .. } => walk(value, f),
+        Stmt::Return(Some(e)) => walk(e, f),
+        _ => {}
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn rsp() -> Expr {
+        Expr::Read(Location::Reg(RegId(RSP)))
+    }
+    fn rbp() -> Expr {
+        Expr::Read(Location::Reg(RegId(RBP)))
+    }
+
+    fn func(stmts: Vec<Stmt>) -> IrFunction {
+        IrFunction {
+            entry: 0,
+            name: "t".into(),
+            bits: 64,
+            reg_params: vec![],
+            blocks: vec![Block { id: 0, addr: 0, stmts, succ: vec![], pred: vec![] }],
+            next_value: 0,
+            next_temp: 0,
+        }
+    }
+
+    /// Standard prologue + a local + a heap store: the local is promotable even
+    /// though the function dereferences a heap pointer.
+    #[test]
+    fn local_promotable_despite_heap_access() {
+        let f = func(vec![
+            // push rbp ; mov rbp, rsp ; sub rsp, 0x20
+            Stmt::Set { dst: Location::Reg(RegId(RSP)), expr: Expr::Binary(BinOp::Sub, Box::new(rsp()), Box::new(Expr::konst(8, 64))) },
+            Stmt::Store { addr: rsp(), value: rbp(), ty: Ty::int(64) }, // save rbp on stack (benign)
+            Stmt::Set { dst: Location::Reg(RegId(RBP)), expr: rsp() },
+            Stmt::Set { dst: Location::Reg(RegId(RSP)), expr: Expr::Binary(BinOp::Sub, Box::new(rsp()), Box::new(Expr::konst(0x20, 64))) },
+            // local_8 = 1
+            Stmt::Set { dst: Location::Frame(-8), expr: Expr::konst(1, 64) },
+            // *(uint64*)(rdi) = 2   (heap)
+            Stmt::Store { addr: Expr::Read(Location::Reg(RegId(7))), value: Expr::konst(2, 64), ty: Ty::int(64) },
+        ]);
+        let slots = promotable_slots(&f);
+        assert!(slots.contains(&-8), "expected -8 promotable, got {:?}", slots);
+    }
+
+    /// Taking a local's address blocks promotion (a frame pointer escapes).
+    #[test]
+    fn address_taken_blocks() {
+        let f = func(vec![
+            Stmt::Store { addr: rsp(), value: rbp(), ty: Ty::int(64) },
+            Stmt::Set { dst: Location::Reg(RegId(RBP)), expr: rsp() },
+            Stmt::Set { dst: Location::Frame(-8), expr: Expr::konst(1, 64) },
+            // g(&local_8)
+            Stmt::CallStmt(Expr::Call {
+                target: CallTarget::Named("g".into()),
+                args: vec![Expr::Addr(Location::Frame(-8))],
+                ret: Ty::Unknown,
+            }),
+        ]);
+        assert!(promotable_slots(&f).is_empty());
+    }
+
+    /// An rsp-relative spill that overlaps the local blocks it; a disjoint one
+    /// does not. Here the spill is at rbp-8 (overlaps local_8) → not promotable.
+    #[test]
+    fn overlapping_spill_blocks_only_that_slot() {
+        let f = func(vec![
+            Stmt::Store { addr: rsp(), value: rbp(), ty: Ty::int(64) },
+            Stmt::Set { dst: Location::Reg(RegId(RBP)), expr: rsp() }, // rbp_off = -8
+            Stmt::Set { dst: Location::Reg(RegId(RSP)), expr: Expr::Binary(BinOp::Sub, Box::new(rsp()), Box::new(Expr::konst(0x10, 64))) }, // rsp = -24
+            Stmt::Set { dst: Location::Frame(-8), expr: Expr::konst(1, 64) },   // entry off -16
+            Stmt::Set { dst: Location::Frame(-16), expr: Expr::konst(2, 64) },  // entry off -24
+            // generic store at [rsp + 8] = entry off -16  -> overlaps local_8
+            Stmt::Store { addr: Expr::Binary(BinOp::Add, Box::new(rsp()), Box::new(Expr::konst(8, 64))), value: Expr::konst(3, 64), ty: Ty::int(64) },
+        ]);
+        let slots = promotable_slots(&f);
+        assert!(!slots.contains(&-8), "local_8 overlaps the spill: {:?}", slots);
+        assert!(slots.contains(&-16), "local_16 is disjoint: {:?}", slots);
+    }
+
+    /// A variable-indexed frame access makes the analysis bail (sound).
+    #[test]
+    fn variable_index_bails() {
+        let f = func(vec![
+            Stmt::Store { addr: rsp(), value: rbp(), ty: Ty::int(64) },
+            Stmt::Set { dst: Location::Reg(RegId(RBP)), expr: rsp() },
+            Stmt::Set { dst: Location::Frame(-8), expr: Expr::konst(1, 64) },
+            // store at [rbp + rax]
+            Stmt::Store { addr: Expr::Binary(BinOp::Add, Box::new(rbp()), Box::new(Expr::Read(Location::Reg(RegId(0))))), value: Expr::konst(0, 64), ty: Ty::int(64) },
+        ]);
+        assert!(promotable_slots(&f).is_empty());
+    }
+}

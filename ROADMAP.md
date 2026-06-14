@@ -423,14 +423,36 @@ des accès heap (→ `accès_inconnu`) ou prend une adresse. Le sous-ensemble
 mutant la sortie mais morte sur du vrai code (violation de « rien d'inutile »),
 la passe a été retirée ; le champ + l'oracle restent.
 
-**Vrai prérequis pour que la promotion morde (prochaine étape).** Une analyse
-d'alias *consciente des régions de la frame* : séparer la zone des registres
-sauvegardés (push/pop), la zone des locaux `[rbp-k]`, et les spills relatifs à
-`rsp`. Un pointeur heap inconnu ne peut aliaser un slot `[rbp-k]` que si une
-adresse de frame s'est échappée ; distinguer ces régions (avec leurs offsets)
-permet de promouvoir les locaux non-aliasés **même** dans les fonctions qui font
-du heap — ce que le gate grossier interdit aujourd'hui. C'est le vrai travail du
-§4.1, désormais cadré par les données.
+**Analyse de régions de frame — ✅ FAIT (`src/opt/frame.rs`).** L'analyse
+*consciente des offsets* demandée : (1) **taint** flow-insensitive des registres
+dérivés de `rsp`/`rbp` (un accès via base non-taintée est du heap → disjoint
+d'une frame non-échappée) ; (2) **offset de `rsp`** flow-sensitive (worklist sur
+le CFG) suivi à travers `push`/`pop`/`sub rsp`/`mov rsp,rbp`, plaçant `rbp`
+(`mov rbp,rsp`) et chaque accès `rsp`/`rbp`-relatif sur un axe relatif à
+l'entrée ; (3) **chevauchement** : un local `[rbp-d]` est promouvable ssi sa
+plage d'octets ne recoupe aucun accès frame générique (spill, arg sortant,
+registre sauvegardé). *Sound by bail* : tout ce que le modèle ne suit pas
+(écriture `rsp` non reconnue, `rsp` incohérent à une jointure, index variable,
+pointeur de frame échappé par copie/store/call/`lea`) ⇒ **aucun** slot promu.
+4 tests unitaires (dont « local promouvable malgré un accès heap »). Pur
+(ne mute pas l'IR). Diagnostic *display-only* dans le dump : `// frame: N
+promotable local slot(s): …`.
+
+**Constat clé (chiffré).** Le payoff de la promotion de slots `[rbp-k]` est
+**faible sur un corpus optimisé** : `cat` 1 fonction / 9 slots, `ls`≈0, `gzip`≈0.
+Catégorisation sur `ls` (45 fonctions à locaux) : **30 BAIL** (alignement
+`and rsp`, tableaux de pile à index variable, jointures `rsp` incohérentes),
+**11 ESCAPE** (`lea` d'un local), **4 OK mais 0 promu** (le local recoupe un
+push de registre sauvegardé). Raison de fond : le code **-O2 omet souvent le
+frame pointer** → les locaux chauds sont **relatifs à `rsp`** et ne deviennent
+jamais des slots `Location::Frame` (qui ne reconnaît que `[rbp±d]`).
+
+**Vrai gros levier (suite).** Modéliser les **locaux relatifs à `rsp`** comme
+variables de première classe (slots nommés à offset stable), ce que le modèle
+d'offset `rsp` de `frame.rs` rend désormais possible. C'est un changement plus
+profond du lifter/IR, mais c'est là qu'est la lisibilité sur le vrai code.
+La transformation de promotion (substitution sûre) reste prête à consommer
+`frame::promotable_slots` dès que les candidats existent en nombre.
 
 ---
 
