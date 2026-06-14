@@ -308,12 +308,23 @@ sub_958510 (mip loop)
             └─ sub_95b160  (format-2 DXT5 block assembler)  ← FINAL piece
 ```
 
-`sub_95b160` reads the three decoded palette buffers (`this+0xf0/+0x100/+0x110`)
-indexed by the per-block symbols, uses a constant table at `.data 0x105c2dc`,
-and writes the BC blocks (4 dwords each) per mip. Reimplementing this one
-39-block function (palette indexing + DXT5 byte layout + the `0x105c2dc` table)
-is the **only** remaining step to emit DDS — and it is pure deterministic data
-reshaping (no entropy), so it is validate-as-you-go work, not discovery.
+`sub_95b160` (format-2 DXT5 assembler) is fully traced to the byte:
+- Per block, the index-stream symbol's low 3 bits select a **count 1–4** via
+  table `0x105c2dc = [1,2,2,3,3,3,3,4]` (followed by u32s `1,2,4,8,16` at
+  `0x105c2cc`); `sym>>3` feeds the component loops.
+- Several component loops (`sub_959480` decodes) accumulate indices **with
+  modulo wraparound** (the `(x>>31)` sign-mask idiom) into the palette buffers
+  `this+0xa4/+0xbc/+0xd4` (index palettes) and `this+0xfc/+0x10c/+0x11c`
+  (endpoint palettes).
+- Final 16-byte DXT5 block write (B30): `blk[0]=(ce0<<16)|colorIdxLo`,
+  `blk[1]=(ce1<<16)|ce_mid`, `blk[2]=alphaEnd`, `blk[3]=alphaIdx`, where the
+  colour endpoints are 3×u16 from `this+0x11c` (stride 6) and the alpha/colour
+  index dwords come from `this+0xfc`/scratch.
+
+Everything is mapped; **nothing remains to discover.** The decode side is
+validated working code. Emitting DDS = reimplementing this one intricate-but-
+deterministic 39-block assembler (≈6 palette buffers + modulo index
+accumulation + the block byte layout above), validate-as-you-go.
 
 Delta decode (per `sub_959590`): `acc = (acc + huff_sym()) & 0xff` for each
 byte; two bytes packed per u16 entry.
