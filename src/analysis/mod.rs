@@ -9,7 +9,7 @@
 use crate::disasm::{Disassembler, Flow, Insn};
 use crate::loader::Program;
 use indexmap::IndexMap;
-use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 
 /// A maximal straight-line run of instructions with a single entry and exit.
 #[derive(Debug, Clone)]
@@ -49,12 +49,12 @@ pub struct AnalysisResult {
 /// `prologue_scan` is set, also recover functions reached only indirectly by
 /// scanning executable sections for function prologues.
 pub fn analyze(prog: &Program, disasm: &Disassembler, prologue_scan: bool) -> AnalysisResult {
-    let (global, entries) = global_decode(prog, disasm, prologue_scan);
+    let (global, entries, jump_tables) = global_decode(prog, disasm, prologue_scan);
     let instruction_count = global.len();
 
     let mut functions = Vec::new();
     for &entry in &entries {
-        if let Some(f) = build_function(prog, &global, entry, &entries) {
+        if let Some(f) = build_function(prog, &global, entry, &entries, &jump_tables) {
             functions.push(f);
         }
     }
@@ -71,16 +71,17 @@ fn global_decode(
     prog: &Program,
     disasm: &Disassembler,
     prologue_scan: bool,
-) -> (BTreeMap<u64, Insn>, BTreeSet<u64>) {
+) -> (BTreeMap<u64, Insn>, BTreeSet<u64>, HashMap<u64, Vec<u64>>) {
     let mut global: BTreeMap<u64, Insn> = BTreeMap::new();
     let mut entries: BTreeSet<u64> = prog.seed_functions().into_iter().collect();
+    let mut jump_tables: HashMap<u64, Vec<u64>> = HashMap::new();
     if entries.is_empty() && prog.is_executable(prog.entry) {
         entries.insert(prog.entry);
     }
 
     // Pass 1: recursive descent from direct-call seeds.
     let mut work: VecDeque<u64> = entries.iter().copied().collect();
-    drain(prog, disasm, &mut global, &mut entries, &mut work);
+    drain(prog, disasm, &mut global, &mut entries, &mut jump_tables, &mut work);
 
     // Pass 2: prologue scanning recovers indirectly-reached functions. Only
     // seed prologues we haven't already decoded as part of a known function.
@@ -91,10 +92,55 @@ fn global_decode(
                 extra.push_back(p);
             }
         }
-        drain(prog, disasm, &mut global, &mut entries, &mut extra);
+        drain(prog, disasm, &mut global, &mut entries, &mut jump_tables, &mut extra);
     }
 
-    (global, entries)
+    (global, entries, jump_tables)
+}
+
+/// Recognise a jump-table dispatch `jmp [table + idx*ptr]` and read its target
+/// list from the binary. Conservative: pointer-sized entries, an absolute (or
+/// rip-relative) table base, entries kept while they point into executable code.
+fn resolve_jump_table(prog: &Program, insn: &Insn) -> Option<Vec<u64>> {
+    use iced_x86::{OpKind, Register};
+    let ins = &insn.raw;
+    if ins.op_kind(0) != OpKind::Memory || ins.memory_index() == Register::None {
+        return None;
+    }
+    let ptr = prog.bitness.bits() / 8;
+    if ins.memory_index_scale() != ptr {
+        return None; // entries must be pointer-sized
+    }
+    // The table base must be a static address (no base register), unless it is
+    // rip-relative (then iced gives the absolute address).
+    let table = if ins.is_ip_rel_memory_operand() {
+        ins.ip_rel_memory_address()
+    } else if ins.memory_base() == Register::None {
+        ins.memory_displacement64()
+    } else {
+        return None;
+    };
+
+    let mut targets = Vec::new();
+    let mut seen = BTreeSet::new();
+    for i in 0..1024u64 {
+        let ea = table + i * ptr as u64;
+        let entry = match if ptr == 8 { prog.read_u64(ea) } else { prog.read_u32(ea).map(|v| v as u64) } {
+            Some(e) => e,
+            None => break,
+        };
+        if !prog.is_executable(entry) {
+            break;
+        }
+        if seen.insert(entry) {
+            targets.push(entry);
+        }
+    }
+    if targets.len() >= 2 {
+        Some(targets)
+    } else {
+        None
+    }
 }
 
 /// Drain a worklist of run starts, decoding each reachable instruction once
@@ -104,6 +150,7 @@ fn drain(
     disasm: &Disassembler,
     global: &mut BTreeMap<u64, Insn>,
     entries: &mut BTreeSet<u64>,
+    jump_tables: &mut HashMap<u64, Vec<u64>>,
     work: &mut VecDeque<u64>,
 ) {
     while let Some(start) = work.pop_front() {
@@ -119,6 +166,11 @@ fn drain(
             let next = insn.next_addr();
             let flow = insn.flow;
             let target = insn.target;
+            let jt = if flow == Flow::Indirect {
+                resolve_jump_table(prog, &insn)
+            } else {
+                None
+            };
             global.insert(cur, insn);
 
             match flow {
@@ -143,7 +195,16 @@ fn drain(
                     }
                     break;
                 }
-                Flow::Return | Flow::Indirect | Flow::Interrupt => break,
+                Flow::Indirect => {
+                    if let Some(targets) = jt {
+                        for &t in &targets {
+                            work.push_back(t); // switch cases (intra-function)
+                        }
+                        jump_tables.insert(cur, targets);
+                    }
+                    break;
+                }
+                Flow::Return | Flow::Interrupt => break,
             }
         }
     }
@@ -155,6 +216,7 @@ fn collect_function(
     global: &BTreeMap<u64, Insn>,
     entry: u64,
     boundary: &BTreeSet<u64>,
+    jump_tables: &HashMap<u64, Vec<u64>>,
 ) -> BTreeMap<u64, Insn> {
     let mut insns: BTreeMap<u64, Insn> = BTreeMap::new();
     let mut work: VecDeque<u64> = VecDeque::new();
@@ -186,7 +248,14 @@ fn collect_function(
                     work.push_back(t);
                 }
             }
-            Flow::Return | Flow::Indirect | Flow::Interrupt => {}
+            Flow::Indirect => {
+                if let Some(targets) = jump_tables.get(&addr) {
+                    for &t in targets {
+                        work.push_back(t); // switch cases
+                    }
+                }
+            }
+            Flow::Return | Flow::Interrupt => {}
         }
         insns.insert(addr, insn);
     }
@@ -199,11 +268,12 @@ fn build_function(
     global: &BTreeMap<u64, Insn>,
     entry: u64,
     all_entries: &BTreeSet<u64>,
+    jump_tables: &HashMap<u64, Vec<u64>>,
 ) -> Option<Function> {
     let mut boundary = all_entries.clone();
     boundary.remove(&entry);
 
-    let insns = collect_function(global, entry, &boundary);
+    let insns = collect_function(global, entry, &boundary, jump_tables);
     if insns.is_empty() {
         return None;
     }
@@ -235,6 +305,14 @@ fn build_function(
             Flow::Return | Flow::Indirect | Flow::Interrupt => {
                 if insns.contains_key(&insn.next_addr()) {
                     leaders.insert(insn.next_addr());
+                }
+                // Jump-table targets begin blocks.
+                if let Some(targets) = jump_tables.get(&insn.address) {
+                    for &t in targets {
+                        if insns.contains_key(&t) {
+                            leaders.insert(t);
+                        }
+                    }
                 }
             }
             _ => {}
@@ -303,6 +381,19 @@ fn build_function(
     }
     if let Some(start) = cur_start {
         flush(&mut blocks, start, std::mem::take(&mut cur));
+    }
+
+    // Attach resolved jump-table targets as successors of their indirect block.
+    for blk in blocks.values_mut() {
+        if blk.terminator == Flow::Indirect {
+            if let Some(targets) = jump_tables.get(&blk.insns.last().unwrap().address) {
+                blk.successors = targets
+                    .iter()
+                    .copied()
+                    .filter(|t| insns.contains_key(t))
+                    .collect();
+            }
+        }
     }
 
     let name = prog

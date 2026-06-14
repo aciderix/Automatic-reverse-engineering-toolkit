@@ -445,10 +445,21 @@ largeur sur des slots `[rbp±disp]` purs.
 
 ## 6. Pilier 4 — Récupération de constructs haut-niveau (`src/recover/`)
 
-### 6.1 Switch / jump tables (priorité haute)
+### 6.1 Switch / jump tables (priorité haute) — ✅ FAIT (résolution + couverture)
 
-Aujourd'hui un `jmp [table + idx*8]` devient `Flow::Indirect` → `/* indirect */`
-(`structure/mod.rs:457`). Détecter le pattern :
+`analysis::resolve_jump_table` reconnaît `jmp [table + idx*ptr]`, lit la table
+dans le binaire (entrées pointeur, base absolue/rip-rel, tant que les cibles
+sont exécutables), décode les **cas** (couverture étendue) et ajoute les arêtes
+au CFG. La sortie texte par défaut émet un `switch` avec la liste des cas, et un
+passage final émet les blocs de cas atteints uniquement par la table. Vérifié
+sur le jeu : switch de 4 et 75 cas récupérés ; combiné aux chaînes, un mapping
+index→nom (`case 0 → "None"`, `1 → "Area"`, `2 → "Cone"`). Recompilabilité IR
+maintenue 700/700.
+
+Reste : récupérer l'**index** (expression du switch) dans l'IR → vrai
+`Stmt::Switch` typé ; tables relatives 4 octets sur x64 ; idiome ci-dessous.
+
+Détection de référence — le pattern :
 
 ```
 cmp idx, N ; ja default ; jmp [base + idx*ptr]

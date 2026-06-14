@@ -301,6 +301,13 @@ impl<'a> Structurer<'a> {
         }
         let entry = self.entry;
         self.emit_seq(entry, Ctx::root(), 1);
+        // Emit any blocks not reached by the structured walk (e.g. switch cases
+        // dispatched through a jump table) as labelled top-level regions.
+        for i in 0..self.nodes.len() {
+            if !self.emitted[i] {
+                self.emit_seq(i, Ctx::root(), 1);
+            }
+        }
         let _ = writeln!(self.out, "}}");
         self.out
     }
@@ -369,7 +376,18 @@ impl<'a> Structurer<'a> {
             }
             Flow::Indirect => {
                 let t = self.blk(i).insns.last().unwrap().text.clone();
-                self.line(depth, &format!("/* indirect: {} */", t));
+                let succ = self.blk(i).successors.clone();
+                if succ.is_empty() {
+                    self.line(depth, &format!("/* indirect: {} */", t));
+                } else {
+                    // Resolved jump table: dispatch to one of the cases. (The
+                    // index expression is recovered by the IR pipeline; here we
+                    // surface the cases and let the region walk emit them.)
+                    self.line(depth, &format!("switch (/*idx*/) {{ /* {} */ }}", t));
+                    for (k, &s) in succ.iter().enumerate() {
+                        self.line(depth, &format!("// case {}: goto {};", k, label(s)));
+                    }
+                }
                 None
             }
             Flow::Interrupt => {

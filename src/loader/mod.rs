@@ -161,6 +161,26 @@ impl Program {
         self.section_at(addr).map(|s| s.executable).unwrap_or(false)
     }
 
+    /// Read a little-endian u32 from program memory.
+    pub fn read_u32(&self, addr: u64) -> Option<u32> {
+        let b = self.read_from(addr)?;
+        if b.len() < 4 {
+            return None;
+        }
+        Some(u32::from_le_bytes([b[0], b[1], b[2], b[3]]))
+    }
+
+    /// Read a little-endian u64 from program memory.
+    pub fn read_u64(&self, addr: u64) -> Option<u64> {
+        let b = self.read_from(addr)?;
+        if b.len() < 8 {
+            return None;
+        }
+        let mut a = [0u8; 8];
+        a.copy_from_slice(&b[..8]);
+        Some(u64::from_le_bytes(a))
+    }
+
     /// If `addr` points to a printable NUL-terminated string in a read-only
     /// section, return it. Used to annotate string-literal references.
     pub fn read_cstring(&self, addr: u64) -> Option<String> {
