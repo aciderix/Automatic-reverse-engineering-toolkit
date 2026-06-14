@@ -545,11 +545,17 @@ relogeable), et compare.
 
 ### 8.2 Niveaux d'équivalence (du plus faible au plus fort)
 
-1. **Recompile** : ça compile sans erreur. (Niveau minimal, déjà discriminant.)
-2. **Différentiel par exécution** : générer des entrées aléatoires/structurées,
-   exécuter la fonction d'origine (dans un mini-émulateur ou via harnais
-   d'exécution) et la fonction recompilée, comparer sorties + effets mémoire.
-   Inspiration : fuzzing différentiel. Donne une **forte confiance empirique**.
+1. **Recompile** : ça compile sans erreur. ✅ `--mode verify` (100 % sur le jeu).
+2. **Différentiel par exécution** : ✅ **implémenté** (`bench/difftest.sh` +
+   `bench/corpus.c`). Pour chaque fonction du corpus : ARET la décompile, on
+   recompile, et on compare à la fonction d'origine sur 200k entrées aléatoires.
+   **Résultat : 11/11 fonctions prouvées empiriquement équivalentes.** Le
+   harness a immédiatement **trouvé un vrai bug** (comparaisons signées 32-bit :
+   il faut étendre le signe depuis la largeur masquée, `(int64_t)(int32_t)x`, et
+   non caster la valeur masquée positive) — corrigé, d'où 6/11 → 11/11. C'est
+   exactement la valeur de la boucle : elle rend les bugs visibles et mesurables.
+   Reste : étendre le corpus, et le différentiel sur binaires sans source (via
+   chargement/émulation de la fonction d'origine).
 3. **Équivalence symbolique (SMT)** : lever les deux fonctions en formules et
    demander à un solveur (Z3 via crate `z3`, ou export SMT-LIB) de prouver
    `∀ entrées. orig(x) == recompiled(x)`. **Garantie formelle**, par fonction.

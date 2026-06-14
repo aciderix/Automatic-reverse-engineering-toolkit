@@ -158,7 +158,7 @@ pub(crate) fn expr_c(e: &Expr) -> String {
                 _ => format!("({})", xs),
             }
         }
-        Expr::Binary(op, a, b) => binary_c(*op, &expr_c(a), &expr_c(b)),
+        Expr::Binary(op, a, b) => binary_c(*op, a, b),
         Expr::Cast { to, expr } => format!("(({})({}))", ty_ctype(to), expr_c(expr)),
         Expr::Addr(Location::Frame(d)) => format!("(uint64_t)(&{})", frame_name(*d)),
         Expr::Addr(_) => "0 /*addr*/".into(),
@@ -187,35 +187,57 @@ pub(crate) fn int_bits(t: &Ty) -> u8 {
     }
 }
 
-fn binary_c(op: BinOp, a: &str, b: &str) -> String {
+/// Signed-cast an operand, sign-extending from its apparent width. A value
+/// masked to a sub-word width (`x & 0xff/0xffff/0xffffffff`) is sign-extended
+/// from that width (`(int64_t)(int32_t)x`), not treated as a positive 64-bit
+/// number — otherwise signed comparisons of negative 32-bit values are wrong.
+fn signed_cast(e: &Expr) -> String {
+    if let Expr::Binary(BinOp::And, x, m) = e {
+        if let Expr::Const(c, _) = m.as_ref() {
+            let st = match *c {
+                0xff => Some("int8_t"),
+                0xffff => Some("int16_t"),
+                0xffffffff => Some("int32_t"),
+                _ => None,
+            };
+            if let Some(t) = st {
+                return format!("(int64_t)({})({})", t, expr_c(x));
+            }
+        }
+    }
+    format!("(int64_t)({})", expr_c(e))
+}
+
+fn binary_c(op: BinOp, a: &Expr, b: &Expr) -> String {
     use BinOp::*;
-    let u = |x: &str| format!("(uint64_t)({})", x);
-    let i = |x: &str| format!("(int64_t)({})", x);
-    let sym = |o: &str, x: &str, y: &str| format!("({} {} {})", x, o, y);
+    let u = |x: &Expr| format!("(uint64_t)({})", expr_c(x));
+    let s = |o: &str| format!("({} {} {})", signed_cast(a), o, signed_cast(b));
+    let un = |o: &str| format!("({} {} {})", u(a), o, u(b));
+    let plain = |o: &str| format!("({} {} {})", expr_c(a), o, expr_c(b));
     match op {
-        Add => sym("+", a, b),
-        Sub => sym("-", a, b),
-        Mul => sym("*", a, b),
-        And => sym("&", a, b),
-        Or => sym("|", a, b),
-        Xor => sym("^", a, b),
-        Shl => sym("<<", a, b),
-        Shr => sym(">>", &u(a), b),
-        Sar => sym(">>", &i(a), b),
-        UDiv => sym("/", &u(a), &u(b)),
-        SDiv => sym("/", &i(a), &i(b)),
-        UMod => sym("%", &u(a), &u(b)),
-        SMod => sym("%", &i(a), &i(b)),
-        Eq => sym("==", a, b),
-        Ne => sym("!=", a, b),
-        Ult => sym("<", &u(a), &u(b)),
-        Ule => sym("<=", &u(a), &u(b)),
-        Ugt => sym(">", &u(a), &u(b)),
-        Uge => sym(">=", &u(a), &u(b)),
-        Slt => sym("<", &i(a), &i(b)),
-        Sle => sym("<=", &i(a), &i(b)),
-        Sgt => sym(">", &i(a), &i(b)),
-        Sge => sym(">=", &i(a), &i(b)),
+        Add => plain("+"),
+        Sub => plain("-"),
+        Mul => plain("*"),
+        And => plain("&"),
+        Or => plain("|"),
+        Xor => plain("^"),
+        Shl => plain("<<"),
+        Eq => plain("=="),
+        Ne => plain("!="),
+        Shr => format!("({} >> {})", u(a), expr_c(b)),
+        Sar => format!("({} >> {})", signed_cast(a), expr_c(b)),
+        UDiv => un("/"),
+        UMod => un("%"),
+        Ult => un("<"),
+        Ule => un("<="),
+        Ugt => un(">"),
+        Uge => un(">="),
+        SDiv => s("/"),
+        SMod => s("%"),
+        Slt => s("<"),
+        Sle => s("<="),
+        Sgt => s(">"),
+        Sge => s(">="),
     }
 }
 
