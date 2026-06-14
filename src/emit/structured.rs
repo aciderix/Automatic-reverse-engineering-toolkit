@@ -138,6 +138,9 @@ pub fn emit_function(func: &IrFunction, forward: &mut BTreeSet<u64>, with_params
     out.push_str(&s.out);
     let _ = writeln!(out, "    return 0;");
     let _ = writeln!(out, "}}");
+    if with_params {
+        out = super::fix_self_calls(out, f.entry, super::param_count(&f));
+    }
     out
 }
 

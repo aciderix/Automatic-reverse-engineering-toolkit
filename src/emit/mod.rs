@@ -537,7 +537,29 @@ pub fn emit_function(func: &IrFunction, forward: &mut BTreeSet<u64>, with_params
         }
     }
     let _ = writeln!(out, "}}");
+    if with_params {
+        out = fix_self_calls(out, f.entry, param_count(&f));
+    }
     out
+}
+
+/// When a function is emitted with parameters, a recursive self-call rendered
+/// as `sub_x()` would have too few arguments for its own prototype. Give such
+/// self-calls the matching number of zero arguments. (Call-site argument
+/// recovery is future work; zeros keep it compilable.)
+pub(crate) fn fix_self_calls(out: String, entry: u64, nparams: usize) -> String {
+    if nparams == 0 {
+        return out;
+    }
+    let empty = format!("sub_{:x}()", entry);
+    let zeros = vec!["0"; nparams].join(", ");
+    let filled = format!("sub_{:x}({})", entry, zeros);
+    out.replace(&empty, &filled)
+}
+
+/// Number of recovered parameters of `func` (register + frame).
+pub(crate) fn param_count(func: &IrFunction) -> usize {
+    func.reg_params.len() + frame_params_locals(func).0.len()
 }
 
 fn ends_in_terminator(b: &Block) -> bool {

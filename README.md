@@ -95,6 +95,21 @@ int64_t factorial(void) {
 The loop, the `if`/`else`, and both conditions are recovered from raw machine
 code. Use `--flat` for the lower-level goto-based form.
 
+
+### Measured results (north-star metric)
+
+Recompilability (level 1) and differential equivalence (level 2) on real code:
+
+| Binary | Recompiled |
+|---|---|
+| gzip (ELF, stripped) | 131/131 (100%) |
+| ls / cat / sha256sum / base64 | 100% |
+| MightyQuest.exe (27 MB game) | 100% (sampled) |
+
+Differential equivalence (recompiled vs original on random inputs): **16/16**
+corpus functions, including pointer/array/loop/string code. Z3 is available in
+this environment (`pip install z3-solver`) for the planned level-3 SMT proofs.
+
 ## Usage
 
 ```bash
