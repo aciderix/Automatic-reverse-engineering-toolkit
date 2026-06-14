@@ -510,6 +510,63 @@ pub fn lift(insn: &Insn, bits: u32) -> Vec<Stmt> {
             let r = bin(BinOp::Mul, some_or_asm!(op_value(ins, 1)), some_or_asm!(op_value(ins, 2)));
             some_or_asm!(write_op0(ins, r, bits))
         }
+        // 1-operand mul/div/idiv (implicit edx:eax). 32-bit form only: the
+        // 64-bit-wide result fits a 64-bit IR value. 64-bit operands would need
+        // 128-bit arithmetic -> Asm fallback (sound).
+        Mnemonic::Mul | Mnemonic::Div | Mnemonic::Idiv if ins.op_count() == 1 => {
+            if op0_width(ins, bits) != 32 {
+                return asm();
+            }
+            let src = some_or_asm!(op_value(ins, 0));
+            let rax = Location::Reg(RegId(0));
+            let rdx = Location::Reg(RegId(2));
+            let m32 = || konst(mask(32));
+            let eax = bin(BinOp::And, Expr::Read(rax.clone()), m32());
+            let edx = bin(BinOp::And, Expr::Read(rdx.clone()), m32());
+            let lo = |e: Expr| combine_write(&rax, 32, bin(BinOp::And, e, m32()), bits);
+            let hi = |e: Expr| combine_write(&rdx, 32, bin(BinOp::And, e, m32()), bits);
+            // Both results depend on the *original* edx:eax. Compute them into
+            // temporaries first, then assign — otherwise the second write would
+            // read the register the first write already changed.
+            let t_lo = Location::Temp((insn.address as u32).wrapping_mul(2));
+            let t_hi = Location::Temp((insn.address as u32).wrapping_mul(2).wrapping_add(1));
+            let (lo_expr, hi_expr) = match ins.mnemonic() {
+                Mnemonic::Mul => {
+                    let p = bin(BinOp::Mul, eax, src); // <= 64 bits
+                    (p.clone(), bin(BinOp::Shr, p, konst(32)))
+                }
+                Mnemonic::Div => {
+                    let d = bin(BinOp::Or, bin(BinOp::Shl, edx, konst(32)), eax);
+                    (bin(BinOp::UDiv, d.clone(), src.clone()), bin(BinOp::UMod, d, src))
+                }
+                _ => {
+                    // idiv: signed; dividend is the signed 64-bit edx:eax.
+                    let d = bin(BinOp::Or, bin(BinOp::Shl, edx, konst(32)), eax);
+                    (bin(BinOp::SDiv, d.clone(), src.clone()), bin(BinOp::SMod, d, src))
+                }
+            };
+            vec![
+                Stmt::Set { dst: t_lo.clone(), expr: lo_expr },
+                Stmt::Set { dst: t_hi.clone(), expr: hi_expr },
+                Stmt::Set { dst: rax.clone(), expr: lo(Expr::Read(t_lo)) },
+                Stmt::Set { dst: rdx.clone(), expr: hi(Expr::Read(t_hi)) },
+            ]
+        }
+
+        // cdq/cltd: EDX = sign-extension of EAX (all-ones if negative else 0).
+        Mnemonic::Cdq => {
+            let rax = Location::Reg(RegId(0));
+            let rdx = Location::Reg(RegId(2));
+            let eax = bin(BinOp::And, Expr::Read(rax), konst(mask(32)));
+            let sign = bin(BinOp::And, bin(BinOp::Sar, eax, konst(31)), konst(mask(32)));
+            vec![Stmt::Set { dst: rdx.clone(), expr: combine_write(&rdx, 32, sign, bits) }]
+        }
+        // cqo: RDX = sign-extension of RAX (64-bit).
+        Mnemonic::Cqo => {
+            let rax = Location::Reg(RegId(0));
+            let rdx = Location::Reg(RegId(2));
+            vec![Stmt::Set { dst: rdx, expr: bin(BinOp::Sar, Expr::Read(rax), konst(63)) }]
+        }
 
         Mnemonic::Shl => {
             let a = some_or_asm!(op_value(ins, 0));

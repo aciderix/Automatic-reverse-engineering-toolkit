@@ -20,3 +20,10 @@ int arraymax(const int* a, int n)        { int m = n > 0 ? a[0] : 0; for (int i 
 int third(const int* a)                  { return a[2]; }
 int counteq(const int* a, int n, int x)  { int c = 0; for (int i = 0; i < n; i++) if (a[i] == x) c++; return c; }
 int strlen_c(const char* s)              { int n = 0; while (s[n]) n++; return n; }
+
+/* 1-operand mul/div/idiv (variable divisor -> real div/idiv instruction). */
+int udiv(unsigned a, unsigned b) { return b ? (int)(a / b) : 0; }
+int umod(unsigned a, unsigned b) { return b ? (int)(a % b) : 0; }
+int sdiv(int a, int b)           { return b ? a / b : 0; }
+int smod(int a, int b)           { return b ? a % b : 0; }
+int widemul(unsigned a, unsigned b) { return (int)((unsigned long long)a * b >> 4); }
