@@ -563,7 +563,7 @@ relogeable), et compare.
 2. **Différentiel par exécution** : ✅ **implémenté** (`bench/difftest.sh` +
    `bench/corpus.c`). Pour chaque fonction du corpus : ARET la décompile, on
    recompile, et on compare à la fonction d'origine sur 200k entrées aléatoires.
-   **Résultat : 11/11 fonctions prouvées empiriquement équivalentes.** Le
+   **Résultat : 16/16 fonctions prouvées empiriquement équivalentes** (dont pointeurs/tableaux/boucles/chaînes — `arraysum`, `arraymax`, `counteq`, `strlen`). Le
    harness a immédiatement **trouvé un vrai bug** (comparaisons signées 32-bit :
    il faut étendre le signe depuis la largeur masquée, `(int64_t)(int32_t)x`, et
    non caster la valeur masquée positive) — corrigé, d'où 6/11 → 11/11. C'est

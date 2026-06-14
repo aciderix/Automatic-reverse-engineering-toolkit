@@ -13,3 +13,10 @@ int clampu(unsigned x)     { return x > 100u ? 100 : (int)x; }
 int mix(unsigned a, unsigned b) { return (a ^ b) + (a & b) * 2; }
 int sumto(int n)           { int s = 0; for (int i = 0; i <= n; i++) s += i; return s; }
 int countbits(unsigned x)  { int c = 0; while (x) { c += x & 1; x >>= 1; } return c; }
+
+/* Pointer / array / loop functions — exercise memory and bounded loops. */
+int arraysum(const int* a, int n)        { int s = 0; for (int i = 0; i < n; i++) s += a[i]; return s; }
+int arraymax(const int* a, int n)        { int m = n > 0 ? a[0] : 0; for (int i = 1; i < n; i++) if (a[i] > m) m = a[i]; return m; }
+int third(const int* a)                  { return a[2]; }
+int counteq(const int* a, int n, int x)  { int c = 0; for (int i = 0; i < n; i++) if (a[i] == x) c++; return c; }
+int strlen_c(const char* s)              { int n = 0; while (s[n]) n++; return n; }
