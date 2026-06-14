@@ -111,6 +111,13 @@ pub fn build_ir(prog: &Program, func: &Function) -> IrFunction {
         b.pred = preds;
     }
 
+    // Name resolved import / PLT call targets (e.g. Direct(plt) -> "malloc").
+    for b in &mut blocks {
+        for s in &mut b.stmts {
+            name_calls_in_stmt(s, prog);
+        }
+    }
+
     IrFunction {
         entry: func.entry,
         name: func.name.clone(),
@@ -131,6 +138,54 @@ fn loc_str(l: &Location) -> String {
         Location::Frame(d) => format!("frame[{}]", d),
         Location::Mem => "mem".into(),
         Location::Temp(t) => format!("t{}", t),
+    }
+}
+
+/// Rewrite `Call { target: Direct(addr) }` to `Named(import)` when `addr` is a
+/// resolved PLT/IAT import. Internal `sub_*` targets are left as Direct so they
+/// keep getting forward-declared (recompilable).
+fn name_calls_in_expr(e: &mut Expr, prog: &Program) {
+    match e {
+        Expr::Call { target, args, .. } => {
+            if let CallTarget::Direct(a) = target {
+                if let Some(name) = prog.import_name(*a) {
+                    *target = CallTarget::Named(name.to_string());
+                }
+            }
+            if let CallTarget::Indirect(x) = target {
+                name_calls_in_expr(x, prog);
+            }
+            for a in args.iter_mut() {
+                name_calls_in_expr(a, prog);
+            }
+        }
+        Expr::Load { addr, .. } => name_calls_in_expr(addr, prog),
+        Expr::Unary(_, x) | Expr::Cast { expr: x, .. } => name_calls_in_expr(x, prog),
+        Expr::Binary(_, a, b) => {
+            name_calls_in_expr(a, prog);
+            name_calls_in_expr(b, prog);
+        }
+        Expr::Select { cond, then_, else_ } => {
+            name_calls_in_expr(cond, prog);
+            name_calls_in_expr(then_, prog);
+            name_calls_in_expr(else_, prog);
+        }
+        _ => {}
+    }
+}
+
+fn name_calls_in_stmt(s: &mut Stmt, prog: &Program) {
+    match s {
+        Stmt::Set { expr, .. } | Stmt::Assign { expr, .. } | Stmt::CallStmt(expr) => {
+            name_calls_in_expr(expr, prog)
+        }
+        Stmt::Store { addr, value, .. } => {
+            name_calls_in_expr(addr, prog);
+            name_calls_in_expr(value, prog);
+        }
+        Stmt::Branch { cond, .. } => name_calls_in_expr(cond, prog),
+        Stmt::Return(Some(e)) => name_calls_in_expr(e, prog),
+        _ => {}
     }
 }
 

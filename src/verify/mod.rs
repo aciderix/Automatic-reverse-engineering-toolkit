@@ -59,7 +59,9 @@ fn pick_cc() -> String {
 /// Try to compile a C translation unit; returns the first error line on failure.
 fn try_compile(cc: &str, src: &str) -> Result<(), String> {
     let mut child = match Command::new(cc)
-        .args(["-x", "c", "-", "-c", "-w", "-o", "/dev/null"])
+        // -fno-builtin: our recovered libc calls (e.g. `v = free()`) must not
+        // clash with the compiler's builtin prototypes.
+        .args(["-x", "c", "-", "-c", "-w", "-fno-builtin", "-o", "/dev/null"])
         .stdin(Stdio::piped())
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
