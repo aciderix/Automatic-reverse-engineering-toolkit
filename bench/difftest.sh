@@ -12,7 +12,8 @@ gcc -O1 -g -c "$DIR/corpus.c" -o "$TMP/corpus.o" || { echo "corpus build failed"
 
 FUNCS="add1:i addsub:i mulshift:i maxi:i mini:i absdiff:i sign:i clampu:i mix:i sumto:i countbits:i \
        arraysum:p arraymax:p third:p counteq:p strlen_c:s udiv:i umod:i sdiv:i smod:i widemul:i \
-       hibyte:i hibyte3:i sxbyte:i sxword:i idxw:p spill2:i spill3:i"
+       hibyte:i hibyte3:i sxbyte:i sxword:i idxw:p spill2:i spill3:i \
+       sortpair:i poly:i stackarr:i fieldsum:p nestcond:i"
 
 pass=0; total=0
 for entry in $FUNCS; do

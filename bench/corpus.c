@@ -42,3 +42,12 @@ int idxw(const int* a, int i)    { return a[i] + 1; }                     /* cdq
    deterministic for differential testing. */
 int spill2(int a, int b)        { volatile int x = a + b; volatile int y = a - b; return x * y + x - y; }
 int spill3(int a, int b, int c) { volatile int p = a * b; volatile int q = b * c; volatile int r = a * c; return p + q - r; }
+
+/* Broader differential coverage: stack arrays, multi-local spills, nested
+   control flow, struct-like pointer access — patterns the IR pipeline now
+   recovers. All pure and small-input-safe. */
+int sortpair(int a, int b)       { int t; if (a > b) { t = a; a = b; b = t; } return a * 10 + b; }
+int poly(int x)                  { return ((x*x) + 3*x + 7) & 0xffff; }
+int stackarr(int a, int b, int c){ int v[3]; v[0]=a; v[1]=b; v[2]=c; return v[0]*v[1] - v[2]; }
+int fieldsum(const int* p)       { return p[0] + p[1]*2 + p[2]*3; }   /* struct-like */
+int nestcond(int a, int b)       { if (a > 0) { if (b > 0) return a+b; else return a-b; } return -a; }
