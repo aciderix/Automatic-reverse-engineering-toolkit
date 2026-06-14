@@ -161,6 +161,31 @@ impl Program {
         self.section_at(addr).map(|s| s.executable).unwrap_or(false)
     }
 
+    /// If `addr` points to a printable NUL-terminated string in a read-only
+    /// section, return it. Used to annotate string-literal references.
+    pub fn read_cstring(&self, addr: u64) -> Option<String> {
+        let sec = self.section_at(addr)?;
+        if sec.writable || sec.executable {
+            return None; // strings live in read-only data (.rdata/.rodata)
+        }
+        let off = (addr - sec.address) as usize;
+        let bytes = sec.data.get(off..)?;
+        let mut s = String::new();
+        for &b in bytes.iter().take(512) {
+            if b == 0 {
+                return if s.len() >= 2 { Some(s) } else { None };
+            }
+            match b {
+                b' '..=b'~' => s.push(b as char),
+                b'\t' => s.push_str("\\t"),
+                b'\n' => s.push_str("\\n"),
+                b'\r' => s.push_str("\\r"),
+                _ => return None, // non-printable -> not a clean C string
+            }
+        }
+        None
+    }
+
     /// All addresses we have a reason to treat as function entry points.
     pub fn seed_functions(&self) -> Vec<u64> {
         let mut seeds = Vec::new();

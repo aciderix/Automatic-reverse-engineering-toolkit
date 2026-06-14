@@ -15,6 +15,36 @@ pub fn label(addr: u64) -> String {
     format!("L_{:08x}", addr)
 }
 
+/// Annotate hex address literals that point to read-only strings, inline:
+/// `0x402004` -> `0x402004 /* "%d %d\n" */`. Display-only, so it can never
+/// affect correctness.
+pub fn annotate_strings(text: &str, prog: &Program) -> String {
+    let bytes = text.as_bytes();
+    let mut out = String::with_capacity(text.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'0' && bytes.get(i + 1) == Some(&b'x') {
+            let mut j = i + 2;
+            while j < bytes.len() && bytes[j].is_ascii_hexdigit() {
+                j += 1;
+            }
+            if j > i + 2 {
+                out.push_str(&text[i..j]);
+                if let Ok(addr) = u64::from_str_radix(&text[i + 2..j], 16) {
+                    if let Some(s) = prog.read_cstring(addr) {
+                        out.push_str(&format!(" /* \"{}\" */", s.replace('"', "\\\"")));
+                    }
+                }
+                i = j;
+                continue;
+            }
+        }
+        out.push(bytes[i] as char);
+        i += 1;
+    }
+    out
+}
+
 /// Callee-saved registers whose lone `push`/`pop` is frame save/restore noise.
 fn is_callee_saved(reg: &str) -> bool {
     matches!(
@@ -354,5 +384,5 @@ pub fn decompile_function(prog: &Program, func: &Function) -> String {
     }
 
     let _ = writeln!(out, "}}");
-    out
+    annotate_strings(&out, prog)
 }

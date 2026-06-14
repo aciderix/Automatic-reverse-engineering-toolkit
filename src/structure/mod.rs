@@ -61,7 +61,8 @@ impl Ctx {
 /// Structure and render a single function as pseudo-C.
 pub fn structure_function(prog: &Program, func: &Function) -> String {
     let s = Structurer::new(prog, func);
-    drop_redundant_continues(s.run())
+    let out = drop_redundant_continues(s.run());
+    crate::decompile::annotate_strings(&out, prog)
 }
 
 /// Remove a `continue;` that is followed only by the closing braces leading out
