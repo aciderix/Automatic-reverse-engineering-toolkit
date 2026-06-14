@@ -286,6 +286,11 @@ pub fn dump(f: &IrFunction) -> String {
             .collect();
         let _ = writeln!(out, "// inferred types: {}", shown.join(", "));
     }
+    // Aggregate reconstruction (roadmap §5.3): bases accessed at multiple
+    // offsets are synthesised as structs. Display-only.
+    for agg in crate::types::recover_aggregates(f) {
+        let _ = writeln!(out, "// {}", crate::types::render_struct(&agg));
+    }
     for b in &f.blocks {
         let succ: Vec<String> = b.succ.iter().map(|s| format!("B{}", s)).collect();
         let _ = writeln!(out, "B{} (0x{:x})  -> [{}]:", b.id, b.addr, succ.join(", "));

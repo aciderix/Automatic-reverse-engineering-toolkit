@@ -448,7 +448,13 @@ largeur sur des slots `[rbp±disp]` purs.
   des appels indirects / jump tables), scalaires signés (`int64_t`) et non
   signés (`uint64_t`). L'émission garde le stockage `uint64_t` + masques
   explicites, donc la sémantique (et le gate de régression) est inchangée.
-- [ ] Synthèse de structs pour accès multi-offset.
+- [x] Synthèse de structs pour accès multi-offset. — `recover_aggregates`
+  (`src/types/mod.rs`) : décompose chaque accès `Load`/`Store` en `(base,
+  offset)`, canonicalise la base via l'union-find (copies/φ fusionnées), et
+  promeut en `struct` toute base touchée à ≥2 offsets distincts. Type de champ =
+  `join` des accès au même offset. Rendu *display-only* dans le dump IR
+  (`// struct s_vN { /*+0x8*/ … }`). Vérifié sur `ls` (buffers d'octets,
+  enregistrements 64 bits alignés, paires d'int32).
 - [ ] Détection de tableaux à stride constant.
 - [ ] Utiliser les types inférés dans l'émission (déclarations typées) une fois
   la promotion de pile / l'analyse d'alias en place — aujourd'hui *display-only*

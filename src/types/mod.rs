@@ -22,7 +22,7 @@
 #![allow(dead_code)]
 
 use crate::ir::types::*;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
 /// Union-find over SSA values, each set carrying the join of its constraints.
 pub struct TypeEnv {
@@ -196,6 +196,128 @@ pub fn infer(func: &IrFunction) -> HashMap<u32, Ty> {
         }
     }
     out
+}
+
+// ---------------------------------------------------------------------------
+// Aggregate (struct) reconstruction — roadmap §5.3, milestone 3.
+//
+// When one base pointer is accessed at several distinct offsets with coherent
+// widths, the object behind it is a record: synthesise a `struct` from the
+// observed `{offset -> type}` map. Versions of the same base (copies, φ) are
+// unified by the inference union-find, so `p`, `p` after a copy, and a φ of both
+// fold to one base and one struct. Display-only, like the type annotations.
+// ---------------------------------------------------------------------------
+
+/// A reconstructed struct: the base value it is reached through, and its fields
+/// as `(byte offset, type)` sorted by offset.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Aggregate {
+    pub base: u32,
+    pub fields: Vec<(i64, Ty)>,
+}
+
+/// Decompose an address into `(base value, byte offset)` for the simple
+/// `base`, `base + k`, `k + base` forms. Negative or non-constant offsets are
+/// rejected: those are stack frames / indexing, handled elsewhere.
+fn base_offset(e: &Expr) -> Option<(u32, i64)> {
+    match e {
+        Expr::Use(v) => Some((v.0, 0)),
+        Expr::Binary(BinOp::Add, a, b) => match (a.as_ref(), b.as_ref()) {
+            (Expr::Use(v), Expr::Const(k, _)) | (Expr::Const(k, _), Expr::Use(v)) => {
+                let k = *k;
+                if k >= 0 && k <= i64::MAX as i128 {
+                    Some((v.0, k as i64))
+                } else {
+                    None
+                }
+            }
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+/// Walk every memory access (`Load`/`Store`) of `func`, yielding `(addr, elem ty)`.
+fn collect_accesses(func: &IrFunction) -> Vec<(Expr, Ty)> {
+    fn walk(e: &Expr, out: &mut Vec<(Expr, Ty)>) {
+        match e {
+            Expr::Load { addr, ty } => {
+                out.push(((**addr).clone(), ty.clone()));
+                walk(addr, out);
+            }
+            Expr::Unary(_, x) | Expr::Cast { expr: x, .. } => walk(x, out),
+            Expr::Binary(_, a, b) => {
+                walk(a, out);
+                walk(b, out);
+            }
+            Expr::Select { cond, then_, else_ } => {
+                walk(cond, out);
+                walk(then_, out);
+                walk(else_, out);
+            }
+            Expr::Call { target, args, .. } => {
+                if let CallTarget::Indirect(x) = target {
+                    walk(x, out);
+                }
+                for a in args {
+                    walk(a, out);
+                }
+            }
+            _ => {}
+        }
+    }
+    let mut out = Vec::new();
+    for b in &func.blocks {
+        for s in &b.stmts {
+            match s {
+                Stmt::Store { addr, value, ty } => {
+                    out.push((addr.clone(), ty.clone()));
+                    walk(addr, &mut out);
+                    walk(value, &mut out);
+                }
+                Stmt::Set { expr, .. } | Stmt::Assign { expr, .. } | Stmt::CallStmt(expr) => {
+                    walk(expr, &mut out)
+                }
+                Stmt::Branch { cond, .. } => walk(cond, &mut out),
+                Stmt::Switch { value, .. } => walk(value, &mut out),
+                Stmt::Return(Some(e)) => walk(e, &mut out),
+                _ => {}
+            }
+        }
+    }
+    out
+}
+
+/// Reconstruct structs from multi-offset pointer accesses. A base is promoted to
+/// a struct only when it is accessed at **two or more distinct offsets** (a
+/// single `*p` is just a scalar dereference, not a record).
+pub fn recover_aggregates(func: &IrFunction) -> Vec<Aggregate> {
+    let mut env = build_env(func);
+    let mut acc: HashMap<u32, BTreeMap<i64, Ty>> = HashMap::new();
+    for (addr, ty) in collect_accesses(func) {
+        if let Some((base, off)) = base_offset(&addr) {
+            let r = env.find(base);
+            let slot = acc.entry(r).or_default().entry(off).or_insert(Ty::Unknown);
+            *slot = join(slot, &ty);
+        }
+    }
+    let mut out: Vec<Aggregate> = acc
+        .into_iter()
+        .filter(|(_, m)| m.len() >= 2)
+        .map(|(base, m)| Aggregate { base, fields: m.into_iter().collect() })
+        .collect();
+    out.sort_by_key(|a| a.base);
+    out
+}
+
+/// Render a reconstructed struct as a one-line C-ish declaration for the dump.
+pub fn render_struct(a: &Aggregate) -> String {
+    let mut s = format!("struct s_v{} {{ ", a.base);
+    for (off, ty) in &a.fields {
+        s.push_str(&format!("/*+0x{:x}*/ {} field_{:x}; ", off, ty_name(ty), off));
+    }
+    s.push('}');
+    s
 }
 
 /// Generate and resolve all constraints, returning the populated environment.
@@ -488,6 +610,85 @@ mod tests {
         );
         let types = infer(&f);
         assert_eq!(ty_name(types.get(&0).unwrap()), "int64_t");
+    }
+
+    /// Two accesses at distinct offsets off one base synthesise a struct.
+    #[test]
+    fn struct_from_multi_offset() {
+        // v1 = *(int64*)(v0 + 0); v2 = *(int32*)(v0 + 8)
+        let f = func(
+            3,
+            vec![
+                Stmt::Assign {
+                    dst: ValueId(1),
+                    expr: Expr::Load { addr: Box::new(use_(0)), ty: Ty::int(64) },
+                },
+                Stmt::Assign {
+                    dst: ValueId(2),
+                    expr: Expr::Load {
+                        addr: Box::new(Expr::Binary(
+                            BinOp::Add,
+                            Box::new(use_(0)),
+                            Box::new(Expr::konst(8, 64)),
+                        )),
+                        ty: Ty::int(32),
+                    },
+                },
+            ],
+        );
+        let aggs = recover_aggregates(&f);
+        assert_eq!(aggs.len(), 1);
+        assert_eq!(aggs[0].base, 0);
+        assert_eq!(aggs[0].fields.len(), 2);
+        assert_eq!(aggs[0].fields[0].0, 0);
+        assert_eq!(aggs[0].fields[1].0, 8);
+        let s = render_struct(&aggs[0]);
+        assert!(s.contains("field_0"), "{}", s);
+        assert!(s.contains("field_8"), "{}", s);
+    }
+
+    /// A single deref is not promoted to a struct.
+    #[test]
+    fn single_offset_is_not_a_struct() {
+        let f = func(
+            2,
+            vec![Stmt::Assign {
+                dst: ValueId(1),
+                expr: Expr::Load { addr: Box::new(use_(0)), ty: Ty::int(64) },
+            }],
+        );
+        assert!(recover_aggregates(&f).is_empty());
+    }
+
+    /// A copy of the base folds into one struct (union-find merges versions).
+    #[test]
+    fn struct_merges_aliased_base() {
+        // v1 = v0; *(v0 + 0); *(v1 + 8) -> one struct on the shared base.
+        let mut f = func(
+            5,
+            vec![
+                Stmt::Assign { dst: ValueId(1), expr: use_(0) },
+                Stmt::Assign {
+                    dst: ValueId(2),
+                    expr: Expr::Load { addr: Box::new(use_(0)), ty: Ty::int(64) },
+                },
+                Stmt::Assign {
+                    dst: ValueId(3),
+                    expr: Expr::Load {
+                        addr: Box::new(Expr::Binary(
+                            BinOp::Add,
+                            Box::new(use_(1)),
+                            Box::new(Expr::konst(8, 64)),
+                        )),
+                        ty: Ty::int(64),
+                    },
+                },
+            ],
+        );
+        f.next_value = 5;
+        let aggs = recover_aggregates(&f);
+        assert_eq!(aggs.len(), 1, "aliased base must yield one struct: {:?}", aggs);
+        assert_eq!(aggs[0].fields.len(), 2);
     }
 
     /// Pointer evidence dominates plain integer arithmetic on the same value.
