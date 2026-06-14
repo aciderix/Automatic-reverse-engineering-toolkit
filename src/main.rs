@@ -216,12 +216,18 @@ fn write_split(
     std::fs::create_dir_all(dir)
         .with_context(|| format!("failed to create {}", dir.display()))?;
 
-    let mut index = String::from("name,entry,basic_blocks,callees\n");
-    for f in functions {
+    // Render + write each function in parallel (independent, prog is read-only).
+    use rayon::prelude::*;
+    let written: Result<()> = functions.par_iter().try_for_each(|f| {
         let fname = format!("{}.c", sanitize(&f.name));
         let body = render_function(prog, f, flat);
         std::fs::write(dir.join(&fname), body)
-            .with_context(|| format!("failed to write {}", fname))?;
+            .with_context(|| format!("failed to write {}", fname))
+    });
+    written?;
+
+    let mut index = String::from("name,entry,basic_blocks,callees\n");
+    for f in functions {
         index.push_str(&format!(
             "{},0x{:x},{},{}\n",
             f.name,

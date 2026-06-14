@@ -52,12 +52,14 @@ pub fn analyze(prog: &Program, disasm: &Disassembler, prologue_scan: bool) -> An
     let (global, entries, jump_tables) = global_decode(prog, disasm, prologue_scan);
     let instruction_count = global.len();
 
-    let mut functions = Vec::new();
-    for &entry in &entries {
-        if let Some(f) = build_function(prog, &global, entry, &entries, &jump_tables) {
-            functions.push(f);
-        }
-    }
+    // Functions are independent (everything they read — `global`, `entries`,
+    // `jump_tables`, `prog` — is shared read-only), so build them in parallel.
+    use rayon::prelude::*;
+    let entry_vec: Vec<u64> = entries.iter().copied().collect();
+    let mut functions: Vec<Function> = entry_vec
+        .par_iter()
+        .filter_map(|&entry| build_function(prog, &global, entry, &entries, &jump_tables))
+        .collect();
     functions.sort_by_key(|f| f.entry);
     AnalysisResult {
         functions,

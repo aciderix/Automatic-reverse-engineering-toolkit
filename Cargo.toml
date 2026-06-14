@@ -22,6 +22,7 @@ clap = { version = "4", features = ["derive"] }
 anyhow = "1"
 # Ordered maps for deterministic output
 indexmap = "2"
+rayon = "1.12.0"
 
 [profile.release]
 opt-level = 3

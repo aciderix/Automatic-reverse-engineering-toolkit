@@ -95,26 +95,30 @@ fn try_compile(cc: &str, src: &str) -> Result<(), String> {
 
 /// Run the recompilability check over `funcs` (capped at `limit`).
 pub fn run(prog: &Program, funcs: &[&Function], limit: usize) -> Report {
+    use rayon::prelude::*;
     let cc = pick_cc();
-    let mut compiled = 0;
-    let mut failures = Vec::new();
-    let mut total = 0;
+    let slice = &funcs[..limit.min(funcs.len())];
 
-    for f in funcs.iter().take(limit) {
-        total += 1;
-        let mut irf = ir::build::build_ir(prog, f);
-        ssa::to_ssa(&mut irf);
-        crate::opt::optimize(&mut irf);
-        let src = emit::structured::emit_unit(std::slice::from_ref(&irf));
-        match try_compile(&cc, &src) {
-            Ok(()) => compiled += 1,
-            Err(e) => {
-                if failures.len() < 20 {
-                    failures.push((f.name.clone(), e));
-                }
-            }
-        }
-    }
+    // Each function is decompiled and compiled independently (separate `cc`
+    // subprocesses), so run them in parallel.
+    let results: Vec<Result<(), (String, String)>> = slice
+        .par_iter()
+        .map(|f| {
+            let mut irf = ir::build::build_ir(prog, f);
+            ssa::to_ssa(&mut irf);
+            crate::opt::optimize(&mut irf);
+            let src = emit::structured::emit_unit(std::slice::from_ref(&irf));
+            try_compile(&cc, &src).map_err(|e| (f.name.clone(), e))
+        })
+        .collect();
+
+    let total = results.len();
+    let compiled = results.iter().filter(|r| r.is_ok()).count();
+    let failures: Vec<(String, String)> = results
+        .into_iter()
+        .filter_map(|r| r.err())
+        .take(20)
+        .collect();
 
     Report {
         total,

@@ -786,7 +786,7 @@ sur la métrique nord.
   (déjà détectées) + variable d'induction → `for(i=…;…;i++)`.
 - **Annotations de confiance** [Prop. 18, effort minimal] : commenter chaque fonction
   `/* confidence: HIGH (SMT) / MEDIUM (diff) / LOW (asm résiduel) */`.
-- **Parallélisme Rayon** [Prop. 19] : `functions.par_iter()` dans emit/verify
+- ✅ **Parallélisme Rayon** [Prop. 19] FAIT (analyse 60→17s, split 44k fn 73→16s, verify parallèle) ; : `functions.par_iter()` dans emit/verify
   (fonctions indépendantes, `prog` en lecture seule) → ~50 s → ~8 s.
 - **Backlog d'outillage (P4)** : export JSON/AST + HTML interactif [22], export
   **LLVM IR** [23], serveur **LSP** [24], **binary diff** sémantique [25],
