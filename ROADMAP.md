@@ -455,7 +455,12 @@ largeur sur des slots `[rbp±disp]` purs.
   `join` des accès au même offset. Rendu *display-only* dans le dump IR
   (`// struct s_vN { /*+0x8*/ … }`). Vérifié sur `ls` (buffers d'octets,
   enregistrements 64 bits alignés, paires d'int32).
-- [ ] Détection de tableaux à stride constant.
+- [x] Détection de tableaux à stride constant. — `recover_arrays`
+  (`src/types/mod.rs`) : reconnaît `base + i*stride` et `base + (i << shift)`
+  (indice variable, échelle constante), base canonicalisée par l'union-find,
+  type d'élément = `join` des accès. Rendu *display-only* (`// T arr_vN[]; /*
+  stride 0xN */`). Distinct des structs (offset constant). Vérifié sur `ls`
+  (tableaux de pointeurs stride 8, tableau d'int16 stride 2).
 - [ ] Utiliser les types inférés dans l'émission (déclarations typées) une fois
   la promotion de pile / l'analyse d'alias en place — aujourd'hui *display-only*
   par sûreté.

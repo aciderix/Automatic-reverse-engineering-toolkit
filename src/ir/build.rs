@@ -291,6 +291,10 @@ pub fn dump(f: &IrFunction) -> String {
     for agg in crate::types::recover_aggregates(f) {
         let _ = writeln!(out, "// {}", crate::types::render_struct(&agg));
     }
+    // Constant-stride indexed accesses are arrays (roadmap §5.4 m.4). Display-only.
+    for arr in crate::types::recover_arrays(f) {
+        let _ = writeln!(out, "// {}", crate::types::render_array(&arr));
+    }
     for b in &f.blocks {
         let succ: Vec<String> = b.succ.iter().map(|s| format!("B{}", s)).collect();
         let _ = writeln!(out, "B{} (0x{:x})  -> [{}]:", b.id, b.addr, succ.join(", "));

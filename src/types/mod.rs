@@ -310,6 +310,84 @@ pub fn recover_aggregates(func: &IrFunction) -> Vec<Aggregate> {
     out
 }
 
+// ---------------------------------------------------------------------------
+// Array reconstruction — roadmap §5.3 / §5.4, milestone 4.
+//
+// An address of the form `base + index*stride` (or `base + (index << shift)`)
+// with a constant stride and a *variable* index is array indexing: synthesise
+// `elem base[]` with `elem` the access type. Distinct from structs, where the
+// offset is a compile-time constant.
+// ---------------------------------------------------------------------------
+
+/// A reconstructed array: base value, element stride in bytes, element type.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ArrayRec {
+    pub base: u32,
+    pub stride: i64,
+    pub elem: Ty,
+}
+
+/// The constant stride of an index term `i*k`, `k*i`, or `i << s` (variable `i`,
+/// constant scale). Returns `None` for anything else.
+fn index_stride(e: &Expr) -> Option<i64> {
+    match e {
+        Expr::Binary(BinOp::Mul, a, b) => match (a.as_ref(), b.as_ref()) {
+            (Expr::Use(_), Expr::Const(k, _)) | (Expr::Const(k, _), Expr::Use(_)) => {
+                let k = *k;
+                if k > 0 && k <= i64::MAX as i128 {
+                    Some(k as i64)
+                } else {
+                    None
+                }
+            }
+            _ => None,
+        },
+        Expr::Binary(BinOp::Shl, a, b) => match (a.as_ref(), b.as_ref()) {
+            (Expr::Use(_), Expr::Const(s, _)) if *s >= 0 && *s < 31 => Some(1i64 << s),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+/// Decompose an address into `(base value, element stride)` for the indexed
+/// forms `base + i*stride` and `stride*i + base`.
+fn array_access(e: &Expr) -> Option<(u32, i64)> {
+    if let Expr::Binary(BinOp::Add, a, b) = e {
+        if let (Some(base), Some(stride)) = (as_use(a), index_stride(b)) {
+            return Some((base, stride));
+        }
+        if let (Some(stride), Some(base)) = (index_stride(a), as_use(b)) {
+            return Some((base, stride));
+        }
+    }
+    None
+}
+
+/// Reconstruct arrays from constant-stride indexed accesses.
+pub fn recover_arrays(func: &IrFunction) -> Vec<ArrayRec> {
+    let mut env = build_env(func);
+    let mut acc: HashMap<(u32, i64), Ty> = HashMap::new();
+    for (addr, ty) in collect_accesses(func) {
+        if let Some((base, stride)) = array_access(&addr) {
+            let r = env.find(base);
+            let slot = acc.entry((r, stride)).or_insert(Ty::Unknown);
+            *slot = join(slot, &ty);
+        }
+    }
+    let mut out: Vec<ArrayRec> = acc
+        .into_iter()
+        .map(|((base, stride), elem)| ArrayRec { base, stride, elem })
+        .collect();
+    out.sort_by_key(|a| (a.base, a.stride));
+    out
+}
+
+/// Render a reconstructed array as a one-line C-ish declaration for the dump.
+pub fn render_array(a: &ArrayRec) -> String {
+    format!("{} arr_v{}[]; /* stride 0x{:x} */", ty_name(&a.elem), a.base, a.stride)
+}
+
 /// Render a reconstructed struct as a one-line C-ish declaration for the dump.
 pub fn render_struct(a: &Aggregate) -> String {
     let mut s = format!("struct s_v{} {{ ", a.base);
@@ -689,6 +767,81 @@ mod tests {
         let aggs = recover_aggregates(&f);
         assert_eq!(aggs.len(), 1, "aliased base must yield one struct: {:?}", aggs);
         assert_eq!(aggs[0].fields.len(), 2);
+    }
+
+    /// `base + i*8` indexing recovers an array with stride 8.
+    #[test]
+    fn array_from_scaled_index() {
+        // v2 = *(int64*)(v0 + v1*8)
+        let f = func(
+            3,
+            vec![Stmt::Assign {
+                dst: ValueId(2),
+                expr: Expr::Load {
+                    addr: Box::new(Expr::Binary(
+                        BinOp::Add,
+                        Box::new(use_(0)),
+                        Box::new(Expr::Binary(
+                            BinOp::Mul,
+                            Box::new(use_(1)),
+                            Box::new(Expr::konst(8, 64)),
+                        )),
+                    )),
+                    ty: Ty::int(64),
+                },
+            }],
+        );
+        let arrs = recover_arrays(&f);
+        assert_eq!(arrs.len(), 1);
+        assert_eq!(arrs[0].base, 0);
+        assert_eq!(arrs[0].stride, 8);
+        assert!(render_array(&arrs[0]).contains("stride 0x8"));
+    }
+
+    /// `base + (i << 2)` recovers stride 4 (shift form).
+    #[test]
+    fn array_from_shift_index() {
+        let f = func(
+            3,
+            vec![Stmt::Assign {
+                dst: ValueId(2),
+                expr: Expr::Load {
+                    addr: Box::new(Expr::Binary(
+                        BinOp::Add,
+                        Box::new(use_(0)),
+                        Box::new(Expr::Binary(
+                            BinOp::Shl,
+                            Box::new(use_(1)),
+                            Box::new(Expr::konst(2, 8)),
+                        )),
+                    )),
+                    ty: Ty::int(32),
+                },
+            }],
+        );
+        let arrs = recover_arrays(&f);
+        assert_eq!(arrs.len(), 1);
+        assert_eq!(arrs[0].stride, 4);
+    }
+
+    /// A constant-offset access is a struct field, not an array element.
+    #[test]
+    fn const_offset_is_not_an_array() {
+        let f = func(
+            2,
+            vec![Stmt::Assign {
+                dst: ValueId(1),
+                expr: Expr::Load {
+                    addr: Box::new(Expr::Binary(
+                        BinOp::Add,
+                        Box::new(use_(0)),
+                        Box::new(Expr::konst(8, 64)),
+                    )),
+                    ty: Ty::int(64),
+                },
+            }],
+        );
+        assert!(recover_arrays(&f).is_empty());
     }
 
     /// Pointer evidence dominates plain integer arithmetic on the same value.
