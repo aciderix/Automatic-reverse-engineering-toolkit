@@ -627,11 +627,27 @@ pub fn lift(insn: &Insn, bits: u32) -> Vec<Stmt> {
                     None => return asm(),
                 },
             };
-            vec![Stmt::CallStmt(Expr::Call {
+            let call = Expr::Call {
                 target,
-                args: Vec::new(),
+                args: Vec::new(), // call-site argument recovery is future work
                 ret: Ty::int(bits as u8),
-            })]
+            };
+            // The call returns its value in rax; caller-saved registers are
+            // undefined afterwards. Modelling this lets later reads of the
+            // result use the call, and prevents stale reads of clobbered regs.
+            let mut out = vec![Stmt::Set { dst: Location::Reg(RegId(0)), expr: call }];
+            let clobbers: &[u16] = if bits == 64 {
+                &[1, 2, 6, 7, 8, 9, 10, 11] // rcx,rdx,rsi,rdi,r8-r11 (SysV caller-saved)
+            } else {
+                &[1, 2] // ecx,edx (cdecl caller-saved scratch)
+            };
+            for &r in clobbers {
+                out.push(Stmt::Set {
+                    dst: Location::Reg(RegId(r)),
+                    expr: Expr::Undef,
+                });
+            }
+            out
         }
         Mnemonic::Ret => vec![Stmt::Return(None)],
 
