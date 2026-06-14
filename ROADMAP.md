@@ -570,7 +570,13 @@ relogeable), et compare.
    exactement la valeur de la boucle : elle rend les bugs visibles et mesurables.
    Reste : étendre le corpus, et le différentiel sur binaires sans source (via
    chargement/émulation de la fonction d'origine).
-3. **Équivalence symbolique (SMT)** : lever les deux fonctions en formules et
+3. **Équivalence symbolique (SMT)** : ✅ **niveau 3 amorcé** (`bench/smt_rewrites.sh`,
+   Z3). Chaque règle de réécriture de l'optimiseur (`src/opt`) est **prouvée
+   formellement** correcte pour *toutes* les entrées 64 bits : reconstruction
+   signée `SF!=OF ⟺ a<s b`, `ZF|(SF!=OF) ⟺ a<=s b`, `ULT|EQ ⟺ a<=u b`,
+   négation des relationnels, masque-de-masque, identités, et l'extension de
+   signe 32→64 (`signed_cast`). 11/11 prouvé (dont un test sanity attendu `sat`).
+   Reste à étendre : lever des **fonctions entières** (sans boucle) en formules et
    demander à un solveur (Z3 via crate `z3`, ou export SMT-LIB) de prouver
    `∀ entrées. orig(x) == recompiled(x)`. **Garantie formelle**, par fonction.
    Faisable pour les fonctions sans boucle / à boucles bornées ; pour le reste,
