@@ -486,8 +486,11 @@ Remplacer le `ARG_REGS` conservateur (`dataflow/mod.rs:59`) par une vraie
 - **Matching de fonctions connues** : empreintes de la CRT/libc (memcpy, malloc,
   printf…) pour les nommer et **sauter le boilerplate runtime**. Démarrer avec
   une petite base d'empreintes par hash de motif d'octets masqués.
-- **Strings** : résoudre les références à `.rodata` en littéraux C
-  (`"%d\n"`), via `loader`. Gros gain de lisibilité immédiat.
+- **Strings** : ✅ **fait** (`loader::read_cstring` + `decompile::annotate_strings`).
+  Les adresses pointant vers des chaînes lisibles d'une section read-only sont
+  annotées inline (`0x402004 /* "%d %d\n" */`) dans la sortie texte par défaut.
+  Sur le jeu : **50 940 chaînes récupérées dans 12 708 fonctions** — révélant
+  qu'OpenSSL + curl sont liés statiquement. Affichage seul → sûr.
 - **Globals** : nommer/typer les accès aux données statiques.
 - **PLT/GOT/imports** : résoudre les appels externes vers leurs noms importés.
 
