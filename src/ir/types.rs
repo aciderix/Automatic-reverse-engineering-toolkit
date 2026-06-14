@@ -219,6 +219,9 @@ pub struct IrFunction {
     pub name: String,
     /// Target pointer width in bits (32 or 64), for frame-slot classification.
     pub bits: u32,
+    /// SSA value ids that are register-passed parameters (64-bit ABIs), in
+    /// calling-convention order. Populated by SSA construction.
+    pub reg_params: Vec<u32>,
     pub blocks: Vec<Block>,
     /// Next fresh SSA value id.
     pub next_value: u32,

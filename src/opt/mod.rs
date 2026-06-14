@@ -452,6 +452,7 @@ mod tests {
             entry: 0,
             name: "t".into(),
             bits: 64,
+            reg_params: vec![],
             blocks: vec![Block {
                 id: 0,
                 addr: 0,

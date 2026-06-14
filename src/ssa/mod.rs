@@ -206,6 +206,20 @@ pub fn to_ssa(func: &mut IrFunction) {
         func.blocks[b].stmts = stmts;
     }
     func.next_value = counter;
+
+    // Register-passed parameters (64-bit ABIs): an argument register read
+    // before being written (its entry/undef version is referenced) is a
+    // parameter. System V order; Win64's rcx,rdx,r8,r9 is a prefix of it minus
+    // rsi/rdi, so this is a reasonable superset for recovery.
+    if func.bits == 64 {
+        // RegId order matches ir::lift::reg_id: rcx=1, rdx=2, rsi=6, rdi=7, r8=8, r9=9.
+        let sysv = [7u16, 6, 2, 1, 8, 9];
+        for r in sysv {
+            if let Some(v) = undef.get(&Location::Reg(RegId(r))) {
+                func.reg_params.push(v.0);
+            }
+        }
+    }
 }
 
 /// Rewrite all `Read(loc)` in an expression to `Use(version)`.
@@ -348,6 +362,7 @@ mod tests {
             entry: 0,
             name: "t".into(),
             bits: 64,
+            reg_params: vec![],
             blocks: vec![
                 blk(
                     0,
@@ -414,6 +429,7 @@ mod tests {
             entry: 0,
             name: "t".into(),
             bits: 64,
+            reg_params: vec![],
             blocks: vec![blk(
                 0,
                 vec![

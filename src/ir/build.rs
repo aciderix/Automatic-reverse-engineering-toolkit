@@ -115,6 +115,7 @@ pub fn build_ir(prog: &Program, func: &Function) -> IrFunction {
         entry: func.entry,
         name: func.name.clone(),
         bits,
+        reg_params: Vec::new(),
         blocks,
         next_value: 0,
         next_temp: 0,

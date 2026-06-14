@@ -78,6 +78,11 @@ pub fn emit_function(func: &IrFunction, forward: &mut BTreeSet<u64>, with_params
 
     let mut values = BTreeSet::new();
     collect_values(&f, &mut values);
+    if with_params {
+        for p in &f.reg_params {
+            values.remove(p); // declared as parameters, not locals
+        }
+    }
 
     let nodes: Vec<u32> = f.blocks.iter().map(|b| b.id).collect();
     let idx: HashMap<u32, usize> = nodes.iter().enumerate().map(|(i, &id)| (id, i)).collect();

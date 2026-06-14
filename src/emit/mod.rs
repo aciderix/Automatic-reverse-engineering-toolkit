@@ -346,15 +346,23 @@ pub(crate) fn frame_params_locals(func: &IrFunction) -> (Vec<i64>, Vec<i64>) {
 /// The function's C signature. With `with_params`, recovered frame arguments
 /// become real parameters; otherwise `(void)`.
 pub(crate) fn signature(func: &IrFunction, with_params: bool) -> String {
+    if !with_params {
+        return format!("uint64_t sub_{:x}(void)", func.entry);
+    }
+    let mut p: Vec<String> = Vec::new();
+    // Register-passed parameters first (64-bit ABIs), in convention order.
+    for v in &func.reg_params {
+        p.push(format!("uint64_t v{}", v));
+    }
+    // Then stack/frame parameters.
     let (params, _) = frame_params_locals(func);
-    if with_params && !params.is_empty() {
-        let p: Vec<String> = params
-            .iter()
-            .map(|d| format!("uint64_t {}", frame_name(*d)))
-            .collect();
-        format!("uint64_t sub_{:x}({})", func.entry, p.join(", "))
-    } else {
+    for d in params {
+        p.push(format!("uint64_t {}", frame_name(d)));
+    }
+    if p.is_empty() {
         format!("uint64_t sub_{:x}(void)", func.entry)
+    } else {
+        format!("uint64_t sub_{:x}({})", func.entry, p.join(", "))
     }
 }
 
@@ -473,6 +481,11 @@ pub fn emit_function(func: &IrFunction, forward: &mut BTreeSet<u64>, with_params
     let mut values = BTreeSet::new();
     collect_values(&f, &mut values);
     collect_callees(&f, forward);
+    if with_params {
+        for p in &f.reg_params {
+            values.remove(p); // declared as parameters, not locals
+        }
+    }
 
     let mut out = String::new();
     let _ = writeln!(out, "{} {{", signature(&f, with_params));
@@ -549,6 +562,7 @@ mod tests {
             entry: 0,
             name: "t".into(),
             bits: 64,
+            reg_params: vec![],
             blocks: vec![
                 Block { id: 0, addr: 0, stmts: vec![Stmt::Set { dst: rax.clone(), expr: Expr::konst(1, 32) }, Stmt::Branch { cond: Expr::konst(1, 8), taken: BlockId(1), fallthrough: BlockId(2) }], succ: vec![1, 2], pred: vec![] },
                 Block { id: 1, addr: 1, stmts: vec![Stmt::Set { dst: rax.clone(), expr: Expr::konst(2, 32) }, Stmt::Jump(BlockId(3)) ], succ: vec![3], pred: vec![0] },
