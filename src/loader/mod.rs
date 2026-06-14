@@ -136,7 +136,8 @@ impl Program {
                 });
         }
 
-        let imports = parse_pe_imports(data);
+        let mut imports = parse_pe_imports(data);
+        add_elf_imports(&obj, &sections, bitness, &mut imports);
 
         Ok(Program {
             format: format!("{:?}", obj.format()),
@@ -321,4 +322,76 @@ fn parse_pe_imports(data: &[u8]) -> BTreeMap<u64, String> {
         .filter(|m| !m.is_empty())
         .or_else(|| collect::<pe::ImageNtHeaders64>(data, 8))
         .unwrap_or_default()
+}
+
+/// Resolve ELF imports: map GOT slots (for `call [GOT]`) and PLT stub entries
+/// (for `call plt_stub`) to their imported symbol names, so libc/external calls
+/// get named. GOT names come from the dynamic relocations; PLT stub addresses
+/// are found by decoding the `.plt*` sections' indirect jumps to the GOT.
+fn add_elf_imports(
+    obj: &object::File,
+    sections: &[Section],
+    bitness: Bitness,
+    imports: &mut BTreeMap<u64, String>,
+) {
+    use iced_x86::{Decoder, DecoderOptions, Instruction, Mnemonic, OpKind, Register};
+    use object::{Object, ObjectSymbol, RelocationTarget};
+
+    if obj.format() != object::BinaryFormat::Elf {
+        return;
+    }
+
+    // Dynamic-relocation symbol indices refer to the *dynamic* symbol table
+    // (the static table is often stripped), so resolve names through it.
+    let dynsym: std::collections::HashMap<usize, String> = obj
+        .dynamic_symbols()
+        .filter_map(|s| s.name().ok().map(|n| (s.index().0, n.to_string())))
+        .collect();
+
+    // GOT slot address -> imported symbol name (from JUMP_SLOT/GLOB_DAT relocs).
+    let mut got: BTreeMap<u64, String> = BTreeMap::new();
+    if let Some(relocs) = obj.dynamic_relocations() {
+        for (addr, rel) in relocs {
+            if let RelocationTarget::Symbol(idx) = rel.target() {
+                if let Some(name) = dynsym.get(&idx.0) {
+                    if !name.is_empty() {
+                        got.insert(addr, name.clone());
+                        imports.insert(addr, name.clone()); // call [GOT]
+                    }
+                }
+            }
+        }
+    }
+    if got.is_empty() {
+        return;
+    }
+
+    // Decode each .plt* section; an indirect jump to a named GOT slot identifies
+    // the 16-byte stub whose start address callers `call`.
+    let bits = bitness.bits();
+    for sec in sections {
+        if !sec.name.starts_with(".plt") {
+            continue;
+        }
+        let mut dec = Decoder::with_ip(bits, &sec.data, sec.address, DecoderOptions::NONE);
+        let mut insn = Instruction::default();
+        while dec.can_decode() {
+            dec.decode_out(&mut insn);
+            if insn.mnemonic() != Mnemonic::Jmp || insn.op0_kind() != OpKind::Memory {
+                continue;
+            }
+            let target = if insn.is_ip_rel_memory_operand() {
+                insn.ip_rel_memory_address()
+            } else if insn.memory_base() == Register::None && insn.memory_index() == Register::None
+            {
+                insn.memory_displacement64()
+            } else {
+                continue;
+            };
+            if let Some(name) = got.get(&target) {
+                let stub = sec.address + ((insn.ip() - sec.address) / 16) * 16;
+                imports.insert(stub, name.clone());
+            }
+        }
+    }
 }

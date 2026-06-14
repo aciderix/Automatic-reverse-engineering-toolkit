@@ -204,6 +204,10 @@ pub fn call_name_of(insn: &Insn, prog: &Program) -> String {
 /// Resolve a call target to a callable C name.
 fn call_name(insn: &Insn, prog: &Program, ops: &[String]) -> String {
     if let Some(t) = insn.target {
+        // Direct call to a PLT stub (ELF) or named symbol.
+        if let Some(name) = prog.import_name(t) {
+            return name.to_string();
+        }
         if let Some(name) = prog.symbol_name(t) {
             return name.to_string();
         }
