@@ -273,6 +273,19 @@ fn stmt_str(s: &Stmt) -> String {
 pub fn dump(f: &IrFunction) -> String {
     let mut out = String::new();
     let _ = writeln!(out, "// {}  @ 0x{:x}  ({} blocks, {} values)", f.name, f.entry, f.blocks.len(), f.next_value);
+    // Constraint-based type inference (roadmap §5): annotate values whose type
+    // could be narrowed past a plain 64-bit scalar (pointers, code pointers,
+    // signed/unsigned ints). Display-only — emission is unaffected.
+    let types = crate::types::infer(f);
+    if !types.is_empty() {
+        let mut items: Vec<(&u32, &crate::ir::types::Ty)> = types.iter().collect();
+        items.sort_by_key(|(k, _)| **k);
+        let shown: Vec<String> = items
+            .iter()
+            .map(|(k, t)| format!("v{}: {}", k, crate::types::ty_name(t)))
+            .collect();
+        let _ = writeln!(out, "// inferred types: {}", shown.join(", "));
+    }
     for b in &f.blocks {
         let succ: Vec<String> = b.succ.iter().map(|s| format!("B{}", s)).collect();
         let _ = writeln!(out, "B{} (0x{:x})  -> [{}]:", b.id, b.addr, succ.join(", "));

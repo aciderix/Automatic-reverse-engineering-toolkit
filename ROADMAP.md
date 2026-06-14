@@ -436,10 +436,23 @@ largeur sur des slots `[rbp±disp]` purs.
 
 ### 5.4 Jalons
 
-- [ ] Treillis + union-find + résolution.
-- [ ] Pointeurs vs scalaires distingués sur le corpus.
+- [x] Treillis + union-find + résolution. — `src/types/mod.rs` : `TypeEnv`
+  (union-find par rang + path-halving), `join`/`join_sign` totaux (un conflit
+  retombe sur un scalaire 64 bits, jamais ⊥), génération de contraintes depuis
+  l'usage (load/store → `Ptr`, comparaison/division signée vs non-signée →
+  `signed`, `sar`/`shr`, `movsx`/sign-extend, cible d'appel indirect → `Code`,
+  copies + φ → union). 10 tests unitaires.
+- [x] Pointeurs vs scalaires distingués sur le corpus. — annotation
+  *display-only* dans le dump IR (`// inferred types:`), vérifiée sur `ls` :
+  pointeurs (`int8*`, `int32*`, `int16*`), pointeurs de code (`code*`, issus
+  des appels indirects / jump tables), scalaires signés (`int64_t`) et non
+  signés (`uint64_t`). L'émission garde le stockage `uint64_t` + masques
+  explicites, donc la sémantique (et le gate de régression) est inchangée.
 - [ ] Synthèse de structs pour accès multi-offset.
 - [ ] Détection de tableaux à stride constant.
+- [ ] Utiliser les types inférés dans l'émission (déclarations typées) une fois
+  la promotion de pile / l'analyse d'alias en place — aujourd'hui *display-only*
+  par sûreté.
 
 ---
 

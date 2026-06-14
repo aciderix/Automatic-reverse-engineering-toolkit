@@ -14,6 +14,7 @@ mod loader;
 mod opt;
 mod ssa;
 mod structure;
+mod types;
 mod verify;
 
 use anyhow::{Context, Result};
