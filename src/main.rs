@@ -155,6 +155,10 @@ fn main() -> Result<()> {
                 // local slots are provably free of any aliasing frame access.
                 // Display-only diagnostic; it does not alter the IR.
                 let promotable = opt::frame::promotable_slots(&irf);
+                // rsp/rbp-relative accesses recovered as named stack slots (the
+                // ones otherwise emitted as `*(T*)(reg + k)`). Both diagnostics run
+                // on the pre-SSA IR, where the frame base is still a register read.
+                let recovered = opt::frame::recover_stack_slots(&irf);
                 ssa::to_ssa(&mut irf);
                 opt::optimize(&mut irf);
                 if !promotable.is_empty() {
@@ -165,6 +169,19 @@ fn main() -> Result<()> {
                         promotable.len(),
                         names.join(", ")
                     ));
+                }
+                if let Some(slots) = recovered {
+                    if !slots.is_empty() {
+                        let items: Vec<String> = slots
+                            .iter()
+                            .map(|(d, si)| format!("{}(x{})", emit::frame_name(*d), si.count))
+                            .collect();
+                        out.push_str(&format!(
+                            "// stack: {} recovered slot(s): {}\n",
+                            slots.len(),
+                            items.join(", ")
+                        ));
+                    }
                 }
                 out.push_str(&ir::build::dump(&irf));
                 out.push('\n');

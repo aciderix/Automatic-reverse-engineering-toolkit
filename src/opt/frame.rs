@@ -47,6 +47,9 @@ struct FrameInfo {
     /// Entry-relative `[start, end)` byte ranges of every *generic* frame access
     /// (rsp/rbp-relative loads/stores, push/pop saves, spills, outgoing args).
     generic_ranges: Vec<(i64, i64)>,
+    /// Every constant-offset frame access as `(entry-relative offset, width
+    /// bytes)`. Raw material for recovering `rsp`-relative locals as named slots.
+    accesses: Vec<(i64, i64)>,
     /// A frame pointer escaped (taken by `lea`, copied into a base, stored to or
     /// passed beyond the frame): no local can be assumed un-aliased.
     escaped: bool,
@@ -54,8 +57,23 @@ struct FrameInfo {
 
 impl FrameInfo {
     fn bail() -> Self {
-        FrameInfo { ok: false, rbp_off: None, generic_ranges: Vec::new(), escaped: true }
+        FrameInfo {
+            ok: false,
+            rbp_off: None,
+            generic_ranges: Vec::new(),
+            accesses: Vec::new(),
+            escaped: true,
+        }
     }
+}
+
+/// A recovered stack slot's usage summary.
+#[derive(Default, Clone, Debug)]
+pub struct SlotInfo {
+    /// Access widths in bits observed at this slot.
+    pub widths: BTreeSet<u32>,
+    /// Number of accesses (loads + stores).
+    pub count: u32,
 }
 
 /// The set of local slot displacements (`Location::Frame(d)`, `d < 0`) that are
@@ -82,6 +100,32 @@ pub fn promotable_slots(func: &IrFunction) -> BTreeSet<i64> {
             !info.generic_ranges.iter().any(|&(gs, ge)| gs < e && s < ge)
         })
         .collect()
+}
+
+/// Recover `rsp`/`rbp`-relative constant-offset accesses as named stack slots,
+/// keyed by displacement in the function's frame coordinate (rbp-relative when a
+/// frame pointer is established, else entry-`rsp`-relative). These are exactly
+/// the accesses currently emitted as `*(T*)(reg + k)`; naming them turns them
+/// into `local_…`. Returns `None` if the frame model bailed or anything escaped
+/// (then no naming is sound). Display/measurement layer for now.
+pub fn recover_stack_slots(func: &IrFunction) -> Option<std::collections::BTreeMap<i64, SlotInfo>> {
+    use std::collections::BTreeMap;
+    let info = analyze(func);
+    if !info.ok || info.escaped {
+        return None;
+    }
+    // Convert entry-relative offsets to the function's frame coordinate.
+    let to_disp = |o: i64| match info.rbp_off {
+        Some(r) => o - r,
+        None => o,
+    };
+    let mut m: BTreeMap<i64, SlotInfo> = BTreeMap::new();
+    for (o, w) in &info.accesses {
+        let e = m.entry(to_disp(*o)).or_default();
+        e.widths.insert((*w * 8) as u32);
+        e.count += 1;
+    }
+    Some(m)
 }
 
 /// Negative-displacement frame slots (the locals).
@@ -151,7 +195,7 @@ fn mentions_tainted(e: &Expr, t: &HashSet<u16>) -> bool {
 fn analyze(func: &IrFunction) -> FrameInfo {
     let n = func.blocks.len();
     if n == 0 {
-        return FrameInfo { ok: true, rbp_off: None, generic_ranges: Vec::new(), escaped: false };
+        return FrameInfo { ok: true, rbp_off: None, generic_ranges: Vec::new(), accesses: Vec::new(), escaped: false };
     }
     let tainted = tainted_regs(func);
 
@@ -161,7 +205,7 @@ fn analyze(func: &IrFunction) -> FrameInfo {
     rsp_in[entry] = Some(0);
 
     let mut info =
-        FrameInfo { ok: true, rbp_off: None, generic_ranges: Vec::new(), escaped: false };
+        FrameInfo { ok: true, rbp_off: None, generic_ranges: Vec::new(), accesses: Vec::new(), escaped: false };
 
     let mut work = vec![entry];
     while let Some(bi) = work.pop() {
@@ -340,7 +384,9 @@ fn merge_var(base: AddrClass, _other: AddrClass) -> AddrClass {
 fn apply_class(cls: AddrClass, width_bytes: i64, info: &mut FrameInfo) -> bool {
     match cls {
         AddrClass::Frame(o) => {
-            info.generic_ranges.push((o, o + width_bytes.max(1)));
+            let w = width_bytes.max(1);
+            info.generic_ranges.push((o, o + w));
+            info.accesses.push((o, w));
             true
         }
         AddrClass::CopyFrame => {
@@ -532,6 +578,26 @@ mod tests {
         let slots = promotable_slots(&f);
         assert!(!slots.contains(&-8), "local_8 overlaps the spill: {:?}", slots);
         assert!(slots.contains(&-16), "local_16 is disjoint: {:?}", slots);
+    }
+
+    /// An `rsp`-relative spill accessed twice is recovered as one stable slot
+    /// in rbp-relative coordinates.
+    #[test]
+    fn recovers_rsp_spill_as_slot() {
+        let f = func(vec![
+            Stmt::Set { dst: Location::Reg(RegId(RSP)), expr: Expr::Binary(BinOp::Sub, Box::new(rsp()), Box::new(Expr::konst(8, 64))) },
+            Stmt::Store { addr: rsp(), value: rbp(), ty: Ty::int(64) }, // save rbp
+            Stmt::Set { dst: Location::Reg(RegId(RBP)), expr: rsp() },   // rbp_off = -8
+            Stmt::Set { dst: Location::Reg(RegId(RSP)), expr: Expr::Binary(BinOp::Sub, Box::new(rsp()), Box::new(Expr::konst(0x10, 64))) }, // rsp=-24
+            // *(uint64*)(rsp+8) = rdi   -> entry off -16 -> disp -8
+            Stmt::Store { addr: Expr::Binary(BinOp::Add, Box::new(rsp()), Box::new(Expr::konst(8, 64))), value: Expr::Read(Location::Reg(RegId(7))), ty: Ty::int(64) },
+            // rax = *(uint64*)(rsp+8)
+            Stmt::Assign { dst: ValueId(1), expr: Expr::Load { addr: Box::new(Expr::Binary(BinOp::Add, Box::new(rsp()), Box::new(Expr::konst(8, 64)))), ty: Ty::int(64) } },
+        ]);
+        let slots = recover_stack_slots(&f).expect("frame model should hold");
+        let s = slots.get(&-8).expect("spill at disp -8 recovered");
+        assert_eq!(s.count, 2, "store + load");
+        assert!(s.widths.contains(&64));
     }
 
     /// A variable-indexed frame access makes the analysis bail (sound).
