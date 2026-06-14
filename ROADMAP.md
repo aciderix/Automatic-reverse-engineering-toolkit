@@ -668,26 +668,29 @@ relogeable), et compare.
    Reste : étendre le corpus, et le différentiel sur binaires sans source (via
    chargement/émulation de la fonction d'origine).
 
-   **Vérification sur code optimisé (multi-niveaux) — outil ajouté + backlog
-   chiffré.** `difftest.sh` tourne désormais à plusieurs niveaux d'optimisation
-   (`LEVELS="-O0 -O1 -O2 -O3"`). Le gate par défaut reste **-O1 (34/34)**, niveau
-   qu'ARET maîtrise pleinement ; les autres niveaux sont un révélateur. Mesure :
-   le harness a immédiatement exposé que « ça recompile » ≠ « c'est correct » sur
-   du code optimisé, avec un **backlog priorisé** de vrais écarts :
-   - **Relocations en .o — ✅ CORRIGÉ.** Un `call` dans un objet ne porte qu'un
-     déplacement-placeholder jusqu'à l'édition de liens ; ARET le décodait vers
-     une adresse fausse (récursion/appel croisé → mauvaise cible, valeur de retour
-     perdue). Le loader applique maintenant `.rela.text` (`parse_static_relocs`),
-     `decode_at` privilégie la cible résolue. Validé par `sumrec` (récursion vers
-     symbole *défini* → `sub_2dc` correct, `return v16 + v1`).
-   - **Canaries de pile (`fs:[0x28]`)** — non modélisés (bail asm correct), mais le
-     `je` de vérification se perd → structure cassée (`stackarr -O0`). À élider.
-   - **Reconnaissance d'idiomes libc** — gcc remplace `strlen_c` par un appel à
-     `strlen` (symbole externe, `R_X86_64_PLT32`) ; reste à nommer l'appel via le
-     nom de relocation + corriger la valeur de retour quand l'appel est en branche.
-   - **Auto-vectorisation / SSE** (`sumto/arraysum/arraymax/counteq -O3`) — boucles
-     vectorisées → instructions SSE en fallback asm → résultat faux. C'est la
-     couverture lifter SSE (§3), désormais quantifiée comme prioritaire.
+   **Vérification sur code optimisé (multi-niveaux) — ✅ -O0/-O1/-O2 verts.**
+   `difftest.sh` tourne à plusieurs niveaux d'optimisation et le gate par défaut
+   couvre désormais **-O0, -O1 et -O2 : 102/102 fonctions** prouvées équivalentes
+   (le harness a d'abord exposé que « ça recompile » ≠ « c'est correct », puis
+   guidé les corrections). Bugs trouvés **et corrigés** :
+   - **Relocations en .o — ✅ CORRIGÉ.** Un `call`/`jmp` dans un objet ne porte
+     qu'un déplacement-placeholder jusqu'à l'édition de liens ; ARET décodait donc
+     les appels récursifs/croisés/externes vers une adresse fausse (corrompant le
+     CFG : les instructions après l'appel devenaient orphelines → valeur de retour
+     perdue). Le loader applique `.rela.text` (`parse_static_relocs`, **seulement
+     les sections code** — sinon les relocations de `.rodata`/`.eh_frame`, toutes
+     basées à 0 dans un .o, écrasaient les branches intra-fonction). `decode_at`
+     supprime le placeholder : cible résolue pour un symbole défini, sinon appel
+     externe **nommé** via le nom de relocation (`strlen`).
+   - **Canaries de pile (`fs:[0x28]`) — ✅ CORRIGÉ.** Lecture TLS modélisée comme
+     une pseudo-valeur constante, écriture ignorée ; le test du canary se replie
+     en no-op (`0-0==0` → chemin normal), équivalent au canary aléatoire réel.
+   - **Idiome libc — ✅ CORRIGÉ.** `gcc` remplace `strlen_c` par un appel externe
+     `strlen` ; nommé correctement + valeur de retour `strlen(s+1)+1` rétablie
+     (conséquence de la suppression du placeholder qui réincorpore le bloc tail).
+   - **Auto-vectorisation / SSE** (`-O3` : `sumto/arraysum/…`) — boucles
+     vectorisées → SSE en fallback asm → faux. **Seul reste à -O3.** C'est la
+     couverture lifter SSE (§3), désormais quantifiée comme le prochain levier.
 3. **Équivalence symbolique (SMT)** : ✅ **niveau 3 amorcé** (`bench/smt_rewrites.sh`,
    Z3). Chaque règle de réécriture de l'optimiseur (`src/opt`) est **prouvée
    formellement** correcte pour *toutes* les entrées 64 bits : reconstruction

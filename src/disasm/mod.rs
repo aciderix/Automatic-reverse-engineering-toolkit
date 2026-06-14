@@ -32,6 +32,9 @@ pub struct Insn {
     pub flow: Flow,
     /// For Jump/CondJump/Call: the resolved target address.
     pub target: Option<u64>,
+    /// For a call relocated to an *undefined* external symbol (object files):
+    /// the symbol name, so the call can be emitted by name (e.g. `strlen`).
+    pub call_name: Option<String>,
     /// The raw iced instruction, kept for IR lifting.
     pub raw: Instruction,
 }
@@ -70,12 +73,17 @@ impl Disassembler {
         }
 
         let (flow, mut target) = classify(&raw);
-        // In object files, a direct call/jump's displacement is a placeholder
-        // fixed up by a relocation; prefer the relocation-resolved target so
-        // recursive/cross-function calls decode to the real address.
+        // In object files a direct call/jump's displacement is a placeholder
+        // fixed up by a relocation, so the raw decoded target is garbage (it
+        // usually points at the next instruction, corrupting the CFG). When a
+        // relocation covers the instruction, trust it instead: use the resolved
+        // address for a defined symbol, or drop the target for an undefined
+        // external (its name is recorded for emission).
+        let mut call_name = None;
         if matches!(flow, Flow::Call | Flow::Jump | Flow::CondJump) {
-            if let Some(t) = prog.reloc_branch_target(addr, raw.len()) {
-                target = Some(t);
+            if let Some(r) = prog.reloc_in(addr, raw.len()) {
+                target = r.target;
+                call_name = r.name.clone();
             }
         }
 
@@ -97,6 +105,7 @@ impl Disassembler {
             text,
             flow,
             target,
+            call_name,
             raw,
         })
     }

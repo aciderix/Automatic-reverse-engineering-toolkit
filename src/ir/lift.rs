@@ -700,11 +700,17 @@ pub fn lift(insn: &Insn, bits: u32) -> Vec<Stmt> {
         }
 
         Mnemonic::Call => {
+            // A defined target resolves to its address (`sub_<addr>`); a call
+            // relocated to an undefined external (object files) is emitted by
+            // name (`strlen`); otherwise it is an indirect call.
             let target = match insn.target {
                 Some(t) => CallTarget::Direct(t),
-                None => match op_value(ins, 0) {
-                    Some(e) => CallTarget::Indirect(Box::new(e)),
-                    None => return asm(),
+                None => match &insn.call_name {
+                    Some(name) => CallTarget::Named(name.clone()),
+                    None => match op_value(ins, 0) {
+                        Some(e) => CallTarget::Indirect(Box::new(e)),
+                        None => return asm(),
+                    },
                 },
             };
             // 64-bit: pass the SysV integer argument registers (read at their
@@ -787,6 +793,7 @@ mod tests {
             text: format!("{:?}", raw.mnemonic()),
             flow: crate::disasm::Flow::Fallthrough,
             target: None,
+            call_name: None,
             raw,
         };
         lift(&insn, bits)

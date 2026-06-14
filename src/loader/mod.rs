@@ -173,6 +173,16 @@ impl Program {
             .find_map(|(_, r)| r.target)
     }
 
+    /// The relocation entry (if any) covering the instruction at `[addr, addr+len)`.
+    /// Presence means the instruction's displacement is a placeholder fixed up by
+    /// the linker — its raw decoded target must not be trusted.
+    pub fn reloc_in(&self, addr: u64, len: usize) -> Option<&RelocEntry> {
+        self.relocs
+            .range(addr..addr.saturating_add(len as u64))
+            .map(|(_, r)| r)
+            .next()
+    }
+
     /// Name referenced by a relocation within `[addr, addr+len)` (for external
     /// calls in object files, whose target symbol is undefined here).
     pub fn reloc_name(&self, addr: u64, len: usize) -> Option<&str> {
@@ -366,6 +376,13 @@ fn parse_static_relocs(obj: &object::File) -> BTreeMap<u64, RelocEntry> {
     use object::{Object, ObjectSection, ObjectSymbol, RelocationKind, RelocationTarget};
     let mut out: BTreeMap<u64, RelocEntry> = BTreeMap::new();
     for sec in obj.sections() {
+        // Only code-section relocations are consumed (to fix call/jump targets).
+        // In an object file every section is based at address 0, so including
+        // data sections' relocations would collide with .text addresses and
+        // falsely override intra-function branches.
+        if sec.kind() != SectionKind::Text {
+            continue;
+        }
         let base = sec.address();
         for (off, rel) in sec.relocations() {
             let site = base + off;

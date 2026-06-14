@@ -15,11 +15,9 @@ DIR="$(cd "$(dirname "$0")" && pwd)"
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
 
-# Gate at -O1 (the level ARET fully handles today). Higher/lower levels are an
-# investigative tool — `LEVELS="-O0 -O1 -O2 -O3" bash bench/difftest.sh` reveals
-# the optimized-code backlog (stack canaries, libc-idiom recognition, auto-
-# vectorisation/SSE, return-value-after-call structuring).
-LEVELS="${LEVELS:--O1}"
+# Gate at -O0/-O1/-O2 — all fully equivalent. -O3 (auto-vectorisation -> SSE) is
+# the remaining backlog; run it explicitly with `LEVELS="-O3" bash bench/difftest.sh`.
+LEVELS="${LEVELS:--O0 -O1 -O2}"
 ITERS="${ITERS:-50000}"
 
 FUNCS="add1:i addsub:i mulshift:i maxi:i mini:i absdiff:i sign:i clampu:i mix:i sumto:i countbits:i \
