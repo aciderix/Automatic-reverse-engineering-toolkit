@@ -87,8 +87,8 @@ investir dans **B** sauf gain rapide et sûr pour l'utilisateur via A.
 | `ir/lift.rs` | **lift IR** via API structurée iced (registres/flags/mémoire), `Frame` slots, `asm_fallback` sain, `cc_to_cond` | B |
 | `ir/build.rs` | Construit l'IR-CFG depuis `analysis::Function` + terminateurs ; `dump` (`--mode ir`) | B |
 | `ssa/mod.rs` | Construction SSA (Cytron) : φ + renommage ; récup args registres 64-bit | B |
-| `opt/mod.rs` | Passes SSA : const-prop, **folding/simplif algébrique** (reconstruit conditions signées/non), DCE, propagation mono-usage + chaînes | B |
-| `emit/mod.rs` | IR→C **compilable** (goto), destruction SSA (φ→copies), signatures (args), `signed_cast`, `fix_self_calls` | B |
+| `opt/mod.rs` | Passes SSA : const-prop, **folding/simplif algébrique** (reconstruit conditions signées/non), DCE, propagation mono-usage + chaînes, `prune_call_args` (ôte args `Undef`) | B |
+| `emit/mod.rs` | IR→C **compilable** (goto), destruction SSA (φ→copies), signatures (args), `signed_cast`, `fixup_call_arity` (aligne appels sur l'arité callee + arités libc) | B |
 | `emit/structured.rs` | IR→C **structuré** (if/while), réutilise `cfg::dom` | B |
 | `verify/mod.rs` | Harness recompilabilité (niveau 1), `--mode verify` | B |
 | `main.rs` | CLI (modes : info/asm/cfg/decompile/ir/emit/verify ; `--flat`/`--split`/`--function`/`--limit`/`--no-prologue-scan`) | — |
@@ -137,8 +137,14 @@ bash bench/smt_rewrites.sh                            # preuves SMT des règles 
 > **MàJ 2025-06-14** (depuis cette section) : ✅ Rayon (analyse 60→17 s, split
 > 73→16 s) ; ✅ lifter `mul`/`div`/`idiv` 1-op + `cdq`/`cqo` ; ✅ modélisation des
 > appels (retour `rax=call` + clobbers caller-saved) ; ✅ noms d'imports dans le
-> pipeline IR (`malloc()`) + `verify` en `-fno-builtin`. Différentiel **21/21**.
-> Détail dans `ROADMAP.md §15.4bis`. Prochain : **args aux call-sites** (Prop. 2b).
+> pipeline IR (`malloc()`) + `verify` en `-fno-builtin` ; ✅ **args aux
+> call-sites 64-bit** (lifter sur-approxime les 6 regs SysV ; `prune_call_args`
+> en opt ôte les `Undef` ; `emit::fixup_call_arity` aligne chaque appel d'une
+> fonction définie sur l'arité de son callee ; table d'arités libc pour les
+> imports → `func(a,b)`, `memcpy(d,s,n)`, `strlen(s)`). gzip recompile
+> **131/131**, différentiel **21/21**, SMT 11/11.
+> Détail dans `ROADMAP.md §15.4bis`. Prochain : **magic division** (Prop. 3),
+> puis **inférence de types** (§5).
 
 
 - **Pilier 1 (IR SSA typé)** : ✅ COMPLET. types, dom+frontière, lift IR, SSA, IR-CFG, `--mode ir`.
@@ -154,8 +160,11 @@ bash bench/smt_rewrites.sh                            # preuves SMT des règles 
   - §6.1 switch/jump tables : ✅ (résolution + couverture ; manque l'**index** dans
     l'IR → `Stmt::Switch` typé ; manque tables relatives 4o x64).
   - §6.2 conventions d'appel : ⚠️ PARTIEL (frame args + args registres 64-bit
-    récupérés ; manque l'analyse interprocédurale + **args aux sites d'appel** →
-    c'est pourquoi les unités multi-fonctions restent en `(void)`).
+    récupérés ; ✅ **args aux sites d'appel 64-bit** : émission toujours avec
+    vraies signatures + fixup inter-procédural `emit::fixup_call_arity` qui aligne
+    l'appel sur l'arité du callee ; les unités multi-fonctions ne sont plus en
+    `(void)`. Reste : **args 32-bit cdecl sur la pile**, matching positionnel si
+    les `reg_params` du callee ne forment pas un préfixe contigu).
   - §6.3 **vtables / appels indirects C++** : ❌ NON FAIT. ⚠️ **Injustement sauté
     vu que le binaire de test EST un jeu C++** : des milliers d'appels
     `(*(*(uint32_t*)(eax+0xN)))()` (vtables) ne sont pas résolus.

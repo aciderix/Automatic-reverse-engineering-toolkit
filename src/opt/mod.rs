@@ -16,7 +16,7 @@
 use crate::ir::types::*;
 use std::collections::HashMap;
 
-/// Run propagation + folding + DCE to a fixpoint.
+/// Run propagation + folding + DCE to a fixpoint, then tidy call sites.
 pub fn optimize(func: &mut IrFunction) {
     for _ in 0..8 {
         let a = propagate(func);
@@ -24,6 +24,55 @@ pub fn optimize(func: &mut IrFunction) {
         let b = dce(func);
         if !a && !b {
             break;
+        }
+    }
+    prune_call_args(func);
+}
+
+/// Trim trailing call arguments that carry no value.
+///
+/// The lifter over-approximates a call by reading all six SysV integer argument
+/// registers (`rdi,rsi,rdx,rcx,r8,r9`). After propagation, a trailing argument
+/// register that was clobbered by an earlier call (or otherwise never assigned a
+/// real value) folds to `Expr::Undef`. Such an argument provably carries no
+/// information, so dropping it is sound and turns `f(a, b, undef, undef)` into
+/// `f(a, b)`. Arguments that hold a real value or a forwarded parameter are
+/// `Expr::Use(_)` and are left untouched, so no live argument is ever lost.
+fn prune_call_args(func: &mut IrFunction) {
+    fn trim(args: &mut Vec<Expr>) {
+        while matches!(args.last(), Some(Expr::Undef)) {
+            args.pop();
+        }
+    }
+    fn visit(e: &mut Expr) {
+        if let Expr::Call { target, args, .. } = e {
+            for a in args.iter_mut() {
+                visit(a);
+            }
+            trim(args);
+            if let CallTarget::Indirect(x) = target {
+                visit(x);
+            }
+            return;
+        }
+        match e {
+            Expr::Load { addr, .. } => visit(addr),
+            Expr::Unary(_, x) | Expr::Cast { expr: x, .. } => visit(x),
+            Expr::Binary(_, a, b) => {
+                visit(a);
+                visit(b);
+            }
+            Expr::Select { cond, then_, else_ } => {
+                visit(cond);
+                visit(then_);
+                visit(else_);
+            }
+            _ => {}
+        }
+    }
+    for b in &mut func.blocks {
+        for s in &mut b.stmts {
+            map_exprs(s, &mut visit);
         }
     }
 }

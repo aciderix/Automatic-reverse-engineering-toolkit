@@ -537,24 +537,116 @@ pub fn emit_function(func: &IrFunction, forward: &mut BTreeSet<u64>, with_params
         }
     }
     let _ = writeln!(out, "}}");
-    if with_params {
-        out = fix_self_calls(out, f.entry, param_count(&f));
-    }
     out
 }
 
-/// When a function is emitted with parameters, a recursive self-call rendered
-/// as `sub_x()` would have too few arguments for its own prototype. Give such
-/// self-calls the matching number of zero arguments. (Call-site argument
-/// recovery is future work; zeros keep it compilable.)
-pub(crate) fn fix_self_calls(out: String, entry: u64, nparams: usize) -> String {
-    if nparams == 0 {
-        return out;
+/// Make every direct call to a function *defined in this unit* pass exactly the
+/// number of arguments that callee's emitted signature declares, so the unit
+/// recompiles even though the lifter over-approximates each call to the six
+/// SysV integer argument registers.
+///
+/// Register arguments are kept (truncated, or zero-padded, to the callee's
+/// recovered register-parameter count); recovered frame parameters are passed
+/// as zero. Calls to a callee *not* defined here are left untouched — their
+/// forward declaration uses an empty parameter list (`sub_x();`) and so accepts
+/// any arity. This also subsumes recursive self-calls, whose prototype is the
+/// function's own definition.
+pub(crate) fn fixup_call_arity(funcs: &mut [IrFunction]) {
+    use std::collections::HashMap;
+    // entry -> (register params, total params incl. frame).
+    let arity: HashMap<u64, (usize, usize)> = funcs
+        .iter()
+        .map(|f| (f.entry, (f.reg_params.len(), param_count(f))))
+        .collect();
+    for f in funcs.iter_mut() {
+        for b in &mut f.blocks {
+            for s in &mut b.stmts {
+                map_top_exprs(s, &mut |e| fixup_call_expr(e, &arity));
+            }
+        }
     }
-    let empty = format!("sub_{:x}()", entry);
-    let zeros = vec!["0"; nparams].join(", ");
-    let filled = format!("sub_{:x}({})", entry, zeros);
-    out.replace(&empty, &filled)
+}
+
+fn fixup_call_expr(e: &mut Expr, arity: &std::collections::HashMap<u64, (usize, usize)>) {
+    match e {
+        Expr::Call { target, args, .. } => {
+            for a in args.iter_mut() {
+                fixup_call_expr(a, arity);
+            }
+            match target {
+                CallTarget::Indirect(x) => fixup_call_expr(x, arity),
+                CallTarget::Direct(addr) => {
+                    if let Some(&(nreg, ntot)) = arity.get(addr) {
+                        args.truncate(nreg);
+                        while args.len() < ntot {
+                            args.push(Expr::Const(0, Ty::int(64)));
+                        }
+                    }
+                }
+                // A named import has no recovered signature, but well-known libc
+                // functions have a fixed arity; trimming the over-approximated
+                // argument registers to it removes noise (`strlen(s)` not
+                // `strlen(s, …)`). The call has no prototype, so this is safe.
+                CallTarget::Named(n) => {
+                    if let Some(k) = libc_arity(n) {
+                        if args.len() > k {
+                            args.truncate(k);
+                        }
+                    }
+                }
+            }
+        }
+        Expr::Load { addr, .. } => fixup_call_expr(addr, arity),
+        Expr::Unary(_, x) | Expr::Cast { expr: x, .. } => fixup_call_expr(x, arity),
+        Expr::Binary(_, a, b) => {
+            fixup_call_expr(a, arity);
+            fixup_call_expr(b, arity);
+        }
+        Expr::Select { cond, then_, else_ } => {
+            fixup_call_expr(cond, arity);
+            fixup_call_expr(then_, arity);
+            fixup_call_expr(else_, arity);
+        }
+        _ => {}
+    }
+}
+
+/// Fixed argument count of a common libc function, if known. The name may be a
+/// raw import symbol (possibly with a `@plt`/version suffix), so match the stem.
+fn libc_arity(name: &str) -> Option<usize> {
+    let stem = name
+        .split(['@', '+'])
+        .next()
+        .unwrap_or(name)
+        .trim_start_matches("__")
+        .trim_end_matches("_chk");
+    Some(match stem {
+        "strlen" | "free" | "puts" | "fflush" | "fclose" | "perror" | "abort" | "exit"
+        | "_exit" | "rewind" | "atoi" | "atol" | "strdup" | "clearerr" | "fileno"
+        | "malloc" | "isatty" | "umask" | "close" | "unlink" | "rmdir" | "chdir" => 1,
+        "strcmp" | "strcpy" | "strcat" | "fopen" | "fputs" | "fdopen" | "getenv" | "setenv"
+        | "rename" | "fseek" | "dup2" | "kill" | "access" | "stat" | "lstat" | "fstat"
+        | "strchr" | "strrchr" | "strstr" => 2,
+        "memcpy" | "memset" | "memmove" | "strncmp" | "strncpy" | "strncat" | "read"
+        | "write" | "memchr" | "fgets" | "lseek" => 3,
+        "fread" | "fwrite" => 4,
+        _ => return None,
+    })
+}
+
+/// Apply `f` to each top-level expression of a statement.
+fn map_top_exprs(s: &mut Stmt, f: &mut impl FnMut(&mut Expr)) {
+    match s {
+        Stmt::Set { expr, .. } | Stmt::Assign { expr, .. } | Stmt::CallStmt(expr) => f(expr),
+        Stmt::Store { addr, value, .. } => {
+            f(addr);
+            f(value);
+        }
+        Stmt::Branch { cond, .. } => f(cond),
+        Stmt::Switch { value, .. } => f(value),
+        Stmt::Return(Some(e)) => f(e),
+        _ => {}
+    }
 }
 
 /// Number of recovered parameters of `func` (register + frame).
@@ -571,22 +663,27 @@ fn ends_in_terminator(b: &Block) -> bool {
 
 /// Emit a complete compilable C translation unit for the given functions.
 pub fn emit_unit(funcs: &[IrFunction]) -> String {
-    // A single-function unit gets real parameter signatures; a multi-function
-    // unit keeps `(void)` so argless calls stay consistent (call-site argument
-    // recovery is future work).
-    let with_params = funcs.len() == 1;
+    // Always emit real parameter signatures; an interprocedural fixup then makes
+    // every call to a function defined here match its callee's arity, so the
+    // unit recompiles (call-site arguments — roadmap §15.4 #2).
+    let mut funcs = funcs.to_vec();
+    fixup_call_arity(&mut funcs);
+    let with_params = true;
     let mut body = String::new();
     let mut forward: BTreeSet<u64> = BTreeSet::new();
     let defined: BTreeSet<u64> = funcs.iter().map(|f| f.entry).collect();
-    for f in funcs {
+    for f in &funcs {
         body.push_str(&emit_function(f, &mut forward, with_params));
         body.push('\n');
     }
     let mut out = String::new();
     out.push_str("#include <stdint.h>\n\n");
-    // Forward-declare callees that aren't defined in this unit.
-    for a in forward.difference(&defined) {
-        let _ = writeln!(out, "uint64_t sub_{:x}(void);", a);
+    // Forward-declare every function (defined or external) with an empty
+    // parameter list, so a call that precedes its callee's definition still has
+    // a compatible prototype. The empty list is compatible with the real,
+    // parameterised definition emitted below.
+    for a in forward.union(&defined) {
+        let _ = writeln!(out, "uint64_t sub_{:x}();", a);
     }
     out.push('\n');
     out.push_str(&body);

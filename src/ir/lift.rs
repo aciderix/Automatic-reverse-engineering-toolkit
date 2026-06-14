@@ -627,9 +627,21 @@ pub fn lift(insn: &Insn, bits: u32) -> Vec<Stmt> {
                     None => return asm(),
                 },
             };
+            // 64-bit: pass the SysV integer argument registers (read at their
+            // pre-call versions). Over-approximate (all 6); a later prune drops
+            // trailing never-defined ones. 32-bit cdecl args are on the stack
+            // (recovered by the text pipeline) — left empty here for now.
+            let args = if bits == 64 {
+                [7u16, 6, 2, 1, 8, 9]
+                    .iter()
+                    .map(|&r| Expr::Read(Location::Reg(RegId(r))))
+                    .collect()
+            } else {
+                Vec::new()
+            };
             let call = Expr::Call {
                 target,
-                args: Vec::new(), // call-site argument recovery is future work
+                args,
                 ret: Ty::int(bits as u8),
             };
             // The call returns its value in rax; caller-saved registers are

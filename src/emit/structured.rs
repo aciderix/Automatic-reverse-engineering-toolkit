@@ -138,9 +138,6 @@ pub fn emit_function(func: &IrFunction, forward: &mut BTreeSet<u64>, with_params
     out.push_str(&s.out);
     let _ = writeln!(out, "    return 0;");
     let _ = writeln!(out, "}}");
-    if with_params {
-        out = super::fix_self_calls(out, f.entry, super::param_count(&f));
-    }
     out
 }
 
@@ -393,18 +390,26 @@ impl Structurer {
 
 /// Emit a complete structured C translation unit.
 pub fn emit_unit(funcs: &[IrFunction]) -> String {
-    let with_params = funcs.len() == 1;
+    // Always emit real parameter signatures; the interprocedural fixup makes
+    // every call to a function defined here match its callee's arity so the unit
+    // recompiles (call-site arguments — roadmap §15.4 #2).
+    let mut funcs = funcs.to_vec();
+    super::fixup_call_arity(&mut funcs);
+    let with_params = true;
     let mut body = String::new();
     let mut forward: BTreeSet<u64> = BTreeSet::new();
     let defined: BTreeSet<u64> = funcs.iter().map(|f| f.entry).collect();
-    for f in funcs {
+    for f in &funcs {
         body.push_str(&emit_function(f, &mut forward, with_params));
         body.push('\n');
     }
     let mut out = String::new();
     out.push_str("#include <stdint.h>\n\n");
-    for a in forward.difference(&defined) {
-        let _ = writeln!(out, "uint64_t sub_{:x}(void);", a);
+    // Forward-declare every function (defined or external) with an empty
+    // parameter list so calls that precede a definition still see a compatible
+    // prototype.
+    for a in forward.union(&defined) {
+        let _ = writeln!(out, "uint64_t sub_{:x}();", a);
     }
     out.push('\n');
     out.push_str(&body);

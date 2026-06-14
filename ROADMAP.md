@@ -808,11 +808,20 @@ sur la métrique nord.
   corrigés par le différentiel → corpus 21/21).
 - ✅ **Modélisation des appels** : retour (`rax = call`) + clobbers caller-saved.
 - ✅ **Noms d'imports dans le pipeline IR** + `verify` en `-fno-builtin`.
-- Reste appels : **args aux call-sites** (ABI-aware : registres 64-bit, pile 32-bit).
+- ✅ **Args aux call-sites (64-bit)** [Prop. 2b] : le lifter sur-approxime
+  l'appel en lisant les 6 registres d'arg SysV ; une passe `prune_call_args`
+  (opt) supprime les args `Undef` traînants ; un *fixup inter-procédural* à
+  l'émission (`emit::fixup_call_arity`) ajuste chaque appel d'une fonction
+  définie dans l'unité à l'arité de son callee (`func(a, b)` au lieu de
+  `func()`), et une table d'arités libc nettoie les imports (`strlen(s)`,
+  `memcpy(d,s,n)`). Émission toujours avec vraies signatures + fwd-decls
+  empty-paren → gzip recompile **131/131**, différentiel **21/21**, SMT 11/11.
+  Reste : **args 32-bit cdecl sur la pile** ; matching positionnel exact quand
+  les `reg_params` du callee ne sont pas un préfixe contigu.
 
 ### 15.4 Ordre d'exécution recommandé (révisé)
 1. **Magic division** [Prop. 3] — gain de lisibilité immédiat, sûr, vérifiable.
-2. **Args aux call-sites** [Prop. 2b] — `func(a, b)` au lieu de `func()`.
+2. ✅ **Args aux call-sites** [Prop. 2b] — `func(a, b)` au lieu de `func()` *(fait, cf. 15.4bis)*.
 3. **Compléter le lifter** (mul/idiv/div 1-op, rol/ror, rep→memcpy) [Prop. 4] +
    **idiomes** [Prop. 5] — moins d'`Asm`, plus lisible.
 4. **Inférence de types** [Prop. 6/§5] — le grand saut (largeur/signe → ptr → structs).
