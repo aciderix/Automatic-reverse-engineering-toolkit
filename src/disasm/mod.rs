@@ -69,7 +69,15 @@ impl Disassembler {
             return None;
         }
 
-        let (flow, target) = classify(&raw);
+        let (flow, mut target) = classify(&raw);
+        // In object files, a direct call/jump's displacement is a placeholder
+        // fixed up by a relocation; prefer the relocation-resolved target so
+        // recursive/cross-function calls decode to the real address.
+        if matches!(flow, Flow::Call | Flow::Jump | Flow::CondJump) {
+            if let Some(t) = prog.reloc_branch_target(addr, raw.len()) {
+                target = Some(t);
+            }
+        }
 
         let mut formatter = IntelFormatter::new();
         // Render numbers C-style (0x..., lowercase, no leading zeros) so the

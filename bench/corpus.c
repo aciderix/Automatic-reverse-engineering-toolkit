@@ -51,3 +51,8 @@ int poly(int x)                  { return ((x*x) + 3*x + 7) & 0xffff; }
 int stackarr(int a, int b, int c){ int v[3]; v[0]=a; v[1]=b; v[2]=c; return v[0]*v[1] - v[2]; }
 int fieldsum(const int* p)       { return p[0] + p[1]*2 + p[2]*3; }   /* struct-like */
 int nestcond(int a, int b)       { if (a > 0) { if (b > 0) return a+b; else return a-b; } return -a; }
+
+/* Non-tail recursion: a self-call to a *defined* symbol, exercising static
+   relocation resolution in object files (the call target is a placeholder until
+   the .rela.text reloc is applied). */
+int sumrec(int n) { return n <= 0 ? 0 : n + sumrec(n - 1); }

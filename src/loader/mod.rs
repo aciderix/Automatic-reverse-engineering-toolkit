@@ -59,6 +59,19 @@ pub struct Program {
     pub symbols: BTreeMap<u64, KnownSymbol>,
     /// PE IAT slot virtual address -> imported function name.
     pub imports: BTreeMap<u64, String>,
+    /// Static-relocation site address -> resolved target (object files). A `call`
+    /// in a `.o` stores only a placeholder displacement until linked; this maps
+    /// the displacement field back to the real target so recursive/cross-function
+    /// calls decode to the right address (and external calls get a name).
+    pub relocs: BTreeMap<u64, RelocEntry>,
+}
+
+/// A resolved static relocation: the branch/data target address (when the symbol
+/// is defined in this object) and/or the referenced symbol's name.
+#[derive(Clone, Debug, Default)]
+pub struct RelocEntry {
+    pub target: Option<u64>,
+    pub name: Option<String>,
 }
 
 impl Program {
@@ -139,6 +152,8 @@ impl Program {
         let mut imports = parse_pe_imports(data);
         add_elf_imports(&obj, &sections, bitness, &mut imports);
 
+        let relocs = parse_static_relocs(&obj);
+
         Ok(Program {
             format: format!("{:?}", obj.format()),
             bitness,
@@ -146,7 +161,24 @@ impl Program {
             sections,
             symbols,
             imports,
+            relocs,
         })
+    }
+
+    /// Resolved branch target of a relocation lying within the instruction at
+    /// `[addr, addr+len)`, if any (PC-relative call/jump in an object file).
+    pub fn reloc_branch_target(&self, addr: u64, len: usize) -> Option<u64> {
+        self.relocs
+            .range(addr..addr.saturating_add(len as u64))
+            .find_map(|(_, r)| r.target)
+    }
+
+    /// Name referenced by a relocation within `[addr, addr+len)` (for external
+    /// calls in object files, whose target symbol is undefined here).
+    pub fn reloc_name(&self, addr: u64, len: usize) -> Option<&str> {
+        self.relocs
+            .range(addr..addr.saturating_add(len as u64))
+            .find_map(|(_, r)| r.name.as_deref())
     }
 
     /// Imported function name for a PE IAT slot address, if any.
@@ -322,6 +354,43 @@ fn parse_pe_imports(data: &[u8]) -> BTreeMap<u64, String> {
         .filter(|m| !m.is_empty())
         .or_else(|| collect::<pe::ImageNtHeaders64>(data, 8))
         .unwrap_or_default()
+}
+
+/// Parse static relocations (object-file `.rela.text` etc.). For each
+/// relocation, resolve the referenced symbol to its address (when defined in
+/// this object) and name. PC-relative 4-byte relocations (the `call`/`jmp`/
+/// `jcc rel32` and rip-relative `lea`/`mov` of object files) have their target
+/// computed as `symbol + addend + 4`, because the displacement field ends the
+/// instruction; that is the address the branch actually goes to once linked.
+fn parse_static_relocs(obj: &object::File) -> BTreeMap<u64, RelocEntry> {
+    use object::{Object, ObjectSection, ObjectSymbol, RelocationKind, RelocationTarget};
+    let mut out: BTreeMap<u64, RelocEntry> = BTreeMap::new();
+    for sec in obj.sections() {
+        let base = sec.address();
+        for (off, rel) in sec.relocations() {
+            let site = base + off;
+            let (sym_addr, name) = match rel.target() {
+                RelocationTarget::Symbol(idx) => match obj.symbol_by_index(idx) {
+                    Ok(sym) => {
+                        let a = sym.address();
+                        let nm = sym.name().ok().filter(|n| !n.is_empty()).map(str::to_string);
+                        (if a != 0 { Some(a) } else { None }, nm)
+                    }
+                    Err(_) => (None, None),
+                },
+                _ => (None, None),
+            };
+            // PC-relative 4-byte field ends the instruction: target = S + A + 4.
+            let pcrel = matches!(rel.kind(), RelocationKind::Relative | RelocationKind::PltRelative);
+            let target = match (sym_addr, pcrel) {
+                (Some(a), true) => Some(a.wrapping_add(rel.addend() as u64).wrapping_add(4)),
+                (Some(a), false) => Some(a.wrapping_add(rel.addend() as u64)),
+                (None, _) => None,
+            };
+            out.insert(site, RelocEntry { target, name });
+        }
+    }
+    out
 }
 
 /// Resolve ELF imports: map GOT slots (for `call [GOT]`) and PLT stub entries
