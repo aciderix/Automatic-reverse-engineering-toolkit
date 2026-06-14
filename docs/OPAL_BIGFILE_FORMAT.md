@@ -296,15 +296,24 @@ sub_958510  orchestrator
    handlers 0x9591d9 / 0x9591e7; not the assembler itself.)
 ```
 
-**Bottom line — reverse engineering is COMPLETE.** Every layer and all four
-channel decoders are mapped; the entropy core is validated working code
-(`hx_codec.py`), colour-endpoints decode exactly. Two channels (colour idx,
-alpha end) use the same 2-D predictive-delta scheme (15×15 / 7×7 offset grids,
-state mod 8 / mod 4, remap table @0xf3ce80). Nothing remains to *discover* — the
-remaining work is purely **implementation**: code the two 2-D delta channels and
-their packing, the alpha-index packing, the per-mip palette→block assembly in
-`sub_958510`, and DDS wrapping (~6–8 interacting functions). This is the stage
-the improved SSA decompiler accelerates most.
+**Bottom line — decode side COMPLETE and validated.** All five sub-streams
+(block-index + four palettes) decode and **consume their sub-blocks to the byte**
+on real textures (`hx_codec.py decode_palettes`). The full assembly chain is
+traced end-to-end:
+
+```
+sub_958510 (mip loop)
+  └─ sub_95b750 (per-mip offsets: be32 @ Hx header 0x46 + mip*4)
+       └─ sub_95b7e0 (format dispatch: byte@0x12 → jump table @0x95b958)
+            └─ sub_95b160  (format-2 DXT5 block assembler)  ← FINAL piece
+```
+
+`sub_95b160` reads the three decoded palette buffers (`this+0xf0/+0x100/+0x110`)
+indexed by the per-block symbols, uses a constant table at `.data 0x105c2dc`,
+and writes the BC blocks (4 dwords each) per mip. Reimplementing this one
+39-block function (palette indexing + DXT5 byte layout + the `0x105c2dc` table)
+is the **only** remaining step to emit DDS — and it is pure deterministic data
+reshaping (no entropy), so it is validate-as-you-go work, not discovery.
 
 Delta decode (per `sub_959590`): `acc = (acc + huff_sym()) & 0xff` for each
 byte; two bytes packed per u16 entry.
