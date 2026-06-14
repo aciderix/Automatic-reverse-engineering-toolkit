@@ -161,6 +161,17 @@ fn op_value(ins: &Instruction, i: u32) -> Option<Expr> {
         | OpKind::Immediate8to64
         | OpKind::Immediate32to64 => Some(konst(ins.immediate(i) as i128)),
         OpKind::Memory => {
+            // Segment-overridden memory (`fs:`/`gs:`) is TLS. Model every read as
+            // one consistent pseudo-value (0). The stack-protector stores
+            // `fs:[0x28]` to a local and later compares the reload to `fs:[0x28]`;
+            // with both reads equal, the check folds to a no-op (`0 - 0 == 0` →
+            // branch to the success path) — observationally identical to the real
+            // random canary, which always matches on a correct run. Without this
+            // the whole instruction degrades to `asm`, dropping the canary `je`
+            // terminator and breaking the function's structure.
+            if ins.segment_prefix() != Register::None {
+                return Some(konst(0));
+            }
             if let Some(d) = frame_disp(ins, i) {
                 let w = (ins.memory_size().size() * 8) as u32;
                 let full = Expr::Read(Location::Frame(d));
@@ -237,6 +248,13 @@ fn write_op0(ins: &Instruction, value: Expr, bits: u32) -> Option<Vec<Stmt>> {
             Some(vec![Stmt::Set { dst, expr }])
         }
         OpKind::Memory => {
+            // A write through a segment override (`fs:`/`gs:`, TLS) is dropped:
+            // reads of TLS are modelled as a constant (see `op_value`), so a write
+            // has no observable effect in our model. This keeps canary/TLS-using
+            // functions fully lifted instead of degrading to `asm`.
+            if ins.segment_prefix() != Register::None {
+                return Some(vec![Stmt::Nop]);
+            }
             if let Some(d) = frame_disp(ins, 0) {
                 let dst = Location::Frame(d);
                 let w = (ins.memory_size().size() * 8) as u32;
