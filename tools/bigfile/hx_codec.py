@@ -213,3 +213,37 @@ if __name__ == "__main__":
     print(f"  block_syms: {len(r['block_syms'])}  range[{min(r['block_syms'])},{max(r['block_syms'])}]")
     for k in ("color_end", "alpha_idx", "color_idx", "alpha_end"):
         print(f"  {k}: {len(r[k])} entries")
+
+# --- block-index tables + per-macroblock selector decode (validated by exact
+# --- consumption of the selector stream) ---------------------------------
+COUNT_TBL = [1, 2, 2, 3, 3, 3, 3, 4]   # engine table @0x105c2dc, low-3-bits -> count
+
+def build_index_tables(hx):
+    """Build the 5 selector tables from the block-index stream (sub_95a780)."""
+    br = BitReader(hx[be(hx, 0x43, 3):be(hx, 0x43, 3) + be(hx, 0x41, 2)])
+    T = {0x74: build_table(br)}
+    if be(hx, 0x27, 2):
+        T[0x8c] = build_table(br); T[0xbc] = build_table(br)
+    if be(hx, 0x37, 2):
+        T[0xa4] = build_table(br); T[0xd4] = build_table(br)
+    return T
+
+def decode_selectors(hx):
+    """Per-macroblock selector decode (sub_95b160 structure). Returns the raw
+    selector symbols per macroblock; consumes the selector stream exactly.
+    Each macroblock: count = COUNT_TBL[sym(0x74)&7]; then count× endpoint
+    selectors (0xa4 colour, 0x8c alpha); then a 2×2 of (0xd4,0xbc) index pairs."""
+    T = build_index_tables(hx)
+    w, h = be(hx, 0x0c, 2), be(hx, 0x0e, 2)
+    bw, bh = (w + 3) // 4, (h + 3) // 4
+    nmb = ((bw + 1) // 2) * ((bh + 1) // 2)
+    so = be(hx, 0x43, 3) + be(hx, 0x41, 2)
+    br = BitReader(hx[so:])
+    out = []
+    for _ in range(nmb):
+        cnt = COUNT_TBL[huff_decode(br, T[0x74]) & 7]
+        ce = [huff_decode(br, T[0xa4]) for _ in range(cnt)]
+        ae = [huff_decode(br, T[0x8c]) for _ in range(cnt)]
+        idx = [(huff_decode(br, T[0xd4]), huff_decode(br, T[0xbc])) for _ in range(4)]
+        out.append((cnt, ce, ae, idx))
+    return out, br.p, len(br.d)
