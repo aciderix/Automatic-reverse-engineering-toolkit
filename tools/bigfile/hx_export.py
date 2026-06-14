@@ -138,7 +138,8 @@ def export(hx_path, out_path):
             px=dxt5_block(blk)
             for i in range(16):
                 img.putpixel((bxi*4+i%4, byi*4+i//4), px[i])
-    img.crop((0,0,w,h)).convert('RGB').save(out_path)
+    img=img.crop((0,0,w,h))
+    img.save(out_path)            # RGBA PNG (alpha preserved)
     print(f"{w}x{h} decoded (selector stream {used}/{tot}) -> {out_path}")
 
 if __name__=='__main__':
