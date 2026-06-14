@@ -395,6 +395,22 @@ pragmatique suffisant au début :
 Cela permet de promouvoir des slots de pile non-aliasés en variables SSA
 (« stack variable promotion ») — gros gain de lisibilité.
 
+**État — ✅ FAIT (oracle + verdict de promouvabilité)** : `src/opt/alias.rs`.
+`classify(addr, width)` range chaque accès en `Frame{off,width}` /
+`Global{width}` / `Unknown` (sur l'IR *pré-SSA*, où la base `rbp/rsp` est encore
+un `Read(Reg)` syntaxique). `may_alias` applique les règles : deux `Frame` ne
+s'aliasent que si leurs plages d'octets se recouvrent, `Frame` vs `Global`
+jamais, tout ce qui touche `Unknown` peut aliaser. `frame_promotable(func)` =
+aucune adresse de slot matérialisée (`&local`) **et** aucun accès pointeur
+inconnu — verdict *sound* (sur-approximé : un `false` peut être prudent, un
+`true` garantit qu'une promotion ne changerait pas le comportement). Analyse
+pure (ne mute pas l'IR → zéro risque). Diagnostic *display-only* dans le dump IR.
+8 tests unitaires. Mesuré sur `ls` : **111 fonctions promouvables / 107 non**.
+
+Reste (prochaine étape) : la **promotion** elle-même, qui consommera
+`frame_promotable` pour transformer les slots `Frame` non-aliasés en valeurs SSA
+versionnées (avec φ aux jointures), puis l'émission typée par-dessus.
+
 ---
 
 ## 5. Pilier 3 — Inférence de types par contraintes (`src/types/`)

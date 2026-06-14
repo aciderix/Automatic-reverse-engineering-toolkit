@@ -151,8 +151,20 @@ fn main() -> Result<()> {
         Mode::Ir => {
             for f in &functions {
                 let mut irf = ir::build::build_ir(&prog, f);
+                // Memory alias analysis (§4.1) runs on the pre-SSA IR, where the
+                // frame/stack base is still a syntactic register read. Verdict is
+                // a display-only diagnostic; it does not alter the IR.
+                let promotable = opt::alias::frame_promotable(&irf);
                 ssa::to_ssa(&mut irf);
                 opt::optimize(&mut irf);
+                out.push_str(&format!(
+                    "// alias: frame slots {}\n",
+                    if promotable {
+                        "promotable (no escape, no aliasing access)"
+                    } else {
+                        "NOT promotable (address taken or unknown-pointer access)"
+                    }
+                ));
                 out.push_str(&ir::build::dump(&irf));
                 out.push('\n');
             }

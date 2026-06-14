@@ -13,6 +13,8 @@
 //! Parallel to the text pipeline; runs in `--mode ir`.
 #![allow(dead_code)]
 
+pub mod alias;
+
 use crate::ir::types::*;
 use std::collections::HashMap;
 
