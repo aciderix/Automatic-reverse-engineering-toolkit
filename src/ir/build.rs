@@ -118,15 +118,20 @@ pub fn build_ir(prog: &Program, func: &Function) -> IrFunction {
         }
     }
 
-    IrFunction {
+    let mut irf = IrFunction {
         entry: func.entry,
         name: func.name.clone(),
         bits,
         reg_params: Vec::new(),
+        frame_promotable: false,
         blocks,
         next_value: 0,
         next_temp: 0,
-    }
+    };
+    // Memory alias analysis (§4.1) on the pre-SSA IR, where the frame/stack base
+    // is still a syntactic register read. The verdict gates stack-slot promotion.
+    irf.frame_promotable = crate::opt::alias::frame_promotable(&irf);
+    irf
 }
 
 // --- pretty-printing ------------------------------------------------------

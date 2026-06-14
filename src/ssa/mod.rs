@@ -363,6 +363,7 @@ mod tests {
             name: "t".into(),
             bits: 64,
             reg_params: vec![],
+            frame_promotable: false,
             blocks: vec![
                 blk(
                     0,
@@ -430,6 +431,7 @@ mod tests {
             name: "t".into(),
             bits: 64,
             reg_params: vec![],
+            frame_promotable: false,
             blocks: vec![blk(
                 0,
                 vec![

@@ -151,10 +151,10 @@ fn main() -> Result<()> {
         Mode::Ir => {
             for f in &functions {
                 let mut irf = ir::build::build_ir(&prog, f);
-                // Memory alias analysis (§4.1) runs on the pre-SSA IR, where the
-                // frame/stack base is still a syntactic register read. Verdict is
-                // a display-only diagnostic; it does not alter the IR.
-                let promotable = opt::alias::frame_promotable(&irf);
+                // Memory alias analysis (§4.1) ran on the pre-SSA IR inside
+                // build_ir (frame_promotable). Verdict is a display-only
+                // diagnostic; it does not alter the IR.
+                let promotable = irf.frame_promotable;
                 ssa::to_ssa(&mut irf);
                 opt::optimize(&mut irf);
                 out.push_str(&format!(

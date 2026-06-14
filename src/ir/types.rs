@@ -222,6 +222,10 @@ pub struct IrFunction {
     /// SSA value ids that are register-passed parameters (64-bit ABIs), in
     /// calling-convention order. Populated by SSA construction.
     pub reg_params: Vec<u32>,
+    /// Whether the function's named stack slots are safe to promote (no slot
+    /// address escapes, no unknown-pointer access). Computed pre-SSA by the alias
+    /// analysis (`opt::alias`); consumed post-SSA by stack-slot promotion.
+    pub frame_promotable: bool,
     pub blocks: Vec<Block>,
     /// Next fresh SSA value id.
     pub next_value: u32,

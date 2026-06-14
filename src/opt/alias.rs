@@ -283,6 +283,7 @@ mod tests {
             name: "t".into(),
             bits: 64,
             reg_params: vec![],
+            frame_promotable: false,
             blocks: vec![Block { id: 0, addr: 0, stmts, succ: vec![], pred: vec![] }],
             next_value: 0,
             next_temp: 0,

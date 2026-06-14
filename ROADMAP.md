@@ -407,9 +407,30 @@ inconnu — verdict *sound* (sur-approximé : un `false` peut être prudent, un
 pure (ne mute pas l'IR → zéro risque). Diagnostic *display-only* dans le dump IR.
 8 tests unitaires. Mesuré sur `ls` : **111 fonctions promouvables / 107 non**.
 
-Reste (prochaine étape) : la **promotion** elle-même, qui consommera
-`frame_promotable` pour transformer les slots `Frame` non-aliasés en valeurs SSA
-versionnées (avec φ aux jointures), puis l'émission typée par-dessus.
+Le verdict est exposé via le champ `IrFunction.frame_promotable` (calculé dans
+`build_ir`) et affiché dans le dump IR.
+
+**Promotion — tentée puis retirée (preuve à l'appui).** Une passe de promotion
+*saine* a été écrite (substitution des lectures d'un slot local à assignation
+unique dont la def domine tous les usages, puis suppression du store mort —
+noms préservés, jamais de `vN` anonyme). Elle passe le gate (équivalence
+différentielle 26/26). **Mais mesure sur le corpus : elle ne se déclenche
+jamais.** Raison structurelle : avec le gate sain `!adresse_prise &&
+!accès_inconnu`, **aucune** fonction promouvable n'a de slot local rbp
+(0/ls, 0/gzip, 0/cat) — car toute fonction ayant des locaux nommés fait aussi
+des accès heap (→ `accès_inconnu`) ou prend une adresse. Le sous-ensemble
+{promouvable} ∩ {a des locaux} est vide. Plutôt que livrer une transformation
+mutant la sortie mais morte sur du vrai code (violation de « rien d'inutile »),
+la passe a été retirée ; le champ + l'oracle restent.
+
+**Vrai prérequis pour que la promotion morde (prochaine étape).** Une analyse
+d'alias *consciente des régions de la frame* : séparer la zone des registres
+sauvegardés (push/pop), la zone des locaux `[rbp-k]`, et les spills relatifs à
+`rsp`. Un pointeur heap inconnu ne peut aliaser un slot `[rbp-k]` que si une
+adresse de frame s'est échappée ; distinguer ces régions (avec leurs offsets)
+permet de promouvoir les locaux non-aliasés **même** dans les fonctions qui font
+du heap — ce que le gate grossier interdit aujourd'hui. C'est le vrai travail du
+§4.1, désormais cadré par les données.
 
 ---
 
