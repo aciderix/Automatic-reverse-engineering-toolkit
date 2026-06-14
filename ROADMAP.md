@@ -503,7 +503,7 @@ Remplacer le `ARG_REGS` conservateur (`dataflow/mod.rs:59`) par une vraie
   Sur le jeu : **50 940 chaînes récupérées dans 12 708 fonctions** — révélant
   qu'OpenSSL + curl sont liés statiquement. Affichage seul → sûr.
 - **Globals** : nommer/typer les accès aux données statiques.
-- **PLT/GOT/imports** : résoudre les appels externes vers leurs noms importés.
+- **PLT/GOT/imports** : ✅ parsing de la table d'import PE (`loader::parse_pe_imports`, INT pour les noms, IAT pour l'adresse du slot) + résolution `call [IAT]` → nom (`ir::call_name`). Sur ce binaire précis (Steam-DRM, dépaqueté) le code appelle un IAT non standard (0xdec0xx) distinct du répertoire d'import reconstruit (0x1d89000) → peu de noms résolus ici, mais la capacité est correcte sur un PE normal (28 imports parsés : WriteFile, RegCloseKey...).
 
 ---
 

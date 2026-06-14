@@ -259,6 +259,10 @@ fn render_info(prog: &Program) -> String {
             if sec.writable { "W" } else { "-" },
         );
     }
+    let _ = writeln!(s, "Imports:  {}", prog.imports.len());
+    for (addr, name) in prog.imports.iter().take(8) {
+        let _ = writeln!(s, "  0x{:<10x} {}", addr, name);
+    }
     let _ = writeln!(s, "Symbols:  {}", prog.symbols.len());
     for sym in prog.symbols.values().take(40) {
         let _ = writeln!(

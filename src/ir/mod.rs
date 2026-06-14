@@ -209,10 +209,32 @@ fn call_name(insn: &Insn, prog: &Program, ops: &[String]) -> String {
         }
         return format!("sub_{:x}", t);
     }
-    // Indirect: call through the operand expression.
+    // Indirect call through a fixed memory slot: resolve a PE import (the IAT).
+    if let Some(addr) = absolute_mem_target(&insn.raw) {
+        if let Some(name) = prog.import_name(addr) {
+            return name.to_string();
+        }
+    }
+    // Otherwise: call through the operand expression.
     ops.first()
         .map(|o| format!("(*({}))", operand_to_c(o)))
         .unwrap_or_else(|| "(*indirect)".to_string())
+}
+
+/// The absolute address of a `[disp]` / rip-relative memory operand (operand 0),
+/// or `None` for register-based addressing.
+fn absolute_mem_target(ins: &iced_x86::Instruction) -> Option<u64> {
+    use iced_x86::{OpKind, Register};
+    if ins.op_kind(0) != OpKind::Memory {
+        return None;
+    }
+    if ins.is_ip_rel_memory_operand() {
+        return Some(ins.ip_rel_memory_address());
+    }
+    if ins.memory_base() == Register::None && ins.memory_index() == Register::None {
+        return Some(ins.memory_displacement64());
+    }
+    None
 }
 
 /// Translate a non-control instruction into pseudo-C statements.

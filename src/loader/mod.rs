@@ -57,6 +57,8 @@ pub struct Program {
     pub sections: Vec<Section>,
     /// address -> symbol, sorted, used to name functions and resolve call targets.
     pub symbols: BTreeMap<u64, KnownSymbol>,
+    /// PE IAT slot virtual address -> imported function name.
+    pub imports: BTreeMap<u64, String>,
 }
 
 impl Program {
@@ -134,13 +136,21 @@ impl Program {
                 });
         }
 
+        let imports = parse_pe_imports(data);
+
         Ok(Program {
             format: format!("{:?}", obj.format()),
             bitness,
             entry: obj.entry(),
             sections,
             symbols,
+            imports,
         })
+    }
+
+    /// Imported function name for a PE IAT slot address, if any.
+    pub fn import_name(&self, addr: u64) -> Option<&str> {
+        self.imports.get(&addr).map(|s| s.as_str())
     }
 
     /// Return the section containing `addr`, if any.
@@ -260,4 +270,55 @@ impl Program {
         }
         seeds
     }
+}
+
+/// Parse a PE import table into a map of IAT slot virtual address -> imported
+/// name. Returns empty for non-PE inputs or on any parse error (best-effort).
+fn parse_pe_imports(data: &[u8]) -> BTreeMap<u64, String> {
+    use object::read::pe::{ImageNtHeaders, ImageOptionalHeader, ImageThunkData};
+    use object::{pe, LittleEndian as LE};
+
+    fn collect<Nt: ImageNtHeaders>(data: &[u8], ptr: u64) -> Option<BTreeMap<u64, String>> {
+        let dos = pe::ImageDosHeader::parse(data).ok()?;
+        let mut offset = dos.nt_headers_offset() as u64;
+        let (nt, dirs) = Nt::parse(data, &mut offset).ok()?;
+        let sections = nt.sections(data, offset).ok()?;
+        let base = nt.optional_header().image_base();
+        let mut map = BTreeMap::new();
+        let it = match dirs.import_table(data, &sections) {
+            Ok(Some(it)) => it,
+            _ => return Some(map),
+        };
+        let mut descs = it.descriptors().ok()?;
+        while let Ok(Some(desc)) = descs.next() {
+            let iat = desc.first_thunk.get(LE); // IAT slots (addresses at runtime)
+            let int = desc.original_first_thunk.get(LE); // names (import name table)
+            // Names come from the INT when present, else the IAT.
+            let name_rva = if int != 0 { int } else { iat };
+            let mut thunks = match it.thunks(name_rva) {
+                Ok(t) => t,
+                Err(_) => continue,
+            };
+            let mut k = 0u64;
+            while let Ok(Some(thunk)) = thunks.next::<Nt>() {
+                let addr = base + iat as u64 + k * ptr; // the IAT slot a `call` targets
+                k += 1;
+                if thunk.is_ordinal() {
+                    continue;
+                }
+                if let Ok((_hint, name)) = it.hint_name(thunk.address()) {
+                    let n = String::from_utf8_lossy(name).into_owned();
+                    if !n.is_empty() {
+                        map.insert(addr, n);
+                    }
+                }
+            }
+        }
+        Some(map)
+    }
+
+    collect::<pe::ImageNtHeaders32>(data, 4)
+        .filter(|m| !m.is_empty())
+        .or_else(|| collect::<pe::ImageNtHeaders64>(data, 8))
+        .unwrap_or_default()
 }
