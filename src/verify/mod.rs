@@ -107,6 +107,7 @@ pub fn run(prog: &Program, funcs: &[&Function], limit: usize) -> Report {
         .par_iter()
         .map(|f| {
             let mut irf = ir::build::build_ir(prog, f);
+            crate::opt::frame::promote_stack_slots(&mut irf);
             ssa::to_ssa(&mut irf);
             crate::opt::optimize(&mut irf);
             let src = emit::structured::emit_unit(std::slice::from_ref(&irf));

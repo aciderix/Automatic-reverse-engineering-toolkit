@@ -151,37 +151,16 @@ fn main() -> Result<()> {
         Mode::Ir => {
             for f in &functions {
                 let mut irf = ir::build::build_ir(&prog, f);
-                // Frame-region analysis (§4.1) on the pre-SSA IR: which named
-                // local slots are provably free of any aliasing frame access.
-                // Display-only diagnostic; it does not alter the IR.
-                let promotable = opt::frame::promotable_slots(&irf);
-                // rsp/rbp-relative accesses recovered as named stack slots (the
-                // ones otherwise emitted as `*(T*)(reg + k)`). Both diagnostics run
-                // on the pre-SSA IR, where the frame base is still a register read.
-                let recovered = opt::frame::recover_stack_slots(&irf);
+                // Stack-slot recovery (§4.1): rewrite safe rsp/rbp-relative
+                // accesses into named `Frame` locals — both a readability win and
+                // a correctness fix (a standalone recompile's frame register is
+                // uninitialised). Runs pre-SSA, where the frame base is a register
+                // read. The diagnostic reports how many slots were promoted.
+                let promoted = opt::frame::promote_stack_slots(&mut irf);
                 ssa::to_ssa(&mut irf);
                 opt::optimize(&mut irf);
-                if !promotable.is_empty() {
-                    let names: Vec<String> =
-                        promotable.iter().map(|d| emit::frame_name(*d)).collect();
-                    out.push_str(&format!(
-                        "// frame: {} promotable local slot(s): {}\n",
-                        promotable.len(),
-                        names.join(", ")
-                    ));
-                }
-                if let Some(slots) = recovered {
-                    if !slots.is_empty() {
-                        let items: Vec<String> = slots
-                            .iter()
-                            .map(|(d, si)| format!("{}(x{})", emit::frame_name(*d), si.count))
-                            .collect();
-                        out.push_str(&format!(
-                            "// stack: {} recovered slot(s): {}\n",
-                            slots.len(),
-                            items.join(", ")
-                        ));
-                    }
+                if promoted > 0 {
+                    out.push_str(&format!("// stack: {} slot(s) promoted to locals\n", promoted));
                 }
                 out.push_str(&ir::build::dump(&irf));
                 out.push('\n');
@@ -192,6 +171,7 @@ fn main() -> Result<()> {
                 .iter()
                 .map(|f| {
                     let mut irf = ir::build::build_ir(&prog, f);
+                    opt::frame::promote_stack_slots(&mut irf);
                     ssa::to_ssa(&mut irf);
                     opt::optimize(&mut irf);
                     irf

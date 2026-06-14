@@ -447,12 +447,26 @@ push de registre sauvegardé). Raison de fond : le code **-O2 omet souvent le
 frame pointer** → les locaux chauds sont **relatifs à `rsp`** et ne deviennent
 jamais des slots `Location::Frame` (qui ne reconnaît que `[rbp±d]`).
 
-**Vrai gros levier (suite).** Modéliser les **locaux relatifs à `rsp`** comme
-variables de première classe (slots nommés à offset stable), ce que le modèle
-d'offset `rsp` de `frame.rs` rend désormais possible. C'est un changement plus
-profond du lifter/IR, mais c'est là qu'est la lisibilité sur le vrai code.
-La transformation de promotion (substitution sûre) reste prête à consommer
-`frame::promotable_slots` dès que les candidats existent en nombre.
+**Récupération des locaux relatifs à `rsp` — ✅ FAIT (`promote_stack_slots`).**
+Le modèle d'offset `rsp` donne à chaque accès `rsp`/`rbp`-relatif à offset
+constant une identité stable (coordonnée frame), puis la passe réécrit les accès
+**sûrs** en slots nommés `Location::Frame` : `*(T*)(reg+k)` → `local_…`. Un slot
+n'est réécrit que si (a) le modèle de frame a tenu (`ok`, rien d'échappé),
+(b) une **largeur unique** (le modèle `Frame` ne porte pas la largeur), et
+(c) sa plage **ne recoupe aucun autre slot**. Le reste reste en mémoire — sain
+par omission. Tourne pré-SSA ; activé par défaut dans les pipelines emit/ir/verify.
+
+**C'est aussi une correction de justesse**, pas qu'un gain de lisibilité : un
+accès pile via le registre de frame (non initialisé dans une recompilation
+isolée) déréférence sinon un pointeur sauvage. Deux fonctions corpus à spill
+(`spill2`, `spill3`, locaux `volatile`) ont été ajoutées : **avant** elles
+*crashaient* en test différentiel (déréférencement de base non initialisée),
+**après** elles passent. Suite différentielle portée à **28/28**, gate complet
+vert (recompile 100 %, SMT 11/11, magicdiv 2³²). 6 tests unitaires dans
+`frame.rs`.
+
+Reste : étendre aux slots multi-largeur / recouvrants (aujourd'hui laissés en
+mémoire), et l'émission typée des locaux récupérés (via §5).
 
 ---
 

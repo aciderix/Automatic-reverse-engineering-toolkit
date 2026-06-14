@@ -50,6 +50,9 @@ struct FrameInfo {
     /// Every constant-offset frame access as `(entry-relative offset, width
     /// bytes)`. Raw material for recovering `rsp`-relative locals as named slots.
     accesses: Vec<(i64, i64)>,
+    /// Per-block entry `rsp` byte offset relative to function entry (`None` =
+    /// block not reached). Lets the rewrite recompute each access's offset.
+    entry_rsp: Vec<Option<i64>>,
     /// A frame pointer escaped (taken by `lea`, copied into a base, stored to or
     /// passed beyond the frame): no local can be assumed un-aliased.
     escaped: bool,
@@ -62,6 +65,7 @@ impl FrameInfo {
             rbp_off: None,
             generic_ranges: Vec::new(),
             accesses: Vec::new(),
+            entry_rsp: Vec::new(),
             escaped: true,
         }
     }
@@ -126,6 +130,185 @@ pub fn recover_stack_slots(func: &IrFunction) -> Option<std::collections::BTreeM
         e.count += 1;
     }
     Some(m)
+}
+
+/// Rewrite the *safe* recovered `rsp`/`rbp`-relative accesses into named
+/// `Location::Frame` slots, so they emit as `local_…` instead of
+/// `*(T*)(reg + k)`. This is also a **correctness fix**: a stack access through
+/// the (uninitialised, in a standalone recompile) frame register otherwise
+/// dereferences a wild pointer; a real C local does not.
+///
+/// Runs on the pre-SSA IR. A slot is rewritten only when the whole-function
+/// frame model held (`ok`, nothing escaped) and the slot is *unambiguous*:
+///   * a single access width (the `Frame` model carries no width), and
+///   * its byte range overlaps no other recovered slot.
+/// Everything else is left as memory — sound by omission. Returns the number of
+/// distinct slots promoted.
+pub fn promote_stack_slots(func: &mut IrFunction) -> usize {
+    use std::collections::{BTreeMap, HashMap};
+    let info = analyze(func);
+    if !info.ok || info.escaped {
+        return 0;
+    }
+    let rbp_off = info.rbp_off;
+    let to_disp = |o: i64| match rbp_off {
+        Some(r) => o - r,
+        None => o,
+    };
+
+    // Per displacement: the set of widths and the spanned entry-relative range.
+    let mut widths: BTreeMap<i64, std::collections::BTreeSet<i64>> = BTreeMap::new();
+    let mut range: BTreeMap<i64, (i64, i64)> = BTreeMap::new();
+    for (o, w) in &info.accesses {
+        let d = to_disp(*o);
+        widths.entry(d).or_default().insert(*w);
+        let r = range.entry(d).or_insert((*o, *o + *w));
+        r.0 = r.0.min(*o);
+        r.1 = r.1.max(*o + *w);
+    }
+
+    // Safe = single width AND range disjoint from every other slot's range.
+    let ranges: Vec<(i64, i64, i64)> = range.iter().map(|(d, &(s, e))| (*d, s, e)).collect();
+    let mut safe: HashMap<i64, i64> = HashMap::new(); // disp -> width bytes
+    for (d, s, e) in &ranges {
+        let ws = &widths[d];
+        if ws.len() != 1 {
+            continue;
+        }
+        let overlaps_other = ranges
+            .iter()
+            .any(|(d2, s2, e2)| d2 != d && *s2 < *e && *s < *e2);
+        if !overlaps_other {
+            safe.insert(*d, *ws.iter().next().unwrap());
+        }
+    }
+    if safe.is_empty() {
+        return 0;
+    }
+
+    // Second pass: re-walk in CFG order with rsp tracking, rewriting the safe
+    // accesses in place. Block-entry rsp offsets come from the analysis.
+    let n = func.blocks.len();
+    let tainted = tainted_regs(func);
+    for bi in 0..n {
+        let Some(mut rsp) = info.entry_rsp.get(bi).copied().flatten() else { continue };
+        let mut stmts = std::mem::take(&mut func.blocks[bi].stmts);
+        for s in &mut stmts {
+            rewrite_stmt(s, rsp, rbp_off, &safe, &tainted);
+            // Update rsp *after* the statement's accesses (matches `push`: the
+            // decrement precedes the store at the new rsp).
+            if let Stmt::Set { dst: Location::Reg(r), expr } = s {
+                if r.0 == RSP {
+                    match rsp_delta(expr) {
+                        Some(RspWrite::Delta(k)) => rsp += k,
+                        Some(RspWrite::FromRbp) => {
+                            if let Some(o) = rbp_off {
+                                rsp = o;
+                            }
+                        }
+                        None => {}
+                    }
+                }
+            }
+        }
+        func.blocks[bi].stmts = stmts;
+    }
+    safe.len()
+}
+
+/// Frame displacement of an address if it is a safe slot at the given `rsp`.
+fn safe_disp(
+    addr: &Expr,
+    rsp: i64,
+    rbp_off: Option<i64>,
+    safe: &std::collections::HashMap<i64, i64>,
+    tainted: &HashSet<u16>,
+) -> Option<i64> {
+    if let AddrClass::Frame(o) = classify(addr, rsp, rbp_off, tainted) {
+        let d = match rbp_off {
+            Some(r) => o - r,
+            None => o,
+        };
+        if safe.contains_key(&d) {
+            return Some(d);
+        }
+    }
+    None
+}
+
+/// Rewrite safe frame `Load`s (anywhere) and a safe frame `Store` (statement
+/// level) into `Frame` reads/sets.
+fn rewrite_stmt(
+    s: &mut Stmt,
+    rsp: i64,
+    rbp_off: Option<i64>,
+    safe: &std::collections::HashMap<i64, i64>,
+    tainted: &HashSet<u16>,
+) {
+    // A store to a safe slot becomes `Set { Frame(d) }`.
+    if let Stmt::Store { addr, value, .. } = s {
+        if let Some(d) = safe_disp(addr, rsp, rbp_off, safe, tainted) {
+            let mut value = std::mem::replace(value, Expr::Undef);
+            rewrite_loads(&mut value, rsp, rbp_off, safe, tainted);
+            *s = Stmt::Set { dst: Location::Frame(d), expr: value };
+            return;
+        }
+    }
+    each_expr_mut(s, &mut |e| rewrite_loads(e, rsp, rbp_off, safe, tainted));
+}
+
+/// Replace `Load` of a safe frame address with `Read(Frame(d))`, recursively.
+fn rewrite_loads(
+    e: &mut Expr,
+    rsp: i64,
+    rbp_off: Option<i64>,
+    safe: &std::collections::HashMap<i64, i64>,
+    tainted: &HashSet<u16>,
+) {
+    if let Expr::Load { addr, .. } = e {
+        if let Some(d) = safe_disp(addr, rsp, rbp_off, safe, tainted) {
+            *e = Expr::Read(Location::Frame(d));
+            return;
+        }
+        rewrite_loads(addr, rsp, rbp_off, safe, tainted);
+        return;
+    }
+    match e {
+        Expr::Unary(_, x) | Expr::Cast { expr: x, .. } => rewrite_loads(x, rsp, rbp_off, safe, tainted),
+        Expr::Binary(_, a, b) => {
+            rewrite_loads(a, rsp, rbp_off, safe, tainted);
+            rewrite_loads(b, rsp, rbp_off, safe, tainted);
+        }
+        Expr::Select { cond, then_, else_ } => {
+            rewrite_loads(cond, rsp, rbp_off, safe, tainted);
+            rewrite_loads(then_, rsp, rbp_off, safe, tainted);
+            rewrite_loads(else_, rsp, rbp_off, safe, tainted);
+        }
+        Expr::Call { target, args, .. } => {
+            if let CallTarget::Indirect(x) = target {
+                rewrite_loads(x, rsp, rbp_off, safe, tainted);
+            }
+            for a in args {
+                rewrite_loads(a, rsp, rbp_off, safe, tainted);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Apply `f` to each top-level expression of a statement (mutable).
+fn each_expr_mut(s: &mut Stmt, f: &mut impl FnMut(&mut Expr)) {
+    match s {
+        Stmt::Set { expr, .. } | Stmt::Assign { expr, .. } | Stmt::CallStmt(expr) => f(expr),
+        Stmt::Store { addr, value, .. } => {
+            f(addr);
+            f(value);
+        }
+        Stmt::Branch { cond, .. } => f(cond),
+        Stmt::Switch { value, .. } => f(value),
+        Stmt::Return(Some(e)) => f(e),
+        _ => {}
+    }
 }
 
 /// Negative-displacement frame slots (the locals).
@@ -195,7 +378,7 @@ fn mentions_tainted(e: &Expr, t: &HashSet<u16>) -> bool {
 fn analyze(func: &IrFunction) -> FrameInfo {
     let n = func.blocks.len();
     if n == 0 {
-        return FrameInfo { ok: true, rbp_off: None, generic_ranges: Vec::new(), accesses: Vec::new(), escaped: false };
+        return FrameInfo { ok: true, rbp_off: None, generic_ranges: Vec::new(), accesses: Vec::new(), entry_rsp: Vec::new(), escaped: false };
     }
     let tainted = tainted_regs(func);
 
@@ -205,7 +388,7 @@ fn analyze(func: &IrFunction) -> FrameInfo {
     rsp_in[entry] = Some(0);
 
     let mut info =
-        FrameInfo { ok: true, rbp_off: None, generic_ranges: Vec::new(), accesses: Vec::new(), escaped: false };
+        FrameInfo { ok: true, rbp_off: None, generic_ranges: Vec::new(), accesses: Vec::new(), entry_rsp: Vec::new(), escaped: false };
 
     let mut work = vec![entry];
     while let Some(bi) = work.pop() {
@@ -231,6 +414,7 @@ fn analyze(func: &IrFunction) -> FrameInfo {
             }
         }
     }
+    info.entry_rsp = rsp_in;
     info
 }
 
@@ -598,6 +782,30 @@ mod tests {
         let s = slots.get(&-8).expect("spill at disp -8 recovered");
         assert_eq!(s.count, 2, "store + load");
         assert!(s.widths.contains(&64));
+    }
+
+    /// Promotion rewrites a safe rsp spill's store/load into Frame set/read.
+    #[test]
+    fn promote_rewrites_spill_to_frame() {
+        let mut f = func(vec![
+            Stmt::Set { dst: Location::Reg(RegId(RSP)), expr: Expr::Binary(BinOp::Sub, Box::new(rsp()), Box::new(Expr::konst(8, 64))) },
+            Stmt::Store { addr: rsp(), value: rbp(), ty: Ty::int(64) },
+            Stmt::Set { dst: Location::Reg(RegId(RBP)), expr: rsp() }, // rbp_off=-8
+            Stmt::Set { dst: Location::Reg(RegId(RSP)), expr: Expr::Binary(BinOp::Sub, Box::new(rsp()), Box::new(Expr::konst(0x10, 64))) },
+            // *(uint64*)(rsp+8) = rdi   (disp -8)
+            Stmt::Store { addr: Expr::Binary(BinOp::Add, Box::new(rsp()), Box::new(Expr::konst(8, 64))), value: Expr::Read(Location::Reg(RegId(7))), ty: Ty::int(64) },
+            // rax = *(uint64*)(rsp+8)
+            Stmt::Assign { dst: ValueId(1), expr: Expr::Load { addr: Box::new(Expr::Binary(BinOp::Add, Box::new(rsp()), Box::new(Expr::konst(8, 64)))), ty: Ty::int(64) } },
+        ]);
+        let n = promote_stack_slots(&mut f);
+        assert!(n >= 1, "expected a slot promoted");
+        let st = &f.blocks[0].stmts;
+        // the spill store became Set { Frame(-8) }
+        assert!(st.iter().any(|s| matches!(s, Stmt::Set { dst: Location::Frame(-8), .. })),
+            "spill store should be Set Frame(-8): {:?}", st);
+        // the reload became Read(Frame(-8))
+        assert!(st.iter().any(|s| matches!(s, Stmt::Assign { expr: Expr::Read(Location::Frame(-8)), .. })),
+            "reload should read Frame(-8): {:?}", st);
     }
 
     /// A variable-indexed frame access makes the analysis bail (sound).

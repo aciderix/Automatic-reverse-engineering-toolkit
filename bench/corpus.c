@@ -35,3 +35,10 @@ int sxbyte(int x)                { return (int)(signed char)x; }          /* mov
 int sxword(int x)                { return (int)(short)x; }                /* movsx */
 int idxw(const int* a, int i)    { return a[i] + 1; }                     /* cdqe index */
 
+
+/* Stack-spill functions: `volatile` locals force constant-offset stack slots
+   with no address taken, exercising rsp/rbp stack-slot recovery + promotion.
+   volatile changes memory traffic, not the computed value, so the result stays
+   deterministic for differential testing. */
+int spill2(int a, int b)        { volatile int x = a + b; volatile int y = a - b; return x * y + x - y; }
+int spill3(int a, int b, int c) { volatile int p = a * b; volatile int q = b * c; volatile int r = a * c; return p + q - r; }
