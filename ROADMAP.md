@@ -802,6 +802,14 @@ sur la métrique nord.
 - **P2** — types (§5), alias+promotion (§4.1), SCCP/GVN (§4), switch→`Stmt::Switch` IR.
 - **P2/P3** — LLM (§9, nécessite API), FLIRT (§6.4), vtables C++ (§6.3), inter-proc (§6.2).
 
+### 15.4bis — Fait depuis l'intégration de §15 (mise à jour 2025-06-14)
+- ✅ **Rayon** (analyse 60→17 s, split 44k 73→16 s, verify parallèle).
+- ✅ **Lifter `mul`/`div`/`idiv` 1-op (32-bit) + `cdq`/`cqo`** (3 bugs trouvés+
+  corrigés par le différentiel → corpus 21/21).
+- ✅ **Modélisation des appels** : retour (`rax = call`) + clobbers caller-saved.
+- ✅ **Noms d'imports dans le pipeline IR** + `verify` en `-fno-builtin`.
+- Reste appels : **args aux call-sites** (ABI-aware : registres 64-bit, pile 32-bit).
+
 ### 15.4 Ordre d'exécution recommandé (révisé)
 1. **Magic division** [Prop. 3] — gain de lisibilité immédiat, sûr, vérifiable.
 2. **Args aux call-sites** [Prop. 2b] — `func(a, b)` au lieu de `func()`.

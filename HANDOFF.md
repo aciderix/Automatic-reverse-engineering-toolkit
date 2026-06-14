@@ -134,6 +134,13 @@ bash bench/smt_rewrites.sh                            # preuves SMT des règles 
 
 ## 5. État d'avancement par pilier (HONNÊTE)
 
+> **MàJ 2025-06-14** (depuis cette section) : ✅ Rayon (analyse 60→17 s, split
+> 73→16 s) ; ✅ lifter `mul`/`div`/`idiv` 1-op + `cdq`/`cqo` ; ✅ modélisation des
+> appels (retour `rax=call` + clobbers caller-saved) ; ✅ noms d'imports dans le
+> pipeline IR (`malloc()`) + `verify` en `-fno-builtin`. Différentiel **21/21**.
+> Détail dans `ROADMAP.md §15.4bis`. Prochain : **args aux call-sites** (Prop. 2b).
+
+
 - **Pilier 1 (IR SSA typé)** : ✅ COMPLET. types, dom+frontière, lift IR, SSA, IR-CFG, `--mode ir`.
 - **Pilier 2 (passes SSA)** : ✅ const-prop, folding/simplif, DCE, propagation
   (intra + chaînes droites), reconstruction conditions, binding retour, sûreté `Asm`.
