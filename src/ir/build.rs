@@ -164,6 +164,7 @@ pub fn build_ir(prog: &Program, func: &Function) -> IrFunction {
         name: func.name.clone(),
         bits,
         reg_params: Vec::new(),
+        frame_base_values: Vec::new(),
         blocks,
         next_value: 0,
         next_temp: 0,

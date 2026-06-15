@@ -137,10 +137,7 @@ pub fn emit_function(func: &IrFunction, forward: &mut BTreeSet<u64>, with_params
         );
     }
     let _ = writeln!(out, "{} {{", super::signature(&f, with_params));
-    if !values.is_empty() {
-        let decls: Vec<String> = values.iter().map(|v| format!("v{} = 0", v)).collect();
-        let _ = writeln!(out, "    uint64_t {};", decls.join(", "));
-    }
+    out.push_str(&super::value_decls(&values, &f.frame_base_values));
     if let Some(fd) = frame_decls(&f, with_params) {
         let _ = writeln!(out, "{}", fd);
     }

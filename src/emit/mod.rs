@@ -290,6 +290,42 @@ pub(crate) fn int_bits(t: &Ty) -> u8 {
     }
 }
 
+/// Size of the synthesised per-call stack-frame array, and the entry offset of
+/// rsp/rbp within it (leaving room above for stack-passed args / saved slots and
+/// below for the function's locals).
+const FRAME_SIZE: usize = 16384;
+const FRAME_TOP: usize = FRAME_SIZE - 2048;
+
+/// Render the function's value declarations. Frame-base values (entry rsp/rbp)
+/// are pointed at a real per-call `__frame` array so generic stack accesses
+/// (arrays, rsp-relative spills) hit real memory instead of dereferencing an
+/// uninitialised frame register. Returns the lines (with leading indent).
+pub(crate) fn value_decls(values: &BTreeSet<u32>, frame_base: &[u32]) -> String {
+    use std::collections::HashSet;
+    if values.is_empty() {
+        return String::new();
+    }
+    let fb: HashSet<u32> = frame_base.iter().copied().collect();
+    let used_fb = values.iter().any(|v| fb.contains(v));
+    let mut out = String::new();
+    if used_fb {
+        // Plain automatic array (per-call, so recursion gets a fresh frame).
+        let _ = writeln!(out, "    uint8_t __frame[{}];", FRAME_SIZE);
+    }
+    let decls: Vec<String> = values
+        .iter()
+        .map(|v| {
+            if fb.contains(v) {
+                format!("v{} = (uint64_t)(__frame + {})", v, FRAME_TOP)
+            } else {
+                format!("v{} = 0", v)
+            }
+        })
+        .collect();
+    let _ = writeln!(out, "    uint64_t {};", decls.join(", "));
+    out
+}
+
 /// Signed-cast an operand, sign-extending from its apparent width. A value
 /// masked to a sub-word width (`x & 0xff/0xffff/0xffffffff`) is sign-extended
 /// from that width (`(int64_t)(int32_t)x`), not treated as a positive 64-bit
@@ -649,10 +685,7 @@ pub fn emit_function(func: &IrFunction, forward: &mut BTreeSet<u64>, with_params
         );
     }
     let _ = writeln!(out, "{} {{", signature(&f, with_params));
-    if !values.is_empty() {
-        let decls: Vec<String> = values.iter().map(|v| format!("v{} = 0", v)).collect();
-        let _ = writeln!(out, "    uint64_t {};", decls.join(", "));
-    }
+    out.push_str(&value_decls(&values, &f.frame_base_values));
     if let Some(fd) = frame_decls(&f, with_params) {
         let _ = writeln!(out, "{}", fd);
     }
@@ -843,6 +876,7 @@ mod tests {
             name: "t".into(),
             bits: 64,
             reg_params: vec![],
+            frame_base_values: vec![],
             blocks: vec![
                 Block { id: 0, addr: 0, stmts: vec![Stmt::Set { dst: rax.clone(), expr: Expr::konst(1, 32) }, Stmt::Branch { cond: Expr::konst(1, 8), taken: BlockId(1), fallthrough: BlockId(2) }], succ: vec![1, 2], pred: vec![] },
                 Block { id: 1, addr: 1, stmts: vec![Stmt::Set { dst: rax.clone(), expr: Expr::konst(2, 32) }, Stmt::Jump(BlockId(3)) ], succ: vec![3], pred: vec![0] },

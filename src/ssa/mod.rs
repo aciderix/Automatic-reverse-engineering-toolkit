@@ -220,6 +220,16 @@ pub fn to_ssa(func: &mut IrFunction) {
             }
         }
     }
+
+    // Frame-base values: the entry (undef) versions of rsp/rbp. Stack-variable
+    // promotion points these at a real local array so generic stack accesses
+    // (arrays, rsp-relative spills) hit real memory instead of dereferencing an
+    // uninitialised frame register.
+    for r in [4u16, 5] {
+        if let Some(v) = undef.get(&Location::Reg(RegId(r))) {
+            func.frame_base_values.push(v.0);
+        }
+    }
 }
 
 /// Rewrite all `Read(loc)` in an expression to `Use(version)`.
@@ -363,6 +373,7 @@ mod tests {
             name: "t".into(),
             bits: 64,
             reg_params: vec![],
+            frame_base_values: vec![],
             blocks: vec![
                 blk(
                     0,
@@ -430,6 +441,7 @@ mod tests {
             name: "t".into(),
             bits: 64,
             reg_params: vec![],
+            frame_base_values: vec![],
             blocks: vec![blk(
                 0,
                 vec![

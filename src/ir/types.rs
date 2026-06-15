@@ -222,6 +222,9 @@ pub struct IrFunction {
     /// SSA value ids that are register-passed parameters (64-bit ABIs), in
     /// calling-convention order. Populated by SSA construction.
     pub reg_params: Vec<u32>,
+    /// SSA values that are the entry (undef) versions of rsp/rbp — pointed at a
+    /// real local frame array by stack-variable promotion. Populated by SSA.
+    pub frame_base_values: Vec<u32>,
     pub blocks: Vec<Block>,
     /// Next fresh SSA value id.
     pub next_value: u32,

@@ -89,3 +89,7 @@ int tlen(const char* s){ return (int)strlen(s); }   /* tail call -> jmp strlen *
 
 /* Struct copy by value: gcc may emit `rep movsq`. Returns an element so the
    differential can compare. */
+
+/* Stack array via variable index — previously crashed standalone (deref of
+   uninitialised frame register); should now work via the __frame array. */
+int stkarr(int a, int b, int c){ int v[6]; for(int i=0;i<6;i++) v[i]=a*i+b; return v[c&5]-c; }
