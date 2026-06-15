@@ -732,10 +732,24 @@ relogeable), et compare.
      nommé ; `jmp [GOT]` → import). **Effondrement de l'incomplétude : gzip
      83→10, ls 164→23, cat 55→4** (de ~300 à 36 fonctions). Validé par un tail
      call libc (`tlen → jmp strlen`), différentiel 192/192.
-   - **Reste (petit, caractérisé)** : jump tables (`notrack jmp [table+idx*8]`,
-     ~20 fn — nécessite la récupération de l'index → `Stmt::Switch` typé + émission
-     du `switch`), `rep movs/stos` (9 fn), une poignée d'ops packed (`movhps`,
-     `shufpd`, `movhlps`, `psubusw`), `hlt`, une forme d'`imul`, et le x87 (~1-2 fn).
+   - **`rep movs` → memcpy — ✅ FAIT** (recompile-validé ; ls 23→21). Les
+     fonctions de copie mémoire ne sont pas testables en différentiel standalone
+     (elles déréférencent le registre de frame non initialisé, comme tout buffer
+     de pile).
+   - **Reste (~35 fn, bloqué par la *validabilité*, pas par la difficulté
+     d'implémentation)** :
+     - **Jump tables register-indirect** (~20, `lea table; movsxd off=[t+idx*4];
+       add; notrack jmp`) : récupérables en `switch(idx)` (le C recompilé n'accède
+       pas à la table → standalone-correct), MAIS lire la table relative exige une
+       lecture section-aware ; en `.o` la collision base-0 empêche de lire la
+       table → impossible à valider en différentiel ; sur exécutable ça marcherait
+       mais seulement *recompile*-validé (pas comportemental). Ajouter une
+       récupération de contrôle de flux non validée comportementalement = risque
+       d'erreur silencieuse → laissé INCOMPLETE (sain) plutôt que bâclé.
+     - **x87** (~2) : 80 bits + pile, non bit-exact dans une IR 64 bits.
+     - **Packed restant** (`movhps/shufpd/movhlps/psubusw`, ~7) + `hlt`, `imul` :
+       difficiles à générer/valider en différentiel.
+     Tous **honnêtement marqués INCOMPLETE** — jamais silencieusement faux.
 
    **Constat majeur (le plus important de cette série).** Une fois la détection
    d'incomplétude en place, on mesure la *vraie* fidélité sur du vrai code :
