@@ -724,6 +724,19 @@ relogeable), et compare.
      ce qui domine encore l'incomplétude des binaires (gzip 88, ls 174). Les
      boucles vectorisées entières sont désormais couvertes.
 
+   - **Tail calls — ✅ FAIT, et c'était LE levier dominant.** La mesure par
+     fonction a montré que l'incomplétude du vrai code n'était PAS due au x87/SSE
+     (≈1 fonction x87) mais aux **`jmp` indirects/externes** liftés en `Stmt::Asm` :
+     surtout `jmp qword [GOT]` (tail call vers un import) et `jmp func` direct.
+     `build_ir` les modélise désormais en `return f(args)` (direct → `sub_`/import
+     nommé ; `jmp [GOT]` → import). **Effondrement de l'incomplétude : gzip
+     83→10, ls 164→23, cat 55→4** (de ~300 à 36 fonctions). Validé par un tail
+     call libc (`tlen → jmp strlen`), différentiel 192/192.
+   - **Reste (petit, caractérisé)** : jump tables (`notrack jmp [table+idx*8]`,
+     ~20 fn — nécessite la récupération de l'index → `Stmt::Switch` typé + émission
+     du `switch`), `rep movs/stos` (9 fn), une poignée d'ops packed (`movhps`,
+     `shufpd`, `movhlps`, `psubusw`), `hlt`, une forme d'`imul`, et le x87 (~1-2 fn).
+
    **Constat majeur (le plus important de cette série).** Une fois la détection
    d'incomplétude en place, on mesure la *vraie* fidélité sur du vrai code :
    **gzip 98/131, ls 184/200, cat 57/67 fonctions contiennent ≥1 instruction non
