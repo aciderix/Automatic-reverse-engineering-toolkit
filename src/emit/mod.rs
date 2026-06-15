@@ -138,11 +138,14 @@ pub(crate) const FLOAT_HELPERS: &str = concat!(
     "static inline uint64_t __fp_lt64(uint64_t a,uint64_t b){return __fp_g64(a)<__fp_g64(b);}\n",
     "static inline uint64_t __fp_eq64(uint64_t a,uint64_t b){return __fp_g64(a)==__fp_g64(b);}\n",
     "static inline uint64_t __fp_un64(uint64_t a,uint64_t b){double x=__fp_g64(a),y=__fp_g64(b);return x!=x||y!=y;}\n",
+    // Packed integer lanes (two 32-bit lanes per 64-bit half), no carry across lanes.
+    "static inline uint64_t __pi_add32(uint64_t a,uint64_t b){uint32_t l=(uint32_t)a+(uint32_t)b,h=(uint32_t)(a>>32)+(uint32_t)(b>>32);return (uint64_t)l|((uint64_t)h<<32);}\n",
+    "static inline uint64_t __pi_sub32(uint64_t a,uint64_t b){uint32_t l=(uint32_t)a-(uint32_t)b,h=(uint32_t)(a>>32)-(uint32_t)(b>>32);return (uint64_t)l|((uint64_t)h<<32);}\n",
 );
 
-/// The float-helper preamble, included only when the body references it.
+/// The runtime-helper preamble, included only when the body references it.
 pub(crate) fn float_preamble(body: &str) -> &'static str {
-    if body.contains("__fp_") {
+    if body.contains("__fp_") || body.contains("__pi_") {
         FLOAT_HELPERS
     } else {
         ""

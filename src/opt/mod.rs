@@ -52,7 +52,14 @@ fn prune_call_args(func: &mut IrFunction) {
             for a in args.iter_mut() {
                 visit(a);
             }
-            trim(args);
+            // Trailing-Undef trimming undoes the lifter's 6-register call-arg
+            // over-approximation. The synthetic float/packed runtime helpers
+            // (`__fp_*`/`__pi_*`) have exact, fixed arity — never trim them, even
+            // when an operand folds to Undef (which would corrupt the call).
+            let is_helper = matches!(target, CallTarget::Named(n) if n.starts_with("__"));
+            if !is_helper {
+                trim(args);
+            }
             if let CallTarget::Indirect(x) = target {
                 visit(x);
             }

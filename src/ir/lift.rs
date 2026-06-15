@@ -90,12 +90,87 @@ fn is_scalar_float(ins: &Instruction) -> bool {
             | Comiss | Comisd | Ucomiss | Ucomisd
             | Pxor | Xorps | Xorpd
             | Movaps | Movapd | Movups | Movupd
+            | Movdqa | Movdqu | Paddd | Psubd | Psrldq
     )
 }
 
 /// Build a call to a named runtime helper returning a 64-bit bit pattern.
 fn fcall(name: &str, args: Vec<Expr>) -> Expr {
     Expr::Call { target: CallTarget::Named(name.to_string()), args, ret: Ty::int(64) }
+}
+
+/// XMM lane number of a register operand.
+fn xmm_num(r: Register) -> Option<u16> {
+    if r.is_xmm() {
+        Some(r.number() as u16)
+    } else {
+        None
+    }
+}
+
+/// The low / high 64-bit halves of XMM register `n`, modelled as two locations
+/// (the integer IR has no 128-bit value). Low half reuses the XMM register id
+/// (`16+n`, matching `reg_id`); the high half lives at `64+n`.
+fn xmm_lo(n: u16) -> Location {
+    Location::Reg(RegId(16 + n))
+}
+fn xmm_hi(n: u16) -> Location {
+    Location::Reg(RegId(64 + n))
+}
+
+/// Read operand `i` as a 128-bit value `(low64, high64)` — an XMM register or a
+/// 16-byte memory location.
+fn read_xmm128(ins: &Instruction, i: u32) -> Option<(Expr, Expr)> {
+    match ins.op_kind(i) {
+        OpKind::Register => {
+            let n = xmm_num(ins.op_register(i))?;
+            Some((Expr::Read(xmm_lo(n)), Expr::Read(xmm_hi(n))))
+        }
+        OpKind::Memory => {
+            // Packed constants from .rodata aren't folded (only the low half
+            // would be), so leave rip-relative 128-bit loads unmodelled.
+            if ins.is_ip_rel_memory_operand() || ins.segment_prefix() != Register::None {
+                return None;
+            }
+            let (addr, _) = mem_addr(ins)?;
+            let lo = Expr::Load { addr: Box::new(addr.clone()), ty: Ty::int(64) };
+            let hi = Expr::Load {
+                addr: Box::new(bin(BinOp::Add, addr, konst(8))),
+                ty: Ty::int(64),
+            };
+            Some((lo, hi))
+        }
+        _ => None,
+    }
+}
+
+/// Write a 128-bit value `(low64, high64)` to operand 0 — an XMM register or a
+/// 16-byte memory location.
+fn write_xmm128(ins: &Instruction, lo: Expr, hi: Expr) -> Option<Vec<Stmt>> {
+    match ins.op_kind(0) {
+        OpKind::Register => {
+            let n = xmm_num(ins.op_register(0))?;
+            Some(vec![
+                Stmt::Set { dst: xmm_lo(n), expr: lo },
+                Stmt::Set { dst: xmm_hi(n), expr: hi },
+            ])
+        }
+        OpKind::Memory => {
+            if ins.is_ip_rel_memory_operand() || ins.segment_prefix() != Register::None {
+                return None;
+            }
+            let (addr, _) = mem_addr(ins)?;
+            Some(vec![
+                Stmt::Store { addr: addr.clone(), value: lo, ty: Ty::int(64) },
+                Stmt::Store {
+                    addr: bin(BinOp::Add, addr, konst(8)),
+                    value: hi,
+                    ty: Ty::int(64),
+                },
+            ])
+        }
+        _ => None,
+    }
 }
 
 /// Lift a binary scalar-float op `dst = helper(dst, src)`.
@@ -610,16 +685,52 @@ pub fn lift(insn: &Insn, bits: u32) -> Vec<Stmt> {
             let v = some_or_asm!(op_value(ins, 1));
             some_or_asm!(write_op0(ins, v, bits))
         }
-        Mnemonic::Movaps | Mnemonic::Movapd | Mnemonic::Movups | Mnemonic::Movupd => {
-            // A register-register copy is a safe scalar move (a genuine 128-bit
-            // packed consumer would still be flagged by its own packed op). A
-            // memory operand may be a 128-bit load/store (e.g. `memcpy`) we don't
-            // model — leave those as an honest `asm` fallback.
-            if ins.op_kind(0) == OpKind::Register && ins.op_kind(1) == OpKind::Register {
-                let v = some_or_asm!(op_value(ins, 1));
-                some_or_asm!(write_op0(ins, v, bits))
-            } else {
-                return asm();
+        // 128-bit moves: copy both 64-bit halves (register or 16-byte memory).
+        Mnemonic::Movaps | Mnemonic::Movapd | Mnemonic::Movups | Mnemonic::Movupd
+        | Mnemonic::Movdqa | Mnemonic::Movdqu => {
+            let (lo, hi) = some_or_asm!(read_xmm128(ins, 1));
+            some_or_asm!(write_xmm128(ins, lo, hi))
+        }
+        // 128-bit lane-wise integer add/sub (no carry across 32-bit lanes).
+        Mnemonic::Paddd | Mnemonic::Psubd => {
+            let (alo, ahi) = some_or_asm!(read_xmm128(ins, 0));
+            let (blo, bhi) = some_or_asm!(read_xmm128(ins, 1));
+            let h = if ins.mnemonic() == Mnemonic::Paddd { "__pi_add32" } else { "__pi_sub32" };
+            let lo = fcall(h, vec![alo, blo]);
+            let hi = fcall(h, vec![ahi, bhi]);
+            some_or_asm!(write_xmm128(ins, lo, hi))
+        }
+        // Byte shift of the whole 128-bit value (right). Handles the reduction
+        // shifts (4/8/12); other counts aren't modelled.
+        Mnemonic::Psrldq => {
+            let n = xmm_num(ins.op_register(0));
+            let imm = ins.immediate(1);
+            match (n, imm) {
+                (Some(n), 8) => vec![
+                    Stmt::Set { dst: xmm_lo(n), expr: Expr::Read(xmm_hi(n)) },
+                    Stmt::Set { dst: xmm_hi(n), expr: konst(0) },
+                ],
+                (Some(n), 12) => vec![
+                    Stmt::Set {
+                        dst: xmm_lo(n),
+                        expr: bin(BinOp::Shr, Expr::Read(xmm_hi(n)), konst(32)),
+                    },
+                    Stmt::Set { dst: xmm_hi(n), expr: konst(0) },
+                ],
+                (Some(n), 4) => {
+                    // lo' = (lo>>32)|(hi<<32) ; hi' = hi>>32  (each masked to 64).
+                    let lo = bin(
+                        BinOp::Or,
+                        bin(BinOp::Shr, Expr::Read(xmm_lo(n)), konst(32)),
+                        bin(BinOp::And, bin(BinOp::Shl, Expr::Read(xmm_hi(n)), konst(32)), konst(mask(64))),
+                    );
+                    let hi = bin(BinOp::Shr, Expr::Read(xmm_hi(n)), konst(32));
+                    vec![
+                        Stmt::Set { dst: xmm_lo(n), expr: lo },
+                        Stmt::Set { dst: xmm_hi(n), expr: hi },
+                    ]
+                }
+                _ => return asm(),
             }
         }
         Mnemonic::Addss => some_or_asm!(fbin("__fp_add32", ins, bits)),
