@@ -171,9 +171,11 @@ fn write_xmm128(ins: &Instruction, lo: Expr, hi: Expr) -> Option<Vec<Stmt>> {
             ])
         }
         OpKind::Memory => {
-            if ins.is_ip_rel_memory_operand() || ins.segment_prefix() != Register::None {
+            if ins.segment_prefix() != Register::None {
                 return None;
             }
+            // A rip-relative store targets a global by absolute address — the same
+            // form ARET emits for any `mov [global], reg`, so handle it likewise.
             let (addr, _) = mem_addr(ins)?;
             Some(vec![
                 Stmt::Store { addr: addr.clone(), value: lo, ty: Ty::int(64) },
