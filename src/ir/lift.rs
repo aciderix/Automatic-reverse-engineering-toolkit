@@ -128,17 +128,21 @@ fn read_xmm128(ins: &Instruction, i: u32) -> Option<(Expr, Expr)> {
             Some((Expr::Read(xmm_lo(n)), Expr::Read(xmm_hi(n))))
         }
         OpKind::Memory => {
-            // Packed constants from .rodata aren't folded (only the low half
-            // would be), so leave rip-relative 128-bit loads unmodelled.
-            if ins.is_ip_rel_memory_operand() || ins.segment_prefix() != Register::None {
+            if ins.segment_prefix() != Register::None {
                 return None;
             }
-            let (addr, _) = mem_addr(ins)?;
-            let lo = Expr::Load { addr: Box::new(addr.clone()), ty: Ty::int(64) };
-            let hi = Expr::Load {
-                addr: Box::new(bin(BinOp::Add, addr, konst(8))),
-                ty: Ty::int(64),
+            // Build the two half addresses. For a rip-relative load use explicit
+            // constant addresses (`abs`, `abs+8`) so the read-only constant folder
+            // can replace both halves with literals.
+            let (lo_addr, hi_addr) = if ins.is_ip_rel_memory_operand() {
+                let a = ins.ip_rel_memory_address() as i128;
+                (konst(a), konst(a + 8))
+            } else {
+                let (addr, _) = mem_addr(ins)?;
+                (addr.clone(), bin(BinOp::Add, addr, konst(8)))
             };
+            let lo = Expr::Load { addr: Box::new(lo_addr), ty: Ty::int(64) };
+            let hi = Expr::Load { addr: Box::new(hi_addr), ty: Ty::int(64) };
             Some((lo, hi))
         }
         _ => None,

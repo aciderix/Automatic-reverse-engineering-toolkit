@@ -143,28 +143,43 @@ fn fold_ro_loads(stmts: &mut [Stmt], insn: &crate::disasm::Insn, prog: &Program)
         return;
     }
     let abs = ins.ip_rel_memory_address();
-    let bits = ((ins.memory_size().size() * 8).min(64)) as u8;
-    let value = if let Some(r) = prog.reloc_in(insn.address, insn.len) {
-        match r.data {
-            Some(d) => d,
-            None => return, // relocated to writable/unresolved data: must stay a load
-        }
-    } else if prog.section_at(abs).map(|s| !s.writable).unwrap_or(false) {
-        match prog.read_u64(abs) {
-            Some(d) => d,
-            None => return,
-        }
-    } else {
+    let size = ins.memory_size().size();
+    let reloc = prog.reloc_in(insn.address, insn.len);
+    // A relocation to writable/unresolved data must stay a load.
+    if reloc.is_some() && reloc.and_then(|r| r.data).is_none() {
         return;
-    };
-    let masked = if bits >= 64 {
-        value as i128
-    } else {
-        (value & ((1u64 << bits) - 1)) as i128
-    };
-    for st in stmts.iter_mut() {
-        fold_const_load(st, abs as i128, masked, bits);
     }
+    // Low 8 bytes at `abs`, and (for a 128-bit load) the next 8 at `abs+8`. The
+    // value comes from the relocation's captured read-only bytes (object files)
+    // or from reading the absolute read-only address (linked executables).
+    let mut fold_half = |stmts: &mut [Stmt], byte_off: u64, reloc_val: Option<u64>| {
+        if size as u64 <= byte_off {
+            return;
+        }
+        let value = match reloc {
+            Some(_) => match reloc_val {
+                Some(v) => v,
+                None => return,
+            },
+            None => {
+                if prog.section_at(abs + byte_off).map(|s| !s.writable).unwrap_or(false) {
+                    match prog.read_u64(abs + byte_off) {
+                        Some(v) => v,
+                        None => return,
+                    }
+                } else {
+                    return;
+                }
+            }
+        };
+        let bits = (((size as u64 - byte_off).min(8) * 8).min(64)) as u8;
+        let masked = if bits >= 64 { value as i128 } else { (value & ((1u64 << bits) - 1)) as i128 };
+        for st in stmts.iter_mut() {
+            fold_const_load(st, (abs + byte_off) as i128, masked, bits);
+        }
+    };
+    fold_half(stmts, 0, reloc.and_then(|r| r.data));
+    fold_half(stmts, 8, reloc.and_then(|r| r.datahi));
 }
 
 /// Replace `Load { addr: Const(`bogus`) }` with `Const(val)` throughout `s`.

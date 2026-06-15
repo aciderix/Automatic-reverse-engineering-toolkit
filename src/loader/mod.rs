@@ -75,7 +75,10 @@ pub struct Program {
 pub struct RelocEntry {
     pub target: Option<u64>,
     pub name: Option<String>,
+    /// First 8 bytes of the read-only target (for folding scalar constants).
     pub data: Option<u64>,
+    /// Next 8 bytes (for folding 128-bit vector constants).
+    pub datahi: Option<u64>,
 }
 
 impl Program {
@@ -427,26 +430,36 @@ fn parse_static_relocs(obj: &object::File) -> BTreeMap<u64, RelocEntry> {
                 (Some(a), false) => Some(a.wrapping_add(rel.addend() as u64)),
                 (None, _) => None,
             };
-            // If the target is read-only data, capture the first 8 bytes so a
-            // rip-relative constant load can be folded to a literal.
-            let data = match (target, &tsec) {
+            // If the target is read-only data, capture the first 16 bytes so a
+            // rip-relative scalar (8) or vector (16) constant load can be folded.
+            let (data, datahi) = match (target, &tsec) {
                 (Some(t), Some(s))
                     if matches!(
                         s.kind(),
                         SectionKind::ReadOnlyData | SectionKind::ReadOnlyString
                     ) =>
                 {
-                    s.data().ok().and_then(|d| {
-                        let o = t.checked_sub(s.address())? as usize;
-                        let mut buf = [0u8; 8];
-                        let n = d.get(o..)?.len().min(8);
-                        buf[..n].copy_from_slice(&d[o..o + n]);
-                        Some(u64::from_le_bytes(buf))
-                    })
+                    s.data()
+                        .ok()
+                        .and_then(|d| {
+                            let o = t.checked_sub(s.address())? as usize;
+                            let avail = d.get(o..)?;
+                            let rd = |start: usize| {
+                                let mut buf = [0u8; 8];
+                                let n = avail.get(start..)?.len().min(8);
+                                if n == 0 {
+                                    return None;
+                                }
+                                buf[..n].copy_from_slice(&avail[start..start + n]);
+                                Some(u64::from_le_bytes(buf))
+                            };
+                            Some((rd(0), rd(8)))
+                        })
+                        .unwrap_or((None, None))
                 }
-                _ => None,
+                _ => (None, None),
             };
-            out.insert(site, RelocEntry { target, name, data });
+            out.insert(site, RelocEntry { target, name, data, datahi });
         }
     }
     out
