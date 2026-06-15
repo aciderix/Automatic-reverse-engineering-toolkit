@@ -33,6 +33,12 @@ echo "  $out"
 n="${out##*: }"; got="${n%%/*}"; tot="${n#*/}"; tot="${tot%% *}"
 if [ -n "$got" ] && [ "$got" = "$tot" ]; then ok "difftest $n"; else ko "difftest $out"; fi
 
+step "in-place differential (globals/tables)"
+out="$(bash bench/inplace.sh 2>&1 | tail -1)"
+echo "  $out"
+n="${out##*: }"; got="${n%%/*}"; tot="${n#*/}"; tot="${tot%% *}"
+if [ -n "$got" ] && [ "$got" = "$tot" ]; then ok "in-place $n"; else ko "in-place $out"; fi
+
 step "magic-division exhaustive 2^32"
 out="$(bash bench/magicdiv.sh 2>&1 | tail -1)"
 echo "  $out"

@@ -93,3 +93,9 @@ int tlen(const char* s){ return (int)strlen(s); }   /* tail call -> jmp strlen *
 /* Stack array via variable index — previously crashed standalone (deref of
    uninitialised frame register); should now work via the __frame array. */
 int stkarr(int a, int b, int c){ int v[6]; for(int i=0;i<6;i++) v[i]=a*i+b; return v[c&5]-c; }
+
+/* Global/table access — only testable with the in-place harness (the decompiled
+   code reads these by absolute address). */
+static const int LUT[8] = {2,3,5,7,11,13,17,19};
+int lut(int i){ return LUT[i & 7]; }
+int swv(int x){ switch(x){case 0:return 7;case 1:return 11;case 2:return 13;case 3:return 17;case 4:return 19;case 5:return 23;default:return -1;} }
