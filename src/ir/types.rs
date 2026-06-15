@@ -225,6 +225,9 @@ pub struct IrFunction {
     /// SSA values that are the entry (undef) versions of rsp/rbp — pointed at a
     /// real local frame array by stack-variable promotion. Populated by SSA.
     pub frame_base_values: Vec<u32>,
+    /// SSA values that live in an x87 FPU stack slot — emitted as `long double`
+    /// (80-bit extended precision) rather than `uint64_t`. Populated by SSA.
+    pub fp80_values: Vec<u32>,
     pub blocks: Vec<Block>,
     /// Next fresh SSA value id.
     pub next_value: u32,

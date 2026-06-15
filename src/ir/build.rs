@@ -27,6 +27,16 @@ pub fn build_ir(prog: &Program, func: &Function) -> IrFunction {
         .map(|(i, &a)| (a, i as u32))
         .collect();
 
+    // Static x87 FPU stack analysis: maps each modelled FPU instruction to its
+    // (stack depth before, truncation-mode) so `lift_x87` can resolve `st(i)` to
+    // a concrete slot. `None` if the function should not be x87-modelled (any
+    // unmodelled FPU op, ambiguous depth, or a float→int store whose rounding we
+    // cannot prove) — those instructions then degrade to a sound `Asm`.
+    let x87 = x87_states(func);
+    // In x87 code, keep every stack access as raw `__frame` memory (no named
+    // scalars) so the integer accesses alias the FPU spills consistently.
+    crate::ir::lift::set_frames_off(x87.is_some());
+
     let mut blocks: Vec<Block> = Vec::with_capacity(order.len());
     for (i, &addr) in order.iter().enumerate() {
         let blk = &func.blocks[&addr];
@@ -42,7 +52,10 @@ pub fn build_ir(prog: &Program, func: &Function) -> IrFunction {
             blk.insns.len()
         };
         for insn in &blk.insns[..body_len] {
-            let mut s = lift(insn, bits);
+            let mut s = match x87.as_ref().and_then(|m| m.get(&insn.address)) {
+                Some(&(sp_in, trunc)) => crate::ir::lift::lift_x87(insn, sp_in, trunc),
+                None => lift(insn, bits),
+            };
             fold_ro_loads(&mut s, insn, prog);
             stmts.extend(s);
         }
@@ -163,16 +176,114 @@ pub fn build_ir(prog: &Program, func: &Function) -> IrFunction {
         }
     }
 
+    // Reset the per-function frame-folding flag for the next function/thread.
+    crate::ir::lift::set_frames_off(false);
+
     IrFunction {
         entry: func.entry,
         name: func.name.clone(),
         bits,
         reg_params: Vec::new(),
         frame_base_values: Vec::new(),
+        fp80_values: Vec::new(),
         blocks,
         next_value: 0,
         next_temp: 0,
     }
+}
+
+/// Static x87 stack-depth + rounding-mode analysis. Returns, per modelled FPU
+/// instruction address, `(stack_depth_before, truncation_mode)`, or `None` to
+/// disable x87 modelling for the whole function — a sound bail: those ops then
+/// fall back to `Asm` (flagged INCOMPLETE) rather than risk a wrong lifting.
+fn x87_states(func: &Function) -> Option<HashMap<u64, (u32, bool)>> {
+    use crate::ir::lift::{is_x87, x87_delta};
+    use iced_x86::Mnemonic;
+
+    if !func.blocks.values().any(|b| b.insns.iter().any(|i| is_x87(&i.raw))) {
+        return None;
+    }
+
+    let order: Vec<u64> = func.blocks.keys().copied().collect();
+    let bidx: HashMap<u64, usize> = order.iter().enumerate().map(|(i, &a)| (a, i)).collect();
+    let n = order.len();
+
+    // Forward propagation of the entry stack depth over the CFG (-1 = unvisited).
+    let mut entry_sp: Vec<i32> = vec![-1; n];
+    let entry_i = *bidx.get(&func.entry).unwrap_or(&0);
+    entry_sp[entry_i] = 0;
+    let mut work = vec![entry_i];
+    let mut out: HashMap<u64, (u32, bool)> = HashMap::new();
+
+    while let Some(bi) = work.pop() {
+        let blk = &func.blocks[&order[bi]];
+        let mut sp = entry_sp[bi];
+        for (k, insn) in blk.insns.iter().enumerate() {
+            let ins = &insn.raw;
+            if !is_x87(ins) {
+                continue;
+            }
+            let delta = x87_delta(ins)?; // unmodelled FPU op → bail whole function
+            // float→int store (`fist`/`fistp`, but not the always-truncating
+            // `fisttp`) is only sound when the rounding mode is truncation.
+            let needs_trunc = matches!(ins.mnemonic(), Mnemonic::Fist | Mnemonic::Fistp);
+            if needs_trunc && !truncate_active(&blk.insns, k) {
+                return None;
+            }
+            if !(0..=8).contains(&sp) {
+                return None;
+            }
+            out.insert(insn.address, (sp as u32, needs_trunc));
+            sp += delta;
+            if !(0..=8).contains(&sp) {
+                return None;
+            }
+        }
+        for &s in &blk.successors {
+            if let Some(&si) = bidx.get(&s) {
+                if entry_sp[si] == -1 {
+                    entry_sp[si] = sp;
+                    work.push(si);
+                } else if entry_sp[si] != sp {
+                    return None; // ambiguous stack depth at a join
+                }
+            }
+        }
+    }
+    Some(out)
+}
+
+/// Is the x87 rounding mode proven to be truncation at instruction `idx` of
+/// `insns`? Recognises the canonical `(int)x` idiom: an `or` that sets the
+/// control word's RC=11 (truncate) bits, followed by `fldcw`, before this store.
+fn truncate_active(insns: &[crate::disasm::Insn], idx: usize) -> bool {
+    use iced_x86::{Mnemonic, OpKind};
+    let lo = idx.saturating_sub(24);
+    let mut saw_fldcw = false;
+    for j in (lo..idx).rev() {
+        let ins = &insns[j].raw;
+        match ins.mnemonic() {
+            Mnemonic::Fldcw => saw_fldcw = true,
+            Mnemonic::Or if saw_fldcw => {
+                // Immediate operand setting RC=truncate (control-word bits 0xc00).
+                if matches!(ins.op_kind(1), OpKind::Immediate8 | OpKind::Immediate8to16
+                    | OpKind::Immediate8to32 | OpKind::Immediate16 | OpKind::Immediate32)
+                {
+                    let imm = ins.immediate(1);
+                    let hi_byte = matches!(
+                        ins.op_register(0),
+                        iced_x86::Register::AH | iced_x86::Register::BH
+                            | iced_x86::Register::CH | iced_x86::Register::DH
+                    );
+                    if (imm & 0xc00) == 0xc00 || (hi_byte && (imm & 0x0c) == 0x0c) {
+                        return true;
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    false
 }
 
 /// Fold a rip-relative load of read-only data into a literal. Without this,

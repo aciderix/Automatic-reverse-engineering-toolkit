@@ -100,3 +100,27 @@ static const int LUT[8] = {2,3,5,7,11,13,17,19};
 int lut(int i){ return LUT[i & 7]; }
 int swv(int x){ switch(x){case 0:return 7;case 1:return 11;case 2:return 13;case 3:return 17;case 4:return 19;case 5:return 23;default:return -1;} }
 int swc(int x, int a){switch(x){case 0:return a+7;case 1:return a*11;case 2:return a-13;case 3:return a^17;case 4:return a<<2;case 5:return a*a;case 6:return a-1;case 7:return a+9;default:return -1;}}
+
+/* x87 80-bit extended precision (`long double` on x86-64 always lowers to the
+   x87 FPU at every -O level). Exercises fild (int load), faddp/fsubp/fmulp/fdivp
+   arithmetic, fcomi compares + branches, and the float->int truncation idiom
+   (fnstcw/or/fldcw/fistp). Int-compatible signatures so the differential harness
+   can compare results (x87 long double is bit-exact: both original and ARET use
+   native `long double`). */
+unsigned x87arith(int a, int b, int c){
+    long double x = (long double)a, y = (long double)b, z = (long double)c;
+    long double r = (x*y - z) * (x + y);
+    return (unsigned)r;
+}
+int x87cmp(int a, int b){
+    long double x = (long double)a, y = (long double)b;
+    long double p = x*x - y, q = y*y - x;
+    return p < q ? 1 : (p == q ? 2 : 3);
+}
+long long x87div(int a, int b){
+    long double x = (long double)a, y = (long double)b;
+    long double d = x*x + y*y;
+    if (d == 0) return 0;
+    long double r = (x*x*x - y*y*y) / d;
+    return (long long)r;
+}

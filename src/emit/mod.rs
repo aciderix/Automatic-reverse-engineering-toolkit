@@ -172,11 +172,39 @@ pub(crate) const FLOAT_HELPERS: &str = concat!(
     "static inline uint64_t __ix_lzcnt64(uint64_t x){return x?__builtin_clzll(x):64;}\n",
     "static inline uint64_t __ix_popcnt32(uint64_t x){return __builtin_popcount((uint32_t)x);}\n",
     "static inline uint64_t __ix_popcnt64(uint64_t x){return __builtin_popcountll(x);}\n",
+    // x87 FPU: 80-bit extended precision == `long double` on x86-64 Linux, so
+    // these recompile to equivalent x87 code (bit-exact). Loads widen memory
+    // floats/ints to long double; stores narrow back; integer stores truncate
+    // (only emitted when the lifter proved truncation rounding or `fisttp`).
+    "static inline long double __x87_ld32(uint64_t a){return (long double)*(float*)(uintptr_t)a;}\n",
+    "static inline long double __x87_ld64(uint64_t a){return (long double)*(double*)(uintptr_t)a;}\n",
+    "static inline long double __x87_ld80(uint64_t a){return *(long double*)(uintptr_t)a;}\n",
+    "static inline long double __x87_ild16(uint64_t a){return (long double)*(int16_t*)(uintptr_t)a;}\n",
+    "static inline long double __x87_ild32(uint64_t a){return (long double)*(int32_t*)(uintptr_t)a;}\n",
+    "static inline long double __x87_ild64(uint64_t a){return (long double)*(int64_t*)(uintptr_t)a;}\n",
+    "static inline uint64_t __x87_st32(uint64_t a,long double v){*(float*)(uintptr_t)a=(float)v;return 0;}\n",
+    "static inline uint64_t __x87_st64(uint64_t a,long double v){*(double*)(uintptr_t)a=(double)v;return 0;}\n",
+    "static inline uint64_t __x87_st80(uint64_t a,long double v){*(long double*)(uintptr_t)a=v;return 0;}\n",
+    "static inline uint64_t __x87_ist16(uint64_t a,long double v){*(int16_t*)(uintptr_t)a=(int16_t)(long long)v;return 0;}\n",
+    "static inline uint64_t __x87_ist32(uint64_t a,long double v){*(int32_t*)(uintptr_t)a=(int32_t)(long long)v;return 0;}\n",
+    "static inline uint64_t __x87_ist64(uint64_t a,long double v){*(int64_t*)(uintptr_t)a=(long long)v;return 0;}\n",
+    "static inline long double __x87_add(long double a,long double b){return a+b;}\n",
+    "static inline long double __x87_sub(long double a,long double b){return a-b;}\n",
+    "static inline long double __x87_mul(long double a,long double b){return a*b;}\n",
+    "static inline long double __x87_div(long double a,long double b){return a/b;}\n",
+    "static inline long double __x87_abs(long double a){return a<0?-a:a;}\n",
+    "static inline long double __x87_neg(long double a){return -a;}\n",
+    "static inline long double __x87_sqrt(long double a){return __builtin_sqrtl(a);}\n",
+    "static inline long double __x87_one(void){return 1.0L;}\n",
+    "static inline long double __x87_zero(void){return 0.0L;}\n",
+    "static inline uint64_t __x87_lt(long double a,long double b){return a<b;}\n",
+    "static inline uint64_t __x87_eq(long double a,long double b){return a==b;}\n",
+    "static inline uint64_t __x87_un(long double a,long double b){return a!=a||b!=b;}\n",
 );
 
 /// The runtime-helper preamble, included only when the body references it.
 pub(crate) fn float_preamble(body: &str) -> &'static str {
-    if body.contains("__fp_") || body.contains("__pi_") || body.contains("__ix_") {
+    if body.contains("__fp_") || body.contains("__pi_") || body.contains("__ix_") || body.contains("__x87_") {
         FLOAT_HELPERS
     } else {
         ""
@@ -300,20 +328,31 @@ const FRAME_TOP: usize = FRAME_SIZE - 2048;
 /// are pointed at a real per-call `__frame` array so generic stack accesses
 /// (arrays, rsp-relative spills) hit real memory instead of dereferencing an
 /// uninitialised frame register. Returns the lines (with leading indent).
-pub(crate) fn value_decls(values: &BTreeSet<u32>, frame_base: &[u32]) -> String {
+pub(crate) fn value_decls(values: &BTreeSet<u32>, frame_base: &[u32], fp80: &[u32]) -> String {
     use std::collections::HashSet;
     if values.is_empty() {
         return String::new();
     }
     let fb: HashSet<u32> = frame_base.iter().copied().collect();
+    let fp: HashSet<u32> = fp80.iter().copied().collect();
     let used_fb = values.iter().any(|v| fb.contains(v));
     let mut out = String::new();
     if used_fb {
         // Plain automatic array (per-call, so recursion gets a fresh frame).
         let _ = writeln!(out, "    uint8_t __frame[{}];", FRAME_SIZE);
     }
+    // x87 FPU values are 80-bit extended precision → `long double`.
+    let ld: Vec<String> = values
+        .iter()
+        .filter(|v| fp.contains(v))
+        .map(|v| format!("v{} = 0", v))
+        .collect();
+    if !ld.is_empty() {
+        let _ = writeln!(out, "    long double {};", ld.join(", "));
+    }
     let decls: Vec<String> = values
         .iter()
+        .filter(|v| !fp.contains(v))
         .map(|v| {
             if fb.contains(v) {
                 format!("v{} = (uint64_t)(__frame + {})", v, FRAME_TOP)
@@ -322,7 +361,9 @@ pub(crate) fn value_decls(values: &BTreeSet<u32>, frame_base: &[u32]) -> String 
             }
         })
         .collect();
-    let _ = writeln!(out, "    uint64_t {};", decls.join(", "));
+    if !decls.is_empty() {
+        let _ = writeln!(out, "    uint64_t {};", decls.join(", "));
+    }
     out
 }
 
@@ -685,7 +726,7 @@ pub fn emit_function(func: &IrFunction, forward: &mut BTreeSet<u64>, with_params
         );
     }
     let _ = writeln!(out, "{} {{", signature(&f, with_params));
-    out.push_str(&value_decls(&values, &f.frame_base_values));
+    out.push_str(&value_decls(&values, &f.frame_base_values, &f.fp80_values));
     if let Some(fd) = frame_decls(&f, with_params) {
         let _ = writeln!(out, "{}", fd);
     }
@@ -877,6 +918,7 @@ mod tests {
             bits: 64,
             reg_params: vec![],
             frame_base_values: vec![],
+            fp80_values: vec![],
             blocks: vec![
                 Block { id: 0, addr: 0, stmts: vec![Stmt::Set { dst: rax.clone(), expr: Expr::konst(1, 32) }, Stmt::Branch { cond: Expr::konst(1, 8), taken: BlockId(1), fallthrough: BlockId(2) }], succ: vec![1, 2], pred: vec![] },
                 Block { id: 1, addr: 1, stmts: vec![Stmt::Set { dst: rax.clone(), expr: Expr::konst(2, 32) }, Stmt::Jump(BlockId(3)) ], succ: vec![3], pred: vec![0] },

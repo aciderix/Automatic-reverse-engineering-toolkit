@@ -284,6 +284,7 @@ mod tests {
             bits: 64,
             reg_params: vec![],
             frame_base_values: vec![],
+            fp80_values: vec![],
             blocks: vec![Block { id: 0, addr: 0, stmts, succ: vec![], pred: vec![] }],
             next_value: 0,
             next_temp: 0,

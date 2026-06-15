@@ -17,8 +17,8 @@
 use super::types::*;
 use crate::disasm::Insn;
 use iced_x86::{
-    ConditionCode, Instruction, InstructionInfoFactory, Mnemonic, OpAccess, OpKind, Register,
-    RflagsBits,
+    ConditionCode, Instruction, InstructionInfoFactory, MemorySize, Mnemonic, OpAccess, OpKind,
+    Register, RflagsBits,
 };
 
 /// Canonical register-family id (al/ax/eax/rax all share one). XMM families
@@ -250,7 +250,24 @@ fn read_reg(r: Register) -> Option<Expr> {
 
 /// If operand `i` is a pure frame slot `[ebp/rbp ± disp]` (base = frame pointer,
 /// no index), return its displacement. These become named `Frame` locations.
+thread_local! {
+    /// When set, the lifter does not fold `[rbp+d]` operands into named `Frame`
+    /// slots (scalars). Enabled per-function for x87 code, whose 80-bit FPU
+    /// spills access those same stack bytes through opaque helpers: keeping every
+    /// frame access as raw `__frame` memory makes the two alias consistently.
+    static FRAMES_OFF: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Disable/enable named frame-slot folding for subsequent `lift` calls on this
+/// thread (set per-function by `ir::build`).
+pub(crate) fn set_frames_off(off: bool) {
+    FRAMES_OFF.with(|c| c.set(off));
+}
+
 fn frame_disp(ins: &Instruction, i: u32) -> Option<i64> {
+    if FRAMES_OFF.with(|c| c.get()) {
+        return None;
+    }
     if ins.op_kind(i) != OpKind::Memory || ins.is_ip_rel_memory_operand() {
         return None;
     }
@@ -1323,6 +1340,273 @@ pub fn lift(insn: &Insn, bits: u32) -> Vec<Stmt> {
             asm()
         }
     }
+}
+
+// ===========================================================================
+// x87 FPU (80-bit extended-precision floating point)
+// ===========================================================================
+//
+// The x87 stack is modelled with a *statically tracked* top-of-stack: the
+// analysis in `ir::build` computes the stack depth (`sp_in`) at every FPU
+// instruction (bailing the whole function if the depth is ambiguous), so each
+// `st(i)` reference resolves to a concrete physical slot. Slot d (0 = oldest
+// live value) is `RegId(96+d)`; `RegId(104)` is a swap scratch. Those values are
+// emitted as native `long double` — which on x86-64 *is* the 80-bit x87 format,
+// so the recompiled C re-lowers to equivalent x87 code: bit-exact by
+// construction. Arithmetic/loads/stores/compares are bit-exact regardless of
+// rounding mode; only `fistp`/`fist` (float→int) depend on it, so those are
+// emitted only when the analysis proves truncation mode (the `(int)x` idiom) or
+// the instruction is `fisttp` (always truncates). Anything else bails to `Asm`.
+
+/// x87 FPU stack slot at absolute depth `d` (0 = oldest live value).
+fn fpr(d: i32) -> Option<Location> {
+    if (0..8).contains(&d) {
+        Some(Location::Reg(RegId(96 + d as u16)))
+    } else {
+        None
+    }
+}
+
+/// Long-double scratch register (for `fxch` swaps).
+fn fpr_scratch() -> Location {
+    Location::Reg(RegId(104))
+}
+
+/// A call to a `long double` x87 runtime helper.
+fn x87call(name: &str, args: Vec<Expr>) -> Expr {
+    Expr::Call { target: CallTarget::Named(name.to_string()), args, ret: Ty::Unknown }
+}
+
+/// Helper name for loading a memory operand of `ms` as a `long double`.
+fn x87_load_helper(ms: MemorySize) -> Option<&'static str> {
+    Some(match ms {
+        MemorySize::Float32 => "__x87_ld32",
+        MemorySize::Float64 => "__x87_ld64",
+        MemorySize::Float80 => "__x87_ld80",
+        MemorySize::Int16 => "__x87_ild16",
+        MemorySize::Int32 => "__x87_ild32",
+        MemorySize::Int64 => "__x87_ild64",
+        _ => return None,
+    })
+}
+
+/// Read operand `i` (an `st(j)` register or a memory float/int) as `long double`.
+fn x87_src(ins: &Instruction, i: u32, sp: i32) -> Option<Expr> {
+    match ins.op_kind(i) {
+        OpKind::Register => {
+            let r = ins.op_register(i);
+            if !r.is_st() {
+                return None;
+            }
+            Some(Expr::Read(fpr(sp - 1 - r.number() as i32)?))
+        }
+        OpKind::Memory => {
+            if ins.segment_prefix() != Register::None {
+                return None;
+            }
+            let (addr, _) = mem_addr(ins)?;
+            Some(x87call(x87_load_helper(ins.memory_size())?, vec![addr]))
+        }
+        _ => None,
+    }
+}
+
+/// Is this an x87 FPU instruction (modelled or not)? Routes lifting to
+/// `lift_x87` when the per-function stack analysis succeeded.
+pub(crate) fn is_x87(ins: &Instruction) -> bool {
+    let m = ins.mnemonic();
+    // iced groups all FPU mnemonics in a contiguous range starting at `Fld`.
+    use Mnemonic::*;
+    if matches!(
+        m,
+        Fadd | Faddp | Fiadd | Fbld | Fbstp | Fchs | Fnclex | Fclex | Fcom | Fcomp | Fcompp
+            | Fcomi | Fcomip | Fcos | Fdecstp | Fdiv | Fdivp | Fidiv | Fdivr | Fdivrp | Fidivr
+            | Ffree | Ffreep | Ficom | Ficomp | Fild | Fincstp | Finit | Fninit | Fist | Fistp
+            | Fisttp | Fisub | Fisubr | Fimul | Fld | Fld1 | Fldcw | Fldenv | Fldl2e | Fldl2t
+            | Fldlg2 | Fldln2 | Fldpi | Fldz | Fmul | Fmulp | Fnop | Fpatan | Fprem | Fprem1
+            | Fptan | Frndint | Frstor | Fnsave | Fsave | Fscale | Fsin | Fsincos | Fsqrt | Fst
+            | Fstp | Fnstcw | Fstcw | Fnstenv | Fstenv | Fnstsw | Fstsw | Fsub | Fsubp | Fsubr
+            | Fsubrp | Ftst | Fucom | Fucomp | Fucompp | Fucomi | Fucomip | Fxam | Fxch | Fxtract
+            | Fyl2x | Fyl2xp1 | F2xm1 | Wait
+    ) {
+        return true;
+    }
+    (0..ins.op_count()).any(|i| ins.op_register(i).is_st())
+}
+
+/// Net x87 stack-depth change of a *modelled* FPU instruction, or `None` if the
+/// instruction is not modelled (so the function's x87 analysis must bail).
+pub(crate) fn x87_delta(ins: &Instruction) -> Option<i32> {
+    use Mnemonic::*;
+    Some(match ins.mnemonic() {
+        Fld | Fild | Fld1 | Fldz => 1,
+        Fstp | Fistp | Fisttp => -1,
+        Faddp | Fsubp | Fsubrp | Fmulp | Fdivp | Fdivrp => -1,
+        Fcomip | Fucomip => -1,
+        Fst | Fist => 0,
+        Fadd | Fsub | Fsubr | Fmul | Fdiv | Fdivr => 0,
+        Fiadd | Fisub | Fisubr | Fimul | Fidiv | Fidivr => 0,
+        Fabs | Fchs | Fsqrt | Fxch => 0,
+        Fcomi | Fucomi => 0,
+        Fldcw | Fnstcw | Fstcw | Fnclex | Fclex | Fnop | Wait => 0,
+        _ => return None,
+    })
+}
+
+/// Build a `long double` arithmetic result via a helper, honouring the
+/// non-commutative reverse forms (`fsubr`/`fdivr`: `src - dst`, `src / dst`).
+fn x87_arith(op: &str, rev: bool, dst: Expr, src: Expr) -> Expr {
+    let (a, b) = if rev { (src, dst) } else { (dst, src) };
+    x87call(&format!("__x87_{}", op), vec![a, b])
+}
+
+/// Lift one x87 FPU instruction given the statically-tracked stack depth
+/// `sp_in` (number of live values *before* it) and whether the current rounding
+/// mode is truncation (`trunc`, required for `fistp`/`fist`). Falls back to a
+/// sound `Asm` for anything outside the proven-bit-exact subset.
+pub(crate) fn lift_x87(insn: &Insn, sp_in: u32, trunc: bool) -> Vec<Stmt> {
+    x87_try(insn, sp_in as i32, trunc).unwrap_or_else(|| asm_fallback(insn))
+}
+
+fn x87_try(insn: &Insn, sp: i32, trunc: bool) -> Option<Vec<Stmt>> {
+    use Mnemonic::*;
+    let ins = &insn.raw;
+    let mn = ins.mnemonic();
+    let st0 = sp - 1; // depth of current top of stack
+
+    Some(match mn {
+        // --- pushes -------------------------------------------------------
+        Fld | Fild => {
+            let v = x87_src(ins, 0, sp)?;
+            vec![Stmt::Set { dst: fpr(sp)?, expr: v }]
+        }
+        Fld1 => vec![Stmt::Set { dst: fpr(sp)?, expr: x87call("__x87_one", vec![]) }],
+        Fldz => vec![Stmt::Set { dst: fpr(sp)?, expr: x87call("__x87_zero", vec![]) }],
+
+        // --- stores (and pops) -------------------------------------------
+        Fst | Fstp | Fist | Fistp | Fisttp => {
+            let value = Expr::Read(fpr(st0)?);
+            match ins.op_kind(0) {
+                OpKind::Register => {
+                    let r = ins.op_register(0);
+                    if !r.is_st() {
+                        return None;
+                    }
+                    vec![Stmt::Set { dst: fpr(sp - 1 - r.number() as i32)?, expr: value }]
+                }
+                OpKind::Memory => {
+                    if ins.segment_prefix() != Register::None {
+                        return None;
+                    }
+                    let (addr, _) = mem_addr(ins)?;
+                    let h = match (mn, ins.memory_size()) {
+                        (Fst | Fstp, MemorySize::Float32) => "__x87_st32",
+                        (Fst | Fstp, MemorySize::Float64) => "__x87_st64",
+                        (Fst | Fstp, MemorySize::Float80) => "__x87_st80",
+                        // Integer stores truncate; only emitted when proven so.
+                        (Fist | Fistp, MemorySize::Int16) if trunc => "__x87_ist16",
+                        (Fist | Fistp, MemorySize::Int32) if trunc => "__x87_ist32",
+                        (Fist | Fistp, MemorySize::Int64) if trunc => "__x87_ist64",
+                        (Fisttp, MemorySize::Int16) => "__x87_ist16",
+                        (Fisttp, MemorySize::Int32) => "__x87_ist32",
+                        (Fisttp, MemorySize::Int64) => "__x87_ist64",
+                        _ => return None,
+                    };
+                    vec![Stmt::CallStmt(x87call(h, vec![addr, value]))]
+                }
+                _ => return None,
+            }
+        }
+
+        // --- arithmetic ---------------------------------------------------
+        Fadd | Faddp | Fiadd | Fmul | Fmulp | Fimul | Fsub | Fsubp | Fisub | Fsubr | Fsubrp
+        | Fisubr | Fdiv | Fdivp | Fidiv | Fdivr | Fdivrp | Fidivr => {
+            let (op, rev) = match mn {
+                Fadd | Faddp | Fiadd => ("add", false),
+                Fmul | Fmulp | Fimul => ("mul", false),
+                Fsub | Fsubp | Fisub => ("sub", false),
+                Fsubr | Fsubrp | Fisubr => ("sub", true),
+                _ => ("div", matches!(mn, Fdivr | Fdivrp | Fidivr)),
+            };
+            let is_p = matches!(mn, Faddp | Fsubp | Fsubrp | Fmulp | Fdivp | Fdivrp);
+            if is_p {
+                // `fXXXp st(i), st0`: st(i) = st(i) op st0, then pop. Default st1.
+                let di = if ins.op_count() >= 1 && ins.op_register(0).is_st() {
+                    ins.op_register(0).number() as i32
+                } else {
+                    1
+                };
+                let d = sp - 1 - di;
+                let res = x87_arith(op, rev, Expr::Read(fpr(d)?), Expr::Read(fpr(st0)?));
+                vec![Stmt::Set { dst: fpr(d)?, expr: res }]
+            } else if ins.op_kind(0) == OpKind::Memory {
+                // `fadd m` / `fiadd m`: st0 = st0 op mem.
+                let src = x87_src(ins, 0, sp)?;
+                let res = x87_arith(op, rev, Expr::Read(fpr(st0)?), src);
+                vec![Stmt::Set { dst: fpr(st0)?, expr: res }]
+            } else {
+                // `fadd st0, st(i)` or `fadd st(i), st0`: dst is op0.
+                let r0 = ins.op_register(0);
+                let r1 = ins.op_register(1);
+                if !r0.is_st() || !r1.is_st() {
+                    return None;
+                }
+                let d0 = sp - 1 - r0.number() as i32;
+                let d1 = sp - 1 - r1.number() as i32;
+                let res = x87_arith(op, rev, Expr::Read(fpr(d0)?), Expr::Read(fpr(d1)?));
+                vec![Stmt::Set { dst: fpr(d0)?, expr: res }]
+            }
+        }
+
+        // --- unary on st0 -------------------------------------------------
+        Fabs => vec![Stmt::Set { dst: fpr(st0)?, expr: x87call("__x87_abs", vec![Expr::Read(fpr(st0)?)]) }],
+        Fchs => vec![Stmt::Set { dst: fpr(st0)?, expr: x87call("__x87_neg", vec![Expr::Read(fpr(st0)?)]) }],
+        Fsqrt => vec![Stmt::Set { dst: fpr(st0)?, expr: x87call("__x87_sqrt", vec![Expr::Read(fpr(st0)?)]) }],
+
+        // --- exchange st0, st(i) (default st1) ----------------------------
+        Fxch => {
+            // iced renders `fxch st(i)` as two operands (`st0, st(i)`); the swap
+            // partner is the operand that is not st0.
+            let di = (0..ins.op_count())
+                .map(|k| ins.op_register(k))
+                .filter(|r| r.is_st())
+                .map(|r| r.number() as i32)
+                .find(|&n| n != 0)
+                .unwrap_or(1);
+            let d = sp - 1 - di;
+            let scratch = fpr_scratch();
+            vec![
+                Stmt::Set { dst: scratch.clone(), expr: Expr::Read(fpr(st0)?) },
+                Stmt::Set { dst: fpr(st0)?, expr: Expr::Read(fpr(d)?) },
+                Stmt::Set { dst: fpr(d)?, expr: Expr::Read(scratch) },
+            ]
+        }
+
+        // --- comparisons setting EFLAGS (P6 fcomi family) -----------------
+        Fcomi | Fcomip | Fucomi | Fucomip => {
+            let r0 = ins.op_register(0);
+            let r1 = ins.op_register(1);
+            if !r0.is_st() || !r1.is_st() {
+                return None;
+            }
+            let a = Expr::Read(fpr(sp - 1 - r0.number() as i32)?);
+            let b = Expr::Read(fpr(sp - 1 - r1.number() as i32)?);
+            let un = x87call("__x87_un", vec![a.clone(), b.clone()]);
+            // comi flags: CF=a<b|unord, ZF=a==b|unord, PF=unord, SF=OF=0.
+            vec![
+                set_flag(FlagKind::Cf, bin(BinOp::Or, x87call("__x87_lt", vec![a.clone(), b.clone()]), un.clone())),
+                set_flag(FlagKind::Zf, bin(BinOp::Or, x87call("__x87_eq", vec![a, b]), un.clone())),
+                set_flag(FlagKind::Pf, un),
+                set_flag(FlagKind::Sf, konst(0)),
+                set_flag(FlagKind::Of, konst(0)),
+            ]
+        }
+
+        // --- control word / wait: no effect on the value stack ------------
+        Fldcw | Fnstcw | Fstcw | Fnclex | Fclex | Fnop | Wait => vec![Stmt::Nop],
+
+        _ => return None,
+    })
 }
 
 #[cfg(test)]

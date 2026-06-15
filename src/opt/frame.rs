@@ -144,8 +144,38 @@ pub fn recover_stack_slots(func: &IrFunction) -> Option<std::collections::BTreeM
 ///   * its byte range overlaps no other recovered slot.
 /// Everything else is left as memory — sound by omission. Returns the number of
 /// distinct slots promoted.
+/// Does this function lift any x87 FPU instruction (via an `__x87_*` helper)?
+fn uses_x87(func: &IrFunction) -> bool {
+    fn in_expr(e: &Expr) -> bool {
+        match e {
+            Expr::Call { target: CallTarget::Named(n), args, .. } => {
+                n.starts_with("__x87_") || args.iter().any(in_expr)
+            }
+            Expr::Call { args, .. } => args.iter().any(in_expr),
+            Expr::Unary(_, x) | Expr::Cast { expr: x, .. } | Expr::Load { addr: x, .. } => in_expr(x),
+            Expr::Binary(_, a, b) => in_expr(a) || in_expr(b),
+            Expr::Select { cond, then_, else_ } => in_expr(cond) || in_expr(then_) || in_expr(else_),
+            _ => false,
+        }
+    }
+    func.blocks.iter().flat_map(|b| &b.stmts).any(|s| match s {
+        Stmt::Set { expr, .. } | Stmt::Assign { expr, .. } | Stmt::CallStmt(expr)
+        | Stmt::Return(Some(expr)) => in_expr(expr),
+        Stmt::Store { addr, value, .. } => in_expr(addr) || in_expr(value),
+        _ => false,
+    })
+}
+
 pub fn promote_stack_slots(func: &mut IrFunction) -> usize {
     use std::collections::{BTreeMap, HashMap};
+    // x87 spills/loads access frame slots through opaque `__x87_*` helpers (with
+    // raw frame-relative addresses) that this pass cannot see. Promoting an
+    // overlapping integer access to a scalar would then alias-split the slot (the
+    // helper writes `__frame`, the scalar is a separate variable) → wrong. Leave
+    // every slot in the `__frame` array so all accesses share backing.
+    if uses_x87(func) {
+        return 0;
+    }
     let info = analyze(func);
     if !info.ok || info.escaped {
         return 0;
@@ -705,6 +735,7 @@ mod tests {
             bits: 64,
             reg_params: vec![],
             frame_base_values: vec![],
+            fp80_values: vec![],
             blocks: vec![Block { id: 0, addr: 0, stmts, succ: vec![], pred: vec![] }],
             next_value: 0,
             next_temp: 0,

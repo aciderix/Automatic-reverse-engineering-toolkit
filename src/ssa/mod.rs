@@ -30,6 +30,12 @@ fn is_versioned(l: &Location) -> bool {
     matches!(l, Location::Reg(_) | Location::Flag(_) | Location::Temp(_))
 }
 
+/// An x87 FPU stack slot (`RegId` 96..104) or swap scratch (104) — its SSA
+/// values are `long double`.
+fn is_fp80_loc(l: &Location) -> bool {
+    matches!(l, Location::Reg(RegId(r)) if (96..112).contains(r))
+}
+
 fn fresh(counter: &mut u32) -> ValueId {
     let v = ValueId(*counter);
     *counter += 1;
@@ -110,6 +116,8 @@ pub fn to_ssa(func: &mut IrFunction) {
     let mut counter: u32 = 0;
     let mut stacks: HashMap<Location, Vec<ValueId>> = HashMap::new();
     let mut undef: HashMap<Location, ValueId> = HashMap::new();
+    // SSA values that version an x87 FPU slot → emitted as `long double`.
+    let mut fp80: Vec<u32> = Vec::new();
 
     // Take the statements out so we can mutate blocks and read successors freely.
     let mut block_stmts: Vec<Vec<Stmt>> =
@@ -154,6 +162,9 @@ pub fn to_ssa(func: &mut IrFunction) {
                 for phi in &mut phis[b] {
                     let nv = fresh(&mut counter);
                     phi.dst = nv;
+                    if is_fp80_loc(&phi.var) {
+                        fp80.push(nv.0);
+                    }
                     stacks.entry(phi.var.clone()).or_default().push(nv);
                     pushed.push(phi.var.clone());
                 }
@@ -165,6 +176,9 @@ pub fn to_ssa(func: &mut IrFunction) {
                         Stmt::Set { dst, expr } if is_versioned(&dst) => {
                             let e = rewrite_reads(expr, &stacks, &mut undef, &mut counter);
                             let nv = fresh(&mut counter);
+                            if is_fp80_loc(&dst) {
+                                fp80.push(nv.0);
+                            }
                             stacks.entry(dst.clone()).or_default().push(nv);
                             pushed.push(dst.clone());
                             new_stmts.push(Stmt::Assign { dst: nv, expr: e });
@@ -230,6 +244,17 @@ pub fn to_ssa(func: &mut IrFunction) {
             func.frame_base_values.push(v.0);
         }
     }
+
+    // x87 FPU values are `long double`. Include any undef (entry) versions too,
+    // though a well-formed function defines a slot (fld/fild) before reading it.
+    for (loc, v) in &undef {
+        if is_fp80_loc(loc) {
+            fp80.push(v.0);
+        }
+    }
+    fp80.sort_unstable();
+    fp80.dedup();
+    func.fp80_values = fp80;
 }
 
 /// Rewrite all `Read(loc)` in an expression to `Use(version)`.
@@ -374,6 +399,7 @@ mod tests {
             bits: 64,
             reg_params: vec![],
             frame_base_values: vec![],
+            fp80_values: vec![],
             blocks: vec![
                 blk(
                     0,
@@ -442,6 +468,7 @@ mod tests {
             bits: 64,
             reg_params: vec![],
             frame_base_values: vec![],
+            fp80_values: vec![],
             blocks: vec![blk(
                 0,
                 vec![

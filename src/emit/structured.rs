@@ -137,7 +137,7 @@ pub fn emit_function(func: &IrFunction, forward: &mut BTreeSet<u64>, with_params
         );
     }
     let _ = writeln!(out, "{} {{", super::signature(&f, with_params));
-    out.push_str(&super::value_decls(&values, &f.frame_base_values));
+    out.push_str(&super::value_decls(&values, &f.frame_base_values, &f.fp80_values));
     if let Some(fd) = frame_decls(&f, with_params) {
         let _ = writeln!(out, "{}", fd);
     }
