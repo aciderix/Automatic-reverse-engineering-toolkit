@@ -69,3 +69,11 @@ int favg(int a, int b)      { float x = a, y = b; return (int)((x + y) / 2.0f); 
 int fpoly(int x)            { double t = x; return (int)(t*t*0.5 + t*3.0 - 1.0); }
 int fcmp(int a, int b)      { float x = a * 1.5f, y = b * 1.5f; return x > y ? a : b; }
 int fmix(int a, int b, int c) { double r = (double)a / (b ? b : 1) + (double)c * 0.25; return (int)r; }
+
+/* 64-bit division/mul and bit ops: exercise __ix_* helpers (div/mul/idiv 1-op
+   64-bit), bswap, and the bit-scan/bit-test paths. */
+unsigned long long div64(unsigned long long a, unsigned long long b){ return b ? a / b + a % b : 0; }
+long long idiv64(long long a, long long b){ return b ? a / b - a % b : 0; }
+int bswapi(unsigned x){ return (int)__builtin_bswap32(x); }
+int clz(unsigned x){ return x ? __builtin_clz(x) : 32; }
+int ctz(unsigned x){ return x ? __builtin_ctz(x) : 32; }

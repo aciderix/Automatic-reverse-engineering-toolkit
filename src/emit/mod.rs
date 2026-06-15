@@ -145,11 +145,30 @@ pub(crate) const FLOAT_HELPERS: &str = concat!(
     "static inline uint64_t __pi_gt32(uint64_t a,uint64_t b){uint32_t l=(int32_t)a>(int32_t)b?~0u:0,h=(int32_t)(a>>32)>(int32_t)(b>>32)?~0u:0;return (uint64_t)l|((uint64_t)h<<32);}\n",
     "static inline uint64_t __pi_shuf_lo(uint64_t lo,uint64_t hi,uint64_t m){uint64_t a=((m&3)<2?lo:hi)>>(((m&3)&1)*32),b=(((m>>2)&3)<2?lo:hi)>>((((m>>2)&3)&1)*32);return (a&0xffffffff)|((b&0xffffffff)<<32);}\n",
     "static inline uint64_t __pi_shuf_hi(uint64_t lo,uint64_t hi,uint64_t m){uint64_t a=(((m>>4)&3)<2?lo:hi)>>((((m>>4)&3)&1)*32),b=(((m>>6)&3)<2?lo:hi)>>((((m>>6)&3)&1)*32);return (a&0xffffffff)|((b&0xffffffff)<<32);}\n",
+    // Wide integer (64-bit 1-operand mul/div via 128-bit), byte swap, bit scan.
+    "typedef unsigned __int128 __u128;typedef __int128 __i128;\n",
+    "static inline uint64_t __ix_mul64hi(uint64_t a,uint64_t b){return (uint64_t)(((__u128)a*b)>>64);}\n",
+    "static inline uint64_t __ix_udiv(uint64_t hi,uint64_t lo,uint64_t d){return d?(uint64_t)((((__u128)hi<<64)|lo)/d):0;}\n",
+    "static inline uint64_t __ix_umod(uint64_t hi,uint64_t lo,uint64_t d){return d?(uint64_t)((((__u128)hi<<64)|lo)%d):0;}\n",
+    "static inline uint64_t __ix_idiv(uint64_t hi,uint64_t lo,uint64_t d){__i128 n=(__i128)(((__u128)hi<<64)|lo);return d?(uint64_t)(n/(__i128)(int64_t)d):0;}\n",
+    "static inline uint64_t __ix_imod(uint64_t hi,uint64_t lo,uint64_t d){__i128 n=(__i128)(((__u128)hi<<64)|lo);return d?(uint64_t)(n%(__i128)(int64_t)d):0;}\n",
+    "static inline uint64_t __ix_bswap32(uint64_t x){return __builtin_bswap32((uint32_t)x);}\n",
+    "static inline uint64_t __ix_bswap64(uint64_t x){return __builtin_bswap64(x);}\n",
+    "static inline uint64_t __ix_bsf32(uint64_t x){return (uint32_t)x?__builtin_ctz((uint32_t)x):0;}\n",
+    "static inline uint64_t __ix_bsr32(uint64_t x){return (uint32_t)x?31-__builtin_clz((uint32_t)x):0;}\n",
+    "static inline uint64_t __ix_bsf64(uint64_t x){return x?__builtin_ctzll(x):0;}\n",
+    "static inline uint64_t __ix_bsr64(uint64_t x){return x?63-__builtin_clzll(x):0;}\n",
+    "static inline uint64_t __ix_tzcnt32(uint64_t x){return (uint32_t)x?__builtin_ctz((uint32_t)x):32;}\n",
+    "static inline uint64_t __ix_lzcnt32(uint64_t x){return (uint32_t)x?__builtin_clz((uint32_t)x):32;}\n",
+    "static inline uint64_t __ix_tzcnt64(uint64_t x){return x?__builtin_ctzll(x):64;}\n",
+    "static inline uint64_t __ix_lzcnt64(uint64_t x){return x?__builtin_clzll(x):64;}\n",
+    "static inline uint64_t __ix_popcnt32(uint64_t x){return __builtin_popcount((uint32_t)x);}\n",
+    "static inline uint64_t __ix_popcnt64(uint64_t x){return __builtin_popcountll(x);}\n",
 );
 
 /// The runtime-helper preamble, included only when the body references it.
 pub(crate) fn float_preamble(body: &str) -> &'static str {
-    if body.contains("__fp_") || body.contains("__pi_") {
+    if body.contains("__fp_") || body.contains("__pi_") || body.contains("__ix_") {
         FLOAT_HELPERS
     } else {
         ""

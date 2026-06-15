@@ -878,7 +878,38 @@ pub fn lift(insn: &Insn, bits: u32) -> Vec<Stmt> {
         // 64-bit-wide result fits a 64-bit IR value. 64-bit operands would need
         // 128-bit arithmetic -> Asm fallback (sound).
         Mnemonic::Mul | Mnemonic::Div | Mnemonic::Idiv if ins.op_count() == 1 => {
-            if op0_width(ins, bits) != 32 {
+            let w = op0_width(ins, bits);
+            // 64-bit form: rdx:rax is a 128-bit operand — use __int128 helpers.
+            if w == 64 {
+                let src = some_or_asm!(op_value(ins, 0));
+                let rax = Location::Reg(RegId(0));
+                let rdx = Location::Reg(RegId(2));
+                let ra = Expr::Read(rax.clone());
+                let rd = Expr::Read(rdx.clone());
+                let t_lo = Location::Temp((insn.address as u32).wrapping_mul(2));
+                let t_hi = Location::Temp((insn.address as u32).wrapping_mul(2).wrapping_add(1));
+                let (lo_e, hi_e) = match ins.mnemonic() {
+                    Mnemonic::Mul => (
+                        bin(BinOp::Mul, ra.clone(), src.clone()),
+                        fcall("__ix_mul64hi", vec![ra, src]),
+                    ),
+                    Mnemonic::Div => (
+                        fcall("__ix_udiv", vec![rd.clone(), ra.clone(), src.clone()]),
+                        fcall("__ix_umod", vec![rd, ra, src]),
+                    ),
+                    _ => (
+                        fcall("__ix_idiv", vec![rd.clone(), ra.clone(), src.clone()]),
+                        fcall("__ix_imod", vec![rd, ra, src]),
+                    ),
+                };
+                return vec![
+                    Stmt::Set { dst: t_lo.clone(), expr: lo_e },
+                    Stmt::Set { dst: t_hi.clone(), expr: hi_e },
+                    Stmt::Set { dst: rax, expr: Expr::Read(t_lo) },
+                    Stmt::Set { dst: rdx, expr: Expr::Read(t_hi) },
+                ];
+            }
+            if w != 32 {
                 return asm();
             }
             let src = some_or_asm!(op_value(ins, 0));
@@ -944,6 +975,74 @@ pub fn lift(insn: &Insn, bits: u32) -> Vec<Stmt> {
             let src = bin(BinOp::And, Expr::Read(rax.clone()), konst(mask(sw)));
             let sv = Expr::Unary(UnOp::SignExtend, Box::new(src));
             vec![Stmt::Set { dst: rax.clone(), expr: combine_write(&rax, dw, sv, bits) }]
+        }
+
+        // Bit test (+ complement/set/reset). Register form only: `CF = (dst >>
+        // (idx mod width)) & 1`, and the variants toggle/set/clear that bit. The
+        // memory form with a register index addresses a bit string and isn't
+        // modelled.
+        Mnemonic::Bt | Mnemonic::Btc | Mnemonic::Bts | Mnemonic::Btr
+            if ins.op_kind(0) == OpKind::Register =>
+        {
+            let w = op0_width(ins, bits);
+            let dst = some_or_asm!(op_value(ins, 0));
+            let idx = some_or_asm!(op_value(ins, 1));
+            let pos = bin(BinOp::And, idx, konst((w - 1) as i128));
+            let bit = bin(BinOp::And, bin(BinOp::Shr, dst.clone(), pos.clone()), konst(1));
+            let mut out = vec![set_flag(FlagKind::Cf, bit)];
+            if ins.mnemonic() != Mnemonic::Bt {
+                let m = bin(BinOp::Shl, konst(1), pos);
+                let nv = match ins.mnemonic() {
+                    Mnemonic::Bts => bin(BinOp::Or, dst, m),
+                    Mnemonic::Btr => bin(BinOp::And, dst, Expr::Unary(UnOp::Not, Box::new(m))),
+                    _ => bin(BinOp::Xor, dst, m), // Btc
+                };
+                out.extend(some_or_asm!(write_op0(ins, nv, bits)));
+            }
+            out
+        }
+        // Byte swap (endianness reversal) of a 32- or 64-bit register.
+        Mnemonic::Bswap => {
+            let w = op0_width(ins, bits);
+            let v = some_or_asm!(op_value(ins, 0));
+            let h = if w == 64 { "__ix_bswap64" } else { "__ix_bswap32" };
+            some_or_asm!(write_op0(ins, fcall(h, vec![v]), bits))
+        }
+        // Bit scan forward/reverse: index of lowest/highest set bit; sets ZF when
+        // the source is zero (the destination is then undefined — modelled as 0).
+        Mnemonic::Bsf | Mnemonic::Bsr => {
+            let w = op0_width(ins, bits);
+            let src = some_or_asm!(op_value(ins, 1));
+            let h = match (ins.mnemonic(), w) {
+                (Mnemonic::Bsf, 64) => "__ix_bsf64",
+                (Mnemonic::Bsf, _) => "__ix_bsf32",
+                (_, 64) => "__ix_bsr64",
+                (_, _) => "__ix_bsr32",
+            };
+            let mut out = vec![set_flag(FlagKind::Zf, bin(BinOp::Eq, src.clone(), konst(0)))];
+            out.extend(some_or_asm!(write_op0(ins, fcall(h, vec![src]), bits)));
+            out
+        }
+
+        // tzcnt/lzcnt (BMI, defined at 0 → width) and popcnt. CF = (src == 0)
+        // for tz/lzcnt (an over-approximation of their exact flag rules, but the
+        // count result is exact); popcnt sets ZF = (src == 0).
+        Mnemonic::Tzcnt | Mnemonic::Lzcnt | Mnemonic::Popcnt => {
+            let w = op0_width(ins, bits);
+            let src = some_or_asm!(op_value(ins, 1));
+            let h = match (ins.mnemonic(), w) {
+                (Mnemonic::Tzcnt, 64) => "__ix_tzcnt64",
+                (Mnemonic::Tzcnt, _) => "__ix_tzcnt32",
+                (Mnemonic::Lzcnt, 64) => "__ix_lzcnt64",
+                (Mnemonic::Lzcnt, _) => "__ix_lzcnt32",
+                (_, 64) => "__ix_popcnt64",
+                (_, _) => "__ix_popcnt32",
+            };
+            let zf = bin(BinOp::Eq, src.clone(), konst(0));
+            let flag = if ins.mnemonic() == Mnemonic::Popcnt { FlagKind::Zf } else { FlagKind::Cf };
+            let mut out = vec![set_flag(flag, zf)];
+            out.extend(some_or_asm!(write_op0(ins, fcall(h, vec![src]), bits)));
+            out
         }
 
         // leave: mov rsp, rbp ; pop rbp.
