@@ -77,3 +77,7 @@ long long idiv64(long long a, long long b){ return b ? a / b - a % b : 0; }
 int bswapi(unsigned x){ return (int)__builtin_bswap32(x); }
 int clz(unsigned x){ return x ? __builtin_clz(x) : 32; }
 int ctz(unsigned x){ return x ? __builtin_ctz(x) : 32; }
+
+/* Vectorisable widening/interleaving: exercise punpck* and 16-bit lane ops. */
+int widen(const short* a){ int s=0; for(int i=0;i<8;i++) s+=a[i]; return s; }
+int interleave(const int* a, const int* b){ int s=0; for(int i=0;i<4;i++) s+=a[i]*b[i]; return s; }

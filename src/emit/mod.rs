@@ -145,6 +145,14 @@ pub(crate) const FLOAT_HELPERS: &str = concat!(
     "static inline uint64_t __pi_gt32(uint64_t a,uint64_t b){uint32_t l=(int32_t)a>(int32_t)b?~0u:0,h=(int32_t)(a>>32)>(int32_t)(b>>32)?~0u:0;return (uint64_t)l|((uint64_t)h<<32);}\n",
     "static inline uint64_t __pi_shuf_lo(uint64_t lo,uint64_t hi,uint64_t m){uint64_t a=((m&3)<2?lo:hi)>>(((m&3)&1)*32),b=(((m>>2)&3)<2?lo:hi)>>((((m>>2)&3)&1)*32);return (a&0xffffffff)|((b&0xffffffff)<<32);}\n",
     "static inline uint64_t __pi_shuf_hi(uint64_t lo,uint64_t hi,uint64_t m){uint64_t a=(((m>>4)&3)<2?lo:hi)>>((((m>>4)&3)&1)*32),b=(((m>>6)&3)<2?lo:hi)>>((((m>>6)&3)&1)*32);return (a&0xffffffff)|((b&0xffffffff)<<32);}\n",
+    "static inline uint64_t __pi_add16(uint64_t a,uint64_t b){uint64_t r=0;for(int i=0;i<64;i+=16)r|=(uint64_t)(uint16_t)((a>>i)+(b>>i))<<i;return r;}\n",
+    // Unpack-low helpers (apply to the high halves to get the unpack-high ops).
+    "static inline uint64_t __pi_unpcklwd_lo(uint64_t d,uint64_t s){return (uint64_t)(uint16_t)d|((uint64_t)(uint16_t)s<<16)|((uint64_t)(uint16_t)(d>>16)<<32)|((uint64_t)(uint16_t)(s>>16)<<48);}\n",
+    "static inline uint64_t __pi_unpcklwd_hi(uint64_t d,uint64_t s){return (uint64_t)(uint16_t)(d>>32)|((uint64_t)(uint16_t)(s>>32)<<16)|((uint64_t)(uint16_t)(d>>48)<<32)|((uint64_t)(uint16_t)(s>>48)<<48);}\n",
+    "static inline uint64_t __pi_unpckldq_lo(uint64_t d,uint64_t s){return (d&0xffffffff)|((s&0xffffffff)<<32);}\n",
+    "static inline uint64_t __pi_unpckldq_hi(uint64_t d,uint64_t s){return (d>>32)|((s>>32)<<32);}\n",
+    "static inline uint64_t __pi_gt16(uint64_t a,uint64_t b){uint64_t r=0;for(int i=0;i<64;i+=16)r|=(uint64_t)((int16_t)(a>>i)>(int16_t)(b>>i)?0xffffu:0)<<i;return r;}\n",
+    "static inline uint64_t __pi_muludq(uint64_t a,uint64_t b){return (uint64_t)(uint32_t)a*(uint32_t)b;}\n",
     // Wide integer (64-bit 1-operand mul/div via 128-bit), byte swap, bit scan.
     "typedef unsigned __int128 __u128;typedef __int128 __i128;\n",
     "static inline uint64_t __ix_mul64hi(uint64_t a,uint64_t b){return (uint64_t)(((__u128)a*b)>>64);}\n",

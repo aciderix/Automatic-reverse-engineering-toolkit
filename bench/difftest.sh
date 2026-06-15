@@ -24,7 +24,7 @@ ITERS="${ITERS:-50000}"
 FUNCS="add1:i addsub:i mulshift:i maxi:i mini:i absdiff:i sign:i clampu:i mix:i sumto:i countbits:i \
        arraysum:p arraymax:p third:p counteq:p strlen_c:s udiv:i umod:i sdiv:i smod:i widemul:i \
        hibyte:i hibyte3:i sxbyte:i sxword:i idxw:p spill2:i spill3:i \
-       sortpair:i poly:i stackarr:i fieldsum:p nestcond:i sumrec:i borrow:i cmp3:i favg:i fpoly:i fcmp:i fmix:i div64:i idiv64:i bswapi:i clz:i ctz:i"
+       sortpair:i poly:i stackarr:i fieldsum:p nestcond:i sumrec:i borrow:i cmp3:i favg:i fpoly:i fcmp:i fmix:i div64:i idiv64:i bswapi:i clz:i ctz:i widen:p interleave:q"
 
 pass=0; total=0; incomplete=0
 for OPT in $LEVELS; do
@@ -50,6 +50,7 @@ for OPT in $LEVELS; do
       i) DECL='uint64_t a0=(int)(rnd()%64)-16,a1=(int)(rnd()%64)-16,a2=(int)(rnd()%64)-16;' ;;
       p) DECL='uint64_t a0=(uint64_t)(uintptr_t)ibuf,a1=(uint64_t)(rnd()%65),a2=(uint64_t)((int)(rnd()%32)-8);' ;;
       s) DECL='uint64_t a0=(uint64_t)(uintptr_t)cbuf,a1=0,a2=0;' ;;
+      q) DECL='uint64_t a0=(uint64_t)(uintptr_t)ibuf,a1=(uint64_t)(uintptr_t)jbuf,a2=(uint64_t)(rnd()%17);' ;;
     esac
     cat > "$TMP/h.c" <<HEOF
 #include <stdint.h>
@@ -60,8 +61,8 @@ static unsigned long long rng=0x2545F4914F6CDD1DULL;
 static uint64_t rnd(void){ rng^=rng<<13; rng^=rng>>7; rng^=rng<<17; return rng; }
 int main(void){
   for(int it=0; it<${ITERS}; it++){
-    int ibuf[65]; char cbuf[65];
-    for(int i=0;i<65;i++){ ibuf[i]=(int)(rnd()%200)-100; cbuf[i]=(char)(1+rnd()%90); }
+    int ibuf[65], jbuf[65]; char cbuf[65];
+    for(int i=0;i<65;i++){ ibuf[i]=(int)(rnd()%200)-100; jbuf[i]=(int)(rnd()%200)-100; cbuf[i]=(char)(1+rnd()%90); }
     cbuf[rnd()%65]=0;
     ${DECL}
     uint32_t o=(uint32_t)${name}(a0,a1,a2);

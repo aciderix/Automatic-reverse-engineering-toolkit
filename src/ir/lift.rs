@@ -92,6 +92,8 @@ fn is_scalar_float(ins: &Instruction) -> bool {
             | Movaps | Movapd | Movups | Movupd
             | Movdqa | Movdqu | Paddd | Psubd | Psrldq
             | Pand | Pandn | Por | Pcmpeqd | Pcmpgtd | Pshufd
+            | Paddw | Paddq | Pcmpgtw | Pmuludq | Psrlq
+            | Punpcklwd | Punpckhwd | Punpckldq | Punpckhdq | Punpcklqdq | Punpckhqdq
     )
 }
 
@@ -155,9 +157,17 @@ fn write_xmm128(ins: &Instruction, lo: Expr, hi: Expr) -> Option<Vec<Stmt>> {
     match ins.op_kind(0) {
         OpKind::Register => {
             let n = xmm_num(ins.op_register(0))?;
+            // Compute both halves into temporaries before assigning: a cross-half
+            // op (e.g. `punpcklwd`, whose high result depends on the low source)
+            // would otherwise see the half this same instruction just overwrote.
+            let base = (ins.ip() as u32).wrapping_mul(2);
+            let t_lo = Location::Temp(base);
+            let t_hi = Location::Temp(base.wrapping_add(1));
             Some(vec![
-                Stmt::Set { dst: xmm_lo(n), expr: lo },
-                Stmt::Set { dst: xmm_hi(n), expr: hi },
+                Stmt::Set { dst: t_lo.clone(), expr: lo },
+                Stmt::Set { dst: t_hi.clone(), expr: hi },
+                Stmt::Set { dst: xmm_lo(n), expr: Expr::Read(t_lo) },
+                Stmt::Set { dst: xmm_hi(n), expr: Expr::Read(t_hi) },
             ])
         }
         OpKind::Memory => {
@@ -759,6 +769,82 @@ pub fn lift(insn: &Insn, bits: u32) -> Vec<Stmt> {
             let h = if ins.mnemonic() == Mnemonic::Pcmpeqd { "__pi_eq32" } else { "__pi_gt32" };
             some_or_asm!(write_xmm128(ins, fcall(h, vec![alo, blo]), fcall(h, vec![ahi, bhi])))
         }
+        // Lane-wise add: 16-bit (helper) and 64-bit (one per half).
+        Mnemonic::Paddw => {
+            let (alo, ahi) = some_or_asm!(read_xmm128(ins, 0));
+            let (blo, bhi) = some_or_asm!(read_xmm128(ins, 1));
+            some_or_asm!(write_xmm128(
+                ins,
+                fcall("__pi_add16", vec![alo, blo]),
+                fcall("__pi_add16", vec![ahi, bhi])
+            ))
+        }
+        Mnemonic::Paddq => {
+            let (alo, ahi) = some_or_asm!(read_xmm128(ins, 0));
+            let (blo, bhi) = some_or_asm!(read_xmm128(ins, 1));
+            some_or_asm!(write_xmm128(ins, bin(BinOp::Add, alo, blo), bin(BinOp::Add, ahi, bhi)))
+        }
+        // 16-bit lane signed compare (mask), unsigned 32x32->64 of even lanes,
+        // and 64-bit logical right shift by an immediate.
+        Mnemonic::Pcmpgtw => {
+            let (alo, ahi) = some_or_asm!(read_xmm128(ins, 0));
+            let (blo, bhi) = some_or_asm!(read_xmm128(ins, 1));
+            some_or_asm!(write_xmm128(
+                ins,
+                fcall("__pi_gt16", vec![alo, blo]),
+                fcall("__pi_gt16", vec![ahi, bhi])
+            ))
+        }
+        Mnemonic::Pmuludq => {
+            let (dlo, dhi) = some_or_asm!(read_xmm128(ins, 0));
+            let (slo, shi) = some_or_asm!(read_xmm128(ins, 1));
+            some_or_asm!(write_xmm128(
+                ins,
+                fcall("__pi_muludq", vec![dlo, slo]),
+                fcall("__pi_muludq", vec![dhi, shi])
+            ))
+        }
+        Mnemonic::Psrlq if ins.op_kind(1) == OpKind::Immediate8 => {
+            let n = konst(ins.immediate(1) as i128);
+            let (lo, hi) = some_or_asm!(read_xmm128(ins, 0));
+            some_or_asm!(write_xmm128(
+                ins,
+                bin(BinOp::Shr, lo, n.clone()),
+                bin(BinOp::Shr, hi, n)
+            ))
+        }
+        // Unpack/interleave. The *high* variants are the low ones applied to the
+        // high halves; the quadword unpacks are pure half selection.
+        Mnemonic::Punpcklwd | Mnemonic::Punpckhwd => {
+            let (dlo, dhi) = some_or_asm!(read_xmm128(ins, 0));
+            let (slo, shi) = some_or_asm!(read_xmm128(ins, 1));
+            let (d, s) = if ins.mnemonic() == Mnemonic::Punpcklwd { (dlo, slo) } else { (dhi, shi) };
+            some_or_asm!(write_xmm128(
+                ins,
+                fcall("__pi_unpcklwd_lo", vec![d.clone(), s.clone()]),
+                fcall("__pi_unpcklwd_hi", vec![d, s])
+            ))
+        }
+        Mnemonic::Punpckldq | Mnemonic::Punpckhdq => {
+            let (dlo, dhi) = some_or_asm!(read_xmm128(ins, 0));
+            let (slo, shi) = some_or_asm!(read_xmm128(ins, 1));
+            let (d, s) = if ins.mnemonic() == Mnemonic::Punpckldq { (dlo, slo) } else { (dhi, shi) };
+            some_or_asm!(write_xmm128(
+                ins,
+                fcall("__pi_unpckldq_lo", vec![d.clone(), s.clone()]),
+                fcall("__pi_unpckldq_hi", vec![d, s])
+            ))
+        }
+        Mnemonic::Punpcklqdq => {
+            let (dlo, _) = some_or_asm!(read_xmm128(ins, 0));
+            let (slo, _) = some_or_asm!(read_xmm128(ins, 1));
+            some_or_asm!(write_xmm128(ins, dlo, slo))
+        }
+        Mnemonic::Punpckhqdq => {
+            let (_, dhi) = some_or_asm!(read_xmm128(ins, 0));
+            let (_, shi) = some_or_asm!(read_xmm128(ins, 1));
+            some_or_asm!(write_xmm128(ins, dhi, shi))
+        }
         // Shuffle the four 32-bit lanes per the imm8 selector.
         Mnemonic::Pshufd => {
             let (lo, hi) = some_or_asm!(read_xmm128(ins, 1));
@@ -813,15 +899,12 @@ pub fn lift(insn: &Insn, bits: u32) -> Vec<Stmt> {
             ]
         }
         Mnemonic::Pxor | Mnemonic::Xorps | Mnemonic::Xorpd => {
-            // The `xorps xmm,xmm` zeroing idiom. A packed xor of distinct
-            // registers is a real 128-bit op and is not modelled.
-            if ins.op_kind(1) == OpKind::Register
-                && ins.op_register(0) == ins.op_register(1)
-            {
-                some_or_asm!(write_op0(ins, konst(0), bits))
-            } else {
-                return asm();
-            }
+            // Full 128-bit xor on both halves (the `xorps xmm,xmm` zeroing idiom
+            // folds to 0). Zeroing *both* halves matters: the high half feeds
+            // later packed ops, so zeroing only the low half corrupts them.
+            let (alo, ahi) = some_or_asm!(read_xmm128(ins, 0));
+            let (blo, bhi) = some_or_asm!(read_xmm128(ins, 1));
+            some_or_asm!(write_xmm128(ins, bin(BinOp::Xor, alo, blo), bin(BinOp::Xor, ahi, bhi)))
         }
 
         Mnemonic::Cmp => {
