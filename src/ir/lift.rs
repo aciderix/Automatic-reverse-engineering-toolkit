@@ -67,6 +67,15 @@ fn konst(v: i128) -> Expr {
 }
 
 /// Read a register operand as its correctly-masked value.
+/// Whether any operand of `ins` is a vector (XMM/YMM/ZMM) register — i.e. an
+/// SSE/AVX instruction the scalar IR cannot model faithfully.
+fn uses_vector_reg(ins: &Instruction) -> bool {
+    (0..ins.op_count()).any(|i| {
+        let r = ins.op_register(i);
+        r.is_xmm() || r.is_ymm() || r.is_zmm()
+    })
+}
+
 fn read_reg(r: Register) -> Option<Expr> {
     let id = reg_id(r)?;
     let full = Expr::Read(Location::Reg(id));
@@ -437,6 +446,15 @@ fn bin(op: BinOp, a: Expr, b: Expr) -> Expr {
 pub fn lift(insn: &Insn, bits: u32) -> Vec<Stmt> {
     let ins = &insn.raw;
     let asm = || asm_fallback(insn);
+
+    // SSE/AVX vector instructions are not modelled. `reg_id` maps XMM/YMM/ZMM to
+    // a register id, so without this guard a packed op (e.g. `paddd`, `movdqu`)
+    // would be lifted as a *scalar* 64-bit operation — silently wrong. Emit an
+    // honest `asm` fallback instead; downstream that flags the function as an
+    // incomplete decompilation rather than producing an incorrect result.
+    if uses_vector_reg(ins) {
+        return asm();
+    }
 
     // Helper to require Some or bail to Asm.
     macro_rules! some_or_asm {

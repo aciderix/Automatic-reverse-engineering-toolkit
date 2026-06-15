@@ -125,6 +125,17 @@ pub fn emit_function(func: &IrFunction, forward: &mut BTreeSet<u64>, with_params
     s.detect_loops();
 
     let mut out = String::new();
+    // Honesty marker: if any instruction could not be lifted (it survives as an
+    // `asm` comment), the decompilation is incomplete and its result may be
+    // wrong. Say so loudly rather than emitting silently-incorrect code.
+    let unlifted = super::count_unlifted(&f);
+    if unlifted > 0 {
+        let _ = writeln!(
+            out,
+            "// WARNING: {} unmodelled instruction(s) — decompilation INCOMPLETE, result may be incorrect",
+            unlifted
+        );
+    }
     let _ = writeln!(out, "{} {{", super::signature(&f, with_params));
     if !values.is_empty() {
         let decls: Vec<String> = values.iter().map(|v| format!("v{} = 0", v)).collect();

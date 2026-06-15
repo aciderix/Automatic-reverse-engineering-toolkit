@@ -688,9 +688,27 @@ relogeable), et compare.
    - **Idiome libc — ✅ CORRIGÉ.** `gcc` remplace `strlen_c` par un appel externe
      `strlen` ; nommé correctement + valeur de retour `strlen(s+1)+1` rétablie
      (conséquence de la suppression du placeholder qui réincorpore le bloc tail).
-   - **Auto-vectorisation / SSE** (`-O3` : `sumto/arraysum/…`) — boucles
-     vectorisées → SSE en fallback asm → faux. **Seul reste à -O3.** C'est la
-     couverture lifter SSE (§3), désormais quantifiée comme le prochain levier.
+   - **SSE/AVX mal-lifté en scalaire — ✅ rendu honnête.** `reg_id` mappe XMM/YMM/
+     ZMM vers un id de registre, donc une instruction packed (`paddd`, `movdqu`…)
+     était liftée comme une op scalaire 64 bits — **silencieusement fausse**. Un
+     garde (`uses_vector_reg`) force désormais le fallback `asm` pour toute
+     instruction vectorielle, et `count_unlifted` détecte les fallbacks (calls
+     `asm:…` + `Stmt::Asm`). L'émission préfixe alors un avertissement
+     `// WARNING: N unmodelled instruction(s) — decompilation INCOMPLETE`, et le
+     harness classe ces fonctions **INCOMPLETE** (non testées pour l'équivalence)
+     plutôt que FAIL. Résultat : différentiel **-O0/-O1/-O2/-O3 = 131/131
+     complètes** + 5 incomplètes assumées (vectorisation -O3).
+
+   **Constat majeur (le plus important de cette série).** Une fois la détection
+   d'incomplétude en place, on mesure la *vraie* fidélité sur du vrai code :
+   **gzip 98/131, ls 184/200, cat 57/67 fonctions contiennent ≥1 instruction non
+   modélisée** (SSE et autres). Autrement dit ARET ne décompile *fidèlement* que
+   ~25 % (gzip) / ~8 % (ls) / ~15 % (cat) des fonctions — et le « recompile 100 % »
+   **masquait** cela (les fonctions incomplètes compilent quand même : asm →
+   commentaire, clobbers → `Undef`). La recompilabilité surestimait le succès ;
+   la mesure honnête est le différentiel sur les fonctions *complètes*. Prochain
+   levier clair et chiffré : **couverture lifter SSE (§3)** — c'est ce qui débloque
+   la majorité du vrai code.
 3. **Équivalence symbolique (SMT)** : ✅ **niveau 3 amorcé** (`bench/smt_rewrites.sh`,
    Z3). Chaque règle de réécriture de l'optimiseur (`src/opt`) est **prouvée
    formellement** correcte pour *toutes* les entrées 64 bits : reconstruction

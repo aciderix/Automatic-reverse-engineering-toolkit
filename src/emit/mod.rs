@@ -104,6 +104,27 @@ fn redirect_terminator(last: Option<&mut Stmt>, from: u32, to: u32) {
     }
 }
 
+/// Count instructions that could not be lifted. The lifter represents an
+/// unmodelled instruction either as `Stmt::Asm` or as an `asm:`-named call
+/// (`asm_fallback`, which also clobbers the written registers to `Undef`). A
+/// non-zero count means the decompilation is incomplete and may be incorrect.
+pub(crate) fn count_unlifted(func: &IrFunction) -> usize {
+    fn is_asm_call(e: &Expr) -> bool {
+        matches!(e, Expr::Call { target: CallTarget::Named(n), .. } if n.starts_with("asm:"))
+    }
+    let mut n = 0;
+    for b in &func.blocks {
+        for s in &b.stmts {
+            match s {
+                Stmt::Asm(_) => n += 1,
+                Stmt::CallStmt(e) | Stmt::Assign { expr: e, .. } if is_asm_call(e) => n += 1,
+                _ => {}
+            }
+        }
+    }
+    n
+}
+
 pub(crate) fn ctype(bits: u8) -> &'static str {
     match bits {
         8 => "uint8_t",
@@ -535,6 +556,14 @@ pub fn emit_function(func: &IrFunction, forward: &mut BTreeSet<u64>, with_params
     }
 
     let mut out = String::new();
+    let unlifted = count_unlifted(&f);
+    if unlifted > 0 {
+        let _ = writeln!(
+            out,
+            "// WARNING: {} unmodelled instruction(s) — decompilation INCOMPLETE, result may be incorrect",
+            unlifted
+        );
+    }
     let _ = writeln!(out, "{} {{", signature(&f, with_params));
     if !values.is_empty() {
         let decls: Vec<String> = values.iter().map(|v| format!("v{} = 0", v)).collect();

@@ -140,13 +140,20 @@ impl Program {
                 continue;
             }
             let is_function = sym.kind() == SymbolKind::Text;
-            symbols
-                .entry(addr)
-                .or_insert_with(|| KnownSymbol {
-                    address: addr,
-                    name,
-                    is_function,
-                });
+            // In an object file every section is based at address 0, so a data
+            // label (e.g. `.LC1` in .rodata) can share an address with a real
+            // function in .text. Prefer the function symbol so seeding/naming use
+            // it rather than the colliding data label.
+            match symbols.entry(addr) {
+                std::collections::btree_map::Entry::Vacant(e) => {
+                    e.insert(KnownSymbol { address: addr, name, is_function });
+                }
+                std::collections::btree_map::Entry::Occupied(mut e) => {
+                    if is_function && !e.get().is_function {
+                        e.insert(KnownSymbol { address: addr, name, is_function });
+                    }
+                }
+            }
         }
 
         let mut imports = parse_pe_imports(data);

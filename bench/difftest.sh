@@ -15,9 +15,10 @@ DIR="$(cd "$(dirname "$0")" && pwd)"
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
 
-# Gate at -O0/-O1/-O2 — all fully equivalent. -O3 (auto-vectorisation -> SSE) is
-# the remaining backlog; run it explicitly with `LEVELS="-O3" bash bench/difftest.sh`.
-LEVELS="${LEVELS:--O0 -O1 -O2}"
+# Gate at -O0..-O3. Every function ARET fully lifts must be equivalent; functions
+# with unmodelled instructions (e.g. -O3 auto-vectorised SSE) are reported as
+# INCOMPLETE and excluded from the ratio (a known gap, not a regression).
+LEVELS="${LEVELS:--O0 -O1 -O2 -O3}"
 ITERS="${ITERS:-50000}"
 
 FUNCS="add1:i addsub:i mulshift:i maxi:i mini:i absdiff:i sign:i clampu:i mix:i sumto:i countbits:i \
@@ -25,7 +26,7 @@ FUNCS="add1:i addsub:i mulshift:i maxi:i mini:i absdiff:i sign:i clampu:i mix:i 
        hibyte:i hibyte3:i sxbyte:i sxword:i idxw:p spill2:i spill3:i \
        sortpair:i poly:i stackarr:i fieldsum:p nestcond:i sumrec:i"
 
-pass=0; total=0
+pass=0; total=0; incomplete=0
 for OPT in $LEVELS; do
   if ! gcc "$OPT" -g -c "$DIR/corpus.c" -o "$TMP/corpus.o" 2>"$TMP/err"; then
     echo "FAIL  (corpus build $OPT: $(head -1 "$TMP/err"))"; total=$((total+1)); continue
@@ -35,6 +36,13 @@ for OPT in $LEVELS; do
     name="${entry%%:*}"; mode="${entry##*:}"; total=$((total+1)); ltotal=$((ltotal+1))
     "$ARET" "$TMP/corpus.o" --mode emit --function "$name" 2>/dev/null \
       | sed -E "s/sub_[0-9a-f]+/aret_target/g" > "$TMP/aret.c"
+    # ARET marks decompilations it could not fully lift (unmodelled instructions,
+    # e.g. auto-vectorised SSE). Those are a known gap, not a correctness
+    # regression — report them as INCOMPLETE rather than testing for equivalence.
+    if grep -q "decompilation INCOMPLETE" "$TMP/aret.c"; then
+      incomplete=$((incomplete+1)); total=$((total-1)); ltotal=$((ltotal-1))
+      echo "INCOMPLETE  $name $OPT (unmodelled instructions)"; continue
+    fi
     if ! gcc -O1 -w -c "$TMP/aret.c" -o "$TMP/aret.o" 2>"$TMP/err"; then
       echo "FAIL  $name $OPT (recompile: $(head -1 "$TMP/err"))"; continue
     fi
@@ -75,4 +83,5 @@ HEOF
   echo "  $OPT: $lpass/$ltotal"
 done
 echo "------------------------------------------"
+echo "incomplete (unmodelled instructions, not tested): $incomplete"
 echo "differential equivalence: $pass/$total functions"
