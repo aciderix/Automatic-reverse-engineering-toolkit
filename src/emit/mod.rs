@@ -600,8 +600,13 @@ fn stmt_c(s: &Stmt, out: &mut String) {
         Stmt::Jump(b) => {
             let _ = writeln!(out, "    goto B{};", b.0);
         }
-        Stmt::Switch { value, default, .. } => {
-            let _ = writeln!(out, "    (void)({}); goto B{};", expr_c(value), default.0);
+        Stmt::Switch { value, cases, default } => {
+            let _ = writeln!(out, "    switch ({}) {{", expr_c(value));
+            for (k, b) in cases {
+                let _ = writeln!(out, "        case {}: goto B{};", k, b.0);
+            }
+            let _ = writeln!(out, "        default: goto B{};", default.0);
+            let _ = writeln!(out, "    }}");
         }
         Stmt::Return(Some(e)) => {
             let _ = writeln!(out, "    return {};", expr_c(e));

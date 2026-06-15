@@ -96,18 +96,29 @@ pub fn build_ir(prog: &Program, func: &Function) -> IrFunction {
             // `return eax`).
             Flow::Return => stmts.push(Stmt::Return(Some(Expr::Read(Location::Reg(RegId(0)))))),
             Flow::Indirect => {
-                // `jmp qword [rip+GOT]` to an import is a tail call to it.
                 let last = blk.insns.last().unwrap();
-                let import = if last.raw.is_ip_rel_memory_operand() {
-                    prog.import_name(last.raw.ip_rel_memory_address()).map(|n| n.to_string())
-                } else {
-                    None
-                };
-                match import {
-                    Some(name) => {
-                        stmts.push(Stmt::Return(Some(tail_call(CallTarget::Named(name), bits))))
+                // A resolved jump table (the analysis attached case edges) with an
+                // index register becomes a typed switch.
+                if !succ.is_empty() {
+                    match crate::ir::lift::switch_index(&last.raw) {
+                        Some(value) => {
+                            let cases = succ
+                                .iter()
+                                .enumerate()
+                                .map(|(i, &b)| (i as i128, BlockId(b)))
+                                .collect();
+                            stmts.push(Stmt::Switch { value, cases, default: BlockId(succ[0]) });
+                        }
+                        None => stmts.push(Stmt::Asm(last.text.clone())),
                     }
-                    None => stmts.push(Stmt::Asm(last.text.clone())),
+                } else if last.raw.is_ip_rel_memory_operand()
+                    && prog.import_name(last.raw.ip_rel_memory_address()).is_some()
+                {
+                    // jmp qword [rip+GOT] to an import is a tail call to it.
+                    let name = prog.import_name(last.raw.ip_rel_memory_address()).unwrap();
+                    stmts.push(Stmt::Return(Some(tail_call(CallTarget::Named(name.to_string()), bits))));
+                } else {
+                    stmts.push(Stmt::Asm(last.text.clone()));
                 }
             }
             Flow::Interrupt => stmts.push(Stmt::Asm(blk.insns.last().unwrap().text.clone())),

@@ -146,6 +146,14 @@ pub fn emit_function(func: &IrFunction, forward: &mut BTreeSet<u64>, with_params
     }
     let entry = s.entry;
     s.emit_seq(entry, Ctx::root(), 1);
+    // Emit any block not reached by structural traversal (e.g. switch cases,
+    // which are reached only via the `goto`s the switch emits) so every label is
+    // defined.
+    for b in 0..s.blocks.len() {
+        if !s.emitted[b] {
+            s.emit_seq(b, Ctx::root(), 1);
+        }
+    }
     out.push_str(&s.out);
     let _ = writeln!(out, "    return 0;");
     let _ = writeln!(out, "}}");
@@ -311,8 +319,19 @@ impl Structurer {
                 None
             }
             Stmt::Jump(_) => self.succ[i].first().copied(),
-            Stmt::Switch { default, .. } => {
-                self.line(depth, &format!("goto {}; /* switch */", label(default.0)));
+            Stmt::Switch { value, .. } => {
+                // Dispatch on the index; cases are this block's CFG successors in
+                // table order. The out-of-range path was branched off before the
+                // table, so the default is unreachable — route it to case 0.
+                self.line(depth, &format!("switch ({}) {{", expr_c(&value)));
+                let cases = self.succ[i].clone();
+                for (k, &t) in cases.iter().enumerate() {
+                    self.line(depth + 1, &format!("case {}: goto {};", k, label(self.nodes[t])));
+                }
+                if let Some(&t0) = cases.first() {
+                    self.line(depth + 1, &format!("default: goto {};", label(self.nodes[t0])));
+                }
+                self.line(depth, "}");
                 None
             }
             _ => None, // Asm leaf / no successor

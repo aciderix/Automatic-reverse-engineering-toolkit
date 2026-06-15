@@ -84,3 +84,5 @@ int interleave(const int* a, const int* b){ int s=0; for(int i=0;i<4;i++) s+=a[i
 
 /* Tail calls: gcc emits `jmp func` at -O2, lifted as `return func(args)`. */
 int tlen(const char* s){ return (int)strlen(s); }   /* tail call -> jmp strlen */
+
+/* Switch with enough cases that gcc emits a jump table at -O2. */

@@ -212,6 +212,17 @@ fn op_bits(ins: &Instruction, i: u32) -> u32 {
     }
 }
 
+/// The switch index of an indexed indirect jump `jmp [base + idx*scale]`: a read
+/// of the index register (masked to its width). `None` if there is no index
+/// register (a computed `jmp reg`, which isn't a recoverable jump table here).
+pub(crate) fn switch_index(ins: &Instruction) -> Option<Expr> {
+    let idx = ins.memory_index();
+    if idx == Register::None {
+        return None;
+    }
+    read_reg(idx)
+}
+
 fn read_reg(r: Register) -> Option<Expr> {
     let id = reg_id(r)?;
     let full = Expr::Read(Location::Reg(id));
