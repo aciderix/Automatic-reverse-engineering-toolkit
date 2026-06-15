@@ -709,10 +709,20 @@ relogeable), et compare.
      relocation (contourne la collision base-0 des `.o`) — sans quoi un `movss
      xmm,[rip+c]` déréférençait un pointeur sauvage. Validé : `favg/fcmp/fmix/fpoly`
      passent à -O0/-O1/-O2 ; différentiel **155/155 complètes**.
-   - **Reste : SSE *packed* 128-bit** (`movaps` mémoire, `movdqa/movdqu`, `paddd`,
-     `punpck*`, `psrldq`…) + **x87** — c'est ce qui domine l'incomplétude du vrai
-     code (gzip 95, ls 180), pas le scalaire. Prochaine tranche (plus lourde :
-     modélisation vectorielle / pile x87).
+   - **SSE *packed* 128-bit — ✅ FAIT (sous-ensemble réductions).** Un XMM est
+     modélisé en **deux moitiés de 64 bits** (basse `RegId(16+n)`, haute `64+n`).
+     Couvre : moves 128-bit (`movaps/movapd/movups/movupd/movdqa/movdqu`, reg +
+     mémoire 16 octets), `pxor/xorps/xorpd` (xor 128-bit), `paddd/psubd`
+     (lanes 32-bit via `__pi_add32/sub32`), `psrldq` (4/8/12), `pand/pandn/por`,
+     `pcmpeqd/pcmpgtd` (masques de lanes), `pshufd` (permutation de dwords), et le
+     **folding des constantes vectorielles `.rodata`** (16 octets via la
+     relocation). Validé : **toutes** les boucles auto-vectorisées du corpus
+     (`arraysum/sumto/arraymax/counteq/sumrec`) passent à -O3. **Différentiel
+     complet à TOUS les niveaux -O0/-O1/-O2/-O3 : 160/160, zéro INCOMPLETE.**
+   - **Reste pour le vrai code : x87** (`fld/fstp/fadd…`, pile st0-st7) et des
+     ops SSE/string moins courantes (`pshuflw`, `pmovmskb`, `pcmpistri`…). C'est
+     ce qui domine encore l'incomplétude des binaires (gzip 88, ls 174). Les
+     boucles vectorisées entières sont désormais couvertes.
 
    **Constat majeur (le plus important de cette série).** Une fois la détection
    d'incomplétude en place, on mesure la *vraie* fidélité sur du vrai code :
