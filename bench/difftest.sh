@@ -24,7 +24,7 @@ ITERS="${ITERS:-50000}"
 FUNCS="add1:i addsub:i mulshift:i maxi:i mini:i absdiff:i sign:i clampu:i mix:i sumto:i countbits:i \
        arraysum:p arraymax:p third:p counteq:p strlen_c:s udiv:i umod:i sdiv:i smod:i widemul:i \
        hibyte:i hibyte3:i sxbyte:i sxword:i idxw:p spill2:i spill3:i \
-       sortpair:i poly:i stackarr:i fieldsum:p nestcond:i sumrec:i borrow:i cmp3:i favg:i fpoly:i fcmp:i fmix:i div64:i idiv64:i bswapi:i clz:i ctz:i widen:p interleave:q"
+       sortpair:i poly:i stackarr:i fieldsum:p nestcond:i sumrec:i borrow:i cmp3:i favg:i fpoly:i fcmp:i fmix:i div64:i idiv64:i bswapi:i clz:i ctz:i widen:p interleave:q tlen:s"
 
 pass=0; total=0; incomplete=0
 for OPT in $LEVELS; do

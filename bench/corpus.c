@@ -81,3 +81,6 @@ int ctz(unsigned x){ return x ? __builtin_ctz(x) : 32; }
 /* Vectorisable widening/interleaving: exercise punpck* and 16-bit lane ops. */
 int widen(const short* a){ int s=0; for(int i=0;i<8;i++) s+=a[i]; return s; }
 int interleave(const int* a, const int* b){ int s=0; for(int i=0;i<4;i++) s+=a[i]*b[i]; return s; }
+
+/* Tail calls: gcc emits `jmp func` at -O2, lifted as `return func(args)`. */
+int tlen(const char* s){ return (int)strlen(s); }   /* tail call -> jmp strlen */

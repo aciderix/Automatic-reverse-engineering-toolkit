@@ -70,19 +70,47 @@ pub fn build_ir(prog: &Program, func: &Function) -> IrFunction {
                 }
             }
             Flow::Jump => {
+                let last = blk.insns.last().unwrap();
                 let t = blk.successors.first().and_then(|t| idx.get(t).copied());
                 match t {
                     Some(t) => stmts.push(Stmt::Jump(BlockId(t))),
-                    None => stmts.push(Stmt::Asm(blk.insns.last().unwrap().text.clone())),
+                    // No internal target: a direct jump to a function entry (or a
+                    // resolved external symbol) is a tail call — `return f(args)`.
+                    None => {
+                        let ct = match (last.target, &last.call_name) {
+                            (Some(target), _) if prog.is_executable(target) => {
+                                Some(CallTarget::Direct(target))
+                            }
+                            (_, Some(name)) => Some(CallTarget::Named(name.clone())),
+                            _ => None,
+                        };
+                        match ct {
+                            Some(ct) => stmts.push(Stmt::Return(Some(tail_call(ct, bits)))),
+                            None => stmts.push(Stmt::Asm(last.text.clone())),
+                        }
+                    }
                 }
             }
             // Model the return value as the result register (rax/eax family),
             // so its computation stays live (analogous to the text pipeline's
             // `return eax`).
             Flow::Return => stmts.push(Stmt::Return(Some(Expr::Read(Location::Reg(RegId(0)))))),
-            Flow::Indirect | Flow::Interrupt => {
-                stmts.push(Stmt::Asm(blk.insns.last().unwrap().text.clone()))
+            Flow::Indirect => {
+                // `jmp qword [rip+GOT]` to an import is a tail call to it.
+                let last = blk.insns.last().unwrap();
+                let import = if last.raw.is_ip_rel_memory_operand() {
+                    prog.import_name(last.raw.ip_rel_memory_address()).map(|n| n.to_string())
+                } else {
+                    None
+                };
+                match import {
+                    Some(name) => {
+                        stmts.push(Stmt::Return(Some(tail_call(CallTarget::Named(name), bits))))
+                    }
+                    None => stmts.push(Stmt::Asm(last.text.clone())),
+                }
             }
+            Flow::Interrupt => stmts.push(Stmt::Asm(blk.insns.last().unwrap().text.clone())),
             Flow::Fallthrough | Flow::Call => {
                 if let Some(&t) = succ.first() {
                     stmts.push(Stmt::Jump(BlockId(t)));
@@ -228,6 +256,21 @@ fn fold_const_load(s: &mut Stmt, bogus: i128, val: i128, bits: u8) {
         Stmt::Return(Some(e)) => go(e, bogus, val, bits),
         _ => {}
     }
+}
+
+/// A tail call to `target`: `Call(target, SysV-arg-registers)`. The over-
+/// approximated argument registers are pruned/fixed up later; direct import
+/// targets are renamed by `name_calls_in_stmt`. Returned as the function value.
+fn tail_call(target: CallTarget, bits: u32) -> Expr {
+    let args = if bits == 64 {
+        [7u16, 6, 2, 1, 8, 9]
+            .iter()
+            .map(|&r| Expr::Read(Location::Reg(RegId(r))))
+            .collect()
+    } else {
+        Vec::new()
+    };
+    Expr::Call { target, args, ret: Ty::int(bits as u8) }
 }
 
 // --- pretty-printing ------------------------------------------------------
