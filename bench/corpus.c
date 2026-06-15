@@ -56,3 +56,7 @@ int nestcond(int a, int b)       { if (a > 0) { if (b > 0) return a+b; else retu
    relocation resolution in object files (the call target is a placeholder until
    the .rela.text reloc is applied). */
 int sumrec(int n) { return n <= 0 ? 0 : n + sumrec(n - 1); }
+
+/* Subtract-with-borrow idioms: gcc emits `sbb` for these at -O1/-O2. */
+int borrow(unsigned a, unsigned b) { return (a < b) ? -1 : 0; }
+int cmp3(unsigned a, unsigned b)   { return (a > b) - (a < b); }

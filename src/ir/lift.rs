@@ -526,6 +526,38 @@ pub fn lift(insn: &Insn, bits: u32) -> Vec<Stmt> {
             out
         }
 
+        // Subtract/add with borrow/carry: fold the carry flag into the second
+        // operand. `sbb dst,src` = dst - (src + CF); `adc dst,src` = dst + src + CF.
+        // The `sbb r,r` idiom (`(a<b) ? -1 : 0`) lifts to `r - (r + CF)` = -CF.
+        Mnemonic::Sbb => {
+            let a = some_or_asm!(op_value(ins, 0));
+            let b = some_or_asm!(op_value(ins, 1));
+            let bc = bin(BinOp::Add, b, read_flag(FlagKind::Cf));
+            let r = bin(BinOp::Sub, a.clone(), bc.clone());
+            let mut out = sub_flags(&a, &bc, &r);
+            out.extend(some_or_asm!(write_op0(ins, r, bits)));
+            out
+        }
+        Mnemonic::Adc => {
+            let a = some_or_asm!(op_value(ins, 0));
+            let b = some_or_asm!(op_value(ins, 1));
+            let bc = bin(BinOp::Add, b, read_flag(FlagKind::Cf));
+            let r = bin(BinOp::Add, a.clone(), bc.clone());
+            let of = bin(
+                BinOp::And,
+                bin(BinOp::Eq, sign_neg(&a), sign_neg(&bc)),
+                bin(BinOp::Ne, sign_neg(&r), sign_neg(&a)),
+            );
+            let mut out = vec![
+                set_flag(FlagKind::Zf, bin(BinOp::Eq, r.clone(), konst(0))),
+                set_flag(FlagKind::Sf, sign_neg(&r)),
+                set_flag(FlagKind::Cf, bin(BinOp::Ult, r.clone(), a.clone())),
+                set_flag(FlagKind::Of, of),
+            ];
+            out.extend(some_or_asm!(write_op0(ins, r, bits)));
+            out
+        }
+
         Mnemonic::Cmp => {
             let a = some_or_asm!(op_value(ins, 0));
             let b = some_or_asm!(op_value(ins, 1));
