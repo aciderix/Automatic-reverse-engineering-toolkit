@@ -52,13 +52,25 @@ pub fn analyze(prog: &Program, disasm: &Disassembler, prologue_scan: bool) -> An
     let (global, entries, jump_tables) = global_decode(prog, disasm, prologue_scan);
     let instruction_count = global.len();
 
+    // Hot/cold splitting (gcc `-freorder-blocks-and-partition`) emits the cold
+    // path as a companion symbol `foo.cold` in `.text.unlikely`. It is part of
+    // `foo`, not a separate function: exclude such addresses from the function
+    // list and from the boundary set so the parent collects them across its
+    // `ja`/`jmp` into the cold region.
+    let cold: BTreeSet<u64> = entries
+        .iter()
+        .copied()
+        .filter(|&a| prog.symbol_name(a).is_some_and(|n| n.contains(".cold")))
+        .collect();
+    let boundary: BTreeSet<u64> = entries.difference(&cold).copied().collect();
+
     // Functions are independent (everything they read — `global`, `entries`,
     // `jump_tables`, `prog` — is shared read-only), so build them in parallel.
     use rayon::prelude::*;
-    let entry_vec: Vec<u64> = entries.iter().copied().collect();
+    let entry_vec: Vec<u64> = boundary.iter().copied().collect();
     let mut functions: Vec<Function> = entry_vec
         .par_iter()
-        .filter_map(|&entry| build_function(prog, &global, entry, &entries, &jump_tables))
+        .filter_map(|&entry| build_function(prog, &global, entry, &boundary, &jump_tables))
         .collect();
     functions.sort_by_key(|f| f.entry);
     AnalysisResult {
@@ -145,6 +157,91 @@ fn resolve_jump_table(prog: &Program, insn: &Insn) -> Option<Vec<u64>> {
     }
 }
 
+/// Resolve the PIE relative jump-table idiom ending in `jmp reg`:
+///
+/// ```text
+///   cmp idx, N ; ja default          (bound, optional)
+///   lea base, [rip+table]
+///   movsxd tgt, [base + idx*4]        (signed 4-byte offset)
+///   add tgt, base                     (target = table + offset)
+///   (notrack) jmp tgt
+/// ```
+///
+/// The three setup instructions precede `jmp` in `global`. Reads the relative
+/// offset table from the binary and returns the absolute case targets (so the
+/// caller decodes them and attaches the CFG edges).
+fn resolve_pie_jump_table(prog: &Program, global: &BTreeMap<u64, Insn>, jmp: &Insn) -> Option<Vec<u64>> {
+    use iced_x86::{Mnemonic, OpKind, Register};
+    let j = &jmp.raw;
+    if j.op0_kind() != OpKind::Register {
+        return None;
+    }
+    let tgt = j.op0_register().full_register();
+    // Scan the instructions just before the jump (the idiom may interleave an
+    // index zero-extension between the lea and the movsxd, so match by pattern
+    // rather than fixed position).
+    let pre: Vec<iced_x86::Instruction> =
+        global.range(..jmp.address).rev().take(10).map(|(_, i)| i.raw).collect();
+    // add tgt, base
+    let add = pre.iter().find(|i| {
+        i.mnemonic() == Mnemonic::Add
+            && i.op0_kind() == OpKind::Register
+            && i.op1_kind() == OpKind::Register
+            && i.op0_register().full_register() == tgt
+    })?;
+    let base = add.op1_register().full_register();
+    // movsxd tgt, [base + idx*4]
+    let mov = pre.iter().find(|i| {
+        i.mnemonic() == Mnemonic::Movsxd
+            && i.op0_register().full_register() == tgt
+            && i.memory_base().full_register() == base
+            && i.memory_index() != Register::None
+            && i.memory_index_scale() == 4
+    })?;
+    let _ = mov;
+    // lea base, [rip + table]
+    let lea = pre.iter().find(|i| {
+        i.mnemonic() == Mnemonic::Lea
+            && i.op0_register().full_register() == base
+            && i.is_ip_rel_memory_operand()
+    })?;
+    let table = lea.ip_rel_memory_address();
+
+    // Exact case count from a preceding `cmp idx, N` (else read until a target
+    // leaves the code, capped).
+    let mut count = 256u64;
+    for (_, ins) in global.range(..jmp.address).rev() {
+        if ins.raw.mnemonic() == Mnemonic::Cmp
+            && matches!(
+                ins.raw.op1_kind(),
+                OpKind::Immediate8 | OpKind::Immediate16 | OpKind::Immediate32 | OpKind::Immediate8to32
+            )
+        {
+            count = (ins.raw.immediate(1) as u64).saturating_add(1).min(256);
+            break;
+        }
+    }
+
+    // Table order (with duplicates) so case index i maps to target[i].
+    let mut ordered = Vec::new();
+    for i in 0..count {
+        let off = match prog.read_u32(table + i * 4) {
+            Some(v) => v as i32 as i64,
+            None => break,
+        };
+        let t = (table as i64).wrapping_add(off) as u64;
+        if !prog.is_executable(t) {
+            break;
+        }
+        ordered.push(t);
+    }
+    if ordered.len() >= 2 {
+        Some(ordered)
+    } else {
+        None
+    }
+}
+
 /// Drain a worklist of run starts, decoding each reachable instruction once
 /// into `global` and recording direct-call targets as new entries.
 fn drain(
@@ -170,6 +267,7 @@ fn drain(
             let target = insn.target;
             let jt = if flow == Flow::Indirect {
                 resolve_jump_table(prog, &insn)
+                    .or_else(|| resolve_pie_jump_table(prog, global, &insn))
             } else {
                 None
             };

@@ -13,8 +13,8 @@ trap 'rm -rf "$TMP"' EXIT
 
 # Non-PIE exe (functions + tables at fixed VAs) — the decompilation/data source.
 cat > "$TMP/keep.c" <<'C'
-int lut(int), swv(int);
-__attribute__((used)) void* keep[] = { (void*)lut, (void*)swv };
+int lut(int), swv(int), swc(int,int);
+__attribute__((used)) void* keep[] = { (void*)lut, (void*)swv, (void*)swc };
 int main(void){ return 0; }
 C
 gcc -no-pie -O2 "$DIR/corpus.c" "$TMP/keep.c" -o "$TMP/exe" 2>/dev/null \
@@ -22,7 +22,7 @@ gcc -no-pie -O2 "$DIR/corpus.c" "$TMP/keep.c" -o "$TMP/exe" 2>/dev/null \
 # Source reference object (linked into the PIE harness).
 gcc -O2 -w -c "$DIR/corpus.c" -o "$TMP/ref.o" 2>/dev/null
 
-FUNCS="lut:i swv:i"
+FUNCS="lut:i swv:i swc:i"
 pass=0; total=0
 for entry in $FUNCS; do
   name="${entry%%:*}"; total=$((total+1))
@@ -43,7 +43,7 @@ for entry in $FUNCS; do
 #include <sys/mman.h>
 #include <sys/stat.h>
 #include <elf.h>
-int ${name}(int);
+int ${name}(int,int);
 uint64_t aret_target(uint64_t,uint64_t,uint64_t);
 /* Map the original binary's loadable segments at their virtual addresses so the
    decompiled function's absolute-address reads resolve to the real data. */
@@ -67,8 +67,8 @@ int main(void){
   map_exe("${TMP}/exe");
   for(int it=0; it<200000; it++){
     int x=(int)(rnd()%64)-8;
-    uint32_t o=(uint32_t)${name}(x);
-    uint32_t r=(uint32_t)aret_target((uint64_t)(int64_t)x,0,0);
+    int a=(int)(rnd()%128)-64; uint32_t o=(uint32_t)${name}(x,a);
+    uint32_t r=(uint32_t)aret_target((uint64_t)(int64_t)x,(uint64_t)(int64_t)a,0);
     if(o!=r){ printf("mismatch x=%d orig=%u aret=%u\n",x,o,r); return 1; }
   }
   return 0;

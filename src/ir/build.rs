@@ -100,7 +100,11 @@ pub fn build_ir(prog: &Program, func: &Function) -> IrFunction {
                 // A resolved jump table (the analysis attached case edges) with an
                 // index register becomes a typed switch.
                 if !succ.is_empty() {
-                    match crate::ir::lift::switch_index(&last.raw) {
+                    // Index from the jump's own memory operand (`jmp [t+idx*8]`),
+                    // or recovered from the PIE idiom (`jmp reg`).
+                    let value = crate::ir::lift::switch_index(&last.raw)
+                        .or_else(|| pie_switch_index(&blk.insns));
+                    match value {
                         Some(value) => {
                             let cases = succ
                                 .iter()
@@ -283,6 +287,19 @@ fn tail_call(target: CallTarget, bits: u32) -> Expr {
         Vec::new()
     };
     Expr::Call { target, args, ret: Ty::int(bits as u8) }
+}
+
+/// Recover the switch index of a PIE relative jump table (`movsxd tgt,[base+
+/// idx*4]; add tgt,base; jmp tgt`): a read of the `movsxd`'s index register.
+fn pie_switch_index(insns: &[crate::disasm::Insn]) -> Option<Expr> {
+    use iced_x86::{Mnemonic, Register};
+    // The block's `movsxd tgt, [base + idx*4]` carries the switch index.
+    let mov = insns.iter().rev().find(|i| {
+        i.raw.mnemonic() == Mnemonic::Movsxd
+            && i.raw.memory_index() != Register::None
+            && i.raw.memory_index_scale() == 4
+    })?;
+    crate::ir::lift::reg_value(mov.raw.memory_index())
 }
 
 // --- pretty-printing ------------------------------------------------------

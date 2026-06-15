@@ -223,6 +223,12 @@ pub(crate) fn switch_index(ins: &Instruction) -> Option<Expr> {
     read_reg(idx)
 }
 
+/// Read a register as an `Expr` (masked to its width) — for jump-table index
+/// recovery in `ir::build`.
+pub(crate) fn reg_value(r: Register) -> Option<Expr> {
+    read_reg(r)
+}
+
 fn read_reg(r: Register) -> Option<Expr> {
     let id = reg_id(r)?;
     let full = Expr::Read(Location::Reg(id));

@@ -99,3 +99,4 @@ int stkarr(int a, int b, int c){ int v[6]; for(int i=0;i<6;i++) v[i]=a*i+b; retu
 static const int LUT[8] = {2,3,5,7,11,13,17,19};
 int lut(int i){ return LUT[i & 7]; }
 int swv(int x){ switch(x){case 0:return 7;case 1:return 11;case 2:return 13;case 3:return 17;case 4:return 19;case 5:return 23;default:return -1;} }
+int swc(int x, int a){switch(x){case 0:return a+7;case 1:return a*11;case 2:return a-13;case 3:return a^17;case 4:return a<<2;case 5:return a*a;case 6:return a-1;case 7:return a+9;default:return -1;}}
