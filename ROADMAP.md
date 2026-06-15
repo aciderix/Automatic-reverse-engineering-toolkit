@@ -720,9 +720,11 @@ relogeable), et compare.
      (`arraysum/sumto/arraymax/counteq/sumrec`) passent à -O3. **Différentiel
      complet à TOUS les niveaux -O0/-O1/-O2/-O3 : 160/160, zéro INCOMPLETE.**
    - **Reste pour le vrai code : x87** (`fld/fstp/fadd…`, pile st0-st7) et des
-     ops SSE/string moins courantes (`pshuflw`, `pmovmskb`, `pcmpistri`…). C'est
-     ce qui domine encore l'incomplétude des binaires (gzip 88, ls 174). Les
-     boucles vectorisées entières sont désormais couvertes.
+     ops SSE/string moins courantes (`pshuflw`, `pmovmskb`, `pcmpistri`…). Les
+     boucles vectorisées entières sont désormais couvertes. *(NB : à ce stade du
+     récit l'incomplétude était encore élevée ; elle a depuis chuté à 26 — voir
+     les bullets « Tail calls » et « Jump tables PIE » ci-dessous, qui étaient en
+     réalité le levier dominant, pas le x87.)*
 
    - **Tail calls — ✅ FAIT, et c'était LE levier dominant.** La mesure par
      fonction a montré que l'incomplétude du vrai code n'était PAS due au x87/SSE
@@ -736,19 +738,26 @@ relogeable), et compare.
      fonctions de copie mémoire ne sont pas testables en différentiel standalone
      (elles déréférencent le registre de frame non initialisé, comme tout buffer
      de pile).
-   - **Reste (~35 fn, bloqué par la *validabilité*, pas par la difficulté
-     d'implémentation)** :
-     - **Jump tables register-indirect** (~20, `lea table; movsxd off=[t+idx*4];
-       add; notrack jmp`) : récupérables en `switch(idx)` (le C recompilé n'accède
-       pas à la table → standalone-correct), MAIS lire la table relative exige une
-       lecture section-aware ; en `.o` la collision base-0 empêche de lire la
-       table → impossible à valider en différentiel ; sur exécutable ça marcherait
-       mais seulement *recompile*-validé (pas comportemental). Ajouter une
-       récupération de contrôle de flux non validée comportementalement = risque
-       d'erreur silencieuse → laissé INCOMPLETE (sain) plutôt que bâclé.
-     - **x87** (~2) : 80 bits + pile, non bit-exact dans une IR 64 bits.
-     - **Packed restant** (`movhps/shufpd/movhlps/psubusw`, ~7) + `hlt`, `imul` :
-       difficiles à générer/valider en différentiel.
+   - **Jump tables PIE relatives — ✅ FAIT depuis** (`analysis::resolve_pie_jump_table`
+     + harnais in-place). Le motif `lea base,[rip+t]; movsxd off=[base+idx*4]; add;
+     (notrack) jmp` est reconnu **dans l'analyse** (pour que les cibles de cas
+     soient décodées), avec **trace de la def atteignante** du registre base
+     inter-blocs ; l'IR le lève en `Stmt::Switch` typé. La validation
+     comportementale est faite par le **harnais in-place** (`bench/inplace.sh`,
+     qui mappe les PT_LOAD à leur VA → la table relative se lit réellement) : 3/3
+     dont `swc` (value-table). La **fusion hot/cold** (`foo.cold`) complète le
+     décodage des cibles renvoyées vers `.text.unlikely`.
+   - **Reste (26 fn : gzip 9, ls 15, cat 2) — par sûreté, pas par difficulté** :
+     - **x87 (cause DOMINANTE, ≈100 des ~140 instructions)** : `fld/fstp/fxch/
+       fldcw/fild/fadd/fmul/fcomi/fistp…` — exige un **modèle de pile FPU 80-bit**
+       (st0-st7, tag word, arrondi fldcw). Seul chantier conséquent ; résout
+       l'essentiel des 26.
+     - **Entiers triviaux** (`ror`, `xchg`, `imul` 1-op) : lift direct, comme
+       `rol`/`sbb` déjà faits.
+     - **Demi-moves SSE packés** (`movhps/movhlps/shufpd`, `psubusw`) :
+       modélisables comme les `__pi_*` existants.
+     - **Variantes `rep`** restantes, **stubs privilégiés** (`hlt`, `sti`) :
+       à laisser en `Asm` (sain) ou `__builtin_unreachable`.
      Tous **honnêtement marqués INCOMPLETE** — jamais silencieusement faux.
 
    **Constat majeur (le plus important de cette série).** Une fois la détection

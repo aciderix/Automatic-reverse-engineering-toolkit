@@ -28,14 +28,25 @@ sûr reste en `Stmt::Asm` / `__asm__` ou est marqué. La sûreté prime sur la
 beauté. En cas de doute → ne pas transformer. Ce principe a guidé chaque
 décision (ex : promotion SSA différée faute d'analyse d'alias — cf. §6).
 
-### Métrique nord
+### Métrique nord  *(MàJ 2026-06-15, mesurée)*
 % de fonctions dont le C émis (a) **recompile** et (b) est **prouvé équivalent**
-au binaire (différentiel ou SMT). Trois niveaux, **tous opérationnels** :
-1. **Recompile** — `--mode verify` : 100 % sur gzip/ls/cat/sha256sum/base64 + jeu.
-2. **Différentiel** (exécution, 50k entrées) — `bench/difftest.sh` : 26/26 (dont
-   pointeurs/tableaux/boucles/chaînes) ; `bench/magicdiv.sh` : équivalence
-   **exhaustive 2^32** de la réécriture magic-division.
-3. **SMT formel** (Z3) — `bench/smt_rewrites.sh` : 11/11 règles d'opt prouvées.
+au binaire (différentiel ou SMT). Niveaux **tous opérationnels** :
+1. **Recompile** — `--mode verify` : **100 %** sur gzip (135/135), ls (226/226),
+   cat (73/73) + jeu.
+2. **Différentiel** (exécution, ~50k–200k entrées, -O0 → -O3) — `bench/difftest.sh`
+   : **196/196** (pointeurs/tableaux/boucles/chaînes/SSE/x87-scalaire/div64…) ;
+   `bench/inplace.sh` : **3/3** (fonctions à accès mémoire par adresse absolue —
+   globals & tables — validées en mappant les segments PT_LOAD du binaire à leur
+   VA) ; `bench/magicdiv.sh` : équivalence **exhaustive 2^32** de la magic-division.
+3. **SMT formel** (Z3) — `bench/smt_rewrites.sh` : **11/11** règles d'opt prouvées.
+
+**Incomplétude résiduelle honnête** (fonctions marquées `// WARNING …
+INCOMPLETE`, exclues du différentiel par sûreté) : **26** au total — gzip 9,
+ls 15, cat 2. Cause **très majoritairement x87** (fld/fstp/fxch/fldcw/fild/
+fadd/fmul/fcomi… ≈ 100 des ~140 instructions non liftées) ; petite queue
+d'entiers triviaux (ror/xchg/imul 1-op), de demi-moves SSE packés
+(shufpd/movhps/movhlps), de variantes `rep`/`psubusw`, et de stubs privilégiés
+(hlt/sti). **Résolubles** — voir §8.
 
 ---
 
@@ -94,10 +105,12 @@ investir dans **B** sauf gain rapide et sûr pour l'utilisateur via A.
 | `verify/mod.rs` | Harness recompilabilité (niveau 1), `--mode verify` | B |
 | `main.rs` | CLI (modes : info/asm/cfg/decompile/ir/emit/verify ; `--flat`/`--split`/`--function`/`--limit`/`--no-prologue-scan`) | — |
 
-`bench/` : `corpus.c` (fonctions de test), `difftest.sh` (niveau 2),
-`magicdiv.sh` (équivalence exhaustive 2^32 magic-division), `smt_rewrites.sh`
-(niveau 3 Z3), `regression.sh` (**porte de non-régression unifiée** : build +
-tests + 3 niveaux ; `bash bench/regression.sh`).
+`bench/` : `corpus.c` (fonctions de test ; ~50), `difftest.sh` (niveau 2,
+-O0→-O3), `inplace.sh` (**différentiel in-place** : mappe les PT_LOAD à leur VA
+pour valider les accès par adresse absolue — globals/tables), `magicdiv.sh`
+(équivalence exhaustive 2^32 magic-division), `smt_rewrites.sh` (niveau 3 Z3),
+`regression.sh` (**porte de non-régression unifiée** : build + tests + tous les
+niveaux dont in-place ; `bash bench/regression.sh`).
 `.claude/hooks/session-start.sh` : hook SessionStart (web) qui build + assure z3
 pour que les benches tournent.
 
@@ -139,24 +152,38 @@ bash bench/smt_rewrites.sh                            # preuves SMT des règles 
 
 ## 5. État d'avancement par pilier (HONNÊTE)
 
-> **MàJ 2025-06-14** (depuis cette section) : ✅ Rayon (analyse 60→17 s, split
-> 73→16 s) ; ✅ lifter `mul`/`div`/`idiv` 1-op + `cdq`/`cqo` ; ✅ modélisation des
-> appels (retour `rax=call` + clobbers caller-saved) ; ✅ noms d'imports dans le
-> pipeline IR (`malloc()`) + `verify` en `-fno-builtin` ; ✅ **args aux
-> call-sites 64-bit** (lifter sur-approxime les 6 regs SysV ; `prune_call_args`
-> en opt ôte les `Undef` ; `emit::fixup_call_arity` aligne chaque appel d'une
-> fonction définie sur l'arité de son callee ; table d'arités libc pour les
-> imports → `func(a,b)`, `memcpy(d,s,n)`, `strlen(s)`). gzip recompile
-> **131/131**, différentiel **21/21** ; ✅ **magic division unsigned 32-bit**
-> (`opt::try_magic_udiv` + `magicu32` auto-validant : `(x*M)>>t` → `x/d`, match
-> magic canonique exact requis ; vérifié **exhaustivement sur 2^32 entrées**
-> via `bench/magicdiv.sh` — Z3 ne converge pas sur le `bvudiv` symbolique) ;
-> ✅ **2 bugs de correction** (segment `fs:`/`gs:` mal lifté → `Asm` ;
-> `SignExtend` émis en identité → cast signé conscient de la largeur) ;
-> ✅ **lifter élargi** (high-byte `ah/bh/ch/dh`, `leave`, `cbw`/`cwde`/`cdqe`).
-> Différentiel **26/26**.
-> Détail dans `ROADMAP.md §15.4bis`. Prochain : **lifter** (`rol`/`ror`,
-> `adc`/`sbb`, `rep`→`memcpy`, puis SSE/float) ou **inférence de types** (§5).
+> **MàJ 2026-06-15** : grosse passe « compléter -O0 → -O3 » + infra de
+> validation. ✅ **SSE scalaire** (float/double bit-exact via helpers `__fp_*`,
+> XMM = motifs de bits) + **SSE packé 128-bit** (XMM = deux moitiés 64-bit,
+> helpers `__pi_*`, `write_xmm128` sans aléa inter-moitié) ; ✅ **garde
+> vectorielle** `uses_vector_reg` (toute op XMM/YMM/ZMM non modélisée → `Asm` +
+> INCOMPLETE, plus de mis-lifting scalaire silencieux — *le « recompile 100 % »
+> masquait des fonctions possiblement fausses*) ; ✅ **entiers étendus** (helpers
+> `__ix_*` : `__int128` pour mul/div 64-bit, `sbb`/`adc`, `bt`/`btc`/`bts`/`btr`,
+> `bswap`, `bsf`/`bsr`/`tzcnt`/`lzcnt`/`popcnt`) ; ✅ **`rep movs` → `memcpy`** ;
+> ✅ **tail calls** (`jmp func` → `return func(args)`, `jmp [GOT]` import →
+> `return import(args)`) — *cause dominante d'incomplétude, pas x87 : gzip
+> 83→10* ; ✅ **tables de saut PIE relatives** (`lea base,[rip+t]; movsxd
+> off=[base+i*4]; add; jmp` — reconnaissance dans l'analyse avec **trace de la
+> def atteignante** du registre base inter-blocs → `Stmt::Switch` typé) ;
+> ✅ **fusion hot/cold** (compagnons gcc `foo.cold` de `.text.unlikely` fusionnés
+> dans le parent) ; ✅ **promotion variables de pile** (le frame base pointe sur
+> un vrai tableau local `uint8_t __frame[16384]`, FRAME_TOP=14336 → corrige les
+> crashs de pointeurs sauvages sur buffers/tableaux de pile) ; ✅ **harnais
+> in-place** (`bench/inplace.sh` : mappe les segments PT_LOAD à leur VA pour
+> valider les accès par adresse absolue — globals/tables) ; ✅ relocations `.o`
+> appliquées, canaris de pile, idiomes libc. **Résultats mesurés** : différentiel
+> **196/196** (-O0→-O3), in-place **3/3**, recompile **100 %**, SMT **11/11**,
+> magicdiv **2^32**. Incomplétude réelle ramenée de ~300 → **26** fonctions.
+> Prochain : **x87** (modèle pile 80-bit — résout l'essentiel des 26) ou
+> **inférence de types** (§5).
+>
+> **MàJ 2025-06-14** (historique) : ✅ Rayon (analyse 60→17 s) ; ✅ lifter
+> `mul`/`div`/`idiv` 1-op + `cdq`/`cqo` ; ✅ modélisation des appels (retour
+> `rax=call` + clobbers) ; ✅ imports nommés + `verify -fno-builtin` ; ✅ args
+> call-sites 64-bit (`prune_call_args`, `emit::fixup_call_arity`, arités libc) ;
+> ✅ **magic division unsigned 32-bit** (vérifiée exhaustivement 2^32) ; ✅ 2 bugs
+> (`fs:`/`gs:`, `SignExtend` → cast signé) ; ✅ high-byte/`leave`/`cbw`/`cwde`/`cdqe`.
 
 
 - **Pilier 1 (IR SSA typé)** : ✅ COMPLET. types, dom+frontière, lift IR, SSA, IR-CFG, `--mode ir`.
@@ -169,20 +196,23 @@ bash bench/smt_rewrites.sh                            # preuves SMT des règles 
   garder les casts sémantiques explicites, n'inférer que pour l'affichage tant que
   pas prouvé.
 - **Pilier 4 (recovery)** :
-  - §6.1 switch/jump tables : ✅ (résolution + couverture ; manque l'**index** dans
-    l'IR → `Stmt::Switch` typé ; manque tables relatives 4o x64).
-  - §6.2 conventions d'appel : ⚠️ PARTIEL (frame args + args registres 64-bit
-    récupérés ; ✅ **args aux sites d'appel 64-bit** : émission toujours avec
-    vraies signatures + fixup inter-procédural `emit::fixup_call_arity` qui aligne
-    l'appel sur l'arité du callee ; les unités multi-fonctions ne sont plus en
-    `(void)`. Reste : **args 32-bit cdecl sur la pile**, matching positionnel si
-    les `reg_params` du callee ne forment pas un préfixe contigu).
+  - §6.1 switch/jump tables : ✅ + ✅ **`Stmt::Switch` typé dans l'IR** (index
+    récupéré) + ✅ **tables relatives PIE 4o x64** (trace de la def atteignante du
+    base register inter-blocs) + ✅ **fusion hot/cold** (`foo.cold`).
+  - §6.2 conventions d'appel : ⚠️ PARTIEL (frame args + args registres 64-bit ;
+    args call-sites 64-bit + fixup `emit::fixup_call_arity` ; ✅ **tail calls**
+    directs et via import GOT → `return callee(args)`). Reste : **args 32-bit
+    cdecl sur la pile**, matching positionnel non-contigu.
   - §6.3 **vtables / appels indirects C++** : ❌ NON FAIT. ⚠️ **Injustement sauté
     vu que le binaire de test EST un jeu C++** : des milliers d'appels
     `(*(*(uint32_t*)(eax+0xN)))()` (vtables) ne sont pas résolus.
-  - §6.4 : ✅ chaînes, ✅ imports PE+ELF. ❌ globals nommés, ❌ FLIRT/signatures CRT.
-- **Pilier 5 (émission C)** : ✅ compilable + structuré. Manque : variables typées
-  (dépend §5), helpers SSE/idiomes, mode `--strict`.
+  - §6.4 : ✅ chaînes, ✅ imports PE+ELF, ✅ **relocations statiques `.o`** (lues
+    sur les sections de code, cible read-only repliée en littéral). ❌ globals
+    nommés, ❌ FLIRT/signatures CRT.
+- **Pilier 5 (émission C)** : ✅ compilable + structuré + ✅ **helpers float/SSE/
+  entiers** (`__fp_*`/`__pi_*`/`__ix_*`, préambule auto) + ✅ **promotion pile**
+  (tableau `__frame` local). Manque : variables typées (dépend §5), **x87**
+  (modèle pile 80-bit), mode `--strict`.
 - **Pilier 6 (vérification)** : ✅ niveaux 1, 2, 3. Niveau 3 ne prouve pour l'instant
   que les **règles d'opt isolées** (pas des fonctions entières lift→SMT). Manque la
   **boucle de raffinement** automatique.
@@ -196,10 +226,15 @@ bash bench/smt_rewrites.sh                            # preuves SMT des règles 
 
 ## 6. Décisions importantes & pièges connus
 
-1. **Promotion SSA des slots de pile (§4.1) — DIFFÉRÉE VOLONTAIREMENT.** La faire
-   sainement exige une **analyse d'alias** (le frame base peut s'échapper sans
-   `lea` : `mov reg,ebp` puis `[reg-4]`). Bâcler = code faux. Prérequis avant de
-   promouvoir. NE PAS promouvoir sans alias analysis.
+1. **Promotion des slots de pile (§4.1) — FAITE prudemment.** Plutôt que de
+   promouvoir chaque slot en variable SSA (qui exigerait une analyse d'alias
+   complète — le frame base peut s'échapper sans `lea`), ARET pointe le **frame
+   base sur un vrai tableau local** `uint8_t __frame[16384]` (FRAME_TOP=14336),
+   émis par `emit::value_decls`. Sain par construction : tout accès relatif au
+   frame (y compris adresse prise, indexation, débordement borné) touche de la
+   vraie mémoire au lieu d'un pointeur sauvage → corrige les crashs de
+   buffers/tableaux de pile sans inférer faussement la sémantique. La promotion
+   SSA fine (slot → `vN` scalaire) reste différée et garderait le besoin d'alias.
 2. **Symboles à l'adresse 0 sautés** (`loader`) : dans un `.o`/binaire où une
    fonction est à l'offset 0, son symbole est ignoré (→ `bench/corpus.c` a un
    `_pad` en tête pour cette raison). Sur un exécutable réel (base ≠ 0), non
@@ -243,12 +278,30 @@ bash bench/smt_rewrites.sh                            # preuves SMT des règles 
 
 ## 8. Prochaines étapes recommandées (par valeur/sûreté)
 
-> **Ordre faisant autorité** : voir `ROADMAP.md` §15.4 (révisé après l'analyse
-> croisée `ARET — Analyse complète & Propositions d'améliorations.md`). Résumé :
-> 1) division magique → 2) args aux call-sites → 3) compléter lifter + idiomes →
-> 4) inférence de types → 5) polir l'émission IR puis basculer le défaut →
-> 6) SCCP/GVN, vtables, LLM → 7) backlog P4 (Rayon tôt, ARM64/LSP/diff après).
-> Ci-dessous, le détail historique (toujours valide) :
+> **Les 26 incomplètes restantes — résolubles ?** OUI, par ordre d'effort :
+> - **x87 (cause dominante, ≈100 des ~140 instructions)** : fld/fstp/fxch/fldcw/
+>   fild/fadd/fmul/fcomi/fistp… Exige un **modèle de la pile FPU 80-bit** (st(0)
+>   …st(7) en registre-pile, tag word, arrondi via fldcw). Travail réel mais
+>   borné ; représenter chaque slot comme une paire (mantisse 64 + exp/signe 16)
+>   ou `long double` natif + helpers `__x87_*` à la manière des `__fp_*`. Résout
+>   à lui seul l'essentiel des 26.
+> - **Entiers triviaux** (ror, xchg, imul 1-op) : lift direct, comme rol/sbb déjà
+>   faits. Quelques heures.
+> - **Demi-moves SSE packés** (movhps/movhlps/shufpd) : modélisables exactement
+>   comme les `__pi_*` existants (manip des moitiés haute/basse). Faible risque.
+> - **Variantes `rep`** (rep stos/movs autres que la copie déjà gérée),
+>   **psubusw** packé : extensions des idiomes existants.
+> - **Stubs privilégiés** (hlt, sti) : apparaissent dans des stubs non-retournants
+>   / syscall ; à laisser en `Asm` (correct) ou marquer `__builtin_unreachable`.
+> Aucune ne requiert de refonte ; toutes respectent le principe « jamais de code
+> faux » (elles restent INCOMPLETE tant que non liftées). **x87 est le seul
+> chantier conséquent.**
+>
+> **Ordre faisant autorité** : voir `ROADMAP.md` §15.4. Résumé : 1) division
+> magique → 2) args call-sites → 3) compléter lifter + idiomes (✅ SSE/entiers/
+> tail-calls/jump-tables faits) → 4) inférence de types → 5) polir l'émission IR
+> puis basculer le défaut → 6) SCCP/GVN, vtables, LLM. Ci-dessous le détail
+> historique (toujours valide) :
 
 
 1. **§6.3 vtables / appels indirects C++** — injustement sauté alors que le test
@@ -275,8 +328,10 @@ bash bench/smt_rewrites.sh                            # preuves SMT des règles 
 
 ## 9. Résumé en une phrase
 ARET est un décompilateur Rust fonctionnel à **deux pipelines** (texte lisible par
-défaut ; IR SSA typé vérifié), avec une **boucle de vérification à 3 niveaux
-opérationnelle** (recompile 100 % / différentiel 26/26 / SMT 11/11) — la
-combinaison analyse-formelle + vérification qu'aucun outil grand public n'offre.
-Reste surtout : **types (§5)**, **vtables (§6.3)**, **couche LLM (§9)**, et
-l'**unification** des deux pipelines. Principe sacré : **jamais de code faux.**
+défaut ; IR SSA typé vérifié), avec une **boucle de vérification opérationnelle**
+(recompile 100 % / différentiel **196/196** -O0→-O3 + in-place **3/3** / SMT 11/11
+/ magicdiv 2^32) — la combinaison analyse-formelle + vérification qu'aucun outil
+grand public n'offre. Incomplétude réelle ramenée à **26 fonctions** (surtout x87,
+toutes résolubles — §8). Reste surtout : **x87**, **types (§5)**, **vtables
+(§6.3)**, **couche LLM (§9)**, et l'**unification** des deux pipelines. Principe
+sacré : **jamais de code faux.**
