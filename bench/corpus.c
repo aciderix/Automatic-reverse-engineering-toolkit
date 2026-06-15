@@ -86,3 +86,6 @@ int interleave(const int* a, const int* b){ int s=0; for(int i=0;i<4;i++) s+=a[i
 int tlen(const char* s){ return (int)strlen(s); }   /* tail call -> jmp strlen */
 
 /* Switch with enough cases that gcc emits a jump table at -O2. */
+
+/* Struct copy by value: gcc may emit `rep movsq`. Returns an element so the
+   differential can compare. */

@@ -604,6 +604,37 @@ pub fn lift(insn: &Insn, bits: u32) -> Vec<Stmt> {
         return asm();
     }
 
+    // `rep movs` is a forward `memcpy(rdi, rsi, rcx*size)` that leaves rdi/rsi
+    // advanced and rcx = 0. Handled here because the string `movsd` shares its
+    // mnemonic with the SSE scalar move — the rep prefix disambiguates. (Backward
+    // copies via DF=1 are not modelled; gcc emits forward `rep movs`.)
+    if ins.has_rep_prefix() {
+        use Mnemonic::*;
+        let sz: i128 = match ins.mnemonic() {
+            Movsb => 1,
+            Movsw => 2,
+            Movsd => 4,
+            Movsq => 8,
+            _ => 0,
+        };
+        if sz != 0 {
+            let rdi = Location::Reg(RegId(7));
+            let rsi = Location::Reg(RegId(6));
+            let rcx = Location::Reg(RegId(1));
+            let bytes = bin(BinOp::Mul, Expr::Read(rcx.clone()), konst(sz));
+            return vec![
+                Stmt::CallStmt(Expr::Call {
+                    target: CallTarget::Named("memcpy".into()),
+                    args: vec![Expr::Read(rdi.clone()), Expr::Read(rsi.clone()), bytes.clone()],
+                    ret: Ty::int(64),
+                }),
+                Stmt::Set { dst: rdi.clone(), expr: bin(BinOp::Add, Expr::Read(rdi), bytes.clone()) },
+                Stmt::Set { dst: rsi.clone(), expr: bin(BinOp::Add, Expr::Read(rsi), bytes) },
+                Stmt::Set { dst: rcx, expr: konst(0) },
+            ];
+        }
+    }
+
     // Helper to require Some or bail to Asm.
     macro_rules! some_or_asm {
         ($e:expr) => {
