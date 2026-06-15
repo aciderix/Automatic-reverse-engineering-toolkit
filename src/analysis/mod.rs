@@ -191,21 +191,34 @@ fn resolve_pie_jump_table(prog: &Program, global: &BTreeMap<u64, Insn>, jmp: &In
     })?;
     let base = add.op1_register().full_register();
     // movsxd tgt, [base + idx*4]
-    let mov = pre.iter().find(|i| {
+    if !pre.iter().any(|i| {
         i.mnemonic() == Mnemonic::Movsxd
             && i.op0_register().full_register() == tgt
             && i.memory_base().full_register() == base
             && i.memory_index() != Register::None
             && i.memory_index_scale() == 4
-    })?;
-    let _ = mov;
-    // lea base, [rip + table]
-    let lea = pre.iter().find(|i| {
-        i.mnemonic() == Mnemonic::Lea
-            && i.op0_register().full_register() == base
-            && i.is_ip_rel_memory_operand()
-    })?;
-    let table = lea.ip_rel_memory_address();
+    }) {
+        return None;
+    }
+    // Find the reaching definition of `base`: scan backwards for the first
+    // instruction that writes it. It must be `lea base, [rip+table]` (the table
+    // address); any other writer (or a return — function boundary) means we
+    // cannot prove the table, so bail. The base register is often set in an
+    // earlier (dominating) block, so this looks past the jump's own block.
+    let mut table = None;
+    for (_, ins) in global.range(..jmp.address).rev().take(2000) {
+        let r = &ins.raw;
+        if r.flow_control() == iced_x86::FlowControl::Return {
+            break;
+        }
+        if r.op0_kind() == OpKind::Register && r.op0_register().full_register() == base {
+            if r.mnemonic() == Mnemonic::Lea && r.is_ip_rel_memory_operand() {
+                table = Some(r.ip_rel_memory_address());
+            }
+            break; // first writer of `base` decides it
+        }
+    }
+    let table = table?;
 
     // Exact case count from a preceding `cmp idx, N` (else read until a target
     // leaves the code, capped).
