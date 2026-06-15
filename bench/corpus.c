@@ -124,3 +124,21 @@ long long x87div(int a, int b){
     long double r = (x*x*x - y*y*y) / d;
     return (long long)r;
 }
+
+/* Rotates, 1-operand signed multiply (imul r/m -> rdx:rax), and register xchg.
+   Int-compatible signatures for the differential harness. */
+unsigned rotl(unsigned x, int n){ n &= 31; return (x << n) | (x >> ((32 - n) & 31)); }
+unsigned rotr(unsigned x, int n){ n &= 31; return (x >> n) | (x << ((32 - n) & 31)); }
+long long imulh(long a, long b){ return (long long)(((__int128)a * b) >> 64); }
+int xchg3(int a, int b){ int t = a; a = b; b = t; return a*7 - b*3; }
+
+/* Packed double (128-bit) lane moves: exercises unpcklpd/unpckhpd (and the
+   movhps/movhlps/shufpd half-move machinery). Built from int args (finite,
+   deterministic) so the differential harness can compare. */
+typedef double __v2df __attribute__((vector_size(16)));
+int vshuf(int x, int y){
+    __v2df a = {(double)x, (double)y};
+    __v2df b = {(double)y, (double)x};
+    __v2df c = a*b + a;
+    return (int)(c[0] - c[1]*2);
+}

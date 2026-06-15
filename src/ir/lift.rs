@@ -94,6 +94,8 @@ fn is_scalar_float(ins: &Instruction) -> bool {
             | Pand | Pandn | Por | Pcmpeqd | Pcmpgtd | Pshufd
             | Paddw | Paddq | Pcmpgtw | Pmuludq | Psrlq
             | Punpcklwd | Punpckhwd | Punpckldq | Punpckhdq | Punpcklqdq | Punpckhqdq
+            | Movhlps | Movlhps | Movhps | Movhpd | Movlps | Movlpd | Shufpd
+            | Unpcklpd | Unpckhpd | Addpd | Subpd | Mulpd | Divpd
     )
 }
 
@@ -132,6 +134,15 @@ fn read_xmm128(ins: &Instruction, i: u32) -> Option<(Expr, Expr)> {
         OpKind::Memory => {
             if ins.segment_prefix() != Register::None {
                 return None;
+            }
+            // A frame spill (`[rbp-d]`) aliases the named `Frame` slots the lifter
+            // creates for integer accesses to the same bytes; read the two halves
+            // as `Frame(d)`/`Frame(d+8)` so they stay consistent.
+            if let Some(d) = frame_disp(ins, i) {
+                return Some((
+                    Expr::Read(Location::Frame(d)),
+                    Expr::Read(Location::Frame(d + 8)),
+                ));
             }
             // Build the two half addresses. For a rip-relative load use explicit
             // constant addresses (`abs`, `abs+8`) so the read-only constant folder
@@ -173,6 +184,20 @@ fn write_xmm128(ins: &Instruction, lo: Expr, hi: Expr) -> Option<Vec<Stmt>> {
         OpKind::Memory => {
             if ins.segment_prefix() != Register::None {
                 return None;
+            }
+            // A frame spill aliases the named `Frame` slots used for integer
+            // accesses to the same bytes — write the two halves as `Frame(d)`/
+            // `Frame(d+8)` (through temps, to avoid a cross-half hazard).
+            if let Some(d) = frame_disp(ins, 0) {
+                let base = (ins.ip() as u32).wrapping_mul(2);
+                let t_lo = Location::Temp(base);
+                let t_hi = Location::Temp(base.wrapping_add(1));
+                return Some(vec![
+                    Stmt::Set { dst: t_lo.clone(), expr: lo },
+                    Stmt::Set { dst: t_hi.clone(), expr: hi },
+                    Stmt::Set { dst: Location::Frame(d), expr: Expr::Read(t_lo) },
+                    Stmt::Set { dst: Location::Frame(d + 8), expr: Expr::Read(t_hi) },
+                ]);
             }
             // A rip-relative store targets a global by absolute address — the same
             // form ARET emits for any `mov [global], reg`, so handle it likewise.
@@ -912,6 +937,84 @@ pub fn lift(insn: &Insn, bits: u32) -> Vec<Stmt> {
             let (_, shi) = some_or_asm!(read_xmm128(ins, 1));
             some_or_asm!(write_xmm128(ins, dhi, shi))
         }
+        // Packed double arithmetic: each 64-bit half is one IEEE-754 double,
+        // computed bit-exactly via the scalar `__fp_*64` helpers.
+        Mnemonic::Addpd | Mnemonic::Subpd | Mnemonic::Mulpd | Mnemonic::Divpd => {
+            let h = match ins.mnemonic() {
+                Mnemonic::Addpd => "__fp_add64",
+                Mnemonic::Subpd => "__fp_sub64",
+                Mnemonic::Mulpd => "__fp_mul64",
+                _ => "__fp_div64",
+            };
+            let (alo, ahi) = some_or_asm!(read_xmm128(ins, 0));
+            let (blo, bhi) = some_or_asm!(read_xmm128(ins, 1));
+            some_or_asm!(write_xmm128(ins, fcall(h, vec![alo, blo]), fcall(h, vec![ahi, bhi])))
+        }
+        // Double-precision unpack: pure 64-bit half selection.
+        Mnemonic::Unpcklpd => {
+            // dst.low unchanged, dst.high = src.low.
+            let (dlo, _) = some_or_asm!(read_xmm128(ins, 0));
+            let (slo, _) = some_or_asm!(read_xmm128(ins, 1));
+            some_or_asm!(write_xmm128(ins, dlo, slo))
+        }
+        Mnemonic::Unpckhpd => {
+            // dst.low = dst.high, dst.high = src.high.
+            let (_, dhi) = some_or_asm!(read_xmm128(ins, 0));
+            let (_, shi) = some_or_asm!(read_xmm128(ins, 1));
+            some_or_asm!(write_xmm128(ins, dhi, shi))
+        }
+        // 64-bit half moves between XMM registers (no memory operand).
+        Mnemonic::Movhlps => {
+            // dst.low = src.high; dst.high unchanged.
+            let (_, dhi) = some_or_asm!(read_xmm128(ins, 0));
+            let (_, shi) = some_or_asm!(read_xmm128(ins, 1));
+            some_or_asm!(write_xmm128(ins, shi, dhi))
+        }
+        Mnemonic::Movlhps => {
+            // dst.high = src.low; dst.low unchanged.
+            let (dlo, _) = some_or_asm!(read_xmm128(ins, 0));
+            let (slo, _) = some_or_asm!(read_xmm128(ins, 1));
+            some_or_asm!(write_xmm128(ins, dlo, slo))
+        }
+        // Move a 64-bit half to/from memory. `movhps`/`movhpd` use the high half,
+        // `movlps`/`movlpd` the low half; the other half is preserved.
+        Mnemonic::Movhps | Mnemonic::Movhpd | Mnemonic::Movlps | Mnemonic::Movlpd => {
+            let high = matches!(ins.mnemonic(), Mnemonic::Movhps | Mnemonic::Movhpd);
+            if ins.segment_prefix() != Register::None {
+                return asm();
+            }
+            match (ins.op_kind(0), ins.op_kind(1)) {
+                // Load m64 into the selected half of the destination register.
+                (OpKind::Register, OpKind::Memory) => {
+                    let (addr, _) = some_or_asm!(mem_addr(ins));
+                    let m = Expr::Load { addr: Box::new(addr), ty: Ty::int(64) };
+                    let (dlo, dhi) = some_or_asm!(read_xmm128(ins, 0));
+                    if high {
+                        some_or_asm!(write_xmm128(ins, dlo, m))
+                    } else {
+                        some_or_asm!(write_xmm128(ins, m, dhi))
+                    }
+                }
+                // Store the selected half of the source register to m64.
+                (OpKind::Memory, OpKind::Register) => {
+                    let (addr, _) = some_or_asm!(mem_addr(ins));
+                    let (slo, shi) = some_or_asm!(read_xmm128(ins, 1));
+                    let v = if high { shi } else { slo };
+                    vec![Stmt::Store { addr, value: v, ty: Ty::int(64) }]
+                }
+                _ => return asm(),
+            }
+        }
+        // Select one 64-bit lane from each source per the imm8 (bit0 → dst low
+        // from dst, bit1 → dst high from src).
+        Mnemonic::Shufpd => {
+            let (dlo, dhi) = some_or_asm!(read_xmm128(ins, 0));
+            let (slo, shi) = some_or_asm!(read_xmm128(ins, 1));
+            let imm = ins.immediate(2);
+            let lo = if imm & 1 != 0 { dhi } else { dlo };
+            let hi = if imm & 2 != 0 { shi } else { slo };
+            some_or_asm!(write_xmm128(ins, lo, hi))
+        }
         // Shuffle the four 32-bit lanes per the imm8 selector.
         Mnemonic::Pshufd => {
             let (lo, hi) = some_or_asm!(read_xmm128(ins, 1));
@@ -1027,7 +1130,7 @@ pub fn lift(insn: &Insn, bits: u32) -> Vec<Stmt> {
         // 1-operand mul/div/idiv (implicit edx:eax). 32-bit form only: the
         // 64-bit-wide result fits a 64-bit IR value. 64-bit operands would need
         // 128-bit arithmetic -> Asm fallback (sound).
-        Mnemonic::Mul | Mnemonic::Div | Mnemonic::Idiv if ins.op_count() == 1 => {
+        Mnemonic::Mul | Mnemonic::Imul | Mnemonic::Div | Mnemonic::Idiv if ins.op_count() == 1 => {
             let w = op0_width(ins, bits);
             // 64-bit form: rdx:rax is a 128-bit operand — use __int128 helpers.
             if w == 64 {
@@ -1042,6 +1145,10 @@ pub fn lift(insn: &Insn, bits: u32) -> Vec<Stmt> {
                     Mnemonic::Mul => (
                         bin(BinOp::Mul, ra.clone(), src.clone()),
                         fcall("__ix_mul64hi", vec![ra, src]),
+                    ),
+                    Mnemonic::Imul => (
+                        bin(BinOp::Mul, ra.clone(), src.clone()),
+                        fcall("__ix_imul64hi", vec![ra, src]),
                     ),
                     Mnemonic::Div => (
                         fcall("__ix_udiv", vec![rd.clone(), ra.clone(), src.clone()]),
@@ -1079,6 +1186,13 @@ pub fn lift(insn: &Insn, bits: u32) -> Vec<Stmt> {
                 Mnemonic::Mul => {
                     let p = bin(BinOp::Mul, eax, src); // <= 64 bits
                     (p.clone(), bin(BinOp::Shr, p, konst(32)))
+                }
+                Mnemonic::Imul => {
+                    // Signed 32×32→64 product: sign-extend both operands first.
+                    let a = Expr::Unary(UnOp::SignExtend, Box::new(eax));
+                    let b = Expr::Unary(UnOp::SignExtend, Box::new(src));
+                    let p = bin(BinOp::Mul, a, b);
+                    (bin(BinOp::And, p.clone(), konst(mask(32))), bin(BinOp::Shr, p, konst(32)))
                 }
                 Mnemonic::Div => {
                     let d = bin(BinOp::Or, bin(BinOp::Shl, edx, konst(32)), eax);
@@ -1232,6 +1346,57 @@ pub fn lift(insn: &Insn, bits: u32) -> Vec<Stmt> {
             let r = bin(op, a, b);
             let mut out = vec![set_flag(FlagKind::Zf, bin(BinOp::Eq, r.clone(), konst(0)))];
             out.extend(some_or_asm!(write_op0(ins, r, bits)));
+            out
+        }
+
+        // Rotate left/right. Models the value and CF (the bit rotated out); the
+        // x86 spec leaves OF *undefined* for multi-bit rotates, so no correct
+        // compiler branches on it — left untouched (sound). ZF/SF/PF/AF are not
+        // affected by rotates. The complement count is masked (`(w-c)&(w-1)`) to
+        // avoid C's shift-by-width UB when the count is 0.
+        Mnemonic::Rol | Mnemonic::Ror => {
+            let w = op0_width(ins, bits);
+            if w == 0 || (w & (w - 1)) != 0 {
+                return asm();
+            }
+            let x = bin(BinOp::And, some_or_asm!(op_value(ins, 0)), konst(mask(w)));
+            let c = bin(BinOp::And, some_or_asm!(op_value(ins, 1)), konst((w - 1) as i128));
+            let wc = bin(BinOp::And, bin(BinOp::Sub, konst(w as i128), c.clone()), konst((w - 1) as i128));
+            let val = if ins.mnemonic() == Mnemonic::Rol {
+                bin(BinOp::Or, bin(BinOp::Shl, x.clone(), c), bin(BinOp::Shr, x, wc))
+            } else {
+                bin(BinOp::Or, bin(BinOp::Shr, x.clone(), c), bin(BinOp::Shl, x, wc))
+            };
+            let val = bin(BinOp::And, val, konst(mask(w)));
+            // CF = LSB (rol) / MSB (ror) of the rotated result.
+            let cf = if ins.mnemonic() == Mnemonic::Rol {
+                bin(BinOp::And, val.clone(), konst(1))
+            } else {
+                bin(BinOp::And, bin(BinOp::Shr, val.clone(), konst((w - 1) as i128)), konst(1))
+            };
+            let mut out = vec![set_flag(FlagKind::Cf, cf)];
+            out.extend(some_or_asm!(write_op0(ins, val, bits)));
+            out
+        }
+
+        // Exchange two operands. Register/register only (the common case); the
+        // locked memory form is left as `asm` (sound). Sequenced through a temp so
+        // each side sees the other's original value.
+        Mnemonic::Xchg
+            if ins.op_kind(0) == OpKind::Register
+                && ins.op_kind(1) == OpKind::Register
+                && !is_high_byte(ins.op_register(0))
+                && !is_high_byte(ins.op_register(1)) =>
+        {
+            let v0 = some_or_asm!(op_value(ins, 0));
+            let v1 = some_or_asm!(op_value(ins, 1));
+            let id1 = some_or_asm!(reg_id(ins.op_register(1)));
+            let w1 = (ins.op_register(1).size() * 8) as u32;
+            let t = Location::Temp((insn.address as u32).wrapping_mul(2));
+            let dst1 = Location::Reg(id1);
+            let mut out = vec![Stmt::Set { dst: t.clone(), expr: v0 }];
+            out.extend(some_or_asm!(write_op0(ins, v1, bits)));
+            out.push(Stmt::Set { dst: dst1.clone(), expr: combine_write(&dst1, w1, Expr::Read(t), bits) });
             out
         }
 

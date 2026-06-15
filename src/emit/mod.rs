@@ -156,6 +156,7 @@ pub(crate) const FLOAT_HELPERS: &str = concat!(
     // Wide integer (64-bit 1-operand mul/div via 128-bit), byte swap, bit scan.
     "typedef unsigned __int128 __u128;typedef __int128 __i128;\n",
     "static inline uint64_t __ix_mul64hi(uint64_t a,uint64_t b){return (uint64_t)(((__u128)a*b)>>64);}\n",
+    "static inline uint64_t __ix_imul64hi(uint64_t a,uint64_t b){return (uint64_t)(((__i128)(int64_t)a*(int64_t)b)>>64);}\n",
     "static inline uint64_t __ix_udiv(uint64_t hi,uint64_t lo,uint64_t d){return d?(uint64_t)((((__u128)hi<<64)|lo)/d):0;}\n",
     "static inline uint64_t __ix_umod(uint64_t hi,uint64_t lo,uint64_t d){return d?(uint64_t)((((__u128)hi<<64)|lo)%d):0;}\n",
     "static inline uint64_t __ix_idiv(uint64_t hi,uint64_t lo,uint64_t d){__i128 n=(__i128)(((__u128)hi<<64)|lo);return d?(uint64_t)(n/(__i128)(int64_t)d):0;}\n",
