@@ -699,6 +699,21 @@ relogeable), et compare.
      plutôt que FAIL. Résultat : différentiel **-O0/-O1/-O2/-O3 = 131/131
      complètes** + 5 incomplètes assumées (vectorisation -O3).
 
+   - **SSE scalaire flottant — ✅ FAIT + validé.** Lifté via des helpers C
+     bit-exacts (`__fp_*`) : les XMM restent des motifs de bits en `uint64_t`, les
+     helpers réinterprètent, calculent en `float`/`double` natif, et réinterprètent
+     — donc bit-exact avec l'original. Couvre `movss/movsd/movd/movq`, `addss…divsd`,
+     `cvtsi2ss/sd`, `cvttss2si/sd`, `cvtss2sd/cvtsd2ss`, `comiss/comisd` (→ flags),
+     `pxor/xorps` (mise à zéro), `movaps/movapd` reg-reg. **Folding des constantes
+     `.rodata`** (rip-relative) en littéraux — lu via la section cible de la
+     relocation (contourne la collision base-0 des `.o`) — sans quoi un `movss
+     xmm,[rip+c]` déréférençait un pointeur sauvage. Validé : `favg/fcmp/fmix/fpoly`
+     passent à -O0/-O1/-O2 ; différentiel **155/155 complètes**.
+   - **Reste : SSE *packed* 128-bit** (`movaps` mémoire, `movdqa/movdqu`, `paddd`,
+     `punpck*`, `psrldq`…) + **x87** — c'est ce qui domine l'incomplétude du vrai
+     code (gzip 95, ls 180), pas le scalaire. Prochaine tranche (plus lourde :
+     modélisation vectorielle / pile x87).
+
    **Constat majeur (le plus important de cette série).** Une fois la détection
    d'incomplétude en place, on mesure la *vraie* fidélité sur du vrai code :
    **gzip 98/131, ls 184/200, cat 57/67 fonctions contiennent ≥1 instruction non

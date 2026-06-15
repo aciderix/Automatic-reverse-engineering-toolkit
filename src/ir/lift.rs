@@ -76,6 +76,50 @@ fn uses_vector_reg(ins: &Instruction) -> bool {
     })
 }
 
+/// Scalar SSE floating-point instructions modelled via the `__fp_*` runtime
+/// helpers (operating on bit patterns). These are exempt from the vector guard.
+fn is_scalar_float(ins: &Instruction) -> bool {
+    use Mnemonic::*;
+    matches!(
+        ins.mnemonic(),
+        Movss | Movsd | Movd | Movq
+            | Addss | Subss | Mulss | Divss
+            | Addsd | Subsd | Mulsd | Divsd
+            | Cvtsi2ss | Cvtsi2sd | Cvttss2si | Cvttsd2si
+            | Cvtss2sd | Cvtsd2ss
+            | Comiss | Comisd | Ucomiss | Ucomisd
+            | Pxor | Xorps | Xorpd
+            | Movaps | Movapd | Movups | Movupd
+    )
+}
+
+/// Build a call to a named runtime helper returning a 64-bit bit pattern.
+fn fcall(name: &str, args: Vec<Expr>) -> Expr {
+    Expr::Call { target: CallTarget::Named(name.to_string()), args, ret: Ty::int(64) }
+}
+
+/// Lift a binary scalar-float op `dst = helper(dst, src)`.
+fn fbin(name: &str, ins: &Instruction, bits: u32) -> Option<Vec<Stmt>> {
+    let a = op_value(ins, 0)?;
+    let b = op_value(ins, 1)?;
+    write_op0(ins, fcall(name, vec![a, b]), bits)
+}
+
+/// Lift a unary scalar-float convert `dst = helper(src)` (`src` = operand 1).
+fn fcvt(name: &str, ins: &Instruction, bits: u32) -> Option<Vec<Stmt>> {
+    let a = op_value(ins, 1)?;
+    write_op0(ins, fcall(name, vec![a]), bits)
+}
+
+/// Bit width of operand `i` (register size, or memory access size).
+fn op_bits(ins: &Instruction, i: u32) -> u32 {
+    match ins.op_kind(i) {
+        OpKind::Register => (ins.op_register(i).size() * 8) as u32,
+        OpKind::Memory => (ins.memory_size().size() * 8) as u32,
+        _ => 64,
+    }
+}
+
 fn read_reg(r: Register) -> Option<Expr> {
     let id = reg_id(r)?;
     let full = Expr::Read(Location::Reg(id));
@@ -447,12 +491,13 @@ pub fn lift(insn: &Insn, bits: u32) -> Vec<Stmt> {
     let ins = &insn.raw;
     let asm = || asm_fallback(insn);
 
-    // SSE/AVX vector instructions are not modelled. `reg_id` maps XMM/YMM/ZMM to
-    // a register id, so without this guard a packed op (e.g. `paddd`, `movdqu`)
-    // would be lifted as a *scalar* 64-bit operation — silently wrong. Emit an
-    // honest `asm` fallback instead; downstream that flags the function as an
-    // incomplete decompilation rather than producing an incorrect result.
-    if uses_vector_reg(ins) {
+    // SSE/AVX vector instructions are not modelled in general. `reg_id` maps
+    // XMM/YMM/ZMM to a register id, so without this guard a packed op (e.g.
+    // `paddd`, `movdqu`) would be lifted as a *scalar* 64-bit operation —
+    // silently wrong. The scalar floating-point subset handled below (operating
+    // on bit patterns via runtime helpers) is exempt; everything else degrades to
+    // an honest `asm` fallback that flags the decompilation incomplete.
+    if uses_vector_reg(ins) && !is_scalar_float(ins) {
         return asm();
     }
 
@@ -556,6 +601,82 @@ pub fn lift(insn: &Insn, bits: u32) -> Vec<Stmt> {
             ];
             out.extend(some_or_asm!(write_op0(ins, r, bits)));
             out
+        }
+
+        // --- scalar SSE floating point (via __fp_* bit-pattern helpers) -------
+        // Moves copy bit patterns; the helpers reinterpret only the relevant low
+        // bits, so an unmasked move is fine.
+        Mnemonic::Movss | Mnemonic::Movsd | Mnemonic::Movd | Mnemonic::Movq => {
+            let v = some_or_asm!(op_value(ins, 1));
+            some_or_asm!(write_op0(ins, v, bits))
+        }
+        Mnemonic::Movaps | Mnemonic::Movapd | Mnemonic::Movups | Mnemonic::Movupd => {
+            // A register-register copy is a safe scalar move (a genuine 128-bit
+            // packed consumer would still be flagged by its own packed op). A
+            // memory operand may be a 128-bit load/store (e.g. `memcpy`) we don't
+            // model — leave those as an honest `asm` fallback.
+            if ins.op_kind(0) == OpKind::Register && ins.op_kind(1) == OpKind::Register {
+                let v = some_or_asm!(op_value(ins, 1));
+                some_or_asm!(write_op0(ins, v, bits))
+            } else {
+                return asm();
+            }
+        }
+        Mnemonic::Addss => some_or_asm!(fbin("__fp_add32", ins, bits)),
+        Mnemonic::Subss => some_or_asm!(fbin("__fp_sub32", ins, bits)),
+        Mnemonic::Mulss => some_or_asm!(fbin("__fp_mul32", ins, bits)),
+        Mnemonic::Divss => some_or_asm!(fbin("__fp_div32", ins, bits)),
+        Mnemonic::Addsd => some_or_asm!(fbin("__fp_add64", ins, bits)),
+        Mnemonic::Subsd => some_or_asm!(fbin("__fp_sub64", ins, bits)),
+        Mnemonic::Mulsd => some_or_asm!(fbin("__fp_mul64", ins, bits)),
+        Mnemonic::Divsd => some_or_asm!(fbin("__fp_div64", ins, bits)),
+        Mnemonic::Cvtsi2ss => {
+            let n = if op_bits(ins, 1) >= 64 { "__fp_i64_32" } else { "__fp_i32_32" };
+            some_or_asm!(fcvt(n, ins, bits))
+        }
+        Mnemonic::Cvtsi2sd => {
+            let n = if op_bits(ins, 1) >= 64 { "__fp_i64_64" } else { "__fp_i32_64" };
+            some_or_asm!(fcvt(n, ins, bits))
+        }
+        Mnemonic::Cvttss2si => {
+            let n = if op_bits(ins, 0) >= 64 { "__fp_32_i64" } else { "__fp_32_i32" };
+            some_or_asm!(fcvt(n, ins, bits))
+        }
+        Mnemonic::Cvttsd2si => {
+            let n = if op_bits(ins, 0) >= 64 { "__fp_64_i64" } else { "__fp_64_i32" };
+            some_or_asm!(fcvt(n, ins, bits))
+        }
+        Mnemonic::Cvtss2sd => some_or_asm!(fcvt("__fp_32_64", ins, bits)),
+        Mnemonic::Cvtsd2ss => some_or_asm!(fcvt("__fp_64_32", ins, bits)),
+        Mnemonic::Comiss | Mnemonic::Ucomiss | Mnemonic::Comisd | Mnemonic::Ucomisd => {
+            let a = some_or_asm!(op_value(ins, 0));
+            let b = some_or_asm!(op_value(ins, 1));
+            let is32 = matches!(ins.mnemonic(), Mnemonic::Comiss | Mnemonic::Ucomiss);
+            let (lt, eq, un) = if is32 {
+                ("__fp_lt32", "__fp_eq32", "__fp_un32")
+            } else {
+                ("__fp_lt64", "__fp_eq64", "__fp_un64")
+            };
+            // comiss flags: CF=a<b|unord, ZF=a==b|unord, PF=unord, SF=OF=0.
+            let unord = fcall(un, vec![a.clone(), b.clone()]);
+            vec![
+                set_flag(FlagKind::Cf, bin(BinOp::Or, fcall(lt, vec![a.clone(), b.clone()]), unord.clone())),
+                set_flag(FlagKind::Zf, bin(BinOp::Or, fcall(eq, vec![a.clone(), b.clone()]), unord.clone())),
+                set_flag(FlagKind::Pf, unord),
+                set_flag(FlagKind::Sf, konst(0)),
+                set_flag(FlagKind::Of, konst(0)),
+            ]
+        }
+        Mnemonic::Pxor | Mnemonic::Xorps | Mnemonic::Xorpd => {
+            // The `xorps xmm,xmm` zeroing idiom. A packed xor of distinct
+            // registers is a real 128-bit op and is not modelled.
+            if ins.op_kind(1) == OpKind::Register
+                && ins.op_register(0) == ins.op_register(1)
+            {
+                some_or_asm!(write_op0(ins, konst(0), bits))
+            } else {
+                return asm();
+            }
         }
 
         Mnemonic::Cmp => {

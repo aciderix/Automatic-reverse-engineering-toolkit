@@ -67,11 +67,15 @@ pub struct Program {
 }
 
 /// A resolved static relocation: the branch/data target address (when the symbol
-/// is defined in this object) and/or the referenced symbol's name.
+/// is defined in this object), the referenced symbol's name, and — when the
+/// target is read-only data — the first 8 bytes there, so rip-relative constant
+/// loads can be folded to literals (read at parse time via the target's section,
+/// which disambiguates the address collisions of a base-0 object file).
 #[derive(Clone, Debug, Default)]
 pub struct RelocEntry {
     pub target: Option<u64>,
     pub name: Option<String>,
+    pub data: Option<u64>,
 }
 
 impl Program {
@@ -393,16 +397,28 @@ fn parse_static_relocs(obj: &object::File) -> BTreeMap<u64, RelocEntry> {
         let base = sec.address();
         for (off, rel) in sec.relocations() {
             let site = base + off;
-            let (sym_addr, name) = match rel.target() {
+            // Resolve the target's address, name, and its section (to read
+            // read-only constants directly, sidestepping base-0 address collisions).
+            let (sym_addr, name, tsec) = match rel.target() {
                 RelocationTarget::Symbol(idx) => match obj.symbol_by_index(idx) {
                     Ok(sym) => {
-                        let a = sym.address();
                         let nm = sym.name().ok().filter(|n| !n.is_empty()).map(str::to_string);
-                        (if a != 0 { Some(a) } else { None }, nm)
+                        // A *defined* symbol has a section (even at offset 0 in a
+                        // base-0 object); an undefined external (libc) has none.
+                        match sym.section() {
+                            object::SymbolSection::Section(s) => {
+                                (Some(sym.address()), nm, obj.section_by_index(s).ok())
+                            }
+                            _ => (None, nm, None),
+                        }
                     }
-                    Err(_) => (None, None),
+                    Err(_) => (None, None, None),
                 },
-                _ => (None, None),
+                RelocationTarget::Section(idx) => {
+                    let sec = obj.section_by_index(idx).ok();
+                    (sec.as_ref().map(|s| s.address()), None, sec)
+                }
+                _ => (None, None, None),
             };
             // PC-relative 4-byte field ends the instruction: target = S + A + 4.
             let pcrel = matches!(rel.kind(), RelocationKind::Relative | RelocationKind::PltRelative);
@@ -411,7 +427,26 @@ fn parse_static_relocs(obj: &object::File) -> BTreeMap<u64, RelocEntry> {
                 (Some(a), false) => Some(a.wrapping_add(rel.addend() as u64)),
                 (None, _) => None,
             };
-            out.insert(site, RelocEntry { target, name });
+            // If the target is read-only data, capture the first 8 bytes so a
+            // rip-relative constant load can be folded to a literal.
+            let data = match (target, &tsec) {
+                (Some(t), Some(s))
+                    if matches!(
+                        s.kind(),
+                        SectionKind::ReadOnlyData | SectionKind::ReadOnlyString
+                    ) =>
+                {
+                    s.data().ok().and_then(|d| {
+                        let o = t.checked_sub(s.address())? as usize;
+                        let mut buf = [0u8; 8];
+                        let n = d.get(o..)?.len().min(8);
+                        buf[..n].copy_from_slice(&d[o..o + n]);
+                        Some(u64::from_le_bytes(buf))
+                    })
+                }
+                _ => None,
+            };
+            out.insert(site, RelocEntry { target, name, data });
         }
     }
     out

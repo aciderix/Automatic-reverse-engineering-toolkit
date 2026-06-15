@@ -104,6 +104,51 @@ fn redirect_terminator(last: Option<&mut Stmt>, from: u32, to: u32) {
     }
 }
 
+/// Scalar SSE float runtime helpers. XMM scalar values are carried through the
+/// integer IR as bit patterns in `uint64_t`; these reinterpret the bits, compute
+/// with native (IEEE-754) `float`/`double`, and reinterpret back, so the
+/// decompiled floating-point arithmetic is bit-exact with the original binary.
+pub(crate) const FLOAT_HELPERS: &str = concat!(
+    "typedef union{uint32_t u;float f;}__fp32;typedef union{uint64_t u;double d;}__fp64;\n",
+    "static inline uint64_t __fp_f32(float f){__fp32 t;t.f=f;return t.u;}\n",
+    "static inline float __fp_g32(uint64_t b){__fp32 t;t.u=(uint32_t)b;return t.f;}\n",
+    "static inline uint64_t __fp_f64(double d){__fp64 t;t.d=d;return t.u;}\n",
+    "static inline double __fp_g64(uint64_t b){__fp64 t;t.u=b;return t.d;}\n",
+    "static inline uint64_t __fp_add32(uint64_t a,uint64_t b){return __fp_f32(__fp_g32(a)+__fp_g32(b));}\n",
+    "static inline uint64_t __fp_sub32(uint64_t a,uint64_t b){return __fp_f32(__fp_g32(a)-__fp_g32(b));}\n",
+    "static inline uint64_t __fp_mul32(uint64_t a,uint64_t b){return __fp_f32(__fp_g32(a)*__fp_g32(b));}\n",
+    "static inline uint64_t __fp_div32(uint64_t a,uint64_t b){return __fp_f32(__fp_g32(a)/__fp_g32(b));}\n",
+    "static inline uint64_t __fp_add64(uint64_t a,uint64_t b){return __fp_f64(__fp_g64(a)+__fp_g64(b));}\n",
+    "static inline uint64_t __fp_sub64(uint64_t a,uint64_t b){return __fp_f64(__fp_g64(a)-__fp_g64(b));}\n",
+    "static inline uint64_t __fp_mul64(uint64_t a,uint64_t b){return __fp_f64(__fp_g64(a)*__fp_g64(b));}\n",
+    "static inline uint64_t __fp_div64(uint64_t a,uint64_t b){return __fp_f64(__fp_g64(a)/__fp_g64(b));}\n",
+    "static inline uint64_t __fp_i32_32(uint64_t i){return __fp_f32((float)(int32_t)i);}\n",
+    "static inline uint64_t __fp_i64_32(uint64_t i){return __fp_f32((float)(int64_t)i);}\n",
+    "static inline uint64_t __fp_i32_64(uint64_t i){return __fp_f64((double)(int32_t)i);}\n",
+    "static inline uint64_t __fp_i64_64(uint64_t i){return __fp_f64((double)(int64_t)i);}\n",
+    "static inline uint64_t __fp_32_i32(uint64_t a){return (uint64_t)(int64_t)(int32_t)__fp_g32(a);}\n",
+    "static inline uint64_t __fp_32_i64(uint64_t a){return (uint64_t)(int64_t)__fp_g32(a);}\n",
+    "static inline uint64_t __fp_64_i32(uint64_t a){return (uint64_t)(int64_t)(int32_t)__fp_g64(a);}\n",
+    "static inline uint64_t __fp_64_i64(uint64_t a){return (uint64_t)(int64_t)__fp_g64(a);}\n",
+    "static inline uint64_t __fp_32_64(uint64_t a){return __fp_f64((double)__fp_g32(a));}\n",
+    "static inline uint64_t __fp_64_32(uint64_t a){return __fp_f32((float)__fp_g64(a));}\n",
+    "static inline uint64_t __fp_lt32(uint64_t a,uint64_t b){return __fp_g32(a)<__fp_g32(b);}\n",
+    "static inline uint64_t __fp_eq32(uint64_t a,uint64_t b){return __fp_g32(a)==__fp_g32(b);}\n",
+    "static inline uint64_t __fp_un32(uint64_t a,uint64_t b){float x=__fp_g32(a),y=__fp_g32(b);return x!=x||y!=y;}\n",
+    "static inline uint64_t __fp_lt64(uint64_t a,uint64_t b){return __fp_g64(a)<__fp_g64(b);}\n",
+    "static inline uint64_t __fp_eq64(uint64_t a,uint64_t b){return __fp_g64(a)==__fp_g64(b);}\n",
+    "static inline uint64_t __fp_un64(uint64_t a,uint64_t b){double x=__fp_g64(a),y=__fp_g64(b);return x!=x||y!=y;}\n",
+);
+
+/// The float-helper preamble, included only when the body references it.
+pub(crate) fn float_preamble(body: &str) -> &'static str {
+    if body.contains("__fp_") {
+        FLOAT_HELPERS
+    } else {
+        ""
+    }
+}
+
 /// Count instructions that could not be lifted. The lifter represents an
 /// unmodelled instruction either as `Stmt::Asm` or as an `asm:`-named call
 /// (`asm_fallback`, which also clobbers the written registers to `Undef`). A
@@ -732,6 +777,7 @@ pub fn emit_unit(funcs: &[IrFunction]) -> String {
     }
     let mut out = String::new();
     out.push_str("#include <stdint.h>\n\n");
+    out.push_str(float_preamble(&body));
     // Forward-declare every function (defined or external) with an empty
     // parameter list, so a call that precedes its callee's definition still has
     // a compatible prototype. The empty list is compatible with the real,

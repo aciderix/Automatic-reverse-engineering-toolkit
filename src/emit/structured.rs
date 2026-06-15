@@ -416,6 +416,7 @@ pub fn emit_unit(funcs: &[IrFunction]) -> String {
     }
     let mut out = String::new();
     out.push_str("#include <stdint.h>\n\n");
+    out.push_str(super::float_preamble(&body));
     // Forward-declare every function (defined or external) with an empty
     // parameter list so calls that precede a definition still see a compatible
     // prototype.

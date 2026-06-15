@@ -60,3 +60,12 @@ int sumrec(int n) { return n <= 0 ? 0 : n + sumrec(n - 1); }
 /* Subtract-with-borrow idioms: gcc emits `sbb` for these at -O1/-O2. */
 int borrow(unsigned a, unsigned b) { return (a < b) ? -1 : 0; }
 int cmp3(unsigned a, unsigned b)   { return (a > b) - (a < b); }
+
+/* Scalar floating-point: exercises cvtsi2ss/sd, addss/mulss/.../divsd,
+   cvttss2si/cvttsd2si, comiss/comisd, movss/movsd. Returns int so the
+   differential harness can compare results (float ops are bit-exact: both the
+   original and ARET use native IEEE-754). */
+int favg(int a, int b)      { float x = a, y = b; return (int)((x + y) / 2.0f); }
+int fpoly(int x)            { double t = x; return (int)(t*t*0.5 + t*3.0 - 1.0); }
+int fcmp(int a, int b)      { float x = a * 1.5f, y = b * 1.5f; return x > y ? a : b; }
+int fmix(int a, int b, int c) { double r = (double)a / (b ? b : 1) + (double)c * 0.25; return (int)r; }

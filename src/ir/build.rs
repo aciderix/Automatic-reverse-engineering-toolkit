@@ -42,7 +42,9 @@ pub fn build_ir(prog: &Program, func: &Function) -> IrFunction {
             blk.insns.len()
         };
         for insn in &blk.insns[..body_len] {
-            stmts.extend(lift(insn, bits));
+            let mut s = lift(insn, bits);
+            fold_ro_loads(&mut s, insn, prog);
+            stmts.extend(s);
         }
 
         // Internal successors (block indices), in CFG order.
@@ -126,6 +128,90 @@ pub fn build_ir(prog: &Program, func: &Function) -> IrFunction {
         blocks,
         next_value: 0,
         next_temp: 0,
+    }
+}
+
+/// Fold a rip-relative load of read-only data into a literal. Without this,
+/// `movss xmm,[rip+c]` (a float/integer constant in `.rodata`) emits a
+/// dereference of an address that is a placeholder in an object file and unmapped
+/// in a standalone recompile — silently crashing. The constant comes from the
+/// relocation's captured data (object files) or from reading the absolute
+/// read-only address directly (linked executables).
+fn fold_ro_loads(stmts: &mut [Stmt], insn: &crate::disasm::Insn, prog: &Program) {
+    let ins = &insn.raw;
+    if !ins.is_ip_rel_memory_operand() {
+        return;
+    }
+    let abs = ins.ip_rel_memory_address();
+    let bits = ((ins.memory_size().size() * 8).min(64)) as u8;
+    let value = if let Some(r) = prog.reloc_in(insn.address, insn.len) {
+        match r.data {
+            Some(d) => d,
+            None => return, // relocated to writable/unresolved data: must stay a load
+        }
+    } else if prog.section_at(abs).map(|s| !s.writable).unwrap_or(false) {
+        match prog.read_u64(abs) {
+            Some(d) => d,
+            None => return,
+        }
+    } else {
+        return;
+    };
+    let masked = if bits >= 64 {
+        value as i128
+    } else {
+        (value & ((1u64 << bits) - 1)) as i128
+    };
+    for st in stmts.iter_mut() {
+        fold_const_load(st, abs as i128, masked, bits);
+    }
+}
+
+/// Replace `Load { addr: Const(`bogus`) }` with `Const(val)` throughout `s`.
+fn fold_const_load(s: &mut Stmt, bogus: i128, val: i128, bits: u8) {
+    fn go(e: &mut Expr, bogus: i128, val: i128, bits: u8) {
+        if let Expr::Load { addr, .. } = e {
+            if matches!(addr.as_ref(), Expr::Const(c, _) if *c == bogus) {
+                *e = Expr::Const(val, Ty::int(bits));
+                return;
+            }
+            go(addr, bogus, val, bits);
+            return;
+        }
+        match e {
+            Expr::Unary(_, x) | Expr::Cast { expr: x, .. } => go(x, bogus, val, bits),
+            Expr::Binary(_, a, b) => {
+                go(a, bogus, val, bits);
+                go(b, bogus, val, bits);
+            }
+            Expr::Select { cond, then_, else_ } => {
+                go(cond, bogus, val, bits);
+                go(then_, bogus, val, bits);
+                go(else_, bogus, val, bits);
+            }
+            Expr::Call { target, args, .. } => {
+                if let CallTarget::Indirect(x) = target {
+                    go(x, bogus, val, bits);
+                }
+                for a in args {
+                    go(a, bogus, val, bits);
+                }
+            }
+            _ => {}
+        }
+    }
+    match s {
+        Stmt::Set { expr, .. } | Stmt::Assign { expr, .. } | Stmt::CallStmt(expr) => {
+            go(expr, bogus, val, bits)
+        }
+        Stmt::Store { addr, value, .. } => {
+            go(addr, bogus, val, bits);
+            go(value, bogus, val, bits);
+        }
+        Stmt::Branch { cond, .. } => go(cond, bogus, val, bits),
+        Stmt::Switch { value, .. } => go(value, bogus, val, bits),
+        Stmt::Return(Some(e)) => go(e, bogus, val, bits),
+        _ => {}
     }
 }
 
