@@ -91,6 +91,7 @@ fn is_scalar_float(ins: &Instruction) -> bool {
             | Pxor | Xorps | Xorpd
             | Movaps | Movapd | Movups | Movupd
             | Movdqa | Movdqu | Paddd | Psubd | Psrldq
+            | Pand | Pandn | Por | Pcmpeqd | Pcmpgtd | Pshufd
     )
 }
 
@@ -732,6 +733,35 @@ pub fn lift(insn: &Insn, bits: u32) -> Vec<Stmt> {
                 }
                 _ => return asm(),
             }
+        }
+        // 128-bit bitwise (exact on both halves). `pandn dst,src` = ~dst & src.
+        Mnemonic::Pand | Mnemonic::Por | Mnemonic::Pandn => {
+            let (alo, ahi) = some_or_asm!(read_xmm128(ins, 0));
+            let (blo, bhi) = some_or_asm!(read_xmm128(ins, 1));
+            let (lo, hi) = match ins.mnemonic() {
+                Mnemonic::Pand => (bin(BinOp::And, alo, blo), bin(BinOp::And, ahi, bhi)),
+                Mnemonic::Por => (bin(BinOp::Or, alo, blo), bin(BinOp::Or, ahi, bhi)),
+                _ => (
+                    bin(BinOp::And, Expr::Unary(UnOp::Not, Box::new(alo)), blo),
+                    bin(BinOp::And, Expr::Unary(UnOp::Not, Box::new(ahi)), bhi),
+                ),
+            };
+            some_or_asm!(write_xmm128(ins, lo, hi))
+        }
+        // Lane-wise 32-bit compares producing all-ones / zero masks.
+        Mnemonic::Pcmpeqd | Mnemonic::Pcmpgtd => {
+            let (alo, ahi) = some_or_asm!(read_xmm128(ins, 0));
+            let (blo, bhi) = some_or_asm!(read_xmm128(ins, 1));
+            let h = if ins.mnemonic() == Mnemonic::Pcmpeqd { "__pi_eq32" } else { "__pi_gt32" };
+            some_or_asm!(write_xmm128(ins, fcall(h, vec![alo, blo]), fcall(h, vec![ahi, bhi])))
+        }
+        // Shuffle the four 32-bit lanes per the imm8 selector.
+        Mnemonic::Pshufd => {
+            let (lo, hi) = some_or_asm!(read_xmm128(ins, 1));
+            let imm = konst(ins.immediate(2) as i128);
+            let nlo = fcall("__pi_shuf_lo", vec![lo.clone(), hi.clone(), imm.clone()]);
+            let nhi = fcall("__pi_shuf_hi", vec![lo, hi, imm]);
+            some_or_asm!(write_xmm128(ins, nlo, nhi))
         }
         Mnemonic::Addss => some_or_asm!(fbin("__fp_add32", ins, bits)),
         Mnemonic::Subss => some_or_asm!(fbin("__fp_sub32", ins, bits)),

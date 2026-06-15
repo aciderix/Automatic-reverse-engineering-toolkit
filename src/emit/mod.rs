@@ -141,6 +141,10 @@ pub(crate) const FLOAT_HELPERS: &str = concat!(
     // Packed integer lanes (two 32-bit lanes per 64-bit half), no carry across lanes.
     "static inline uint64_t __pi_add32(uint64_t a,uint64_t b){uint32_t l=(uint32_t)a+(uint32_t)b,h=(uint32_t)(a>>32)+(uint32_t)(b>>32);return (uint64_t)l|((uint64_t)h<<32);}\n",
     "static inline uint64_t __pi_sub32(uint64_t a,uint64_t b){uint32_t l=(uint32_t)a-(uint32_t)b,h=(uint32_t)(a>>32)-(uint32_t)(b>>32);return (uint64_t)l|((uint64_t)h<<32);}\n",
+    "static inline uint64_t __pi_eq32(uint64_t a,uint64_t b){uint32_t l=(uint32_t)a==(uint32_t)b?~0u:0,h=(uint32_t)(a>>32)==(uint32_t)(b>>32)?~0u:0;return (uint64_t)l|((uint64_t)h<<32);}\n",
+    "static inline uint64_t __pi_gt32(uint64_t a,uint64_t b){uint32_t l=(int32_t)a>(int32_t)b?~0u:0,h=(int32_t)(a>>32)>(int32_t)(b>>32)?~0u:0;return (uint64_t)l|((uint64_t)h<<32);}\n",
+    "static inline uint64_t __pi_shuf_lo(uint64_t lo,uint64_t hi,uint64_t m){uint64_t a=((m&3)<2?lo:hi)>>(((m&3)&1)*32),b=(((m>>2)&3)<2?lo:hi)>>((((m>>2)&3)&1)*32);return (a&0xffffffff)|((b&0xffffffff)<<32);}\n",
+    "static inline uint64_t __pi_shuf_hi(uint64_t lo,uint64_t hi,uint64_t m){uint64_t a=(((m>>4)&3)<2?lo:hi)>>((((m>>4)&3)&1)*32),b=(((m>>6)&3)<2?lo:hi)>>((((m>>6)&3)&1)*32);return (a&0xffffffff)|((b&0xffffffff)<<32);}\n",
 );
 
 /// The runtime-helper preamble, included only when the body references it.
