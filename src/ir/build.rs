@@ -33,9 +33,13 @@ pub fn build_ir(prog: &Program, func: &Function) -> IrFunction {
     // unmodelled FPU op, ambiguous depth, or a float→int store whose rounding we
     // cannot prove) — those instructions then degrade to a sound `Asm`.
     let x87 = x87_states(func);
-    // In x87 code, keep every stack access as raw `__frame` memory (no named
-    // scalars) so the integer accesses alias the FPU spills consistently.
-    crate::ir::lift::set_frames_off(x87.is_some());
+    // Keep every stack access as raw `__frame` memory (no named scalars) when the
+    // function spills 80-bit x87 values OR 128-bit XMM registers: those go through
+    // byte-addressed memory, and a function may read the same bytes back at a
+    // finer granularity (e.g. 4-byte packed-float lanes). Named scalars would
+    // alias-split those accesses; raw `__frame` keeps them byte-consistent.
+    let raw_frames = x87.is_some() || uses_xmm128_mem(func);
+    crate::ir::lift::set_frames_off(raw_frames);
 
     let mut blocks: Vec<Block> = Vec::with_capacity(order.len());
     for (i, &addr) in order.iter().enumerate() {
@@ -205,6 +209,18 @@ pub fn build_ir(prog: &Program, func: &Function) -> IrFunction {
         next_value: 0,
         next_temp: 0,
     }
+}
+
+/// Does the function access 128-bit (16-byte) memory via an XMM register? Such
+/// spills are written as two 8-byte halves but may be read back at a finer
+/// granularity, so the function must keep frame slots as raw `__frame` memory.
+fn uses_xmm128_mem(func: &Function) -> bool {
+    func.blocks.values().any(|b| {
+        b.insns.iter().any(|i| {
+            i.raw.memory_size().size() == 16
+                && (0..i.raw.op_count()).any(|k| i.raw.op_register(k).is_xmm())
+        })
+    })
 }
 
 /// Static x87 stack-depth + rounding-mode analysis. Returns, per modelled FPU

@@ -145,3 +145,35 @@ int vshuf(int x, int y){
 
 /* rep stos (gcc emits `rep stosq` to zero a struct/array). */
 int repset(int a, int b){ long buf[16]; for(int i=0;i<16;i++) buf[i]=0; buf[a&15]=b; return (int)buf[b&15]; }
+
+/* Packed single-precision SSE (4 floats / 128-bit): addps/subps/mulps/divps,
+   minps/maxps/sqrtps, cmpps+movmskps, shufps, unpcklps/unpckhps, cvtdq2ps.
+   Built from int args (finite, deterministic) so the harness can compare. */
+typedef float __v4sf __attribute__((vector_size(16)));
+typedef int   __v4si __attribute__((vector_size(16)));
+int psA(int x, int y){
+    __v4sf a={(float)x,(float)y,(float)(x+2),(float)(y+3)};
+    __v4sf b={(float)(y+1),(float)(x-1),(float)x,(float)y};
+    __v4sf c=a*b + a - b;
+    __v4sf d=b/(a+ (__v4sf){1,1,1,1});
+    return (int)c[0]+(int)c[1]*3-(int)c[2]+(int)d[3];
+}
+int psB(int x, int y){
+    __v4sf a={(float)x,(float)y,(float)(x*2),(float)(y*2)};
+    __v4sf b={(float)y,(float)x,(float)(y*3),(float)(x*3)};
+    __v4sf lo=__builtin_ia32_minps(a,b), hi=__builtin_ia32_maxps(a,b);
+    __v4sf s=__builtin_ia32_sqrtps(hi*hi);
+    return (int)lo[0]-(int)hi[1]+(int)s[2]+(int)s[3];
+}
+int psC(int x, int y){
+    __v4sf a={(float)x,(float)y,(float)(x+1),(float)(y+1)};
+    __v4sf b={(float)y,(float)x,(float)(x-1),(float)(y-1)};
+    __v4sf m=(__v4sf)__builtin_ia32_cmpltps(a,b);
+    return __builtin_ia32_movmskps(m) + (int)((__v4sf)__builtin_ia32_cmpleps(a,b))[0];
+}
+int psD(int x, int y){
+    __v4si a={x,y,x+y,x-y};
+    __v4sf b=__builtin_ia32_cvtdq2ps(a);
+    __v4sf c=b*b - b;
+    return (int)c[0]+(int)c[1]-(int)c[2]+(int)c[3];
+}

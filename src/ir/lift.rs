@@ -96,6 +96,8 @@ fn is_scalar_float(ins: &Instruction) -> bool {
             | Punpcklwd | Punpckhwd | Punpckldq | Punpckhdq | Punpcklqdq | Punpckhqdq
             | Movhlps | Movlhps | Movhps | Movhpd | Movlps | Movlpd | Shufpd
             | Unpcklpd | Unpckhpd | Addpd | Subpd | Mulpd | Divpd
+            | Addps | Subps | Mulps | Divps | Minps | Maxps | Sqrtps | Cvtdq2ps
+            | Cmpps | Andps | Orps | Andnps | Shufps | Movmskps | Unpcklps | Unpckhps
     )
 }
 
@@ -134,15 +136,6 @@ fn read_xmm128(ins: &Instruction, i: u32) -> Option<(Expr, Expr)> {
         OpKind::Memory => {
             if ins.segment_prefix() != Register::None {
                 return None;
-            }
-            // A frame spill (`[rbp-d]`) aliases the named `Frame` slots the lifter
-            // creates for integer accesses to the same bytes; read the two halves
-            // as `Frame(d)`/`Frame(d+8)` so they stay consistent.
-            if let Some(d) = frame_disp(ins, i) {
-                return Some((
-                    Expr::Read(Location::Frame(d)),
-                    Expr::Read(Location::Frame(d + 8)),
-                ));
             }
             // Build the two half addresses. For a rip-relative load use explicit
             // constant addresses (`abs`, `abs+8`) so the read-only constant folder
@@ -184,20 +177,6 @@ fn write_xmm128(ins: &Instruction, lo: Expr, hi: Expr) -> Option<Vec<Stmt>> {
         OpKind::Memory => {
             if ins.segment_prefix() != Register::None {
                 return None;
-            }
-            // A frame spill aliases the named `Frame` slots used for integer
-            // accesses to the same bytes — write the two halves as `Frame(d)`/
-            // `Frame(d+8)` (through temps, to avoid a cross-half hazard).
-            if let Some(d) = frame_disp(ins, 0) {
-                let base = (ins.ip() as u32).wrapping_mul(2);
-                let t_lo = Location::Temp(base);
-                let t_hi = Location::Temp(base.wrapping_add(1));
-                return Some(vec![
-                    Stmt::Set { dst: t_lo.clone(), expr: lo },
-                    Stmt::Set { dst: t_hi.clone(), expr: hi },
-                    Stmt::Set { dst: Location::Frame(d), expr: Expr::Read(t_lo) },
-                    Stmt::Set { dst: Location::Frame(d + 8), expr: Expr::Read(t_hi) },
-                ]);
             }
             // A rip-relative store targets a global by absolute address — the same
             // form ARET emits for any `mov [global], reg`, so handle it likewise.
@@ -949,10 +928,12 @@ pub fn lift(insn: &Insn, bits: u32) -> Vec<Stmt> {
                 fcall("__pi_unpcklwd_hi", vec![d, s])
             ))
         }
-        Mnemonic::Punpckldq | Mnemonic::Punpckhdq => {
+        // unpcklps/unpckhps interleave 32-bit lanes exactly like punpckldq/hdq.
+        Mnemonic::Punpckldq | Mnemonic::Punpckhdq | Mnemonic::Unpcklps | Mnemonic::Unpckhps => {
             let (dlo, dhi) = some_or_asm!(read_xmm128(ins, 0));
             let (slo, shi) = some_or_asm!(read_xmm128(ins, 1));
-            let (d, s) = if ins.mnemonic() == Mnemonic::Punpckldq { (dlo, slo) } else { (dhi, shi) };
+            let low = matches!(ins.mnemonic(), Mnemonic::Punpckldq | Mnemonic::Unpcklps);
+            let (d, s) = if low { (dlo, slo) } else { (dhi, shi) };
             some_or_asm!(write_xmm128(
                 ins,
                 fcall("__pi_unpckldq_lo", vec![d.clone(), s.clone()]),
@@ -969,6 +950,73 @@ pub fn lift(insn: &Insn, bits: u32) -> Vec<Stmt> {
             let (_, shi) = some_or_asm!(read_xmm128(ins, 1));
             some_or_asm!(write_xmm128(ins, dhi, shi))
         }
+        // Packed single-precision arithmetic/min/max: two floats per 64-bit half,
+        // bit-exact via the `__ps_*` helpers.
+        Mnemonic::Addps | Mnemonic::Subps | Mnemonic::Mulps | Mnemonic::Divps
+        | Mnemonic::Minps | Mnemonic::Maxps => {
+            let h = match ins.mnemonic() {
+                Mnemonic::Addps => "__ps_add",
+                Mnemonic::Subps => "__ps_sub",
+                Mnemonic::Mulps => "__ps_mul",
+                Mnemonic::Divps => "__ps_div",
+                Mnemonic::Minps => "__ps_min",
+                _ => "__ps_max",
+            };
+            let (alo, ahi) = some_or_asm!(read_xmm128(ins, 0));
+            let (blo, bhi) = some_or_asm!(read_xmm128(ins, 1));
+            some_or_asm!(write_xmm128(ins, fcall(h, vec![alo, blo]), fcall(h, vec![ahi, bhi])))
+        }
+        Mnemonic::Sqrtps => {
+            let (lo, hi) = some_or_asm!(read_xmm128(ins, 1));
+            some_or_asm!(write_xmm128(ins, fcall("__ps_sqrt", vec![lo]), fcall("__ps_sqrt", vec![hi])))
+        }
+        Mnemonic::Cvtdq2ps => {
+            let (lo, hi) = some_or_asm!(read_xmm128(ins, 1));
+            some_or_asm!(write_xmm128(ins, fcall("__ps_cvtdq", vec![lo]), fcall("__ps_cvtdq", vec![hi])))
+        }
+        // cmpps with the imm8 predicate (`cmpltps`/`cmpleps`/`cmpeqps`… aliases).
+        Mnemonic::Cmpps => {
+            let (alo, ahi) = some_or_asm!(read_xmm128(ins, 0));
+            let (blo, bhi) = some_or_asm!(read_xmm128(ins, 1));
+            let p = konst(ins.immediate(2) as i128);
+            some_or_asm!(write_xmm128(
+                ins,
+                fcall("__ps_cmp", vec![alo, blo, p.clone()]),
+                fcall("__ps_cmp", vec![ahi, bhi, p])
+            ))
+        }
+        // Bitwise packed-float logic: operate on the raw 128-bit halves.
+        Mnemonic::Andps | Mnemonic::Orps | Mnemonic::Andnps => {
+            let (alo, ahi) = some_or_asm!(read_xmm128(ins, 0));
+            let (blo, bhi) = some_or_asm!(read_xmm128(ins, 1));
+            let (lo, hi) = match ins.mnemonic() {
+                Mnemonic::Andps => (bin(BinOp::And, alo, blo), bin(BinOp::And, ahi, bhi)),
+                Mnemonic::Orps => (bin(BinOp::Or, alo, blo), bin(BinOp::Or, ahi, bhi)),
+                _ => (
+                    bin(BinOp::And, Expr::Unary(UnOp::Not, Box::new(alo)), blo),
+                    bin(BinOp::And, Expr::Unary(UnOp::Not, Box::new(ahi)), bhi),
+                ),
+            };
+            some_or_asm!(write_xmm128(ins, lo, hi))
+        }
+        // shufps: low two lanes from dst, high two from src (imm8 lane selectors).
+        // Reuses the dword-shuffle helpers (same 32-bit lane permutation).
+        Mnemonic::Shufps => {
+            let (dlo, dhi) = some_or_asm!(read_xmm128(ins, 0));
+            let (slo, shi) = some_or_asm!(read_xmm128(ins, 1));
+            let imm = konst(ins.immediate(2) as i128);
+            some_or_asm!(write_xmm128(
+                ins,
+                fcall("__pi_shuf_lo", vec![dlo, dhi, imm.clone()]),
+                fcall("__pi_shuf_hi", vec![slo, shi, imm])
+            ))
+        }
+        // Extract the 4 lane sign bits into a GP register.
+        Mnemonic::Movmskps => {
+            let (lo, hi) = some_or_asm!(read_xmm128(ins, 1));
+            some_or_asm!(write_op0(ins, fcall("__ps_movmsk", vec![lo, hi]), bits))
+        }
+
         // Packed double arithmetic: each 64-bit half is one IEEE-754 double,
         // computed bit-exactly via the scalar `__fp_*64` helpers.
         Mnemonic::Addpd | Mnemonic::Subpd | Mnemonic::Mulpd | Mnemonic::Divpd => {
