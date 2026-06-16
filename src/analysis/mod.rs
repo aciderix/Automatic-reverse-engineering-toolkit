@@ -49,7 +49,7 @@ pub struct AnalysisResult {
 /// `prologue_scan` is set, also recover functions reached only indirectly by
 /// scanning executable sections for function prologues.
 pub fn analyze(prog: &Program, disasm: &Disassembler, prologue_scan: bool) -> AnalysisResult {
-    let (global, entries, jump_tables) = global_decode(prog, disasm, prologue_scan);
+    let (global, entries, jump_tables, prologue_only) = global_decode(prog, disasm, prologue_scan);
     let instruction_count = global.len();
 
     // Hot/cold splitting (gcc `-freorder-blocks-and-partition`) emits the cold
@@ -70,7 +70,9 @@ pub fn analyze(prog: &Program, disasm: &Disassembler, prologue_scan: bool) -> An
     let entry_vec: Vec<u64> = boundary.iter().copied().collect();
     let mut functions: Vec<Function> = entry_vec
         .par_iter()
-        .filter_map(|&entry| build_function(prog, &global, entry, &boundary, &jump_tables))
+        .filter_map(|&entry| {
+            build_function(prog, &global, entry, &boundary, &jump_tables, &prologue_only)
+        })
         .collect();
     functions.sort_by_key(|f| f.entry);
     AnalysisResult {
@@ -85,7 +87,7 @@ fn global_decode(
     prog: &Program,
     disasm: &Disassembler,
     prologue_scan: bool,
-) -> (BTreeMap<u64, Insn>, BTreeSet<u64>, HashMap<u64, Vec<u64>>) {
+) -> (BTreeMap<u64, Insn>, BTreeSet<u64>, HashMap<u64, Vec<u64>>, BTreeSet<u64>) {
     let mut global: BTreeMap<u64, Insn> = BTreeMap::new();
     let mut entries: BTreeSet<u64> = prog.seed_functions().into_iter().collect();
     let mut jump_tables: HashMap<u64, Vec<u64>> = HashMap::new();
@@ -99,17 +101,22 @@ fn global_decode(
 
     // Pass 2: prologue scanning recovers indirectly-reached functions. Only
     // seed prologues we haven't already decoded as part of a known function.
+    // These seeds are heuristic (a `push rbp; mov rbp,rsp` mid-function looks
+    // like an entry) — record them so `collect_function` can absorb the ones
+    // that turn out to be reachable by fall-through from a real function.
+    let mut prologue_only: BTreeSet<u64> = BTreeSet::new();
     if prologue_scan {
         let mut extra: VecDeque<u64> = VecDeque::new();
         for p in prog.prologue_seeds() {
             if !global.contains_key(&p) && prog.is_executable(p) && entries.insert(p) {
+                prologue_only.insert(p);
                 extra.push_back(p);
             }
         }
         drain(prog, disasm, &mut global, &mut entries, &mut jump_tables, &mut extra);
     }
 
-    (global, entries, jump_tables)
+    (global, entries, jump_tables, prologue_only)
 }
 
 /// Recognise a jump-table dispatch `jmp [table + idx*ptr]` and read its target
@@ -330,16 +337,25 @@ fn collect_function(
     entry: u64,
     boundary: &BTreeSet<u64>,
     jump_tables: &HashMap<u64, Vec<u64>>,
+    prologue_only: &BTreeSet<u64>,
 ) -> BTreeMap<u64, Insn> {
     let mut insns: BTreeMap<u64, Insn> = BTreeMap::new();
-    let mut work: VecDeque<u64> = VecDeque::new();
-    work.push_back(entry);
+    // Each work item carries whether it was reached by a *fallthrough* edge.
+    // Execution cannot fall through from one function into another, so a
+    // fallthrough continuation into a *prologue-scan* entry means that entry is a
+    // false positive mid-function (`push rbp; mov rbp,rsp` after an early-exit
+    // branch) — absorb it. We restrict this to prologue-scanned entries; real
+    // entries (symbols, call targets) always stop collection, even on fallthrough.
+    let mut work: VecDeque<(u64, bool)> = VecDeque::new();
+    work.push_back((entry, false));
 
-    while let Some(addr) = work.pop_front() {
+    while let Some((addr, fallthrough)) = work.pop_front() {
         if insns.contains_key(&addr) {
             continue;
         }
-        if addr != entry && boundary.contains(&addr) {
+        if addr != entry && boundary.contains(&addr)
+            && !(fallthrough && prologue_only.contains(&addr))
+        {
             continue; // belongs to another function
         }
         let insn = match global.get(&addr) {
@@ -348,23 +364,26 @@ fn collect_function(
         };
         let next = insn.next_addr();
         match insn.flow {
-            Flow::Fallthrough => work.push_back(next),
-            Flow::Call => work.push_back(next),
+            // The not-taken / sequential successor is an intra-function edge.
+            Flow::Fallthrough => work.push_back((next, true)),
             Flow::CondJump => {
                 if let Some(t) = insn.target {
-                    work.push_back(t);
+                    work.push_back((t, false));
                 }
-                work.push_back(next);
+                work.push_back((next, true));
             }
+            // A call returns to `next`, but if the callee is no-return the bytes at
+            // `next` may be padding or the following function — keep the boundary.
+            Flow::Call => work.push_back((next, false)),
             Flow::Jump => {
                 if let Some(t) = insn.target {
-                    work.push_back(t);
+                    work.push_back((t, false));
                 }
             }
             Flow::Indirect => {
                 if let Some(targets) = jump_tables.get(&addr) {
                     for &t in targets {
-                        work.push_back(t); // switch cases
+                        work.push_back((t, false)); // switch cases
                     }
                 }
             }
@@ -382,11 +401,12 @@ fn build_function(
     entry: u64,
     all_entries: &BTreeSet<u64>,
     jump_tables: &HashMap<u64, Vec<u64>>,
+    prologue_only: &BTreeSet<u64>,
 ) -> Option<Function> {
     let mut boundary = all_entries.clone();
     boundary.remove(&entry);
 
-    let insns = collect_function(global, entry, &boundary, jump_tables);
+    let insns = collect_function(global, entry, &boundary, jump_tables, prologue_only);
     if insns.is_empty() {
         return None;
     }
