@@ -530,7 +530,13 @@ pub(crate) fn collect_frame_vars(func: &IrFunction, out: &mut BTreeSet<i64>) {
                 walk(a, out);
                 walk(b, out);
             }
-            Expr::Call { args, .. } => {
+            Expr::Call { target, args, .. } => {
+                // An indirect call's target is itself an expression (e.g. a frame
+                // slot holding a function pointer) — walk it too, or its frame
+                // slots go undeclared.
+                if let CallTarget::Indirect(e) = target {
+                    walk(e, out);
+                }
                 for a in args {
                     walk(a, out);
                 }
