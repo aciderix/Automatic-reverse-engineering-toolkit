@@ -1109,6 +1109,20 @@ pub fn lift(insn: &Insn, bits: u32) -> Vec<Stmt> {
             some_or_asm!(write_xmm128(ins, bin(BinOp::Xor, alo, blo), bin(BinOp::Xor, ahi, bhi)))
         }
 
+        // sahf: load CPU flags from AH (CF=AH.0, PF=AH.2, AF=AH.4, ZF=AH.6,
+        // SF=AH.7). Completes the x87 `fcom; fnstsw ax; sahf` compare idiom.
+        Mnemonic::Sahf => {
+            let ah = bin(BinOp::Shr, Expr::Read(Location::Reg(RegId(0))), konst(8));
+            let bit = |n: i128| bin(BinOp::And, bin(BinOp::Shr, ah.clone(), konst(n)), konst(1));
+            vec![
+                set_flag(FlagKind::Cf, bin(BinOp::And, ah.clone(), konst(1))),
+                set_flag(FlagKind::Pf, bit(2)),
+                set_flag(FlagKind::Af, bit(4)),
+                set_flag(FlagKind::Zf, bit(6)),
+                set_flag(FlagKind::Sf, bit(7)),
+            ]
+        }
+
         Mnemonic::Cmp => {
             let a = some_or_asm!(op_value(ins, 0));
             let b = some_or_asm!(op_value(ins, 1));
@@ -1569,6 +1583,13 @@ fn fpr_scratch() -> Location {
     Location::Reg(RegId(104))
 }
 
+/// The x87 FPU status word (the condition bits C0/C2/C3), modelled as an integer
+/// pseudo-register. `fcom`/`fucom` set it; `fnstsw` copies it to AX, after which
+/// `sahf` (or a `test ah, imm`) turns it into CPU flags. Not an fp80 value.
+fn fsw() -> Location {
+    Location::Reg(RegId(120))
+}
+
 /// A call to a `long double` x87 runtime helper.
 fn x87call(name: &str, args: Vec<Expr>) -> Expr {
     Expr::Call { target: CallTarget::Named(name.to_string()), args, ret: Ty::Unknown }
@@ -1645,6 +1666,11 @@ pub(crate) fn x87_delta(ins: &Instruction) -> Option<i32> {
         Fiadd | Fisub | Fisubr | Fimul | Fidiv | Fidivr => 0,
         Fabs | Fchs | Fsqrt | Fxch => 0,
         Fcomi | Fucomi => 0,
+        // Status-word compares (32-bit float idiom) + status-word store.
+        Fcom | Fucom | Ficom => 0,
+        Fcomp | Fucomp | Ficomp => -1,
+        Fcompp | Fucompp => -2,
+        Fnstsw | Fstsw => 0,
         Fldcw | Fnstcw | Fstcw | Fnclex | Fclex | Fnop | Wait => 0,
         _ => return None,
     })
@@ -1798,6 +1824,47 @@ fn x87_try(insn: &Insn, sp: i32, trunc: bool) -> Option<Vec<Stmt>> {
                 set_flag(FlagKind::Of, konst(0)),
             ]
         }
+
+        // --- status-word compare (32-bit float idiom) ---------------------
+        // `fcom`/`fucom` set the FPU condition bits C0/C2/C3; `fnstsw ax` then
+        // copies them to AX and `sahf`/`test ah` derives the branch. Encode the
+        // bits at their hardware positions (C0=bit8, C2=bit10, C3=bit14) so that
+        // both `sahf` (CF=C0, ZF=C3, PF=C2) and `test ah, imm` read them right.
+        Fcom | Fcomp | Fcompp | Fucom | Fucomp | Fucompp | Ficom | Ficomp => {
+            let a = Expr::Read(fpr(st0)?);
+            let b = if ins.op_count() == 0 {
+                Expr::Read(fpr(st0 - 1)?) // st1
+            } else {
+                x87_src(ins, ins.op_count() - 1, sp)?
+            };
+            let lt = x87call("__x87_lt", vec![a.clone(), b.clone()]);
+            let eq = x87call("__x87_eq", vec![a.clone(), b.clone()]);
+            let un = x87call("__x87_un", vec![a, b]);
+            let c0 = bin(BinOp::Or, lt, un.clone()); // less | unordered
+            let c3 = bin(BinOp::Or, eq, un.clone()); // equal | unordered
+            let c2 = un; // unordered
+            let word = bin(
+                BinOp::Or,
+                bin(BinOp::Or, bin(BinOp::Shl, c0, konst(8)), bin(BinOp::Shl, c2, konst(10))),
+                bin(BinOp::Shl, c3, konst(14)),
+            );
+            vec![Stmt::Set { dst: fsw(), expr: word }]
+        }
+        // Store the FPU status word to AX (or memory).
+        Fnstsw | Fstsw => match ins.op_kind(0) {
+            OpKind::Register => {
+                let rax = Location::Reg(RegId(0));
+                vec![Stmt::Set { dst: rax.clone(), expr: combine_write(&rax, 16, Expr::Read(fsw()), 64) }]
+            }
+            OpKind::Memory => {
+                if ins.segment_prefix() != Register::None {
+                    return None;
+                }
+                let (addr, _) = mem_addr(ins)?;
+                vec![Stmt::Store { addr, value: Expr::Read(fsw()), ty: Ty::int(16) }]
+            }
+            _ => return None,
+        },
 
         // --- control word / wait: no effect on the value stack ------------
         Fldcw | Fnstcw | Fstcw | Fnclex | Fclex | Fnop | Wait => vec![Stmt::Nop],
