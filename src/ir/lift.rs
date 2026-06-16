@@ -601,6 +601,35 @@ fn sub_flags(a: &Expr, b: &Expr, r: &Expr) -> Vec<Stmt> {
     ]
 }
 
+/// Flags for an addition `a + b` of width `w` bits, with result `r` (the raw,
+/// un-truncated sum). The operands are masked to `w` bits, so the carry-out is
+/// bit `w` of the sum — *not* `r < a`, which is always false when a `w<64` sum is
+/// computed in 64-bit and never wraps. Sign/zero/overflow use the `w`-bit result.
+fn add_flags(a: &Expr, b: &Expr, r: &Expr, w: u32) -> Vec<Stmt> {
+    let m = if w >= 64 {
+        r.clone()
+    } else {
+        bin(BinOp::And, r.clone(), konst(mask(w)))
+    };
+    let signw = |x: &Expr| bin(BinOp::And, bin(BinOp::Shr, x.clone(), konst((w - 1) as i128)), konst(1));
+    let cf = if w >= 64 {
+        bin(BinOp::Ult, r.clone(), a.clone()) // 64-bit: wraparound check
+    } else {
+        bin(BinOp::And, bin(BinOp::Shr, r.clone(), konst(w as i128)), konst(1))
+    };
+    let of = bin(
+        BinOp::And,
+        bin(BinOp::Eq, signw(a), signw(b)),
+        bin(BinOp::Ne, signw(&m), signw(a)),
+    );
+    vec![
+        set_flag(FlagKind::Zf, bin(BinOp::Eq, m.clone(), konst(0))),
+        set_flag(FlagKind::Sf, signw(&m)),
+        set_flag(FlagKind::Cf, cf),
+        set_flag(FlagKind::Of, of),
+    ]
+}
+
 /// Flags for a logical result `r` (covers `test`, `and`, `or`, `xor`): CF=OF=0.
 fn logic_flags(r: &Expr) -> Vec<Stmt> {
     vec![
@@ -736,20 +765,7 @@ pub fn lift(insn: &Insn, bits: u32) -> Vec<Stmt> {
             let mut out = match flags {
                 Some(true) => sub_flags(&a, &b, &r),  // sub
                 Some(false) => logic_flags(&r),       // and/or/xor
-                None => {
-                    // add: ZF/SF from result, CF=carry, OF=signed overflow
-                    let of = bin(
-                        BinOp::And,
-                        bin(BinOp::Eq, sign_neg(&a), sign_neg(&b)),
-                        bin(BinOp::Ne, sign_neg(&r), sign_neg(&a)),
-                    );
-                    vec![
-                        set_flag(FlagKind::Zf, bin(BinOp::Eq, r.clone(), konst(0))),
-                        set_flag(FlagKind::Sf, sign_neg(&r)),
-                        set_flag(FlagKind::Cf, bin(BinOp::Ult, r.clone(), a.clone())),
-                        set_flag(FlagKind::Of, of),
-                    ]
-                }
+                None => add_flags(&a, &b, &r, op0_width(ins, bits)),
             };
             out.extend(some_or_asm!(write_op0(ins, r, bits)));
             out
@@ -761,28 +777,26 @@ pub fn lift(insn: &Insn, bits: u32) -> Vec<Stmt> {
         Mnemonic::Sbb => {
             let a = some_or_asm!(op_value(ins, 0));
             let b = some_or_asm!(op_value(ins, 1));
-            let bc = bin(BinOp::Add, b, read_flag(FlagKind::Cf));
+            // Capture the *input* carry in a temp first: the destination and the
+            // CF-output both read `Cf`, and since the CF-set is emitted before the
+            // dst write, SSA would otherwise resolve the dst's carry-in to this
+            // instruction's own carry-out.
+            let cf = Location::Temp((insn.address as u32).wrapping_mul(2));
+            let bc = bin(BinOp::Add, b, Expr::Read(cf.clone()));
             let r = bin(BinOp::Sub, a.clone(), bc.clone());
-            let mut out = sub_flags(&a, &bc, &r);
+            let mut out = vec![Stmt::Set { dst: cf, expr: read_flag(FlagKind::Cf) }];
+            out.extend(sub_flags(&a, &bc, &r));
             out.extend(some_or_asm!(write_op0(ins, r, bits)));
             out
         }
         Mnemonic::Adc => {
             let a = some_or_asm!(op_value(ins, 0));
             let b = some_or_asm!(op_value(ins, 1));
-            let bc = bin(BinOp::Add, b, read_flag(FlagKind::Cf));
+            let cf = Location::Temp((insn.address as u32).wrapping_mul(2));
+            let bc = bin(BinOp::Add, b, Expr::Read(cf.clone()));
             let r = bin(BinOp::Add, a.clone(), bc.clone());
-            let of = bin(
-                BinOp::And,
-                bin(BinOp::Eq, sign_neg(&a), sign_neg(&bc)),
-                bin(BinOp::Ne, sign_neg(&r), sign_neg(&a)),
-            );
-            let mut out = vec![
-                set_flag(FlagKind::Zf, bin(BinOp::Eq, r.clone(), konst(0))),
-                set_flag(FlagKind::Sf, sign_neg(&r)),
-                set_flag(FlagKind::Cf, bin(BinOp::Ult, r.clone(), a.clone())),
-                set_flag(FlagKind::Of, of),
-            ];
+            let mut out = vec![Stmt::Set { dst: cf, expr: read_flag(FlagKind::Cf) }];
+            out.extend(add_flags(&a, &bc, &r, op0_width(ins, bits)));
             out.extend(some_or_asm!(write_op0(ins, r, bits)));
             out
         }
@@ -1157,6 +1171,19 @@ pub fn lift(insn: &Insn, bits: u32) -> Vec<Stmt> {
             some_or_asm!(write_xmm128(ins, bin(BinOp::Xor, alo, blo), bin(BinOp::Xor, ahi, bhi)))
         }
 
+        // Carry-flag direct manipulation.
+        Mnemonic::Stc => vec![set_flag(FlagKind::Cf, konst(1))],
+        Mnemonic::Clc => vec![set_flag(FlagKind::Cf, konst(0))],
+        Mnemonic::Cmc => vec![set_flag(
+            FlagKind::Cf,
+            bin(BinOp::Xor, Expr::Read(Location::Flag(FlagKind::Cf)), konst(1)),
+        )],
+        // NB: `lahf` (AH = flags byte) is deliberately NOT modelled — it would
+        // expose the raw SF/AF/PF bits, which this pipeline computes only well
+        // enough to reconstruct branch *conditions* (it does not set AF/PF, and
+        // SF is not width-truncated). Reading them directly would be wrong, so
+        // `lahf` stays a sound `Asm`. (`sahf` is fine: it *writes* flags from AH.)
+
         // sahf: load CPU flags from AH (CF=AH.0, PF=AH.2, AF=AH.4, ZF=AH.6,
         // SF=AH.7). Completes the x87 `fcom; fnstsw ax; sahf` compare idiom.
         Mnemonic::Sahf => {
@@ -1419,6 +1446,33 @@ pub fn lift(insn: &Insn, bits: u32) -> Vec<Stmt> {
                 },
                 Stmt::Set { dst: sp.clone(), expr: bin(BinOp::Add, Expr::Read(sp), konst(ptr)) },
             ]
+        }
+
+        // Double-precision shift: shift `dst` by `cnt`, filling from `src`.
+        // `shld dst,src,c` = (dst<<c)|(src>>(w-c)); `shrd` = (dst>>c)|(src<<(w-c)).
+        // Immediate count only (the CL form bails to a sound `asm`); a zero count
+        // is a documented no-op. Sets ZF from the result (CF/SF left, as for the
+        // ordinary shifts above).
+        Mnemonic::Shld | Mnemonic::Shrd if ins.op_kind(2) == OpKind::Immediate8 => {
+            let w = op0_width(ins, bits);
+            if !(w == 16 || w == 32 || w == 64) {
+                return asm();
+            }
+            let cnt = (ins.immediate(2) as u32) & (w - 1);
+            let dst = some_or_asm!(op_value(ins, 0));
+            if cnt == 0 {
+                return some_or_asm!(write_op0(ins, dst, bits)); // no-op
+            }
+            let src = some_or_asm!(op_value(ins, 1));
+            let val = if ins.mnemonic() == Mnemonic::Shld {
+                bin(BinOp::Or, bin(BinOp::Shl, dst, konst(cnt as i128)), bin(BinOp::Shr, src, konst((w - cnt) as i128)))
+            } else {
+                bin(BinOp::Or, bin(BinOp::Shr, dst, konst(cnt as i128)), bin(BinOp::Shl, src, konst((w - cnt) as i128)))
+            };
+            let val = bin(BinOp::And, val, konst(mask(w)));
+            let mut out = vec![set_flag(FlagKind::Zf, bin(BinOp::Eq, val.clone(), konst(0)))];
+            out.extend(some_or_asm!(write_op0(ins, val, bits)));
+            out
         }
 
         Mnemonic::Shl => {

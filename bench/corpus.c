@@ -177,3 +177,12 @@ int psD(int x, int y){
     __v4sf c=b*b - b;
     return (int)c[0]+(int)c[1]-(int)c[2]+(int)c[3];
 }
+
+/* Carry/borrow chains: 128-bit add/sub on x86-64 emits add+adc / sub+sbb, so the
+   carry-out flag (width-aware) feeds the next limb. Exercises the adc/sbb input-
+   carry capture and the width-correct add carry. */
+unsigned long long adc128(unsigned long long a, unsigned long long b){
+    unsigned __int128 x = (unsigned __int128)a * 0x100000001ULL + b;
+    unsigned __int128 y = x + ((unsigned __int128)b << 40) - ((unsigned __int128)a << 7);
+    return (unsigned long long)(y >> 13) ^ (unsigned long long)y;
+}
