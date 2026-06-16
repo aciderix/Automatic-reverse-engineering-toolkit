@@ -116,6 +116,39 @@ fn global_decode(
         drain(prog, disasm, &mut global, &mut entries, &mut jump_tables, &mut extra);
     }
 
+    // Jump-table resolution is order-sensitive: it scans the instructions
+    // *preceding* an indirect `jmp` for the table idiom, so if a `jmp` is first
+    // decoded as another path's target (before its own `lea/movsxd/add` setup
+    // exists), the inline attempt in `drain` fails and is never retried. Re-run
+    // resolution to a fixpoint now that all reachable code is decoded, decoding
+    // any newly discovered case targets.
+    loop {
+        let found: Vec<(u64, Vec<u64>)> = global
+            .iter()
+            .filter(|(addr, insn)| insn.flow == Flow::Indirect && !jump_tables.contains_key(addr))
+            .filter_map(|(addr, insn)| {
+                resolve_jump_table(prog, insn)
+                    .or_else(|| resolve_pie_jump_table(prog, &global, insn))
+                    .map(|t| (*addr, t))
+            })
+            .collect();
+        if found.is_empty() {
+            break;
+        }
+        let mut newwork: VecDeque<u64> = VecDeque::new();
+        for (addr, targets) in found {
+            for &t in &targets {
+                if !global.contains_key(&t) {
+                    newwork.push_back(t);
+                }
+            }
+            jump_tables.insert(addr, targets);
+        }
+        if !newwork.is_empty() {
+            drain(prog, disasm, &mut global, &mut entries, &mut jump_tables, &mut newwork);
+        }
+    }
+
     (global, entries, jump_tables, prologue_only)
 }
 
