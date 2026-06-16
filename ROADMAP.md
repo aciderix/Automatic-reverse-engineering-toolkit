@@ -759,11 +759,22 @@ relogeable), et compare.
      mulpd/divpd, unpcklpd/unpckhpd, movhlps/movlhps/movhps/movlps, shufpd),
      `psubusw`, `rep stos`, **appels & tail-calls indirects** (`call/jmp reg` →
      `(*reg)(args)`). Différentiel 160 → **232** (-O0→-O3).
-   - **Reste réel : 6 fonctions = le plancher irréductible** (gzip 2, ls 2,
-     cat 2). 4 contiennent **`hlt`/`sti`** (privilégié — aucune sémantique C, donc
-     `__asm__` EST la sortie correcte) ; 2 sont des cas limites de récupération de
-     CFG (un `ret` sur-segmenté en fonction ; un `jmp` indirect non résolu).
-     Tous **honnêtement marqués INCOMPLETE** — jamais silencieusement faux.
+   - **Récupération de CFG — ✅ FAIT** (`analysis/mod.rs`, `ir/build.rs`).
+     Corrigés : (a) **sur-segmentation de prologue** — un `push rbp; mov rbp,rsp`
+     mi-fonction (après une sortie anticipée) passe pour une entrée ; `collect_
+     function` absorbe désormais une entrée prologue-seule atteinte par
+     *fall-through* (l'exécution ne tombe jamais d'une fonction dans une autre) ;
+     (b) **résolution de jump-table en point fixe** après décodage complet
+     (l'inline échouait quand un `jmp` était décodé avant son bloc de setup) ;
+     (c) **index de switch inter-blocs** — `pie_switch_index` scanne au-delà du
+     bloc du `jmp` (tables à 2 niveaux : la case-cible est un leader de bloc) ;
+     (d) **borne de table exacte** — le scan du `cmp idx,N` manquait
+     `Immediate8to64` (`cmp r64,imm8`), sautait la vraie borne et sur-lisait la
+     table (p. ex. 48 cas pour un switch à 10).
+   - **Reste réel : 3 fonctions = le plancher absolu** (gzip 1, ls 1, cat 1) :
+     toutes **`_start`** (le stub d'entrée ELF asm, `call __libc_start_main; hlt`).
+     `hlt` est privilégié, sans sémantique C ; `_start` n'est pas une fonction C →
+     `__asm__`/INCOMPLETE est la seule sortie correcte. Jamais silencieusement faux.
 
    **Constat majeur (le plus important de cette série).** Une fois la détection
    d'incomplétude en place, on mesure la *vraie* fidélité sur du vrai code :

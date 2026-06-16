@@ -41,13 +41,15 @@ au binaire (différentiel ou SMT). Niveaux **tous opérationnels** :
 3. **SMT formel** (Z3) — `bench/smt_rewrites.sh` : **11/11** règles d'opt prouvées.
 
 **Incomplétude résiduelle honnête** (fonctions `// WARNING … INCOMPLETE`,
-exclues du différentiel) : **6** (gzip 2, ls 2, cat 2) — le **plancher
-irréductible**. 4 sur 6 contiennent des **instructions privilégiées** (`hlt`×3,
-`sti`×1 — stubs `_start`/asm libc) qui n'ont **aucune sémantique C** : les
-laisser en `__asm__` EST la décompilation correcte. Les 2 autres sont des cas
-limites de **récupération de CFG** (un `ret` sur-segmenté en fonction séparée ;
-un `jmp` indirect non résolu). Tombé de ~300 → 26 → **6** ; tout x87, SSE packé,
-rotates, imul, rep, tail-calls indirects désormais modélisés.
+exclues du différentiel) : **3** (gzip 1, ls 1, cat 1) — le **plancher
+absolu**. Les 3 sont **`_start`** (le stub d'entrée ELF, écrit à la main :
+`call __libc_start_main; hlt`). `hlt` est privilégié et n'a **aucune sémantique
+C** : `_start` n'est pas une fonction C → le laisser en `__asm__`/INCOMPLETE EST
+la seule décompilation correcte. Tombé de ~300 → 26 → **3** ; tout x87, SSE
+packé, rotates, imul, rep, tail-calls/appels indirects modélisés, et **tous les
+cas de récupération de CFG corrigés** (sur-segmentation de prologue, résolution
+de jump-table dépendante de l'ordre, index de switch inter-blocs pour tables à
+2 niveaux, sur-lecture de table via `cmp r64,imm8`).
 
 ---
 
@@ -211,9 +213,10 @@ bash bench/smt_rewrites.sh                            # preuves SMT des règles 
     sur les sections de code, cible read-only repliée en littéral). ❌ globals
     nommés, ❌ FLIRT/signatures CRT.
 - **Pilier 5 (émission C)** : ✅ compilable + structuré + ✅ **helpers float/SSE/
-  entiers** (`__fp_*`/`__pi_*`/`__ix_*`, préambule auto) + ✅ **promotion pile**
-  (tableau `__frame` local). Manque : variables typées (dépend §5), **x87**
-  (modèle pile 80-bit), mode `--strict`.
+  entiers/x87** (`__fp_*`/`__pi_*`/`__ix_*`/`__x87_*`, préambule auto) + ✅ **x87
+  80-bit** (`long double`) + ✅ **promotion pile** (tableau `__frame` local) +
+  ✅ **appels indirects** (cast pointeur-de-fonction). Manque : variables typées
+  (dépend §5), mode `--strict`.
 - **Pilier 6 (vérification)** : ✅ niveaux 1, 2, 3. Niveau 3 ne prouve pour l'instant
   que les **règles d'opt isolées** (pas des fonctions entières lift→SMT). Manque la
   **boucle de raffinement** automatique.
@@ -279,18 +282,19 @@ bash bench/smt_rewrites.sh                            # preuves SMT des règles 
 
 ## 8. Prochaines étapes recommandées (par valeur/sûreté)
 
-> **Incomplétude — FAIT (~300 → 6).** Tout le gros œuvre est livré et
+> **Incomplétude — FAIT (~300 → 3).** Tout le gros œuvre est livré et
 > différentiel-validé (-O0→-O3) : **x87 80-bit** (`long double`, suivi de pile
-> statique, idiome de troncature ; cf. `ir/lift.rs::lift_x87` + `ir/build.rs::
+> statique, idiome de troncature ; `ir/lift.rs::lift_x87` + `ir/build.rs::
 > x87_states`), **SSE packé double** (addpd/unpckpd/shufpd/movh*/movl*), **imul
 > 1-op**, **rol/ror**, **xchg**, **rep stos**, **psubusw**, **appels & tail-calls
-> indirects** (`jmp reg` → `return (*reg)(args)`). Les **6 restantes sont le
-> plancher** : 4 contiennent `hlt`/`sti` (privilégié, pas de C correct → asm est
-> la bonne sortie), 2 sont des cas limites de récupération de CFG (un `ret`
-> sur-segmenté en fonction ; un `jmp` indirect non résolu). Atteindre zéro
-> littéral exigerait soit de **traiter l'asm privilégié comme "complet"**
-> (changement de politique — c'est déjà fidèle), soit du travail de
-> **recouvrement de CFG/jump-tables** à risque de régression pour 2 fonctions.
+> indirects** (`jmp reg` → `return (*reg)(args)`), et **toute la récupération de
+> CFG** : sur-segmentation de prologue (`collect_function` absorbe les fausses
+> entrées atteintes par fall-through), résolution de jump-table en **point fixe**
+> après décodage complet (indépendante de l'ordre), **index de switch inter-blocs**
+> (`pie_switch_index` scanne au-delà du bloc du `jmp`, pour les tables à 2 niveaux),
+> et borne de table exacte (`cmp r64,imm8` = `Immediate8to64`, sinon sur-lecture).
+> Les **3 restantes sont `_start`** (stub d'entrée asm, `hlt`) — pas du C, plancher
+> absolu. Le zéro littéral n'existe pas : `_start` ne se décompile pas en C.
 >
 > **Ordre faisant autorité** : voir `ROADMAP.md` §15.4. Résumé : 1) division
 > magique → 2) args call-sites → 3) compléter lifter + idiomes (✅ SSE/entiers/
