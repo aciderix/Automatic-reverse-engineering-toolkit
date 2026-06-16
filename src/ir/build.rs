@@ -134,6 +134,21 @@ pub fn build_ir(prog: &Program, func: &Function) -> IrFunction {
                     // jmp qword [rip+GOT] to an import is a tail call to it.
                     let name = prog.import_name(last.raw.ip_rel_memory_address()).unwrap();
                     stmts.push(Stmt::Return(Some(tail_call(CallTarget::Named(name.to_string()), bits))));
+                } else if last.raw.op_kind(0) == iced_x86::OpKind::Register
+                    && crate::ir::lift::switch_index(&last.raw).is_none()
+                    && pie_switch_index(&blk.insns).is_none()
+                {
+                    // `jmp reg` with no jump-table idiom is an indirect tail call
+                    // through a function pointer: `return (*reg)(args)`. (An
+                    // *unresolved* table — index idiom present but no case edges —
+                    // falls through to the sound `Asm` below instead.)
+                    match crate::ir::lift::reg_value(last.raw.op_register(0)) {
+                        Some(target) => stmts.push(Stmt::Return(Some(tail_call(
+                            CallTarget::Indirect(Box::new(target)),
+                            bits,
+                        )))),
+                        None => stmts.push(Stmt::Asm(last.text.clone())),
+                    }
                 } else {
                     stmts.push(Stmt::Asm(last.text.clone()));
                 }

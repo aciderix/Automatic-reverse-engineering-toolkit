@@ -308,7 +308,17 @@ pub(crate) fn expr_c(e: &Expr) -> String {
                     format!("0 /*{}*/", n)
                 }
                 CallTarget::Named(n) => format!("{}({})", n, a.join(", ")),
-                CallTarget::Indirect(_) => "0 /*indirect call*/".into(),
+                CallTarget::Indirect(e) => {
+                    // Call through a function pointer: cast the computed target to
+                    // a function-pointer type taking the (over-approximated) SysV
+                    // argument registers and returning a 64-bit value.
+                    let params = if a.is_empty() {
+                        "void".to_string()
+                    } else {
+                        vec!["uint64_t"; a.len()].join(",")
+                    };
+                    format!("((uint64_t(*)({}))({}))({})", params, expr_c(e), a.join(", "))
+                }
             }
         }
         Expr::Select { cond, then_, else_ } => {
