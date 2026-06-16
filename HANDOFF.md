@@ -33,23 +33,29 @@ décision (ex : promotion SSA différée faute d'analyse d'alias — cf. §6).
 au binaire (différentiel ou SMT). Niveaux **tous opérationnels** :
 1. **Recompile** — `--mode verify` : **100 %** sur gzip (135/135), ls (226/226),
    cat (73/73) + jeu.
-2. **Différentiel** (exécution, ~50k–200k entrées, -O0 → -O3) — `bench/difftest.sh`
-   : **232/232** (pointeurs/tableaux/boucles/chaînes/SSE scalaire+packé/**x87
-   80-bit**/div64/rotates/imul/**appels indirects**…) ; `bench/inplace.sh` :
-   **3/3** (accès par adresse absolue — globals & tables) ; `bench/magicdiv.sh` :
-   équivalence **exhaustive 2^32** de la magic-division.
+2. **Différentiel** (exécution, ~50k–500k entrées, -O0 → -O3) — `bench/difftest.sh`
+   : **264/264** (pointeurs/tableaux/boucles/chaînes/SSE scalaire+packé simple &
+   double/**x87 80-bit**/div64/rotates/imul/appels indirects/**chaînes adc-sbb**/
+   **atomics xadd-cmpxchg-xchg**/shld-shrd…) ; `bench/inplace.sh` : **3/3** ;
+   `bench/magicdiv.sh` : équivalence **exhaustive 2^32** de la magic-division.
 3. **SMT formel** (Z3) — `bench/smt_rewrites.sh` : **11/11** règles d'opt prouvées.
 
-**Incomplétude résiduelle honnête** (fonctions `// WARNING … INCOMPLETE`,
-exclues du différentiel) : **3** (gzip 1, ls 1, cat 1) — le **plancher
-absolu**. Les 3 sont **`_start`** (le stub d'entrée ELF, écrit à la main :
-`call __libc_start_main; hlt`). `hlt` est privilégié et n'a **aucune sémantique
-C** : `_start` n'est pas une fonction C → le laisser en `__asm__`/INCOMPLETE EST
-la seule décompilation correcte. Tombé de ~300 → 26 → **3** ; tout x87, SSE
-packé, rotates, imul, rep, tail-calls/appels indirects modélisés, et **tous les
-cas de récupération de CFG corrigés** (sur-segmentation de prologue, résolution
-de jump-table dépendante de l'ordre, index de switch inter-blocs pour tables à
-2 niveaux, sur-lecture de table via `cmp r64,imm8`).
+**Incomplétude — binaires système** : **3** (gzip 1, ls 1, cat 1) = `_start`
+(stub d'entrée ELF `call __libc_start_main; hlt` ; `hlt` privilégié, pas de C →
+INCOMPLETE est correct). Tombé de ~300 → 26 → 3 ; tout x87, SSE packé, rotates,
+imul, rep, tail-calls/appels indirects, CFG (prologue, jump-tables ordre/inter-
+blocs/borne) corrigés.
+
+**Test sur vrai binaire (le jeu PE32 32-bit C++, 26 Mo, ~44k fn)** : recompile
+**100 %** ; incomplétude ~5900 → **~4370 / 44 183 (≈90 % entièrement modélisées)**
+cette session, via x87 status-word (`fcom/fnstsw/sahf`), SSE packé simple,
+atomics, + **2 vrais bugs corrigés** (arg cdecl 32-bit non déclaré ; retenue
+add/adc non width-aware — bugs latents non couverts par le corpus). Le reste est
+le **plancher honnête de cet environnement** : `pushad/pushfd/lahf` (32-bit only
+→ non assemblables/exécutables ici pour valider ; et `pushfd`/`lahf` liraient les
+flags bruts SF/AF/PF que ce pipeline n'approxime que pour reconstruire des
+*conditions* → non sûrs sans refonte du modèle de flags) + x87 transcendantes
+(fsin/fcos non bit-exactes). Les laisser INCOMPLETE est correct (jamais faux).
 
 ---
 
