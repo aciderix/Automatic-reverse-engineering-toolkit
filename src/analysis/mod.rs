@@ -260,14 +260,23 @@ fn resolve_pie_jump_table(prog: &Program, global: &BTreeMap<u64, Insn>, jmp: &In
     }
     let table = table?;
 
-    // Exact case count from a preceding `cmp idx, N` (else read until a target
-    // leaves the code, capped).
+    // Exact case count from the nearest preceding `cmp idx, N` (the bound check).
+    // All immediate encodings must be recognised — notably `Immediate8to64`,
+    // used by `cmp r64, imm8` (e.g. `cmp rbx, 9`); missing it skips the real
+    // bound and picks a wrong earlier `cmp`, over-reading the table. If no bound
+    // is found, fall back to reading until a target leaves executable code.
     let mut count = 256u64;
     for (_, ins) in global.range(..jmp.address).rev() {
         if ins.raw.mnemonic() == Mnemonic::Cmp
             && matches!(
                 ins.raw.op1_kind(),
-                OpKind::Immediate8 | OpKind::Immediate16 | OpKind::Immediate32 | OpKind::Immediate8to32
+                OpKind::Immediate8
+                    | OpKind::Immediate16
+                    | OpKind::Immediate32
+                    | OpKind::Immediate8to16
+                    | OpKind::Immediate8to32
+                    | OpKind::Immediate8to64
+                    | OpKind::Immediate32to64
             )
         {
             count = (ins.raw.immediate(1) as u64).saturating_add(1).min(256);

@@ -116,7 +116,7 @@ pub fn build_ir(prog: &Program, func: &Function) -> IrFunction {
                     // Index from the jump's own memory operand (`jmp [t+idx*8]`),
                     // or recovered from the PIE idiom (`jmp reg`).
                     let value = crate::ir::lift::switch_index(&last.raw)
-                        .or_else(|| pie_switch_index(&blk.insns));
+                        .or_else(|| pie_switch_index(func, &last.raw));
                     match value {
                         Some(value) => {
                             let cases = succ
@@ -136,7 +136,7 @@ pub fn build_ir(prog: &Program, func: &Function) -> IrFunction {
                     stmts.push(Stmt::Return(Some(tail_call(CallTarget::Named(name.to_string()), bits))));
                 } else if last.raw.op_kind(0) == iced_x86::OpKind::Register
                     && crate::ir::lift::switch_index(&last.raw).is_none()
-                    && pie_switch_index(&blk.insns).is_none()
+                    && pie_switch_index(func, &last.raw).is_none()
                 {
                     // `jmp reg` with no jump-table idiom is an indirect tail call
                     // through a function pointer: `return (*reg)(args)`. (An
@@ -417,13 +417,32 @@ fn tail_call(target: CallTarget, bits: u32) -> Expr {
 
 /// Recover the switch index of a PIE relative jump table (`movsxd tgt,[base+
 /// idx*4]; add tgt,base; jmp tgt`): a read of the `movsxd`'s index register.
-fn pie_switch_index(insns: &[crate::disasm::Insn]) -> Option<Expr> {
-    use iced_x86::{Mnemonic, Register};
-    // The block's `movsxd tgt, [base + idx*4]` carries the switch index.
-    let mov = insns.iter().rev().find(|i| {
+fn pie_switch_index(func: &Function, jmp: &iced_x86::Instruction) -> Option<Expr> {
+    use iced_x86::{Mnemonic, OpKind, Register};
+    // PIE idiom: `movsxd tgt, [base + idx*4]; add tgt, base; jmp tgt`. The index
+    // is the memory index of the `movsxd` whose destination is the jump's own
+    // target register. That `movsxd` may sit in a *predecessor* block (when the
+    // `jmp` is itself a jump-table case target, hence a block leader), so scan the
+    // function's instructions in a small window before the jump — not just the
+    // jump's own block. Constraining the destination to the jump register keeps it
+    // precise (no unrelated `movsxd` can be mistaken for the index source).
+    if jmp.op0_kind() != OpKind::Register {
+        return None;
+    }
+    let tgt = jmp.op0_register().full_register();
+    let jmp_addr = jmp.ip();
+    let mut window: Vec<&crate::disasm::Insn> = func
+        .blocks
+        .values()
+        .flat_map(|b| b.insns.iter())
+        .filter(|i| i.address < jmp_addr)
+        .collect();
+    window.sort_by_key(|i| i.address);
+    let mov = window.iter().rev().take(10).find(|i| {
         i.raw.mnemonic() == Mnemonic::Movsxd
             && i.raw.memory_index() != Register::None
             && i.raw.memory_index_scale() == 4
+            && i.raw.op0_register().full_register() == tgt
     })?;
     crate::ir::lift::reg_value(mov.raw.memory_index())
 }

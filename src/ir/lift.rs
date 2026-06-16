@@ -273,8 +273,6 @@ fn read_reg(r: Register) -> Option<Expr> {
     }
 }
 
-/// If operand `i` is a pure frame slot `[ebp/rbp ± disp]` (base = frame pointer,
-/// no index), return its displacement. These become named `Frame` locations.
 thread_local! {
     /// When set, the lifter does not fold `[rbp+d]` operands into named `Frame`
     /// slots (scalars). Enabled per-function for x87 code, whose 80-bit FPU
@@ -289,6 +287,8 @@ pub(crate) fn set_frames_off(off: bool) {
     FRAMES_OFF.with(|c| c.set(off));
 }
 
+/// If operand `i` is a pure frame slot `[ebp/rbp ± disp]` (base = frame pointer,
+/// no index), return its displacement. These become named `Frame` locations.
 fn frame_disp(ins: &Instruction, i: u32) -> Option<i64> {
     if FRAMES_OFF.with(|c| c.get()) {
         return None;
