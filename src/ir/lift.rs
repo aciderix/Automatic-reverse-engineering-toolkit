@@ -92,7 +92,7 @@ fn is_scalar_float(ins: &Instruction) -> bool {
             | Movaps | Movapd | Movups | Movupd
             | Movdqa | Movdqu | Paddd | Psubd | Psrldq
             | Pand | Pandn | Por | Pcmpeqd | Pcmpgtd | Pshufd
-            | Paddw | Paddq | Pcmpgtw | Pmuludq | Psrlq
+            | Paddw | Paddq | Pcmpgtw | Pmuludq | Psrlq | Psubusw
             | Punpcklwd | Punpckhwd | Punpckldq | Punpckhdq | Punpcklqdq | Punpckhqdq
             | Movhlps | Movlhps | Movhps | Movhpd | Movlps | Movlpd | Shufpd
             | Unpcklpd | Unpckhpd | Addpd | Subpd | Mulpd | Divpd
@@ -681,6 +681,29 @@ pub fn lift(insn: &Insn, bits: u32) -> Vec<Stmt> {
                 Stmt::Set { dst: rcx, expr: konst(0) },
             ];
         }
+        // `rep stos`: forward fill of `rcx` elements at `rdi` with the low bytes of
+        // the accumulator (al/ax/eax/rax). Leaves rdi advanced and rcx = 0.
+        let (ssz, helper): (i128, &str) = match ins.mnemonic() {
+            Stosb => (1, "__rep_stos8"),
+            Stosw => (2, "__rep_stos16"),
+            Stosd => (4, "__rep_stos32"),
+            Stosq => (8, "__rep_stos64"),
+            _ => (0, ""),
+        };
+        if ssz != 0 {
+            let rdi = Location::Reg(RegId(7));
+            let rax = Location::Reg(RegId(0));
+            let rcx = Location::Reg(RegId(1));
+            let bytes = bin(BinOp::Mul, Expr::Read(rcx.clone()), konst(ssz));
+            return vec![
+                Stmt::CallStmt(fcall(
+                    helper,
+                    vec![Expr::Read(rdi.clone()), Expr::Read(rax), Expr::Read(rcx.clone())],
+                )),
+                Stmt::Set { dst: rdi.clone(), expr: bin(BinOp::Add, Expr::Read(rdi), bytes) },
+                Stmt::Set { dst: rcx, expr: konst(0) },
+            ];
+        }
     }
 
     // Helper to require Some or bail to Asm.
@@ -885,6 +908,15 @@ pub fn lift(insn: &Insn, bits: u32) -> Vec<Stmt> {
                 ins,
                 fcall("__pi_gt16", vec![alo, blo]),
                 fcall("__pi_gt16", vec![ahi, bhi])
+            ))
+        }
+        Mnemonic::Psubusw => {
+            let (alo, ahi) = some_or_asm!(read_xmm128(ins, 0));
+            let (blo, bhi) = some_or_asm!(read_xmm128(ins, 1));
+            some_or_asm!(write_xmm128(
+                ins,
+                fcall("__pi_subus16", vec![alo, blo]),
+                fcall("__pi_subus16", vec![ahi, bhi])
             ))
         }
         Mnemonic::Pmuludq => {

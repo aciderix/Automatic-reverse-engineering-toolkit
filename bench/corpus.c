@@ -142,3 +142,6 @@ int vshuf(int x, int y){
     __v2df c = a*b + a;
     return (int)(c[0] - c[1]*2);
 }
+
+/* rep stos (gcc emits `rep stosq` to zero a struct/array). */
+int repset(int a, int b){ long buf[16]; for(int i=0;i<16;i++) buf[i]=0; buf[a&15]=b; return (int)buf[b&15]; }

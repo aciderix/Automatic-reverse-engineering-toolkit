@@ -153,6 +153,7 @@ pub(crate) const FLOAT_HELPERS: &str = concat!(
     "static inline uint64_t __pi_unpckldq_hi(uint64_t d,uint64_t s){return (d>>32)|((s>>32)<<32);}\n",
     "static inline uint64_t __pi_gt16(uint64_t a,uint64_t b){uint64_t r=0;for(int i=0;i<64;i+=16)r|=(uint64_t)((int16_t)(a>>i)>(int16_t)(b>>i)?0xffffu:0)<<i;return r;}\n",
     "static inline uint64_t __pi_muludq(uint64_t a,uint64_t b){return (uint64_t)(uint32_t)a*(uint32_t)b;}\n",
+    "static inline uint64_t __pi_subus16(uint64_t a,uint64_t b){uint64_t r=0;for(int i=0;i<64;i+=16){uint16_t x=(uint16_t)(a>>i),y=(uint16_t)(b>>i);r|=(uint64_t)(uint16_t)(x>y?x-y:0)<<i;}return r;}\n",
     // Wide integer (64-bit 1-operand mul/div via 128-bit), byte swap, bit scan.
     "typedef unsigned __int128 __u128;typedef __int128 __i128;\n",
     "static inline uint64_t __ix_mul64hi(uint64_t a,uint64_t b){return (uint64_t)(((__u128)a*b)>>64);}\n",
@@ -201,11 +202,16 @@ pub(crate) const FLOAT_HELPERS: &str = concat!(
     "static inline uint64_t __x87_lt(long double a,long double b){return a<b;}\n",
     "static inline uint64_t __x87_eq(long double a,long double b){return a==b;}\n",
     "static inline uint64_t __x87_un(long double a,long double b){return a!=a||b!=b;}\n",
+    // `rep stos`: fill `n` elements at `d` with the low bytes of `v` (forward, DF=0).
+    "static inline uint64_t __rep_stos8(uint64_t d,uint64_t v,uint64_t n){uint8_t* p=(uint8_t*)(uintptr_t)d;for(uint64_t i=0;i<n;i++)p[i]=(uint8_t)v;return 0;}\n",
+    "static inline uint64_t __rep_stos16(uint64_t d,uint64_t v,uint64_t n){uint16_t* p=(uint16_t*)(uintptr_t)d;for(uint64_t i=0;i<n;i++)p[i]=(uint16_t)v;return 0;}\n",
+    "static inline uint64_t __rep_stos32(uint64_t d,uint64_t v,uint64_t n){uint32_t* p=(uint32_t*)(uintptr_t)d;for(uint64_t i=0;i<n;i++)p[i]=(uint32_t)v;return 0;}\n",
+    "static inline uint64_t __rep_stos64(uint64_t d,uint64_t v,uint64_t n){uint64_t* p=(uint64_t*)(uintptr_t)d;for(uint64_t i=0;i<n;i++)p[i]=v;return 0;}\n",
 );
 
 /// The runtime-helper preamble, included only when the body references it.
 pub(crate) fn float_preamble(body: &str) -> &'static str {
-    if body.contains("__fp_") || body.contains("__pi_") || body.contains("__ix_") || body.contains("__x87_") {
+    if body.contains("__fp_") || body.contains("__pi_") || body.contains("__ix_") || body.contains("__x87_") || body.contains("__rep_") {
         FLOAT_HELPERS
     } else {
         ""
