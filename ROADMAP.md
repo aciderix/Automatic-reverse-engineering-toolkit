@@ -747,17 +747,22 @@ relogeable), et compare.
      qui mappe les PT_LOAD à leur VA → la table relative se lit réellement) : 3/3
      dont `swc` (value-table). La **fusion hot/cold** (`foo.cold`) complète le
      décodage des cibles renvoyées vers `.text.unlikely`.
-   - **Reste (26 fn : gzip 9, ls 15, cat 2) — par sûreté, pas par difficulté** :
-     - **x87 (cause DOMINANTE, ≈100 des ~140 instructions)** : `fld/fstp/fxch/
-       fldcw/fild/fadd/fmul/fcomi/fistp…` — exige un **modèle de pile FPU 80-bit**
-       (st0-st7, tag word, arrondi fldcw). Seul chantier conséquent ; résout
-       l'essentiel des 26.
-     - **Entiers triviaux** (`ror`, `xchg`, `imul` 1-op) : lift direct, comme
-       `rol`/`sbb` déjà faits.
-     - **Demi-moves SSE packés** (`movhps/movhlps/shufpd`, `psubusw`) :
-       modélisables comme les `__pi_*` existants.
-     - **Variantes `rep`** restantes, **stubs privilégiés** (`hlt`, `sti`) :
-       à laisser en `Asm` (sain) ou `__builtin_unreachable`.
+   - **x87 80-bit — ✅ FAIT** (`ir/lift.rs::lift_x87`, `ir/build.rs::x87_states`).
+     Pile FPU suivie **statiquement** (profondeur par instruction, bail si
+     ambigu), slots émis en `long double` (= le format 80-bit x87 sur x86-64 →
+     recompile en x87 équivalent, bit-exact). Couvre fild/fld/fstp, faddp/fsubp/
+     fmulp/fdivp (+ formes reg/mem), fabs/fchs/fsqrt, fxch, fcomi/fucomi(p), et la
+     **troncature float→int** prouvée (idiome fnstcw/or/fldcw/fistp). fist/fistp
+     en arrondi non prouvé, comparaisons via status-word, transcendantes → `Asm`.
+   - **Reste du lifter — ✅ FAIT** : `imul` 1-op, `rol`/`ror` (CF correct, OF
+     laissé — indéfini par la spec), `xchg` reg, **SSE packé double** (addpd/subpd/
+     mulpd/divpd, unpcklpd/unpckhpd, movhlps/movlhps/movhps/movlps, shufpd),
+     `psubusw`, `rep stos`, **appels & tail-calls indirects** (`call/jmp reg` →
+     `(*reg)(args)`). Différentiel 160 → **232** (-O0→-O3).
+   - **Reste réel : 6 fonctions = le plancher irréductible** (gzip 2, ls 2,
+     cat 2). 4 contiennent **`hlt`/`sti`** (privilégié — aucune sémantique C, donc
+     `__asm__` EST la sortie correcte) ; 2 sont des cas limites de récupération de
+     CFG (un `ret` sur-segmenté en fonction ; un `jmp` indirect non résolu).
      Tous **honnêtement marqués INCOMPLETE** — jamais silencieusement faux.
 
    **Constat majeur (le plus important de cette série).** Une fois la détection

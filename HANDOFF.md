@@ -34,19 +34,20 @@ au binaire (différentiel ou SMT). Niveaux **tous opérationnels** :
 1. **Recompile** — `--mode verify` : **100 %** sur gzip (135/135), ls (226/226),
    cat (73/73) + jeu.
 2. **Différentiel** (exécution, ~50k–200k entrées, -O0 → -O3) — `bench/difftest.sh`
-   : **196/196** (pointeurs/tableaux/boucles/chaînes/SSE/x87-scalaire/div64…) ;
-   `bench/inplace.sh` : **3/3** (fonctions à accès mémoire par adresse absolue —
-   globals & tables — validées en mappant les segments PT_LOAD du binaire à leur
-   VA) ; `bench/magicdiv.sh` : équivalence **exhaustive 2^32** de la magic-division.
+   : **232/232** (pointeurs/tableaux/boucles/chaînes/SSE scalaire+packé/**x87
+   80-bit**/div64/rotates/imul/**appels indirects**…) ; `bench/inplace.sh` :
+   **3/3** (accès par adresse absolue — globals & tables) ; `bench/magicdiv.sh` :
+   équivalence **exhaustive 2^32** de la magic-division.
 3. **SMT formel** (Z3) — `bench/smt_rewrites.sh` : **11/11** règles d'opt prouvées.
 
-**Incomplétude résiduelle honnête** (fonctions marquées `// WARNING …
-INCOMPLETE`, exclues du différentiel par sûreté) : **26** au total — gzip 9,
-ls 15, cat 2. Cause **très majoritairement x87** (fld/fstp/fxch/fldcw/fild/
-fadd/fmul/fcomi… ≈ 100 des ~140 instructions non liftées) ; petite queue
-d'entiers triviaux (ror/xchg/imul 1-op), de demi-moves SSE packés
-(shufpd/movhps/movhlps), de variantes `rep`/`psubusw`, et de stubs privilégiés
-(hlt/sti). **Résolubles** — voir §8.
+**Incomplétude résiduelle honnête** (fonctions `// WARNING … INCOMPLETE`,
+exclues du différentiel) : **6** (gzip 2, ls 2, cat 2) — le **plancher
+irréductible**. 4 sur 6 contiennent des **instructions privilégiées** (`hlt`×3,
+`sti`×1 — stubs `_start`/asm libc) qui n'ont **aucune sémantique C** : les
+laisser en `__asm__` EST la décompilation correcte. Les 2 autres sont des cas
+limites de **récupération de CFG** (un `ret` sur-segmenté en fonction séparée ;
+un `jmp` indirect non résolu). Tombé de ~300 → 26 → **6** ; tout x87, SSE packé,
+rotates, imul, rep, tail-calls indirects désormais modélisés.
 
 ---
 
@@ -278,24 +279,18 @@ bash bench/smt_rewrites.sh                            # preuves SMT des règles 
 
 ## 8. Prochaines étapes recommandées (par valeur/sûreté)
 
-> **Les 26 incomplètes restantes — résolubles ?** OUI, par ordre d'effort :
-> - **x87 (cause dominante, ≈100 des ~140 instructions)** : fld/fstp/fxch/fldcw/
->   fild/fadd/fmul/fcomi/fistp… Exige un **modèle de la pile FPU 80-bit** (st(0)
->   …st(7) en registre-pile, tag word, arrondi via fldcw). Travail réel mais
->   borné ; représenter chaque slot comme une paire (mantisse 64 + exp/signe 16)
->   ou `long double` natif + helpers `__x87_*` à la manière des `__fp_*`. Résout
->   à lui seul l'essentiel des 26.
-> - **Entiers triviaux** (ror, xchg, imul 1-op) : lift direct, comme rol/sbb déjà
->   faits. Quelques heures.
-> - **Demi-moves SSE packés** (movhps/movhlps/shufpd) : modélisables exactement
->   comme les `__pi_*` existants (manip des moitiés haute/basse). Faible risque.
-> - **Variantes `rep`** (rep stos/movs autres que la copie déjà gérée),
->   **psubusw** packé : extensions des idiomes existants.
-> - **Stubs privilégiés** (hlt, sti) : apparaissent dans des stubs non-retournants
->   / syscall ; à laisser en `Asm` (correct) ou marquer `__builtin_unreachable`.
-> Aucune ne requiert de refonte ; toutes respectent le principe « jamais de code
-> faux » (elles restent INCOMPLETE tant que non liftées). **x87 est le seul
-> chantier conséquent.**
+> **Incomplétude — FAIT (~300 → 6).** Tout le gros œuvre est livré et
+> différentiel-validé (-O0→-O3) : **x87 80-bit** (`long double`, suivi de pile
+> statique, idiome de troncature ; cf. `ir/lift.rs::lift_x87` + `ir/build.rs::
+> x87_states`), **SSE packé double** (addpd/unpckpd/shufpd/movh*/movl*), **imul
+> 1-op**, **rol/ror**, **xchg**, **rep stos**, **psubusw**, **appels & tail-calls
+> indirects** (`jmp reg` → `return (*reg)(args)`). Les **6 restantes sont le
+> plancher** : 4 contiennent `hlt`/`sti` (privilégié, pas de C correct → asm est
+> la bonne sortie), 2 sont des cas limites de récupération de CFG (un `ret`
+> sur-segmenté en fonction ; un `jmp` indirect non résolu). Atteindre zéro
+> littéral exigerait soit de **traiter l'asm privilégié comme "complet"**
+> (changement de politique — c'est déjà fidèle), soit du travail de
+> **recouvrement de CFG/jump-tables** à risque de régression pour 2 fonctions.
 >
 > **Ordre faisant autorité** : voir `ROADMAP.md` §15.4. Résumé : 1) division
 > magique → 2) args call-sites → 3) compléter lifter + idiomes (✅ SSE/entiers/
