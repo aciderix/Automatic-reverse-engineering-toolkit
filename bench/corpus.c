@@ -193,3 +193,13 @@ unsigned long long adc128(unsigned long long a, unsigned long long b){
 int atomadd(int a, int b){ volatile int v=a; int old=__sync_fetch_and_add((int*)&v, b); return old*3 + v; }
 int atomcas(int a, int b){ volatile int v=a; int old=__sync_val_compare_and_swap((int*)&v, a, b+1); return old + v*2; }
 int atomxchg(int a, int b){ volatile int v=a+b; int old=__atomic_exchange_n((int*)&v, b, __ATOMIC_SEQ_CST); return old - v*2; }
+
+/* Variable-count 128-bit shift -> shld/shrd with CL count, and large variable
+   left shifts (the `1<<n` 64-bit-emit path). */
+unsigned long long dshiftv(unsigned long long a, unsigned long long b){
+    unsigned __int128 x = ((unsigned __int128)a << 64) | b;
+    int n = (int)(b & 63);
+    x >>= n; x <<= (n | 1);
+    unsigned long long m = 1ULL << (a & 63);
+    return ((unsigned long long)(x ^ (x >> 64))) + m;
+}

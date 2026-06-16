@@ -1474,16 +1474,56 @@ pub fn lift(insn: &Insn, bits: u32) -> Vec<Stmt> {
             out.extend(some_or_asm!(write_op0(ins, val, bits)));
             out
         }
+        // shld/shrd with a variable (CL) count. Count is taken mod `w`; a zero
+        // count is a no-op (selected explicitly, so the shift-by-w in the other
+        // branch is never evaluated). The complement shift is masked to avoid UB.
+        Mnemonic::Shld | Mnemonic::Shrd => {
+            let w = op0_width(ins, bits);
+            if !(w == 16 || w == 32 || w == 64) {
+                return asm();
+            }
+            let dst = some_or_asm!(op_value(ins, 0));
+            let src = some_or_asm!(op_value(ins, 1));
+            let c = bin(BinOp::And, some_or_asm!(op_value(ins, 2)), konst((w - 1) as i128));
+            let wc = bin(BinOp::And, bin(BinOp::Sub, konst(w as i128), c.clone()), konst((w - 1) as i128));
+            let shifted = if ins.mnemonic() == Mnemonic::Shld {
+                bin(BinOp::Or, bin(BinOp::Shl, dst.clone(), c.clone()), bin(BinOp::Shr, src, wc))
+            } else {
+                bin(BinOp::Or, bin(BinOp::Shr, dst.clone(), c.clone()), bin(BinOp::Shl, src, wc))
+            };
+            let shifted = bin(BinOp::And, shifted, konst(mask(w)));
+            let val = Expr::Select {
+                cond: Box::new(bin(BinOp::Eq, c, konst(0))),
+                then_: Box::new(bin(BinOp::And, dst, konst(mask(w)))),
+                else_: Box::new(shifted),
+            };
+            let mut out = vec![set_flag(FlagKind::Zf, bin(BinOp::Eq, val.clone(), konst(0)))];
+            out.extend(some_or_asm!(write_op0(ins, val, bits)));
+            out
+        }
 
+        // Shifts. CF is the last bit shifted out (a zero count leaves CF
+        // unchanged) — needed by the `shl;rcl` / `shr;rcr` multi-word idioms.
         Mnemonic::Shl => {
+            let w = op0_width(ins, bits);
             let a = some_or_asm!(op_value(ins, 0));
             let b = some_or_asm!(op_value(ins, 1));
-            let r = bin(BinOp::Shl, a, b);
-            let mut out = vec![set_flag(FlagKind::Zf, bin(BinOp::Eq, r.clone(), konst(0)))];
+            let r = bin(BinOp::Shl, a.clone(), b.clone());
+            let c = bin(BinOp::And, b, konst((w - 1) as i128));
+            let cf = Expr::Select {
+                cond: Box::new(bin(BinOp::Eq, c.clone(), konst(0))),
+                then_: Box::new(read_flag(FlagKind::Cf)),
+                else_: Box::new(bin(BinOp::And, bin(BinOp::Shr, a, bin(BinOp::Sub, konst(w as i128), c)), konst(1))),
+            };
+            let mut out = vec![
+                set_flag(FlagKind::Zf, bin(BinOp::Eq, r.clone(), konst(0))),
+                set_flag(FlagKind::Cf, cf),
+            ];
             out.extend(some_or_asm!(write_op0(ins, r, bits)));
             out
         }
         Mnemonic::Shr | Mnemonic::Sar => {
+            let w = op0_width(ins, bits);
             let a = some_or_asm!(op_value(ins, 0));
             let b = some_or_asm!(op_value(ins, 1));
             let op = if ins.mnemonic() == Mnemonic::Shr {
@@ -1491,8 +1531,18 @@ pub fn lift(insn: &Insn, bits: u32) -> Vec<Stmt> {
             } else {
                 BinOp::Sar
             };
-            let r = bin(op, a, b);
-            let mut out = vec![set_flag(FlagKind::Zf, bin(BinOp::Eq, r.clone(), konst(0)))];
+            let r = bin(op, a.clone(), b.clone());
+            // CF = bit (c-1) of the source (the last bit shifted out the bottom).
+            let c = bin(BinOp::And, b, konst((w - 1) as i128));
+            let cf = Expr::Select {
+                cond: Box::new(bin(BinOp::Eq, c.clone(), konst(0))),
+                then_: Box::new(read_flag(FlagKind::Cf)),
+                else_: Box::new(bin(BinOp::And, bin(BinOp::Shr, a, bin(BinOp::Sub, c, konst(1))), konst(1))),
+            };
+            let mut out = vec![
+                set_flag(FlagKind::Zf, bin(BinOp::Eq, r.clone(), konst(0))),
+                set_flag(FlagKind::Cf, cf),
+            ];
             out.extend(some_or_asm!(write_op0(ins, r, bits)));
             out
         }
@@ -1527,13 +1577,48 @@ pub fn lift(insn: &Insn, bits: u32) -> Vec<Stmt> {
             out
         }
 
-        // Exchange two operands. Register/register only (the common case); the
-        // locked memory form is left as `asm` (sound). Sequenced through a temp so
+        // Rotate through carry: a (w+1)-bit rotate of {CF:dst}. Immediate count
+        // only (CL form bails); width ≤ 32 so the (w+1)-bit value fits in 64 bits.
+        // Models the result and CF (out); OF is undefined for multi-bit, left.
+        Mnemonic::Rcl | Mnemonic::Rcr if ins.op_kind(1) == OpKind::Immediate8 => {
+            let w = op0_width(ins, bits);
+            if !(w == 8 || w == 16 || w == 32) {
+                return asm();
+            }
+            let c = (ins.immediate(1) as u32) % (w + 1);
+            let dst = bin(BinOp::And, some_or_asm!(op_value(ins, 0)), konst(mask(w)));
+            if c == 0 {
+                return some_or_asm!(write_op0(ins, dst, bits)); // no-op (CF unchanged)
+            }
+            // Capture the input carry first: the result and the carry-out both read
+            // `Cf`, and the carry-out set is emitted before the dst write, so SSA
+            // would otherwise resolve the result's carry-in to the carry-out.
+            let cf_in = Location::Temp((insn.address as u32).wrapping_mul(2));
+            // v = (CF << w) | dst  — the (w+1)-bit value.
+            let v = bin(
+                BinOp::Or,
+                bin(BinOp::Shl, Expr::Read(cf_in.clone()), konst(w as i128)),
+                dst,
+            );
+            let rot = if ins.mnemonic() == Mnemonic::Rcl {
+                bin(BinOp::Or, bin(BinOp::Shl, v.clone(), konst(c as i128)), bin(BinOp::Shr, v, konst((w + 1 - c) as i128)))
+            } else {
+                bin(BinOp::Or, bin(BinOp::Shr, v.clone(), konst(c as i128)), bin(BinOp::Shl, v, konst((w + 1 - c) as i128)))
+            };
+            let rot = bin(BinOp::And, rot, konst(mask(w + 1)));
+            let val = bin(BinOp::And, rot.clone(), konst(mask(w)));
+            let cf = bin(BinOp::And, bin(BinOp::Shr, rot, konst(w as i128)), konst(1));
+            let mut out = vec![
+                Stmt::Set { dst: cf_in, expr: read_flag(FlagKind::Cf) },
+                set_flag(FlagKind::Cf, cf),
+            ];
+            out.extend(some_or_asm!(write_op0(ins, val, bits)));
+            out
+        }
+        // Exchange. Register/register or memory/register (`xchg [m], r`, incl. the
+        // `lock` prefix — atomicity isn't expressible in sequential C, but the
+        // single-threaded value semantics are exact). Sequenced through a temp so
         // each side sees the other's original value.
-        // Exchange. Register/register or memory/register (the `xchg [m], r` form,
-        // including the `lock` prefix — atomicity is not expressible in sequential
-        // C, but the single-threaded value semantics are exact). Sequenced through
-        // a temp so each side sees the other's original value.
         Mnemonic::Xchg
             if ins.op_kind(1) == OpKind::Register
                 && !is_high_byte(ins.op_register(1))

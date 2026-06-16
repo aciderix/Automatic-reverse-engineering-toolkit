@@ -453,7 +453,9 @@ fn binary_c(op: BinOp, a: &Expr, b: &Expr) -> String {
         And => plain("&"),
         Or => plain("|"),
         Xor => plain("^"),
-        Shl => plain("<<"),
+        // Left operand cast to 64-bit: a small/constant operand is otherwise an
+        // `int`, and `1 << 32` (shift ≥ width) is undefined behaviour in C.
+        Shl => format!("({} << {})", u(a), expr_c(b)),
         Eq => plain("=="),
         Ne => plain("!="),
         Shr => format!("({} >> {})", u(a), expr_c(b)),
