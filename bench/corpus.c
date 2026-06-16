@@ -186,3 +186,10 @@ unsigned long long adc128(unsigned long long a, unsigned long long b){
     unsigned __int128 y = x + ((unsigned __int128)b << 40) - ((unsigned __int128)a << 7);
     return (unsigned long long)(y >> 13) ^ (unsigned long long)y;
 }
+
+/* Atomics (single-threaded value semantics): __sync/__atomic builtins emit
+   lock xadd / lock cmpxchg / xchg. The address of a local escapes to the
+   builtin so gcc keeps the RMW instruction. */
+int atomadd(int a, int b){ volatile int v=a; int old=__sync_fetch_and_add((int*)&v, b); return old*3 + v; }
+int atomcas(int a, int b){ volatile int v=a; int old=__sync_val_compare_and_swap((int*)&v, a, b+1); return old + v*2; }
+int atomxchg(int a, int b){ volatile int v=a+b; int old=__atomic_exchange_n((int*)&v, b, __ATOMIC_SEQ_CST); return old - v*2; }

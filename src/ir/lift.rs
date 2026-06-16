@@ -1530,11 +1530,15 @@ pub fn lift(insn: &Insn, bits: u32) -> Vec<Stmt> {
         // Exchange two operands. Register/register only (the common case); the
         // locked memory form is left as `asm` (sound). Sequenced through a temp so
         // each side sees the other's original value.
+        // Exchange. Register/register or memory/register (the `xchg [m], r` form,
+        // including the `lock` prefix — atomicity is not expressible in sequential
+        // C, but the single-threaded value semantics are exact). Sequenced through
+        // a temp so each side sees the other's original value.
         Mnemonic::Xchg
-            if ins.op_kind(0) == OpKind::Register
-                && ins.op_kind(1) == OpKind::Register
-                && !is_high_byte(ins.op_register(0))
-                && !is_high_byte(ins.op_register(1)) =>
+            if ins.op_kind(1) == OpKind::Register
+                && !is_high_byte(ins.op_register(1))
+                && ((ins.op_kind(0) == OpKind::Register && !is_high_byte(ins.op_register(0)))
+                    || ins.op_kind(0) == OpKind::Memory) =>
         {
             let v0 = some_or_asm!(op_value(ins, 0));
             let v1 = some_or_asm!(op_value(ins, 1));
@@ -1545,6 +1549,44 @@ pub fn lift(insn: &Insn, bits: u32) -> Vec<Stmt> {
             let mut out = vec![Stmt::Set { dst: t.clone(), expr: v0 }];
             out.extend(some_or_asm!(write_op0(ins, v1, bits)));
             out.push(Stmt::Set { dst: dst1.clone(), expr: combine_write(&dst1, w1, Expr::Read(t), bits) });
+            out
+        }
+        // xadd dst, src: src gets dst's old value; dst = dst + src (atomic add-and-
+        // exchange, used for reference counting). `src` is always a register.
+        Mnemonic::Xadd if ins.op_kind(1) == OpKind::Register && !is_high_byte(ins.op_register(1)) => {
+            let w = op0_width(ins, bits);
+            let old = some_or_asm!(op_value(ins, 0));
+            let s = some_or_asm!(op_value(ins, 1));
+            let sum = bin(BinOp::Add, old.clone(), s.clone());
+            let t = Location::Temp((insn.address as u32).wrapping_mul(2));
+            let id1 = some_or_asm!(reg_id(ins.op_register(1)));
+            let w1 = (ins.op_register(1).size() * 8) as u32;
+            let dst1 = Location::Reg(id1);
+            let mut out = vec![Stmt::Set { dst: t.clone(), expr: old.clone() }];
+            out.extend(add_flags(&old, &s, &sum, w));
+            out.extend(some_or_asm!(write_op0(ins, sum, bits)));
+            out.push(Stmt::Set { dst: dst1.clone(), expr: combine_write(&dst1, w1, Expr::Read(t), bits) });
+            out
+        }
+        // cmpxchg dst, src: if acc == dst { dst = src; ZF=1 } else { acc = dst;
+        // ZF=0 }. The compare sets the flags; `acc` is al/ax/eax/rax for the width.
+        Mnemonic::Cmpxchg if ins.op_kind(1) == OpKind::Register => {
+            let w = op0_width(ins, bits);
+            let acc_full = Location::Reg(RegId(0));
+            let acc = bin(BinOp::And, Expr::Read(acc_full.clone()), konst(mask(w)));
+            // Capture the old destination first so the `acc = dst` path (emitted
+            // after the store) reads the pre-store value, not the new one.
+            let t = Location::Temp((insn.address as u32).wrapping_mul(2));
+            let d = Expr::Read(t.clone());
+            let s = some_or_asm!(op_value(ins, 1));
+            let mut out = vec![Stmt::Set { dst: t.clone(), expr: some_or_asm!(op_value(ins, 0)) }];
+            let eq = bin(BinOp::Eq, acc.clone(), d.clone());
+            let r = bin(BinOp::Sub, acc.clone(), d.clone());
+            out.extend(sub_flags(&acc, &d, &r));
+            let dst_new = Expr::Select { cond: Box::new(eq.clone()), then_: Box::new(s), else_: Box::new(d.clone()) };
+            out.extend(some_or_asm!(write_op0(ins, dst_new, bits)));
+            let eax_new = Expr::Select { cond: Box::new(eq), then_: Box::new(acc), else_: Box::new(d) };
+            out.push(Stmt::Set { dst: acc_full.clone(), expr: combine_write(&acc_full, w, eax_new, bits) });
             out
         }
 
