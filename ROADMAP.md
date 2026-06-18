@@ -776,6 +776,61 @@ relogeable), et compare.
      `hlt` est privilégié, sans sémantique C ; `_start` n'est pas une fonction C →
      `__asm__`/INCOMPLETE est la seule sortie correcte. Jamais silencieusement faux.
 
+   - **Test sur vrai binaire 32-bit C++ (le jeu PE32, 26 Mo, ~44k fn) — ✅ FAIT.**
+     Recompile **100 %** ; incomplétude **~5900 → ~4360 / 44 183 (~90 %
+     entièrement modélisées)**. Différentiel **160 → 268** (-O0→-O3). Ajouts (tous
+     généraux, différentiel-validés ; les ops 32-bit-only validées via assembleur
+     `as --64` écrit à la main) :
+     - **x87 status-word** `fcom/fcomp/fcompp/fucom*/fnstsw/sahf` (compare flottant
+       32-bit, ≡ fcomi ; pseudo-registre FSW C0/C2/C3) + `fnstsw [mem]`.
+     - **SSE packé simple** addps/subps/mulps/divps, minps/maxps, sqrtps, cmpps
+       (imm8 predicat), andps/orps/andnps, shufps, unpcklps/unpckhps, movmskps,
+       cvtdq2ps. **rcpps/rsqrtps → Asm** (approximations dépendantes du CPU).
+     - **Atomics** `lock xadd`, `cmpxchg`, `xchg [mem]` (sémantique valeur mono-thread).
+     - `rcl/rcr` (count imm, rotate (w+1)-bit à travers CF), `shld/shrd` (forme CL),
+       `stc/clc/cmc`, `shl/shr/sar` posent **CF** (manquait).
+     - **3 vrais bugs corrigés** : arg cdecl 32-bit non déclaré (`collect_frame_vars`
+       ne parcourait pas la cible d'appel indirect) ; **retenue add/adc non
+       width-aware** (CF toujours 0 sur 32-bit) + capture de la retenue d'entrée
+       adc/sbb/rcl/rcr dans un temp (sinon SSA résout l'entrée sur la sortie) ;
+       **émission `Shl`** sans cast → `1 << 32` = UB C (bit perdu) → cast uint64_t.
+
+   ### Backlog incomplétude (TODO, par catégorie)
+
+   **Mesure honnête (jeu) : 89 % des fonctions incomplètes sont du *plancher
+   irréductible*, 10 % d'une queue récupérable mais co-bloquée.**
+
+   - **PLANCHER — ne pas modéliser (non sûr OU non validable OU non bit-exact)** :
+     - `pushad/pushfd/popad/popfd` (≈12k) : **32-bit only** — *rejetées par
+       l'assembleur 64-bit* → invalidables ici ; et `pushfd`/`lahf` liraient les
+       flags bruts SF/AF/PF que ce pipeline n'approxime que pour reconstruire des
+       *conditions* → **non sûrs** sans refonte du modèle de flags (cf. ci-dessous).
+     - x87 transcendantes `fsin/fcos/fptan/fpatan/f2xm1/fyl2x/fprem/frndint/fscale`
+       (microcode, précision dépendante du CPU → pas bit-exact).
+     - `rcpps/rsqrtps/rcpss/rsqrtss` (approximations ~12 bits, dépendantes du CPU).
+     - Privilégiées / I-O : `hlt/sti/cli/in/out/cpuid/rdtsc/int/iret/lgdt/...`.
+     - BCD 32-bit-only : `aaa/aad/aam/daa/das/aas/salc`.
+     - `cmpxchg8b/cmpxchg16b` (CAS 64/128-bit — modélisable mais rare ; bas ROI).
+   - **QUEUE RÉCUPÉRABLE (sûr + validable, mais faible rendement : co-bloquée par
+     le plancher → ~15 fonctions complétées par lot)** — à faire si on y revient :
+     - `rcl/rcr` **forme CL** (count variable : rotate (w+1)-bit à count runtime,
+       cas count=0 par Select) — ~71 fn.
+     - `bt/bts/btr/btc` **forme mémoire** (`[mem], reg` : adresse de bit) — ~18 fn.
+     - `punpcklbw/punpckhbw` (unpack octets), `cvtps2pd/cvtpd2ps` (conversion
+       packée simple↔double) — ~15 fn.
+     - Ops chaîne non-`rep` : `stos/lods/scas/cmps` (single-step) — modélisables
+       comme la version `rep` déjà faite.
+     - Formes de registre segment/contrôle de `mov/push/pop` (`mov eax,cr0`,
+       `push ds`…) — surtout plancher en pratique (registres système).
+   - **CHANTIER OPTIONNEL (débloquerait `lahf`/`pushfd`, gros + risqué)** :
+     **rendre le modèle de flags exact** (SF/ZF/AF/PF/OF posés width-aware comme
+     valeurs brutes par cmp/sub/add/...). Prérequis pour `lahf`/`pushfd`/`pushad`
+     *sûrs*. ⚠️ risque de régression sur la reconstruction de conditions de
+     `opt` (qui matche des patterns `SF!=OF` etc.) ; **et** ne lève pas la
+     non-validabilité des ops 32-bit-only ici (pas d'exécution 32-bit). À ne
+     tenter qu'avec un environnement d'exécution 32-bit pour valider.
+
+
    **Constat majeur (le plus important de cette série).** Une fois la détection
    d'incomplétude en place, on mesure la *vraie* fidélité sur du vrai code :
    **gzip 98/131, ls 184/200, cat 57/67 fonctions contiennent ≥1 instruction non
