@@ -289,6 +289,31 @@ pub(crate) fn frame_name(d: i64) -> String {
     }
 }
 
+thread_local! {
+    /// The current function's recovered struct layouts (set per function by the
+    /// emitter). When a memory address matches a clean struct field, it is
+    /// emitted as `((struct S*)base)->field_k` — byte-identical to the raw cast.
+    static STRUCT_INFO: std::cell::RefCell<Option<crate::types::StructInfo>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Set (or clear) the struct layouts consulted by `lvalue_c`.
+pub(crate) fn set_struct_info(si: Option<crate::types::StructInfo>) {
+    STRUCT_INFO.with(|c| *c.borrow_mut() = si);
+}
+
+/// Render a memory lvalue: a recovered struct field access when the base is a
+/// struct pointer, else the raw width-typed cast. The two are byte-identical
+/// (packed, exact-offset layout), so this never changes semantics.
+pub(crate) fn lvalue_c(addr: &Expr, width_bits: u8) -> String {
+    let hit = STRUCT_INFO
+        .with(|c| c.borrow().as_ref().and_then(|si| si.lookup(addr, (width_bits / 8) as u32)));
+    match hit {
+        Some((name, base, off)) => format!("((struct {}*)(v{}))->field_{:x}", name, base, off),
+        None => format!("(*({}*)({}))", ctype(width_bits), expr_c(addr)),
+    }
+}
+
 pub(crate) fn expr_c(e: &Expr) -> String {
     match e {
         Expr::Const(v, _) => const_c(*v),
@@ -296,7 +321,7 @@ pub(crate) fn expr_c(e: &Expr) -> String {
         Expr::Undef => "0 /*undef*/".into(),
         Expr::Read(Location::Frame(d)) => frame_name(*d),
         Expr::Read(_) => "0 /*reg*/".into(), // other reads don't remain post-SSA
-        Expr::Load { addr, ty } => format!("(*({}*)({}))", ctype(int_bits(ty)), expr_c(addr)),
+        Expr::Load { addr, ty } => lvalue_c(addr, int_bits(ty)),
         Expr::Unary(op, x) => match op {
             UnOp::Neg => format!("(-({}))", expr_c(x)),
             UnOp::Not => format!("(~({}))", expr_c(x)),
@@ -700,13 +725,7 @@ fn stmt_c(s: &Stmt, out: &mut String) {
         }
         Stmt::Set { .. } => {}
         Stmt::Store { addr, value, ty } => {
-            let _ = writeln!(
-                out,
-                "    *({}*)({}) = {};",
-                ctype(int_bits(ty)),
-                expr_c(addr),
-                expr_c(value)
-            );
+            let _ = writeln!(out, "    {} = {};", lvalue_c(addr, int_bits(ty)), expr_c(value));
         }
         Stmt::Branch { cond, taken, fallthrough } => {
             let _ = writeln!(out, "    if ({}) goto B{};", expr_c(cond), taken.0);
@@ -742,6 +761,12 @@ fn stmt_c(s: &Stmt, out: &mut String) {
 /// Emit one function as compilable C (goto form). `forward` receives the
 /// forward declarations this function needs (callees).
 pub fn emit_function(func: &IrFunction, forward: &mut BTreeSet<u64>, with_params: bool) -> String {
+    let struct_defs = {
+        let si = crate::types::struct_info(func);
+        let defs = si.defs();
+        set_struct_info(Some(si));
+        defs
+    };
     let mut f = func.clone();
     destruct_ssa(&mut f);
 
@@ -755,6 +780,7 @@ pub fn emit_function(func: &IrFunction, forward: &mut BTreeSet<u64>, with_params
     }
 
     let mut out = String::new();
+    out.push_str(&struct_defs);
     let unlifted = count_unlifted(&f);
     if unlifted > 0 {
         let _ = writeln!(
@@ -787,6 +813,7 @@ pub fn emit_function(func: &IrFunction, forward: &mut BTreeSet<u64>, with_params
         }
     }
     let _ = writeln!(out, "}}");
+    set_struct_info(None);
     out
 }
 

@@ -310,6 +310,128 @@ pub fn recover_aggregates(func: &IrFunction) -> Vec<Aggregate> {
     out
 }
 
+/// Byte width of a field type, for struct layout.
+fn ty_bytes(t: &Ty) -> u32 {
+    match t {
+        Ty::Int { bits, .. } => (if *bits == 0 { 64 } else { *bits } as u32) / 8,
+        Ty::Ptr(_) | Ty::Code => 8,
+        Ty::Float { bits } => *bits as u32 / 8,
+        _ => 8,
+    }
+}
+
+/// Safe struct layouts for *emission*. Per canonical base pointer, the
+/// non-overlapping fields whose access width is unambiguous. Emitting
+/// `((struct S*)base)->field_k` for these is **byte-identical** to
+/// `*(uintW_t*)(base+k)` — the struct is packed with exact offsets — so it is
+/// semantics-preserving (validated by the differential gate). Anything
+/// ambiguous (mixed widths at an offset, overlap) is dropped and falls back to
+/// the raw cast, keeping the output always correct.
+pub struct StructInfo {
+    entry: u64,
+    parent: Vec<u32>,
+    /// canonical base -> (offset -> width bytes), sorted, non-overlapping.
+    layouts: HashMap<u32, BTreeMap<i64, u32>>,
+}
+
+impl StructInfo {
+    /// Union-find representative (read-only, no path compression).
+    fn find(&self, mut x: u32) -> u32 {
+        while (x as usize) < self.parent.len() && self.parent[x as usize] != x {
+            x = self.parent[x as usize];
+        }
+        x
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.layouts.is_empty()
+    }
+
+    /// Function-unique struct name (value ids are function-local, so the entry
+    /// address namespaces them to avoid C redefinition across the unit).
+    pub fn struct_name(&self, canon: u32) -> String {
+        format!("s_{:x}_{}", self.entry, canon)
+    }
+
+    /// Resolve a memory address into a struct field access, if it is one:
+    /// returns `(struct name, base value id, offset)`.
+    pub fn lookup(&self, addr: &Expr, wbytes: u32) -> Option<(String, u32, i64)> {
+        let (base, off) = base_offset(addr)?;
+        let name = self.field(base, off, wbytes)?;
+        Some((name, base, off))
+    }
+
+    /// If `base + off` (a `wbytes`-wide access) is a clean struct field, return
+    /// the struct name to cast the base pointer to.
+    pub fn field(&self, base: u32, off: i64, wbytes: u32) -> Option<String> {
+        let canon = self.find(base);
+        let m = self.layouts.get(&canon)?;
+        if m.get(&off) == Some(&wbytes) {
+            Some(self.struct_name(canon))
+        } else {
+            None
+        }
+    }
+
+    /// C definitions of all recovered structs (packed, exact offsets via padding).
+    pub fn defs(&self) -> String {
+        use std::fmt::Write;
+        let mut bases: Vec<u32> = self.layouts.keys().copied().collect();
+        bases.sort_unstable();
+        let mut out = String::new();
+        for b in bases {
+            let m = &self.layouts[&b];
+            let _ = write!(out, "struct {} {{", self.struct_name(b));
+            let mut prev_end: i64 = 0;
+            for (i, (&off, &w)) in m.iter().enumerate() {
+                if off > prev_end {
+                    let _ = write!(out, " char _pad{}[{}];", i, off - prev_end);
+                }
+                let _ = write!(out, " uint{}_t field_{:x};", w * 8, off);
+                prev_end = off + w as i64;
+            }
+            let _ = writeln!(out, " }} __attribute__((packed));");
+        }
+        out
+    }
+}
+
+/// Build the safe struct layouts for emission (see [`StructInfo`]).
+pub fn struct_info(func: &IrFunction) -> StructInfo {
+    use std::collections::BTreeSet;
+    let mut env = build_env(func);
+    // Per canonical base: offset -> set of distinct access widths.
+    let mut acc: HashMap<u32, BTreeMap<i64, BTreeSet<u32>>> = HashMap::new();
+    for (addr, ty) in collect_accesses(func) {
+        if let Some((base, off)) = base_offset(&addr) {
+            let r = env.find(base);
+            acc.entry(r).or_default().entry(off).or_default().insert(ty_bytes(&ty));
+        }
+    }
+    let mut layouts: HashMap<u32, BTreeMap<i64, u32>> = HashMap::new();
+    for (base, offs) in acc {
+        // Keep only offsets with a single unambiguous width.
+        let mut clean: Vec<(i64, u32)> = offs
+            .into_iter()
+            .filter_map(|(o, ws)| (ws.len() == 1).then(|| (o, *ws.iter().next().unwrap())))
+            .collect();
+        clean.sort_unstable();
+        // Drop overlapping fields (keep the earlier-offset one).
+        let mut fields: BTreeMap<i64, u32> = BTreeMap::new();
+        let mut end: i64 = i64::MIN;
+        for (o, w) in clean {
+            if o >= end {
+                fields.insert(o, w);
+                end = o + w as i64;
+            }
+        }
+        if fields.len() >= 2 {
+            layouts.insert(base, fields);
+        }
+    }
+    StructInfo { entry: func.entry, parent: std::mem::take(&mut env.parent), layouts }
+}
+
 // ---------------------------------------------------------------------------
 // Array reconstruction — roadmap §5.3 / §5.4, milestone 4.
 //

@@ -534,9 +534,15 @@ largeur sur des slots `[rbp±disp]` purs.
   type d'élément = `join` des accès. Rendu *display-only* (`// T arr_vN[]; /*
   stride 0xN */`). Distinct des structs (offset constant). Vérifié sur `ls`
   (tableaux de pointeurs stride 8, tableau d'int16 stride 2).
-- [ ] Utiliser les types inférés dans l'émission (déclarations typées) une fois
-  la promotion de pile / l'analyse d'alias en place — aujourd'hui *display-only*
-  par sûreté.
+- [x] **Émission d'accès de struct** (`((struct S*)base)->field_k`) — `types::
+  struct_info` calcule des dispositions *sûres* (largeur non ambiguë par offset,
+  champs non chevauchants, ≥2 champs), `emit::lvalue_c` réécrit Load/Store. Le
+  struct est `packed` à offsets exacts → **octet-identique** au cast brut
+  `*(uintW_t*)(base+k)`, donc sémantique préservée (validé par le différentiel +
+  recompile 100 %). Noms `s_<entry>_<base>` (uniques par fonction). Tout accès
+  ambigu retombe sur le cast brut → toujours correct. Reste : déclarer les
+  *variables*/params typés (largeur/signe/ptr) — exige promotion de pile +
+  alias, toujours différé par sûreté.
 
 ---
 

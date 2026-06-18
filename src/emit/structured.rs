@@ -21,9 +21,8 @@ fn body_line(s: &Stmt) -> Option<String> {
     match s {
         Stmt::Assign { dst, expr } => Some(format!("v{} = {};", dst.0, expr_c(expr))),
         Stmt::Store { addr, value, ty } => Some(format!(
-            "*({}*)({}) = {};",
-            super::ctype(super::int_bits(ty)),
-            expr_c(addr),
+            "{} = {};",
+            super::lvalue_c(addr, super::int_bits(ty)),
             expr_c(value)
         )),
         Stmt::CallStmt(e) => Some(format!("(void)({});", expr_c(e))),
@@ -72,6 +71,15 @@ impl Ctx {
 
 /// Emit a single function as structured C.
 pub fn emit_function(func: &IrFunction, forward: &mut BTreeSet<u64>, with_params: bool) -> String {
+    // Recover struct layouts from the SSA form (stable value ids) and make them
+    // available to `lvalue_c` while this function's body is emitted.
+    let struct_defs = {
+        let si = crate::types::struct_info(func);
+        let defs = si.defs();
+        super::set_struct_info(Some(si));
+        defs
+    };
+
     let mut f = func.clone();
     destruct_ssa(&mut f);
     collect_callees(&f, forward);
@@ -125,6 +133,8 @@ pub fn emit_function(func: &IrFunction, forward: &mut BTreeSet<u64>, with_params
     s.detect_loops();
 
     let mut out = String::new();
+    // File-scope struct declarations (function-unique names), used by the body.
+    out.push_str(&struct_defs);
     // Honesty marker: if any instruction could not be lifted (it survives as an
     // `asm` comment), the decompilation is incomplete and its result may be
     // wrong. Say so loudly rather than emitting silently-incorrect code.
@@ -154,6 +164,7 @@ pub fn emit_function(func: &IrFunction, forward: &mut BTreeSet<u64>, with_params
     out.push_str(&s.out);
     let _ = writeln!(out, "    return 0;");
     let _ = writeln!(out, "}}");
+    super::set_struct_info(None);
     out
 }
 
