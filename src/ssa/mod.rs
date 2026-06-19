@@ -400,6 +400,7 @@ mod tests {
             reg_params: vec![],
             frame_base_values: vec![],
             fp80_values: vec![],
+            frame_widths: std::collections::HashMap::new(),
             blocks: vec![
                 blk(
                     0,
@@ -469,6 +470,7 @@ mod tests {
             reg_params: vec![],
             frame_base_values: vec![],
             fp80_values: vec![],
+            frame_widths: std::collections::HashMap::new(),
             blocks: vec![blk(
                 0,
                 vec![

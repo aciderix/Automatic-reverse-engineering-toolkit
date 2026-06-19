@@ -653,8 +653,19 @@ pub(crate) fn signature(func: &IrFunction, with_params: bool) -> String {
     }
 }
 
-/// Declaration line for frame slots that are *not* parameters (or all of them
-/// when `with_params` is false).
+/// C type of a recovered frame slot: the exact `uintW_t` when promotion proved a
+/// single, alias-disjoint access width, else `uint64_t`. Width-typing is safe —
+/// the surrounding masks make it byte-identical to the 64-bit slot (validated by
+/// the differential gate).
+pub(crate) fn frame_ctype(func: &IrFunction, d: i64) -> &'static str {
+    match func.frame_widths.get(&d) {
+        Some(&w) => ctype((w * 8) as u8),
+        None => "uint64_t",
+    }
+}
+
+/// Declaration lines for frame slots that are *not* parameters (or all of them
+/// when `with_params` is false), each declared at its recovered width.
 pub(crate) fn frame_decls(func: &IrFunction, with_params: bool) -> Option<String> {
     let (params, locals) = frame_params_locals(func);
     let set: Vec<i64> = if with_params {
@@ -665,8 +676,11 @@ pub(crate) fn frame_decls(func: &IrFunction, with_params: bool) -> Option<String
     if set.is_empty() {
         return None;
     }
-    let decls: Vec<String> = set.iter().map(|d| format!("{} = 0", frame_name(*d))).collect();
-    Some(format!("    uint64_t {};", decls.join(", ")))
+    let decls: Vec<String> = set
+        .iter()
+        .map(|d| format!("    {} {} = 0;", frame_ctype(func, *d), frame_name(*d)))
+        .collect();
+    Some(decls.join("\n"))
 }
 
 /// Collect direct call targets, to forward-declare them.
@@ -984,6 +998,7 @@ mod tests {
             reg_params: vec![],
             frame_base_values: vec![],
             fp80_values: vec![],
+            frame_widths: std::collections::HashMap::new(),
             blocks: vec![
                 Block { id: 0, addr: 0, stmts: vec![Stmt::Set { dst: rax.clone(), expr: Expr::konst(1, 32) }, Stmt::Branch { cond: Expr::konst(1, 8), taken: BlockId(1), fallthrough: BlockId(2) }], succ: vec![1, 2], pred: vec![] },
                 Block { id: 1, addr: 1, stmts: vec![Stmt::Set { dst: rax.clone(), expr: Expr::konst(2, 32) }, Stmt::Jump(BlockId(3)) ], succ: vec![3], pred: vec![0] },

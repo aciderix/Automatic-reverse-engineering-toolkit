@@ -228,6 +228,11 @@ pub struct IrFunction {
     /// SSA values that live in an x87 FPU stack slot — emitted as `long double`
     /// (80-bit extended precision) rather than `uint64_t`. Populated by SSA.
     pub fp80_values: Vec<u32>,
+    /// Recovered frame slots (`Location::Frame(disp)`) whose access width is a
+    /// single value, alias-proven non-overlapping → safe to declare as the exact
+    /// `uintW_t` rather than `uint64_t`. Maps displacement → width in bytes.
+    /// Populated by stack-slot promotion (`opt::frame`).
+    pub frame_widths: std::collections::HashMap<i64, u32>,
     pub blocks: Vec<Block>,
     /// Next fresh SSA value id.
     pub next_value: u32,

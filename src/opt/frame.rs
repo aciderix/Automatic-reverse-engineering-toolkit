@@ -243,6 +243,11 @@ pub fn promote_stack_slots(func: &mut IrFunction) -> usize {
         }
         func.blocks[bi].stmts = stmts;
     }
+    // Record each promoted slot's (alias-proven, single) width so the emitter can
+    // declare it as the exact `uintW_t` rather than `uint64_t`.
+    for (&d, &w) in &safe {
+        func.frame_widths.insert(d, w as u32);
+    }
     safe.len()
 }
 
@@ -736,6 +741,7 @@ mod tests {
             reg_params: vec![],
             frame_base_values: vec![],
             fp80_values: vec![],
+            frame_widths: std::collections::HashMap::new(),
             blocks: vec![Block { id: 0, addr: 0, stmts, succ: vec![], pred: vec![] }],
             next_value: 0,
             next_temp: 0,
