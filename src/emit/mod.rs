@@ -302,6 +302,29 @@ pub(crate) fn set_struct_info(si: Option<crate::types::StructInfo>) {
     STRUCT_INFO.with(|c| *c.borrow_mut() = si);
 }
 
+thread_local! {
+    /// The current function's frame-slot widths (set per function). Lets the
+    /// expression emitter drop a width mask that a width-typed slot already
+    /// enforces (`(local_4 & 0xffffffff)` → `local_4` when `local_4` is uint32_t).
+    static FRAME_WIDTHS: std::cell::RefCell<std::collections::HashMap<i64, u32>> =
+        std::cell::RefCell::new(std::collections::HashMap::new());
+}
+
+pub(crate) fn set_frame_widths(m: std::collections::HashMap<i64, u32>) {
+    FRAME_WIDTHS.with(|c| *c.borrow_mut() = m);
+}
+
+/// If `a & b` is a width mask already enforced by a width-typed frame slot
+/// (`Read(Frame(d)) & mask(W)` where slot `d` is `uintW_t`), return the bare
+/// slot — the mask is redundant. Else `None`.
+fn redundant_frame_mask(a: &Expr, b: &Expr) -> Option<String> {
+    let (Expr::Read(Location::Frame(d)), Expr::Const(m, _)) = (a, b) else { return None };
+    let w = FRAME_WIDTHS.with(|c| c.borrow().get(d).copied())?;
+    let bits = (w * 8) as u32;
+    let mask: u128 = if bits >= 64 { u64::MAX as u128 } else { (1u128 << bits) - 1 };
+    (*m as u128 == mask).then(|| frame_name(*d))
+}
+
 /// Render a memory lvalue: a recovered struct field access when the base is a
 /// struct pointer, else the raw width-typed cast. The two are byte-identical
 /// (packed, exact-offset layout), so this never changes semantics.
@@ -475,7 +498,8 @@ fn binary_c(op: BinOp, a: &Expr, b: &Expr) -> String {
         Add => plain("+"),
         Sub => plain("-"),
         Mul => plain("*"),
-        And => plain("&"),
+        // Drop a width mask a width-typed frame slot already enforces.
+        And => redundant_frame_mask(a, b).unwrap_or_else(|| plain("&")),
         Or => plain("|"),
         Xor => plain("^"),
         // Left operand cast to 64-bit: a small/constant operand is otherwise an
@@ -781,6 +805,7 @@ pub fn emit_function(func: &IrFunction, forward: &mut BTreeSet<u64>, with_params
         set_struct_info(Some(si));
         defs
     };
+    set_frame_widths(func.frame_widths.clone());
     let mut f = func.clone();
     destruct_ssa(&mut f);
 
@@ -827,6 +852,7 @@ pub fn emit_function(func: &IrFunction, forward: &mut BTreeSet<u64>, with_params
         }
     }
     let _ = writeln!(out, "}}");
+    set_frame_widths(Default::default());
     set_struct_info(None);
     out
 }

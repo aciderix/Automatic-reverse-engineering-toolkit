@@ -79,6 +79,7 @@ pub fn emit_function(func: &IrFunction, forward: &mut BTreeSet<u64>, with_params
         super::set_struct_info(Some(si));
         defs
     };
+    super::set_frame_widths(func.frame_widths.clone());
 
     let mut f = func.clone();
     destruct_ssa(&mut f);
@@ -164,6 +165,7 @@ pub fn emit_function(func: &IrFunction, forward: &mut BTreeSet<u64>, with_params
     out.push_str(&s.out);
     let _ = writeln!(out, "    return 0;");
     let _ = writeln!(out, "}}");
+    super::set_frame_widths(Default::default());
     super::set_struct_info(None);
     out
 }
