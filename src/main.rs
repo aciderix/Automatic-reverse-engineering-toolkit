@@ -38,6 +38,8 @@ enum Mode {
     Ir,
     /// Emit compilable C from the SSA IR (goto form) — work in progress.
     Emit,
+    /// Emit LLVM IR from the SSA IR (experimental rev.ng-style backend).
+    Llvm,
     /// Verify recompilability: emit C per function, recompile, report the rate.
     Verify,
     /// Transpile to a native executable for the target OS (UBT M1): intercept
@@ -204,6 +206,19 @@ fn main() -> Result<()> {
             } else {
                 out.push_str(&emit::structured::emit_unit(&irfs));
             }
+        }
+        Mode::Llvm => {
+            let irfs: Vec<_> = functions
+                .iter()
+                .map(|f| {
+                    let mut irf = ir::build::build_ir(&prog, f);
+                    opt::frame::promote_stack_slots(&mut irf);
+                    ssa::to_ssa(&mut irf);
+                    opt::optimize(&mut irf);
+                    irf
+                })
+                .collect();
+            out.push_str(&emit::llvm::emit_unit(&irfs));
         }
         Mode::Verify => {
             let limit = args.limit.unwrap_or(200);

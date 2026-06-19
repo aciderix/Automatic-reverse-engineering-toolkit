@@ -8,6 +8,7 @@
 //! comments (their clobbers were already `Undef`), so the output compiles.
 #![allow(dead_code)]
 
+pub mod llvm;
 pub mod structured;
 
 use crate::ir::types::*;
