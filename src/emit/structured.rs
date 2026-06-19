@@ -436,7 +436,11 @@ impl Structurer {
 /// float helpers, and an empty-parameter forward declaration for every function,
 /// so any chunk can call any other function. (Empty `sub_x();` is compatible both
 /// with calls and with the parameterised definitions emitted in the chunks.)
-pub fn emit_split(funcs: &[IrFunction], chunk_size: usize) -> (String, Vec<String>) {
+/// Returns `(shared header, chunk bodies, referenced-but-undefined function
+/// addresses)`. The last are call targets ARET did not recover (e.g. inside a
+/// packer section, or indirect targets); the builder emits weak stubs for them so
+/// the program still links.
+pub fn emit_split(funcs: &[IrFunction], chunk_size: usize) -> (String, Vec<String>, Vec<u64>) {
     // The cdecl arity fixup (non-shared only) needs an owned, mutable copy. In
     // shared-stack mode we skip it, so borrow directly — cloning tens of
     // thousands of IR functions for a real binary is a needless memory spike.
@@ -486,7 +490,8 @@ pub fn emit_split(funcs: &[IrFunction], chunk_size: usize) -> (String, Vec<Strin
     for a in forward.union(&defined) {
         let _ = writeln!(header, "uint64_t sub_{:x}();", a);
     }
-    (header, chunks)
+    let undefined: Vec<u64> = forward.difference(&defined).copied().collect();
+    (header, chunks, undefined)
 }
 
 /// Emit a complete structured C translation unit.

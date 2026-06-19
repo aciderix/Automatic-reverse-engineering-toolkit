@@ -209,7 +209,7 @@ pub fn transpile(
     emit::set_shared_stack(true);
     let irfs: Vec<_> = funcs.iter().map(|f| lower(prog, f)).collect();
     let n_funcs = irfs.len();
-    let (decls_h, chunks) = emit::structured::emit_split(&irfs, CHUNK_FUNCS);
+    let (decls_h, chunks, undef_subs) = emit::structured::emit_split(&irfs, CHUNK_FUNCS);
     emit::set_shared_stack(false);
     // The IR is no longer needed; free it before spawning the parallel compilers
     // (which need the memory) on a large program.
@@ -243,9 +243,18 @@ pub fn transpile(
         std::fs::write(out_dir.join(name), body)
             .with_context(|| format!("failed to write {}", name))
     };
+    // Weak stubs: one per unimplemented import, plus one per referenced-but-
+    // unrecovered function address — so the program links even though the static
+    // recovery is incomplete, and reports the gaps at runtime.
+    let mut stubs = emit_import_stubs(prog);
+    for &addr in &undef_subs {
+        stubs.push_str(&format!(
+            "__attribute__((weak)) uint64_t sub_{addr:x}(uint64_t e,uint64_t a,uint64_t c,uint64_t d){{ (void)e;(void)a;(void)c;(void)d; aret_unimpl(\"sub_{addr:x} (unrecovered)\"); return 0; }}\n"
+        ));
+    }
     write("aret_hle.h", HLE_H)?;
     write("aret_hle.c", HLE_C)?;
-    write("aret_stubs.c", &emit_import_stubs(prog))?;
+    write("aret_stubs.c", &stubs)?;
     write("aret_decls.h", &decls_h)?;
     write("aret_main.c", &main_c)?;
     // Each chunk is its own translation unit that includes the shared header.
@@ -318,6 +327,7 @@ pub fn transpile(
     let link = Command::new(&cc)
         .args([march, "-no-pie"])
         .args(&objs)
+        .arg("-lm") // the float helpers use sqrtf/sqrtl
         .arg("-o")
         .arg(&binary)
         .output()
