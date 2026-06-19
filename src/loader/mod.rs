@@ -126,6 +126,15 @@ impl Program {
             });
         }
 
+        // Map the PE headers at the image base too: the Windows CRT/startup reads
+        // its own MZ/PE/section headers (e.g. `cmp word ptr [imagebase], 0x5a4d`),
+        // which are not an `object` section, so without this they fault.
+        if let Some(hdr) = pe_header_section(data) {
+            if !sections.iter().any(|s| s.address == hdr.address) {
+                sections.push(hdr);
+            }
+        }
+
         if sections.iter().all(|s| !s.executable) {
             // Some stripped PEs mislabel sections; fall back to flag-based detection
             // by trusting any section literally named .text/__text.
@@ -327,6 +336,32 @@ impl Program {
         }
         seeds
     }
+}
+
+/// A synthetic section holding the PE headers (DOS + NT + section table) mapped
+/// at the image base, so transpiled code that reads its own headers works.
+fn pe_header_section(data: &[u8]) -> Option<Section> {
+    use object::read::pe::{ImageNtHeaders, ImageOptionalHeader};
+    use object::pe;
+
+    fn build<Nt: ImageNtHeaders>(data: &[u8]) -> Option<Section> {
+        let dos = pe::ImageDosHeader::parse(data).ok()?;
+        let mut offset = dos.nt_headers_offset() as u64;
+        let (nt, _dirs) = Nt::parse(data, &mut offset).ok()?;
+        let oh = nt.optional_header();
+        let base = oh.image_base();
+        let soh = oh.size_of_headers() as usize;
+        let n = soh.clamp(1, data.len());
+        Some(Section {
+            name: ".pe_header".to_string(),
+            address: base,
+            data: data[..n].to_vec(),
+            executable: false,
+            writable: false,
+        })
+    }
+
+    build::<pe::ImageNtHeaders32>(data).or_else(|| build::<pe::ImageNtHeaders64>(data))
 }
 
 /// Parse a PE import table into a map of IAT slot virtual address -> imported

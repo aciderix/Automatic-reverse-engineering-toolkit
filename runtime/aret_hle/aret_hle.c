@@ -414,6 +414,81 @@ void aret_unimpl(const char *name) {
 }
 
 /* ------------------------------------------------------------------ */
+/* C runtime bring-up (mingw/MSVC startup)                            */
+/* ------------------------------------------------------------------ */
+
+/* kernel32 process/module/sync (best-effort) */
+uint32_t aret_GetModuleHandleA(uint32_t esp) { (void)esp; return 0x00400000u; }
+uint32_t aret_GetModuleHandleW(uint32_t esp) { (void)esp; return 0x00400000u; }
+uint32_t aret_GetProcAddress(uint32_t esp) { (void)esp; return 0; }
+uint32_t aret_LoadLibraryA(uint32_t esp) { (void)esp; return 0x10000000u; }
+uint32_t aret_FreeLibrary(uint32_t esp) { (void)esp; return 1; }
+uint32_t aret_SetUnhandledExceptionFilter(uint32_t esp) { (void)esp; return 0; }
+uint32_t aret_VirtualProtect(uint32_t esp) { (void)esp; return 1; }
+uint32_t aret_VirtualQuery(uint32_t esp) { (void)esp; return 0; }
+uint32_t aret_TlsGetValue(uint32_t esp) { (void)esp; return 0; }
+uint32_t aret_TlsSetValue(uint32_t esp) { (void)esp; return 1; }
+uint32_t aret_TlsAlloc(uint32_t esp) { (void)esp; return 0; }
+uint32_t aret_InitializeCriticalSection(uint32_t esp) { (void)esp; return 0; }
+uint32_t aret_DeleteCriticalSection(uint32_t esp) { (void)esp; return 0; }
+uint32_t aret_EnterCriticalSection(uint32_t esp) { (void)esp; return 0; }
+uint32_t aret_LeaveCriticalSection(uint32_t esp) { (void)esp; return 0; }
+uint32_t aret_IsDBCSLeadByteEx(uint32_t esp) { (void)esp; return 0; }
+uint32_t aret_MultiByteToWideChar(uint32_t esp) { (void)esp; return 0; }
+uint32_t aret_WideCharToMultiByte(uint32_t esp) { (void)esp; return 0; }
+uint32_t aret_GetCommandLineA(uint32_t esp) { (void)esp; return (uint32_t)(uintptr_t)"program"; }
+
+/* msvcrt internal globals exposed as pointer-returning functions */
+static int aret_fmode = 0, aret_commode = 0, aret_errno_v = 0;
+uint32_t aret___p__fmode(uint32_t esp) { (void)esp; return (uint32_t)(uintptr_t)&aret_fmode; }
+uint32_t aret___p__commode(uint32_t esp) { (void)esp; return (uint32_t)(uintptr_t)&aret_commode; }
+uint32_t aret__errno(uint32_t esp) { (void)esp; return (uint32_t)(uintptr_t)&aret_errno_v; }
+uint32_t aret___set_app_type(uint32_t esp) { (void)esp; return 0; }
+uint32_t aret___setusermatherr(uint32_t esp) { (void)esp; return 0; }
+uint32_t aret__amsg_exit(uint32_t esp) { _exit((int)arg(esp, 0)); return 0; }
+uint32_t aret__cexit(uint32_t esp) { (void)esp; return 0; }
+uint32_t aret__lock(uint32_t esp) { (void)esp; return 0; }
+uint32_t aret__unlock(uint32_t esp) { (void)esp; return 0; }
+uint32_t aret__onexit(uint32_t esp) { return arg(esp, 0); }
+uint32_t aret_signal(uint32_t esp) { (void)esp; return 0; }
+uint32_t aret_atexit(uint32_t esp) { (void)esp; return 0; }
+uint32_t aret_setlocale(uint32_t esp) { (void)esp; return (uint32_t)(uintptr_t)"C"; }
+uint32_t aret_abort(uint32_t esp) { (void)esp; abort(); return 0; }
+uint32_t aret_exit(uint32_t esp) { exit((int)arg(esp, 0)); return 0; }
+uint32_t aret__exit(uint32_t esp) { _exit((int)arg(esp, 0)); return 0; }
+uint32_t aret_strerror(uint32_t esp) { return (uint32_t)(uintptr_t)strerror((int)arg(esp, 0)); }
+uint32_t aret_atoi(uint32_t esp) { return (uint32_t)atoi((const char *)(uintptr_t)arg(esp, 0)); }
+uint32_t aret_strchr(uint32_t esp) {
+    return (uint32_t)(uintptr_t)strchr((const char *)(uintptr_t)arg(esp, 0), (int)arg(esp, 1));
+}
+uint32_t aret_strncmp(uint32_t esp) {
+    return (uint32_t)(int32_t)strncmp((const char *)(uintptr_t)arg(esp, 0),
+                                      (const char *)(uintptr_t)arg(esp, 1), arg(esp, 2));
+}
+
+/* __getmainargs(int* argc, char*** argv, char*** env, int wild, _startupinfo*) */
+static char *aret_argv0[] = { (char *)"program", 0 };
+uint32_t aret___getmainargs(uint32_t esp) {
+    uint32_t pargc = arg(esp, 0), pargv = arg(esp, 1), penv = arg(esp, 2);
+    if (pargc) *(int32_t *)(uintptr_t)pargc = 1;
+    if (pargv) *(uint32_t *)(uintptr_t)pargv = (uint32_t)(uintptr_t)aret_argv0;
+    if (penv) *(uint32_t *)(uintptr_t)penv = 0;
+    return 0;
+}
+
+/* _initterm(start, end): a table of constructor function pointers (original code
+ * VAs). Dispatch each non-null one through aret_call. */
+uint32_t aret__initterm(uint32_t esp) {
+    uint32_t s = arg(esp, 0), e = arg(esp, 1);
+    for (uint32_t p = s; p < e; p += 4) {
+        uint32_t fn = *(uint32_t *)(uintptr_t)p;
+        if (fn) aret_call(fn, esp, 0, 0, 0);
+    }
+    return 0;
+}
+uint32_t aret__initterm_e(uint32_t esp) { aret__initterm(esp); return 0; }
+
+/* ------------------------------------------------------------------ */
 /* Synthetic TEB / PEB (Windows process environment, x86)             */
 /* ------------------------------------------------------------------ */
 
