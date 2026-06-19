@@ -601,7 +601,7 @@ fn peeled_reg(e: &Expr) -> Option<&Location> {
 /// decoration / non-identifier characters and prefix `aret_`. The prefix keeps
 /// shim names (e.g. `aret_printf`, `aret_malloc`) from colliding with the real
 /// libc functions the shims themselves call.
-fn sanitize_import(name: &str) -> String {
+pub(crate) fn sanitize_import(name: &str) -> String {
     let stem = name
         .trim_start_matches('_')
         .split(['@', '+'])

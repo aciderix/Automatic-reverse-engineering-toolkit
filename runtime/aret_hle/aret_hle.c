@@ -396,3 +396,19 @@ uint32_t aret_SetFilePointer(uint32_t esp) {
     off_t r = lseek(fd, dist, whence);
     return (uint32_t)r;
 }
+
+/* ------------------------------------------------------------------ */
+/* Diagnostics                                                        */
+/* ------------------------------------------------------------------ */
+
+/* Reported by the builder's weak per-import stubs when an unimplemented API is
+ * actually called. Warn once per name (the stubs pass stable string literals, so
+ * pointer comparison de-dups), then let the program limp on. */
+void aret_unimpl(const char *name) {
+    static const char *seen[1024];
+    static int nseen = 0;
+    for (int i = 0; i < nseen; i++)
+        if (seen[i] == name) return;
+    if (nseen < 1024) seen[nseen++] = name;
+    fprintf(stderr, "ARET: unimplemented import called: %s\n", name);
+}

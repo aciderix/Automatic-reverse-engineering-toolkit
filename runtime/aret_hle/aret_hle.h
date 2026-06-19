@@ -68,4 +68,9 @@ uint32_t aret_CloseHandle(uint32_t esp);  /* (HANDLE) -> BOOL */
 uint32_t aret_DeleteFileA(uint32_t esp);  /* (name) -> BOOL */
 uint32_t aret_SetFilePointer(uint32_t esp); /* (h, dist, *high, method) -> DWORD */
 
+/* Diagnostic for an intercepted import that has no shim yet: the builder emits a
+ * weak stub per unresolved import that calls this (warns once, then returns 0),
+ * so a large binary still links and reports exactly which APIs it needs. */
+void aret_unimpl(const char *name);
+
 #endif /* ARET_HLE_H */

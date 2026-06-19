@@ -302,6 +302,18 @@ Pièces livrées (`runtime/aret_hle/`, purement additif — aucun changement Rus
   on avance par tranches de bout en bout ; on réutilise les briques externes au
   lieu de les réécrire. **M1, M2, M3, M4 et le sous-système Fichiers sont
   livrés** (cf. §4 → §4 sexies).
+- 🏗️ **Mise à l'échelle (vers de vrais gros binaires)** — chantier ouvert après
+  le test sur un AAA packé (44 183 fonctions, `program.c` de 403 Mo) :
+  - ✅ **Données en blob** : les sections sont embarquées via `.incbin`
+    (`aret_layout.S` + `sections.bin`) au lieu de tableaux d'octets C — ~×18 plus
+    petit (59 Mo → 3,3 Mo pour le jeu).
+  - ✅ **Stubs d'imports faibles** : un stub `aret_<import>` par import non shimé
+    (override par le HLE quand il existe) → le binaire **lie toujours** et
+    **signale à l'exécution** chaque API manquante (liste de courses du HLE / cible
+    du pont Wine).
+  - ➡️ **Reste le mur principal** : l'émission en **un seul** `.c` de 403 Mo ne
+    compile pas. Prochaine brique = **émission modulaire** (un `.c` par paquet de
+    fonctions + en-tête de déclarations partagé, compilation parallèle puis lien).
 - ⏸️ **M5 (fallback Unicorn) différé** : il faudrait lier un émulateur **dans le
   binaire généré**, qui est `-m32` ; or l'environnement n'a pas de `libunicorn`
   32-bit (le paquet apt est 64-bit), donc un M5 réellement exécutable n'est pas
