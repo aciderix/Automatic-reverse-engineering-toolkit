@@ -228,8 +228,14 @@ bash bench/smt_rewrites.sh                            # preuves SMT des règles 
 - **Pilier 6 (vérification)** : ✅ niveaux 1, 2, 3. Niveau 3 ne prouve pour l'instant
   que les **règles d'opt isolées** (pas des fonctions entières lift→SMT). Manque la
   **boucle de raffinement** automatique.
-- **Pilier 7 (LLM §9)** : ❌ NON FAIT (pas d'API ici). À échafauder : prompt depuis
-  l'IR typé, patch de noms/commentaires, re-vérification après renommage.
+- **Pilier 7 (LLM §9)** : ✅ **ÉCHAFAUDÉ, optionnel & fonctionnel** (`src/llm/
+  mod.rs`). `aret --mode emit --function F --llm` : prompt depuis le C émis →
+  appel Anthropic via `curl` (si `ANTHROPIC_API_KEY` ; `ANTHROPIC_MODEL`
+  configurable) → renommage **rename-only** (fonction/variables/commentaire). Sans
+  clé → no-op (sortie inchangée). **Sûr par construction** : noms uniquement, donc
+  ne change jamais la sémantique ; noms invalides/keywords/collisions rejetés.
+  Aucune crate réseau. 5 tests. Reste : re-vérification recompile post-renommage
+  (optionnelle), enrichissement multi-fonctions/contexte d'appel.
 - **Pilier 8 (bench/CI §10)** : ✅ **porte unifiée** `bench/regression.sh` (build +
   tests + niveaux 1/2/3) et **hook SessionStart** `.claude/hooks/session-start.sh`
   (build + z3) en place. Reste : la brancher en CI GitHub Actions sur push.
