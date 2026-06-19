@@ -60,7 +60,8 @@ moitié faits. Chaque tranche élargit la classe de binaires supportés.
 | **M2** ✅ | **Imports indirects via registre** (`mov reg,[iat]; call reg`) + **Memory Layout Mapper** (données globales `.rdata`/`.data` remises à leur VA) | PE Win32 multi-références à données globales en mémoire absolue | `object` |
 | **M3** ✅ | **Pile machine partagée** : passage d'arguments inter-fonctions, par la **pile** (stdcall/cdecl) **et par registres** (regparm/fastcall) | programmes Win32 multi-fonctions à appels internes | nouveau lowering gated |
 | **M4** ✅ | **Shims CRT** (`msvcrt`) : `printf` **variadique**, `malloc`/`free`/`calloc`/`realloc`, `mem*`/`str*`, `puts` | `.exe` console utilisant le runtime C | shims natifs |
-| M5 | Fallback émulateur (Unicorn) sur adresse inconnue | code partiellement obfusqué / sauts dynamiques | `unicorn-engine` |
+| **FS** ✅ | **Sous-système Fichiers** : file I/O Win32/CRT + **traduction de chemins** `C:\…` → `prefix/drive_c/…` | programmes lisant/écrivant des fichiers | shims natifs |
+| M5 | Fallback émulateur (Unicorn) sur adresse inconnue ⏸️ *différé : pas de libunicorn 32-bit dans l'env* | code partiellement obfusqué / sauts dynamiques | `unicorn-engine` |
 | M6 | Cible WebAssembly/WASI (au lieu d'un OS natif) | « cible universelle » de la note 3 | `wasmtime` |
 | M7 | GUI / graphisme (X11, puis DXVK) | applications fenêtrées, puis jeux | Wine/DXVK |
 
@@ -253,6 +254,33 @@ Pièces livrées (`runtime/aret_hle/`) :
 
 ---
 
+## 4 sexies. Sous-système Fichiers — ✅ FAIT (Phase 3, traduction de chemins)
+
+> Statut : implémenté et testé. Un programme qui écrit puis relit un fichier via
+> un chemin Windows `C:\…` se transpile et s'exécute nativement ; le fichier
+> atterrit au chemin natif traduit.
+
+```
+$ ARET_PREFIX=/tmp/aretfs aret tests/m1/fixtures/hello_file.exe --mode transpile --run
+  | FS: round-trip through a C:\ path
+$ cat /tmp/aretfs/drive_c/aret_fs_test.txt
+  FS: round-trip through a C:\ path        # C:\aret_fs_test.txt -> $ARET_PREFIX/drive_c/...
+```
+
+Pièces livrées (`runtime/aret_hle/`, purement additif — aucun changement Rust) :
+- **Traduction de chemins** (design doc §2, « Système de Fichiers ») :
+  `C:\dir\file` → `$ARET_PREFIX/drive_c/dir/file` (lettre de lecteur →
+  `drive_<x>`, `\` → `/`, chemins relatifs inchangés) ; `$ARET_PREFIX` par défaut
+  `aret_prefix`. Création récursive des dossiers parents à l'écriture.
+- **stdio CRT** : `fopen`/`fclose`/`fread`/`fwrite`/`fputs`/`fgets`/`fseek`/
+  `ftell`/`remove`.
+- **API fichier Win32** : `CreateFileA`/`CloseHandle`/`DeleteFileA`/
+  `SetFilePointer` — les HANDLE sont des fds POSIX dans le modèle, donc les
+  `aret_ReadFile`/`aret_WriteFile` existants fonctionnent tels quels avec les
+  handles renvoyés.
+
+---
+
 ## 5. Décisions d'architecture à trancher au moment de coder M1
 
 - **Mono-crate vs workspace** : la note 1 propose un workspace
@@ -272,12 +300,17 @@ Pièces livrées (`runtime/aret_hle/`) :
 
 - ✅ **Acté** : on garde ARET (C) comme socle ; la Phase 3 (HLE) est la priorité ;
   on avance par tranches de bout en bout ; on réutilise les briques externes au
-  lieu de les réécrire. **M1, M2, M3 et M4 sont livrés** (cf. §4 → §4 quinquies).
-- ➡️ **Prochaine marche (M5)** : le **filet de sécurité** — quand la
-  décompilation statique ne couvre pas tout (code auto-modifiant, sauts calculés,
-  obfuscation), embarquer un mini-émulateur (`unicorn-engine`) dans le binaire
-  généré pour exécuter à la volée les blocs non découverts. Puis M6 (cible WASI),
-  M7 (GUI/DXVK).
+  lieu de les réécrire. **M1, M2, M3, M4 et le sous-système Fichiers sont
+  livrés** (cf. §4 → §4 sexies).
+- ⏸️ **M5 (fallback Unicorn) différé** : il faudrait lier un émulateur **dans le
+  binaire généré**, qui est `-m32` ; or l'environnement n'a pas de `libunicorn`
+  32-bit (le paquet apt est 64-bit), donc un M5 réellement exécutable n'est pas
+  démontrable ici. À reprendre dans un environnement avec une toolchain Unicorn
+  32-bit, ou en ciblant un binaire source 64-bit.
+- ➡️ **Pistes immédiates testables nativement** : élargir la couverture Win32
+  réelle (`MessageBoxA` → stderr/console, `GetCommandLineA`, environnement,
+  horloge), un test **différentiel** comparant la sortie transpilée à une
+  référence connue, puis M6 (cible WASI) et M7 (GUI/DXVK).
 
 > Ce fichier est le point d'entrée « mémoire » du projet UBT. Les trois notes
 > d'origine sont conservées à côté, non éditées, comme cap de référence.

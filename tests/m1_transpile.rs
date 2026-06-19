@@ -31,8 +31,9 @@ fn has_m32() -> bool {
     child.wait().map(|s| s.success()).unwrap_or(false)
 }
 
-/// Transpile `fixture` to a native binary, run it, and return its stdout.
-fn transpile_and_run(fixture_name: &str) -> String {
+/// Transpile `fixture` to a native binary, run it (with optional extra env), and
+/// return its stdout.
+fn transpile_and_run_env(fixture_name: &str, env: &[(&str, &str)]) -> String {
     let fixture = format!(
         "{}/tests/m1/fixtures/{}",
         env!("CARGO_MANIFEST_DIR"),
@@ -50,13 +51,15 @@ fn transpile_and_run(fixture_name: &str) -> String {
     ));
     let aret = env!("CARGO_BIN_EXE_aret");
 
-    let output = Command::new(aret)
-        .args(["--mode", "transpile", "--run"])
+    let mut cmd = Command::new(aret);
+    cmd.args(["--mode", "transpile", "--run"])
         .arg("--out-dir")
         .arg(&out_dir)
-        .arg(&fixture)
-        .output()
-        .expect("failed to run aret");
+        .arg(&fixture);
+    for (k, v) in env {
+        cmd.env(k, v);
+    }
+    let output = cmd.output().expect("failed to run aret");
 
     let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
     let stderr = String::from_utf8_lossy(&output.stderr);
@@ -66,6 +69,11 @@ fn transpile_and_run(fixture_name: &str) -> String {
     );
     let _ = std::fs::remove_dir_all(&out_dir);
     stdout
+}
+
+/// Transpile `fixture` to a native binary, run it, and return its stdout.
+fn transpile_and_run(fixture_name: &str) -> String {
+    transpile_and_run_env(fixture_name, &[])
 }
 
 #[test]
@@ -159,4 +167,31 @@ fn m4_heap_and_string_runtime() {
         out.contains("M4: heap=ABCDE len=5"),
         "heap/string runtime wrong:\n{out}"
     );
+}
+
+#[test]
+fn fs_file_roundtrip_with_path_translation() {
+    if !has_m32() {
+        eprintln!("skipping FS test: `cc -m32` unavailable (install gcc-multilib)");
+        return;
+    }
+    // A program that writes then reads a file through a Windows `C:\` path. The
+    // HLE translates the path under ARET_PREFIX and maps stdio onto POSIX.
+    let prefix = std::env::temp_dir().join(format!("aret_fs_prefix_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&prefix);
+    let prefix_str = prefix.to_str().unwrap();
+
+    let out = transpile_and_run_env("hello_file.exe", &[("ARET_PREFIX", prefix_str)]);
+    assert!(
+        out.contains("FS: round-trip through a C:\\ path"),
+        "file round-trip output wrong:\n{out}"
+    );
+    // The Windows path C:\aret_fs_test.txt must have landed under <prefix>/drive_c.
+    let translated = prefix.join("drive_c").join("aret_fs_test.txt");
+    assert!(
+        translated.exists(),
+        "translated file not created at {}",
+        translated.display()
+    );
+    let _ = std::fs::remove_dir_all(&prefix);
 }

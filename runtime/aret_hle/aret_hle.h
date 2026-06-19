@@ -46,4 +46,26 @@ uint32_t aret_strlen(uint32_t esp);   /* (s) -> size_t */
 uint32_t aret_strcmp(uint32_t esp);   /* (a, b) -> int */
 uint32_t aret_strcpy(uint32_t esp);   /* (dst, src) -> dst */
 
+/* Filesystem subsystem (UBT Phase 3). Windows paths are translated to native
+ * paths under the ARET prefix: `C:\dir\file` -> `$ARET_PREFIX/drive_c/dir/file`
+ * (backslashes become slashes; relative paths pass through). $ARET_PREFIX
+ * defaults to "aret_prefix" in the current directory. */
+
+/* msvcrt.dll — C stdio */
+uint32_t aret_fopen(uint32_t esp);    /* (name, mode) -> FILE* */
+uint32_t aret_fclose(uint32_t esp);   /* (FILE*) -> int */
+uint32_t aret_fread(uint32_t esp);    /* (ptr, size, nmemb, FILE*) -> nmemb */
+uint32_t aret_fwrite(uint32_t esp);   /* (ptr, size, nmemb, FILE*) -> nmemb */
+uint32_t aret_fputs(uint32_t esp);    /* (s, FILE*) -> int */
+uint32_t aret_fgets(uint32_t esp);    /* (buf, n, FILE*) -> buf|0 */
+uint32_t aret_fseek(uint32_t esp);    /* (FILE*, off, whence) -> int */
+uint32_t aret_ftell(uint32_t esp);    /* (FILE*) -> long */
+uint32_t aret_remove(uint32_t esp);   /* (name) -> int */
+
+/* kernel32.dll — Win32 file API (handles are POSIX fds in this model) */
+uint32_t aret_CreateFileA(uint32_t esp);  /* (name, access, share, sec, disp, flags, tmpl) -> HANDLE */
+uint32_t aret_CloseHandle(uint32_t esp);  /* (HANDLE) -> BOOL */
+uint32_t aret_DeleteFileA(uint32_t esp);  /* (name) -> BOOL */
+uint32_t aret_SetFilePointer(uint32_t esp); /* (h, dist, *high, method) -> DWORD */
+
 #endif /* ARET_HLE_H */

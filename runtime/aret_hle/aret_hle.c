@@ -10,6 +10,9 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
+#include <fcntl.h>
+#include <sys/stat.h>
+#include <ctype.h>
 
 /* Read stdcall/cdecl argument `i` (a 32-bit word) from the modelled stack. */
 static inline uint32_t arg(uint32_t esp, int i) {
@@ -249,4 +252,147 @@ uint32_t aret_strcpy(uint32_t esp) {
     char *d = (char *)(uintptr_t)arg(esp, 0);
     strcpy(d, (const char *)(uintptr_t)arg(esp, 1));
     return (uint32_t)(uintptr_t)d;
+}
+
+/* ------------------------------------------------------------------ */
+/* Filesystem subsystem (UBT Phase 3)                                 */
+/* ------------------------------------------------------------------ */
+
+static const char *aret_prefix(void) {
+    const char *p = getenv("ARET_PREFIX");
+    return (p && *p) ? p : "aret_prefix";
+}
+
+/* Translate a Windows path to a native path under the ARET prefix:
+ *   "C:\dir\file" -> "<prefix>/drive_c/dir/file"
+ *   "\dir\file"   -> "<prefix>/dir/file"   (rooted, drive-less)
+ *   "dir\file"    -> "dir/file"            (relative: passes through) */
+static void translate_path(const char *win, char *out, size_t cap) {
+    if (!win) { if (cap) out[0] = 0; return; }
+    size_t o = 0;
+    const char *s = win;
+    if (win[0] && win[1] == ':' && (win[2] == '\\' || win[2] == '/')) {
+        o = (size_t)snprintf(out, cap, "%s/drive_%c", aret_prefix(),
+                             (char)tolower((unsigned char)win[0]));
+        s = win + 2; /* keep the leading separator */
+    } else if (win[0] == '\\' || win[0] == '/') {
+        o = (size_t)snprintf(out, cap, "%s", aret_prefix());
+        s = win;
+    }
+    for (; *s && o < cap - 1; s++) out[o++] = (*s == '\\') ? '/' : *s;
+    out[o] = 0;
+}
+
+/* mkdir -p for the directory components of `path`. */
+static void make_parents(const char *path) {
+    char buf[1024];
+    snprintf(buf, sizeof buf, "%s", path);
+    for (char *p = buf + 1; *p; p++) {
+        if (*p == '/') {
+            *p = 0;
+            mkdir(buf, 0777);
+            *p = '/';
+        }
+    }
+}
+
+static int path_is_write_mode(const char *mode) {
+    return mode && (strchr(mode, 'w') || strchr(mode, 'a') || strchr(mode, '+'));
+}
+
+uint32_t aret_fopen(uint32_t esp) {
+    const char *name = (const char *)(uintptr_t)arg(esp, 0);
+    const char *mode = (const char *)(uintptr_t)arg(esp, 1);
+    char path[1024];
+    translate_path(name, path, sizeof path);
+    if (path_is_write_mode(mode)) make_parents(path);
+    FILE *f = fopen(path, mode ? mode : "rb");
+    return (uint32_t)(uintptr_t)f;
+}
+
+uint32_t aret_fclose(uint32_t esp) {
+    return (uint32_t)fclose((FILE *)(uintptr_t)arg(esp, 0));
+}
+
+uint32_t aret_fread(uint32_t esp) {
+    void *ptr = (void *)(uintptr_t)arg(esp, 0);
+    return (uint32_t)fread(ptr, arg(esp, 1), arg(esp, 2), (FILE *)(uintptr_t)arg(esp, 3));
+}
+
+uint32_t aret_fwrite(uint32_t esp) {
+    const void *ptr = (const void *)(uintptr_t)arg(esp, 0);
+    return (uint32_t)fwrite(ptr, arg(esp, 1), arg(esp, 2), (FILE *)(uintptr_t)arg(esp, 3));
+}
+
+uint32_t aret_fputs(uint32_t esp) {
+    return (uint32_t)fputs((const char *)(uintptr_t)arg(esp, 0), (FILE *)(uintptr_t)arg(esp, 1));
+}
+
+uint32_t aret_fgets(uint32_t esp) {
+    char *buf = (char *)(uintptr_t)arg(esp, 0);
+    char *r = fgets(buf, (int)arg(esp, 1), (FILE *)(uintptr_t)arg(esp, 2));
+    return r ? (uint32_t)(uintptr_t)buf : 0;
+}
+
+uint32_t aret_fseek(uint32_t esp) {
+    return (uint32_t)fseek((FILE *)(uintptr_t)arg(esp, 0), (long)(int32_t)arg(esp, 1), (int)arg(esp, 2));
+}
+
+uint32_t aret_ftell(uint32_t esp) {
+    return (uint32_t)ftell((FILE *)(uintptr_t)arg(esp, 0));
+}
+
+uint32_t aret_remove(uint32_t esp) {
+    char path[1024];
+    translate_path((const char *)(uintptr_t)arg(esp, 0), path, sizeof path);
+    return (uint32_t)remove(path);
+}
+
+/* Win32 file API — handles are POSIX file descriptors in this model, so the
+ * existing aret_ReadFile/aret_WriteFile (which treat the handle as an fd) work
+ * unchanged with handles returned here. */
+#define ARET_INVALID_HANDLE 0xFFFFFFFFu
+#define GENERIC_READ_FLAG  0x80000000u
+#define GENERIC_WRITE_FLAG 0x40000000u
+
+uint32_t aret_CreateFileA(uint32_t esp) {
+    const char *name = (const char *)(uintptr_t)arg(esp, 0);
+    uint32_t access = arg(esp, 1);
+    uint32_t disposition = arg(esp, 4);
+    char path[1024];
+    translate_path(name, path, sizeof path);
+
+    int rd = (access & GENERIC_READ_FLAG) != 0;
+    int wr = (access & GENERIC_WRITE_FLAG) != 0;
+    int flags = (rd && wr) ? O_RDWR : (wr ? O_WRONLY : O_RDONLY);
+    switch (disposition) {
+        case 1: flags |= O_CREAT | O_EXCL; break;  /* CREATE_NEW */
+        case 2: flags |= O_CREAT | O_TRUNC; break; /* CREATE_ALWAYS */
+        case 3: break;                             /* OPEN_EXISTING */
+        case 4: flags |= O_CREAT; break;           /* OPEN_ALWAYS */
+        case 5: flags |= O_TRUNC; break;           /* TRUNCATE_EXISTING */
+        default: break;
+    }
+    if (wr || disposition == 1 || disposition == 2 || disposition == 4) make_parents(path);
+    int fd = open(path, flags, 0666);
+    return fd < 0 ? ARET_INVALID_HANDLE : (uint32_t)fd;
+}
+
+uint32_t aret_CloseHandle(uint32_t esp) {
+    return close((int)arg(esp, 0)) == 0 ? 1 : 0;
+}
+
+uint32_t aret_DeleteFileA(uint32_t esp) {
+    char path[1024];
+    translate_path((const char *)(uintptr_t)arg(esp, 0), path, sizeof path);
+    return unlink(path) == 0 ? 1 : 0;
+}
+
+uint32_t aret_SetFilePointer(uint32_t esp) {
+    int fd = (int)arg(esp, 0);
+    int32_t dist = (int32_t)arg(esp, 1);
+    uint32_t method = arg(esp, 3); /* 0 FILE_BEGIN, 1 FILE_CURRENT, 2 FILE_END */
+    int whence = method == 1 ? SEEK_CUR : (method == 2 ? SEEK_END : SEEK_SET);
+    off_t r = lseek(fd, dist, whence);
+    return (uint32_t)r;
 }

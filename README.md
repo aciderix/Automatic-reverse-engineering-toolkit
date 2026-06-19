@@ -173,6 +173,15 @@ aret tests/m1/fixtures/hello_printf.exe --mode transpile --run
 #   | M4: malloc sum=100
 ```
 
+A **filesystem subsystem** translates Windows paths (`C:\dir\file` →
+`$ARET_PREFIX/drive_c/dir/file`) and maps Win32/CRT file I/O onto POSIX, so a
+program that reads/writes files through `C:\` paths works:
+
+```bash
+ARET_PREFIX=/tmp/aretfs aret tests/m1/fixtures/hello_file.exe --mode transpile --run
+#   | FS: round-trip through a C:\ path        # file lands at /tmp/aretfs/drive_c/...
+```
+
 The vision, design notes, and milestone roadmap live in
 [`docs/vision/`](docs/vision/) (start with `00-SYNTHESE-roadmap-UBT.md`). The HLE
 runtime is in [`runtime/aret_hle/`](runtime/aret_hle); the backend builder is in
