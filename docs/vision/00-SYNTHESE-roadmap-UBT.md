@@ -322,11 +322,22 @@ Pièces livrées (`runtime/aret_hle/`, purement additif — aucun changement Rus
     **produit un ELF Linux natif de 196 Mo** qui **lie proprement et démarre** :
     le mapper mémoire s'exécute, l'entrée tourne… puis **segfault dans le code de
     démarrage Windows** (`sub_4026c0`, `mov (%eax),%eax` avec `eax=0x10`).
-  - ➡️ **Prochain mur = l'environnement processus Windows** : le startup/packer
-    lit une structure processus (TEB/PEB via `fs:`, ou un résultat d'API stubé)
-    qu'on renvoie à 0, puis déréférence `[ptr+0x10]`. Étapes : modéliser `fs:` →
-    un vrai TEB/PEB synthétique, implémenter les API de bootstrap, gérer le
-    dépaquetage `.UBX`. (Et pour *jouer* : pont Win32/D3D → Wine + DXVK.)
+  - ✅ **TEB/PEB synthétique** : `fs:[ea]` est modélisé (en transpile) comme un
+    accès réel à `__aret_fs() + ea` pointant sur un TEB/PEB synthétique (Self,
+    PEB, SEH, StackBase…). Vérifié : `fs:[0x18]` (Self) et `fs:[0x30]` (PEB)
+    résolvent et sont cohérents nativement (fixture `hello_teb`).
+  - ✅ **Dispatch d'appels indirects** : un pointeur de fonction porte la VA
+    d'origine ; `aret_call(va, …)` recherche `sub_<va>` dans une table triée et
+    appelle la fonction transpilée (fixture `hello_fnptr` : `ops[sel](6,7)=42`).
+  - 📈 **Effet sur un *vrai* `.exe` console (CRT mingw complet, non packé)** :
+    chaque brique le fait avancer d'un mur — démarrage → passe `fs:`/TEB → passe
+    l'appel indirect → plante plus loin dans l'init du CRT (prochaine API/struct
+    à shimer). Progrès réel et mesurable.
+  - ➡️ **Reste pour ce binaire de jeu spécifiquement** : il est **packé**
+    (`.UBX`), et un stub de packer (déchiffrement, IAT dynamique, anti-debug) ne
+    se transpile **pas** statiquement — c'est le rôle de Wine. Diagnostic vérifié :
+    son crash n'est pas `fs:`-lié mais un *callee* (packer) renvoyant nul.
+    Pour *jouer* : Wine + DXVK. Pour le *protocole/serveur* : le décompilateur.
 - ⏸️ **M5 (fallback Unicorn) différé** : il faudrait lier un émulateur **dans le
   binaire généré**, qui est `-m32` ; or l'environnement n'a pas de `libunicorn`
   32-bit (le paquet apt est 64-bit), donc un M5 réellement exécutable n'est pas

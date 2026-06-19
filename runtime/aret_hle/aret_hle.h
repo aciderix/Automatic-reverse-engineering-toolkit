@@ -73,4 +73,15 @@ uint32_t aret_SetFilePointer(uint32_t esp); /* (h, dist, *high, method) -> DWORD
  * so a large binary still links and reports exactly which APIs it needs. */
 void aret_unimpl(const char *name);
 
+/* Segment bases for the transpiled code: `fs:[ea]` becomes a load/store at
+ * `__aret_fs() + ea`, pointing into a synthetic TEB/PEB so the Windows startup's
+ * thread/process-block reads work natively. gs is unused in 32-bit user mode. */
+uint32_t __aret_fs(void);
+uint32_t __aret_gs(void);
+
+/* Indirect-call dispatch: a function pointer holds the original code virtual
+ * address, so calls through it are routed here, which maps the VA to the
+ * transpiled `sub_<va>` (generated table in aret_dispatch.c). */
+uint64_t aret_call(uint32_t va, uint64_t esp, uint64_t a, uint64_t c, uint64_t d);
+
 #endif /* ARET_HLE_H */

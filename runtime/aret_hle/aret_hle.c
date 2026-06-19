@@ -412,3 +412,42 @@ void aret_unimpl(const char *name) {
     if (nseen < 1024) seen[nseen++] = name;
     fprintf(stderr, "ARET: unimplemented import called: %s\n", name);
 }
+
+/* ------------------------------------------------------------------ */
+/* Synthetic TEB / PEB (Windows process environment, x86)             */
+/* ------------------------------------------------------------------ */
+
+static uint8_t aret_teb[0x1000];
+static uint8_t aret_peb[0x1000];
+static int aret_teb_ready = 0;
+
+static void aret_teb_init(void) {
+    if (aret_teb_ready) return;
+    aret_teb_ready = 1;
+    uint32_t teb = (uint32_t)(uintptr_t)aret_teb;
+    uint32_t peb = (uint32_t)(uintptr_t)aret_peb;
+    uint32_t *t = (uint32_t *)aret_teb;
+    /* NT_TIB / TEB (x86 offsets) */
+    t[0x00 / 4] = 0xFFFFFFFFu;       /* ExceptionList: end of SEH chain */
+    t[0x04 / 4] = 0x7FFF0000u;       /* StackBase  (permissive range)  */
+    t[0x08 / 4] = 0x00010000u;       /* StackLimit                     */
+    t[0x18 / 4] = teb;               /* Self (linear TEB address)      */
+    t[0x20 / 4] = (uint32_t)getpid();/* ClientId.UniqueProcess         */
+    t[0x24 / 4] = (uint32_t)getpid();/* ClientId.UniqueThread          */
+    t[0x2C / 4] = 0;                 /* ThreadLocalStoragePointer      */
+    t[0x30 / 4] = peb;               /* ProcessEnvironmentBlock        */
+    t[0x34 / 4] = 0;                 /* LastErrorValue                 */
+    uint32_t *p = (uint32_t *)aret_peb;
+    aret_peb[0x02] = 0;              /* BeingDebugged = FALSE          */
+    p[0x08 / 4] = 0x00400000u;       /* ImageBaseAddress (typical)     */
+}
+
+uint32_t __aret_fs(void) {
+    aret_teb_init();
+    return (uint32_t)(uintptr_t)aret_teb;
+}
+
+uint32_t __aret_gs(void) {
+    aret_teb_init();
+    return 0; /* gs is unused in 32-bit Windows user mode */
+}

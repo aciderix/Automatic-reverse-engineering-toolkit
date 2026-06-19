@@ -170,6 +170,36 @@ fn m4_heap_and_string_runtime() {
 }
 
 #[test]
+fn indirect_call_dispatch_through_function_pointer() {
+    if !has_m32() {
+        eprintln!("skipping fnptr test: `cc -m32` unavailable (install gcc-multilib)");
+        return;
+    }
+    // A call through a function pointer (holding the original code VA) must be
+    // dispatched by aret_call to the transpiled function.
+    let out = transpile_and_run("hello_fnptr.exe");
+    assert!(
+        out.contains("INDIRECT: result=42"),
+        "indirect call did not dispatch correctly:\n{out}"
+    );
+}
+
+#[test]
+fn teb_synthetic_process_environment() {
+    if !has_m32() {
+        eprintln!("skipping TEB test: `cc -m32` unavailable (install gcc-multilib)");
+        return;
+    }
+    // fs:[0x18] (TEB Self) and fs:[0x30] (PEB) must resolve to a consistent
+    // synthetic TEB so Windows-startup environment reads work natively.
+    let out = transpile_and_run("hello_teb.exe");
+    assert!(
+        out.contains("TEB: nonnull=1 self_consistent=1 peb_nonnull=1"),
+        "synthetic TEB/PEB not consistent:\n{out}"
+    );
+}
+
+#[test]
 fn fs_file_roundtrip_with_path_translation() {
     if !has_m32() {
         eprintln!("skipping FS test: `cc -m32` unavailable (install gcc-multilib)");

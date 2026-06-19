@@ -296,14 +296,35 @@ fn frame_disp(ins: &Instruction, i: u32) -> Option<i64> {
 }
 
 /// Build the address expression and access size (bits) of a memory operand.
+/// The segment-base helper call for an `fs:`/`gs:`-prefixed operand: `__aret_fs()`
+/// / `__aret_gs()` return the synthetic TEB base at runtime. Used (transpile/
+/// shared-stack mode only) to model `fs:[disp]` as a real load/store at
+/// `seg_base + disp` — so the Windows startup's TEB/PEB reads work natively.
+fn seg_base(ins: &Instruction) -> Option<Expr> {
+    let name = match ins.segment_prefix() {
+        Register::FS => "__aret_fs",
+        Register::GS => "__aret_gs",
+        _ => return None,
+    };
+    Some(Expr::Call {
+        target: CallTarget::Named(name.to_string()),
+        args: vec![],
+        ret: Ty::int(32),
+    })
+}
+
 fn mem_addr(ins: &Instruction) -> Option<(Expr, u32)> {
     // Segment-overridden memory (`fs:`/`gs:`) has an effective address we don't
-    // model — falling through would silently read the wrong (absolute) address,
-    // which is exactly the kind of incorrect-but-compilable output the project
-    // forbids. Bail so the instruction becomes an honest `Stmt::Asm`.
+    // model here — falling through would silently read the wrong (absolute)
+    // address. Callers that model segments (the TEB path) use `mem_addr_raw`.
     if ins.segment_prefix() != Register::None {
         return None;
     }
+    mem_addr_raw(ins)
+}
+
+/// Effective address of a memory operand, *ignoring* any segment override.
+fn mem_addr_raw(ins: &Instruction) -> Option<(Expr, u32)> {
     let size_bits = (ins.memory_size().size() * 8) as u32;
     if ins.is_ip_rel_memory_operand() {
         return Some((konst(ins.ip_rel_memory_address() as i128), size_bits));
@@ -360,6 +381,16 @@ fn op_value(ins: &Instruction, i: u32) -> Option<Expr> {
             // the whole instruction degrades to `asm`, dropping the canary `je`
             // terminator and breaking the function's structure.
             if ins.segment_prefix() != Register::None {
+                // Transpile/shared-stack mode: model `fs:[ea]` as a real load from
+                // the synthetic TEB (`__aret_fs() + ea`), so the Windows startup's
+                // TEB/PEB reads work natively. Otherwise keep the consistent-0
+                // model (the stack canary folds to a no-op; see below).
+                if crate::emit::shared_stack() {
+                    if let (Some(base), Some((addr, sz))) = (seg_base(ins), mem_addr_raw(ins)) {
+                        let ea = Expr::Binary(BinOp::Add, Box::new(base), Box::new(addr));
+                        return Some(Expr::Load { addr: Box::new(ea), ty: Ty::int(sz as u8) });
+                    }
+                }
                 return Some(konst(0));
             }
             if let Some(d) = frame_disp(ins, i) {
@@ -443,6 +474,15 @@ fn write_op0(ins: &Instruction, value: Expr, bits: u32) -> Option<Vec<Stmt>> {
             // has no observable effect in our model. This keeps canary/TLS-using
             // functions fully lifted instead of degrading to `asm`.
             if ins.segment_prefix() != Register::None {
+                // Transpile/shared-stack mode: store into the synthetic TEB so
+                // SEH / TLS writes are real. Otherwise drop the write (reads are
+                // modelled as a constant, so it has no observable effect).
+                if crate::emit::shared_stack() {
+                    if let (Some(base), Some((addr, sz))) = (seg_base(ins), mem_addr_raw(ins)) {
+                        let ea = Expr::Binary(BinOp::Add, Box::new(base), Box::new(addr));
+                        return Some(vec![Stmt::Store { addr: ea, value, ty: Ty::int(sz as u8) }]);
+                    }
+                }
                 return Some(vec![Stmt::Nop]);
             }
             if let Some(d) = frame_disp(ins, 0) {

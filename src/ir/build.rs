@@ -656,11 +656,14 @@ fn internal_call_args() -> Vec<Expr> {
 fn thread_calls_in_expr(e: &mut Expr) {
     match e {
         Expr::Call { target, args, .. } => {
-            if matches!(target, CallTarget::Direct(_)) {
+            // Direct internal calls and indirect (function-pointer) calls both take
+            // the fixed machine context. Imports are already `Named` (handled in
+            // name_calls with just the stack pointer), so they are not touched.
+            if matches!(target, CallTarget::Direct(_) | CallTarget::Indirect(_)) {
+                if let CallTarget::Indirect(x) = target {
+                    thread_calls_in_expr(x);
+                }
                 *args = internal_call_args();
-            }
-            if let CallTarget::Indirect(x) = target {
-                thread_calls_in_expr(x);
             }
             for a in args.iter_mut() {
                 thread_calls_in_expr(a);
