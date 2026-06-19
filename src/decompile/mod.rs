@@ -29,13 +29,25 @@ pub fn annotate_strings(text: &str, prog: &Program) -> String {
                 j += 1;
             }
             if j > i + 2 {
-                out.push_str(&text[i..j]);
+                // Consume an integer-literal suffix (`ULL`, `LL`, …) so the comment
+                // is inserted *after* the whole literal, not inside it.
+                let mut k = j;
+                while k < bytes.len() && matches!(bytes[k], b'u' | b'U' | b'l' | b'L') {
+                    k += 1;
+                }
+                out.push_str(&text[i..k]);
                 if let Ok(addr) = u64::from_str_radix(&text[i + 2..j], 16) {
-                    if let Some(s) = prog.read_cstring(addr) {
-                        out.push_str(&format!(" /* \"{}\" */", s.replace('"', "\\\"")));
+                    if let Some(mut s) = prog.read_cstring(addr) {
+                        // Keep the comment one line and well-formed: truncate, and
+                        // neutralise any `*/` that would close it early.
+                        if s.chars().count() > 64 {
+                            s = format!("{}…", s.chars().take(64).collect::<String>());
+                        }
+                        let s = s.replace("*/", "* /").replace('"', "\\\"");
+                        out.push_str(&format!(" /* \"{}\" */", s));
                     }
                 }
-                i = j;
+                i = k;
                 continue;
             }
         }

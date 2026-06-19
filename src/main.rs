@@ -189,6 +189,9 @@ fn main() -> Result<()> {
             } else {
                 emit::structured::emit_unit(&irfs)
             };
+            // Annotate read-only string addresses with their contents (comments;
+            // semantics-neutral). Helps the reader and, with --llm, the model.
+            let body = decompile::annotate_strings(&body, &prog);
             // Optional LLM naming pass (per function, so the prompt is focused).
             // No API key → `annotate` returns the input unchanged.
             if args.llm {
