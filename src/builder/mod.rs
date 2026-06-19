@@ -218,6 +218,54 @@ fn emit_iat_patch(prog: &Program) -> String {
     s
 }
 
+/// Referenced-but-undefined `Direct` call targets across `irfs` (for the LLVM
+/// backend, which does not go through `emit_split`'s forward set). These get weak
+/// stubs so the program links despite incomplete recovery.
+fn collect_undef_subs(irfs: &[ir::types::IrFunction]) -> Vec<u64> {
+    use ir::types::{CallTarget, Expr, Stmt};
+    use std::collections::BTreeSet;
+    let defined: BTreeSet<u64> = irfs.iter().map(|f| f.entry).collect();
+    let mut called: BTreeSet<u64> = BTreeSet::new();
+    fn ex(e: &Expr, out: &mut BTreeSet<u64>) {
+        match e {
+            Expr::Call { target, args, .. } => {
+                if let CallTarget::Direct(a) = target {
+                    out.insert(*a);
+                }
+                if let CallTarget::Indirect(x) = target {
+                    ex(x, out);
+                }
+                for a in args {
+                    ex(a, out);
+                }
+            }
+            Expr::Load { addr, .. } => ex(addr, out),
+            Expr::Unary(_, x) | Expr::Cast { expr: x, .. } => ex(x, out),
+            Expr::Binary(_, a, b) => { ex(a, out); ex(b, out); }
+            Expr::Select { cond, then_, else_ } => { ex(cond, out); ex(then_, out); ex(else_, out); }
+            _ => {}
+        }
+    }
+    fn st(s: &Stmt, out: &mut BTreeSet<u64>) {
+        match s {
+            Stmt::Set { expr, .. } | Stmt::Assign { expr, .. } | Stmt::CallStmt(expr) => ex(expr, out),
+            Stmt::Store { addr, value, .. } => { ex(addr, out); ex(value, out); }
+            Stmt::Branch { cond, .. } => ex(cond, out),
+            Stmt::Switch { value, .. } => ex(value, out),
+            Stmt::Return(Some(e)) => ex(e, out),
+            _ => {}
+        }
+    }
+    for f in irfs {
+        for b in &f.blocks {
+            for s in &b.stmts {
+                st(s, &mut called);
+            }
+        }
+    }
+    called.difference(&defined).copied().collect()
+}
+
 /// Build IR for one recovered function and lower it for shared-stack transpilation
 /// (UBT M3). Unlike the verify/decompile chain, this does *not* promote stack
 /// slots to private per-function locals: every stack access stays raw memory into
@@ -242,7 +290,9 @@ pub fn transpile(
     out_dir: &Path,
     run: bool,
     entry_override: Option<u64>,
+    backend: &str,
 ) -> Result<TranspileReport> {
+    let use_llvm = backend.eq_ignore_ascii_case("llvm");
     if funcs.is_empty() {
         bail!("no functions to transpile");
     }
@@ -267,7 +317,14 @@ pub fn transpile(
     emit::set_shared_stack(true);
     let irfs: Vec<_> = funcs.iter().map(|f| lower(prog, f)).collect();
     let n_funcs = irfs.len();
-    let (decls_h, chunks, undef_subs) = emit::structured::emit_split(&irfs, CHUNK_FUNCS);
+    // Program emission: either the LLVM IR backend (one module) or the chunked C
+    // backend. The runtime (HLE, main, dispatch, layout, stubs) is C either way.
+    let llvm_ir = if use_llvm { Some(emit::llvm::emit_unit(&irfs)) } else { None };
+    let (decls_h, chunks, undef_subs) = if use_llvm {
+        (String::new(), Vec::new(), collect_undef_subs(&irfs))
+    } else {
+        emit::structured::emit_split(&irfs, CHUNK_FUNCS)
+    };
     emit::set_shared_stack(false);
     // The IR is no longer needed; free it before spawning the parallel compilers
     // (which need the memory) on a large program.
@@ -322,14 +379,18 @@ pub fn transpile(
     write("aret_stubs.c", &stubs)?;
     write("aret_dispatch.c", &emit_dispatch(&entries))?;
     write("aret_iat.c", &emit_iat_patch(prog))?;
-    write("aret_decls.h", &decls_h)?;
     write("aret_main.c", &main_c)?;
-    // Each chunk is its own translation unit that includes the shared header.
-    let mut chunk_srcs: Vec<std::path::PathBuf> = Vec::with_capacity(chunks.len());
-    for (i, body) in chunks.iter().enumerate() {
-        let name = format!("chunk_{i}.c");
-        write(&name, &format!("#include \"aret_decls.h\"\n{}", body))?;
-        chunk_srcs.push(out_dir.join(name));
+    // Program: one LLVM IR module, or chunked C translation units.
+    let mut chunk_srcs: Vec<std::path::PathBuf> = Vec::new();
+    if let Some(ir) = &llvm_ir {
+        write("program.ll", ir)?;
+    } else {
+        write("aret_decls.h", &decls_h)?;
+        for (i, body) in chunks.iter().enumerate() {
+            let name = format!("chunk_{i}.c");
+            write(&name, &format!("#include \"aret_decls.h\"\n{}", body))?;
+            chunk_srcs.push(out_dir.join(name));
+        }
     }
     // Memory layout: a blob-backed mapper, or a no-op when there is no addressable
     // data (so aret_main.c always links).
@@ -391,7 +452,25 @@ pub fn transpile(
             Ok(obj)
         })
         .collect();
-    let objs = objs?;
+    let mut objs = objs?;
+
+    // LLVM backend: compile the program module with llc and add its object.
+    if use_llvm {
+        let obj = out_dir.join("program.ll.o");
+        let triple = if bits == 32 { "i386-pc-linux-gnu" } else { "x86_64-pc-linux-gnu" };
+        let llc = std::env::var("LLC").unwrap_or_else(|_| "llc".to_string());
+        let out = Command::new(&llc)
+            .args([&format!("-mtriple={triple}"), "-filetype=obj", "-O2", "-relocation-model=static"])
+            .arg(out_dir.join("program.ll"))
+            .arg("-o")
+            .arg(&obj)
+            .output()
+            .with_context(|| format!("failed to run {}", llc))?;
+        if !out.status.success() {
+            bail!("llc failed:\n{}", String::from_utf8_lossy(&out.stderr).trim());
+        }
+        objs.push(obj);
+    }
 
     let link = Command::new(&cc)
         .args([march, "-no-pie"])

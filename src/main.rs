@@ -100,6 +100,10 @@ struct Args {
     #[arg(long)]
     entry: Option<String>,
 
+    /// Transpile mode: code-generation backend (`c` or `llvm`).
+    #[arg(long, default_value = "c")]
+    backend: String,
+
     /// Transpile mode: target triple (informational for M1; the host C
     /// compiler builds a native binary at the source's bitness).
     #[arg(long)]
@@ -236,8 +240,14 @@ fn main() -> Result<()> {
                 }
                 None => None,
             };
-            let report =
-                builder::transpile(&prog, &functions, &args.out_dir, args.run, entry_override)?;
+            let report = builder::transpile(
+                &prog,
+                &functions,
+                &args.out_dir,
+                args.run,
+                entry_override,
+                &args.backend,
+            )?;
             out.push_str(&report.render());
         }
     }

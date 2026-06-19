@@ -48,6 +48,61 @@ fn assert_valid_ir(fixture: &str) {
     );
 }
 
+fn has_m32_and_llc() -> bool {
+    if !has_llvm_as() {
+        return false;
+    }
+    let llc = Command::new("llc").arg("--version").stdout(Stdio::null()).stderr(Stdio::null()).status();
+    if !llc.map(|s| s.success()).unwrap_or(false) {
+        return false;
+    }
+    // cc -m32 must compile+link (the runtime is built as a 32-bit process).
+    let cc = std::env::var("CC").unwrap_or_else(|_| "cc".to_string());
+    let mut child = match Command::new(&cc)
+        .args(["-m32", "-x", "c", "-", "-o", "/dev/null"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+    {
+        Ok(c) => c,
+        Err(_) => return false,
+    };
+    use std::io::Write;
+    if let Some(mut s) = child.stdin.take() {
+        let _ = s.write_all(b"int main(void){return 0;}\n");
+    }
+    child.wait().map(|s| s.success()).unwrap_or(false)
+}
+
+/// End-to-end through the LLVM backend: transpile a real Windows PE to a native
+/// ELF *via LLVM IR* (llc), run it, and check the output — at parity with the C
+/// backend.
+#[test]
+fn llvm_backend_runs_native() {
+    if !has_m32_and_llc() {
+        eprintln!("skipping LLVM run test: need llc + cc -m32");
+        return;
+    }
+    let path = format!("{}/tests/m1/fixtures/hello_printf.exe", env!("CARGO_MANIFEST_DIR"));
+    let out_dir = std::env::temp_dir().join(format!("aret_llvm_run_{}", std::process::id()));
+    let aret = env!("CARGO_BIN_EXE_aret");
+    let output = Command::new(aret)
+        .args(["--mode", "transpile", "--backend", "llvm", "--run"])
+        .arg("--out-dir")
+        .arg(&out_dir)
+        .arg(&path)
+        .output()
+        .expect("failed to run aret");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(output.status.success(), "llvm transpile failed:\n{stdout}");
+    assert!(
+        stdout.contains("M4: int=42 hex=0xff str=hello char=Z pct=%"),
+        "LLVM-backed binary wrong output:\n{stdout}"
+    );
+    let _ = std::fs::remove_dir_all(&out_dir);
+}
+
 #[test]
 fn llvm_ir_is_valid_for_fixtures() {
     if !has_llvm_as() {

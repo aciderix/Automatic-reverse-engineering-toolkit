@@ -35,6 +35,10 @@ pub fn emit_unit(funcs: &[IrFunction]) -> String {
     for name in callees.difference(&defined) {
         let _ = writeln!(out, "declare i64 @{}(...)", name);
     }
+    // Shared-stack mode routes indirect calls through the dispatch helper.
+    if super::shared_stack() {
+        out.push_str("declare i64 @aret_call(i32, i64, i64, i64, i64)\n");
+    }
     out.push('\n');
 
     for f in funcs {
@@ -117,9 +121,20 @@ fn emit_function(func: &IrFunction) -> String {
     let mut f = func.clone();
     super::destruct_ssa(&mut f);
 
-    // Signature: i64 params for register params (shared-stack/SysV order).
-    let params: Vec<String> = f.reg_params.iter().map(|v| format!("i64 %v{}", v)).collect();
-    let mut head = format!("define i64 @sub_{:x}({}) {{\n", f.entry, params.join(", "));
+    let shared = super::shared_stack();
+
+    // Signature. Shared-stack mode: a leading `%esp` parameter plus the volatile
+    // register parameters (the caller's stack pointer is threaded through calls);
+    // the frame base comes from `%esp`, not a private buffer. Otherwise: register
+    // params only, frame base points at a fresh local stack array.
+    let mut sig: Vec<String> = Vec::new();
+    if shared {
+        sig.push("i64 %esp".to_string());
+    }
+    for v in &f.reg_params {
+        sig.push(format!("i64 %v{}", v));
+    }
+    let mut head = format!("define i64 @sub_{:x}({}) {{\n", f.entry, sig.join(", "));
 
     let mut cx = Ctx { body: String::new(), tmp: 0, slots: BTreeSet::new(), decls: String::new() };
 
@@ -129,9 +144,13 @@ fn emit_function(func: &IrFunction) -> String {
         cx.line(&format!("store i64 %v{}, ptr {}", v, s));
     }
 
-    // Frame: a real stack buffer; frame-base values point at it.
-    let uses_frame = !f.frame_base_values.is_empty();
-    if uses_frame {
+    // Frame-base values (entry rsp/rbp).
+    if shared {
+        for v in &f.frame_base_values {
+            let s = cx.slot(&format!("v{}", v));
+            cx.line(&format!("store i64 %esp, ptr {}", s));
+        }
+    } else if !f.frame_base_values.is_empty() {
         cx.line("%frame = alloca [16384 x i8]");
         let base = cx.fresh();
         cx.line(&format!("{} = ptrtoint ptr %frame to i64", base));
@@ -357,12 +376,32 @@ fn emit_call(cx: &mut Ctx, target: &CallTarget, args: &[Expr]) -> String {
             return "0".to_string();
         }
     }
+    // Shared-stack indirect call: a function pointer holds the original code VA,
+    // so dispatch through `aret_call(va, esp, eax, ecx, edx)`.
+    if super::shared_stack() {
+        if let CallTarget::Indirect(x) = target {
+            let v = emit_expr(cx, x);
+            let va = cx.fresh();
+            cx.line(&format!("{} = trunc i64 {} to i32", va, v));
+            let mut a: Vec<String> = args.iter().map(|e| emit_expr(cx, e)).collect();
+            while a.len() < 4 {
+                a.push("0".to_string());
+            }
+            let t = cx.fresh();
+            cx.line(&format!(
+                "{} = call i64 @aret_call(i32 {}, i64 {}, i64 {}, i64 {}, i64 {})",
+                t, va, a[0], a[1], a[2], a[3]
+            ));
+            return t;
+        }
+    }
+
     let argv: Vec<String> = args.iter().map(|a| format!("i64 {}", emit_expr(cx, a))).collect();
     let callee = match target {
         CallTarget::Direct(a) => format!("@sub_{:x}", a),
         CallTarget::Named(n) => format!("@{}", n),
         CallTarget::Indirect(x) => {
-            // Call through a computed pointer.
+            // Call through a computed pointer (non-shared mode).
             let v = emit_expr(cx, x);
             let p = cx.fresh();
             cx.line(&format!("{} = inttoptr i64 {} to ptr", p, v));
