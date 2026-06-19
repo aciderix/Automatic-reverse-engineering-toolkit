@@ -168,6 +168,9 @@ pub(crate) const FLOAT_HELPERS: &str = concat!(
     "static inline uint64_t __ps_cmp(uint64_t a,uint64_t b,uint64_t p){uint32_t l=__ps_cmp1(__fp_g32(a),__fp_g32(b),(int)p),h=__ps_cmp1(__fp_g32(a>>32),__fp_g32(b>>32),(int)p);return (uint64_t)l|((uint64_t)h<<32);}\n",
     "static inline uint64_t __ps_movmsk(uint64_t lo,uint64_t hi){return ((lo>>31)&1)|(((lo>>63)&1)<<1)|(((hi>>31)&1)<<2)|(((hi>>63)&1)<<3);}\n",
     // Wide integer (64-bit 1-operand mul/div via 128-bit), byte swap, bit scan.
+    // `__int128` only exists on 64-bit targets; on -m32 (where the transpiler's
+    // stack model runs) use bit-exact software equivalents.
+    "#if defined(__SIZEOF_INT128__)\n",
     "typedef unsigned __int128 __u128;typedef __int128 __i128;\n",
     "static inline uint64_t __ix_mul64hi(uint64_t a,uint64_t b){return (uint64_t)(((__u128)a*b)>>64);}\n",
     "static inline uint64_t __ix_imul64hi(uint64_t a,uint64_t b){return (uint64_t)(((__i128)(int64_t)a*(int64_t)b)>>64);}\n",
@@ -175,6 +178,15 @@ pub(crate) const FLOAT_HELPERS: &str = concat!(
     "static inline uint64_t __ix_umod(uint64_t hi,uint64_t lo,uint64_t d){return d?(uint64_t)((((__u128)hi<<64)|lo)%d):0;}\n",
     "static inline uint64_t __ix_idiv(uint64_t hi,uint64_t lo,uint64_t d){__i128 n=(__i128)(((__u128)hi<<64)|lo);return d?(uint64_t)(n/(__i128)(int64_t)d):0;}\n",
     "static inline uint64_t __ix_imod(uint64_t hi,uint64_t lo,uint64_t d){__i128 n=(__i128)(((__u128)hi<<64)|lo);return d?(uint64_t)(n%(__i128)(int64_t)d):0;}\n",
+    "#else\n",
+    "static inline uint64_t __ix_mul64hi(uint64_t a,uint64_t b){uint64_t al=(uint32_t)a,ah=a>>32,bl=(uint32_t)b,bh=b>>32;uint64_t ll=al*bl,lh=al*bh,hl=ah*bl,hh=ah*bh;uint64_t cr=(ll>>32)+(uint32_t)lh+(uint32_t)hl;return hh+(lh>>32)+(hl>>32)+(cr>>32);}\n",
+    "static inline uint64_t __ix_imul64hi(uint64_t a,uint64_t b){uint64_t hi=__ix_mul64hi(a,b);if((int64_t)a<0)hi-=b;if((int64_t)b<0)hi-=a;return hi;}\n",
+    "static inline void __ix_divmod128(uint64_t hi,uint64_t lo,uint64_t d,uint64_t*qp,uint64_t*rp){uint64_t q=0,r=0;for(int i=127;i>=0;i--){r=(r<<1)|((i>=64?(hi>>(i-64)):(lo>>i))&1);if(d&&r>=d){r-=d;if(i<64)q|=(uint64_t)1<<i;}}*qp=q;*rp=r;}\n",
+    "static inline uint64_t __ix_udiv(uint64_t hi,uint64_t lo,uint64_t d){uint64_t q,r;if(!d)return 0;__ix_divmod128(hi,lo,d,&q,&r);return q;}\n",
+    "static inline uint64_t __ix_umod(uint64_t hi,uint64_t lo,uint64_t d){uint64_t q,r;if(!d)return 0;__ix_divmod128(hi,lo,d,&q,&r);return r;}\n",
+    "static inline uint64_t __ix_idiv(uint64_t hi,uint64_t lo,uint64_t d){if(!d)return 0;int neg=0;uint64_t nh=hi,nl=lo;if((int64_t)hi<0){neg^=1;nl=~lo+1;nh=~hi+(nl==0);}uint64_t dd=d;if((int64_t)d<0){neg^=1;dd=(uint64_t)(-(int64_t)d);}uint64_t q,r;__ix_divmod128(nh,nl,dd,&q,&r);return neg?(uint64_t)(-(int64_t)q):q;}\n",
+    "static inline uint64_t __ix_imod(uint64_t hi,uint64_t lo,uint64_t d){if(!d)return 0;int neg=(int64_t)hi<0;uint64_t nh=hi,nl=lo;if(neg){nl=~lo+1;nh=~hi+(nl==0);}uint64_t dd=(int64_t)d<0?(uint64_t)(-(int64_t)d):d;uint64_t q,r;__ix_divmod128(nh,nl,dd,&q,&r);return neg?(uint64_t)(-(int64_t)r):r;}\n",
+    "#endif\n",
     "static inline uint64_t __ix_bswap32(uint64_t x){return __builtin_bswap32((uint32_t)x);}\n",
     "static inline uint64_t __ix_bswap64(uint64_t x){return __builtin_bswap64(x);}\n",
     "static inline uint64_t __ix_bsf32(uint64_t x){return (uint32_t)x?__builtin_ctz((uint32_t)x):0;}\n",
