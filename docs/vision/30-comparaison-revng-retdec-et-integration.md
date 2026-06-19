@@ -101,6 +101,22 @@ Limite honnête : même déballé, un AAA reste plein de comportements **dynamiq
 (résolution d'API au vol, callbacks) durs en statique pur. Le déballage rend
 faisable la classe « gros programme non-VM-protégé », pas forcément un AAA complet.
 
+## 5 bis. Démarré : backend LLVM (`--mode llvm`)
+
+> Première pierre de l'amélioration #1 (§3). ARET sait maintenant émettre du
+> **LLVM IR** directement (`src/emit/llvm.rs`), pas seulement du C.
+
+- Modèle : valeurs et base de pile = `alloca i64` (le `mem2reg`/`-O2` de LLVM
+  reconstruit le SSA), mémoire via `inttoptr`. Couvre le sous-ensemble
+  entier/mémoire/branchements/`switch`/appels + la soupape `asm:`.
+- Validé : les **130 fonctions** d'un vrai `.exe` CRT mingw produisent un module
+  **accepté par `llvm-as`** et **compilé en objet par `llc -O2`**. Test :
+  `tests/llvm_backend.rs`.
+- Portée honnête (proof of concept) : reste à faire — flottant/x87, largeurs
+  exactes (extend/truncate), un **chemin LLVM exécutable de bout en bout** (pile
+  partagée + HLE + dispatch, comme le transpileur C), et la **vérif d'équivalence**
+  sur le chemin LLVM (notre point fort à conserver).
+
 ## 6. Reco
 
 1. **Court terme, gros gain** : pour [3], **brancher le vrai CRT natif** (mingw-w64)
