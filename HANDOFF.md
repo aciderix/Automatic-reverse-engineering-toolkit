@@ -238,7 +238,7 @@ bash bench/smt_rewrites.sh                            # preuves SMT des règles 
   (optionnelle), enrichissement multi-fonctions/contexte d'appel.
 - **Pilier 8 (bench/CI §10)** : ✅ **porte unifiée** `bench/regression.sh` (build +
   tests + niveaux 1/2/3) et **hook SessionStart** `.claude/hooks/session-start.sh`
-  (build + z3) en place. Reste : la brancher en CI GitHub Actions sur push.
+  (build + z3) en place. ✅ **CI GitHub Actions** (`.github/workflows/ci.yml`) lance la porte de régression sur chaque push/PR.
 
 ---
 
