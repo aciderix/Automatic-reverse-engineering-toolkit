@@ -426,6 +426,62 @@ impl Structurer {
     }
 }
 
+/// Emit a *modular* translation unit: a shared declarations header plus one body
+/// string per chunk of `chunk_size` functions. A real program is millions of
+/// lines of C — passing it to the compiler as one translation unit chokes it, so
+/// the builder writes the header to `aret_decls.h`, each returned chunk to its own
+/// `.c` (which `#include`s the header), and compiles the chunks in parallel.
+///
+/// The header carries `<stdint.h>`, the HLE declarations, the (static-inline)
+/// float helpers, and an empty-parameter forward declaration for every function,
+/// so any chunk can call any other function. (Empty `sub_x();` is compatible both
+/// with calls and with the parameterised definitions emitted in the chunks.)
+pub fn emit_split(funcs: &[IrFunction], chunk_size: usize) -> (String, Vec<String>) {
+    let mut funcs = funcs.to_vec();
+    if !super::shared_stack() {
+        super::fixup_call_arity(&mut funcs);
+    }
+    let with_params = true;
+    let defined: BTreeSet<u64> = funcs.iter().map(|f| f.entry).collect();
+    let mut forward: BTreeSet<u64> = BTreeSet::new();
+
+    let mut chunks: Vec<String> = Vec::new();
+    let mut cur = String::new();
+    let mut n = 0usize;
+    let mut needs_float = false;
+    for f in &funcs {
+        let body = emit_function(f, &mut forward, with_params);
+        // The float helpers use `__int128`, unavailable under -m32, so only pull
+        // them in when a function actually uses floating point (as `emit_unit`).
+        if !super::float_preamble(&body).is_empty() {
+            needs_float = true;
+        }
+        cur.push_str(&body);
+        cur.push('\n');
+        n += 1;
+        if n >= chunk_size.max(1) {
+            chunks.push(std::mem::take(&mut cur));
+            n = 0;
+        }
+    }
+    if !cur.is_empty() {
+        chunks.push(cur);
+    }
+
+    let mut header = String::new();
+    header.push_str("#include <stdint.h>\n");
+    header.push_str("#include \"aret_hle.h\"\n");
+    if needs_float {
+        // Static-inline definitions: each chunk gets its own copy, no link clash.
+        header.push_str(super::FLOAT_HELPERS);
+    }
+    header.push('\n');
+    for a in forward.union(&defined) {
+        let _ = writeln!(header, "uint64_t sub_{:x}();", a);
+    }
+    (header, chunks)
+}
+
 /// Emit a complete structured C translation unit.
 pub fn emit_unit(funcs: &[IrFunction]) -> String {
     // Always emit real parameter signatures; the interprocedural fixup makes

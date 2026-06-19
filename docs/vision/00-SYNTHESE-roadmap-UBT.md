@@ -311,9 +311,11 @@ Pièces livrées (`runtime/aret_hle/`, purement additif — aucun changement Rus
     (override par le HLE quand il existe) → le binaire **lie toujours** et
     **signale à l'exécution** chaque API manquante (liste de courses du HLE / cible
     du pont Wine).
-  - ➡️ **Reste le mur principal** : l'émission en **un seul** `.c` de 403 Mo ne
-    compile pas. Prochaine brique = **émission modulaire** (un `.c` par paquet de
-    fonctions + en-tête de déclarations partagé, compilation parallèle puis lien).
+  - ✅ **Émission modulaire** : le programme est découpé en `chunk_<i>.c`
+    (paquets de 200 fonctions) + un en-tête partagé `aret_decls.h` (déclarations
+    avant de toutes les fonctions + helpers float). Chaque chunk est compilé en
+    `.o` **en parallèle** (rayon) puis lié — fini le `.c` unique de 403 Mo qui
+    étouffe le compilateur.
 - ⏸️ **M5 (fallback Unicorn) différé** : il faudrait lier un émulateur **dans le
   binaire généré**, qui est `-m32` ; or l'environnement n'a pas de `libunicorn`
   32-bit (le paquet apt est 64-bit), donc un M5 réellement exécutable n'est pas

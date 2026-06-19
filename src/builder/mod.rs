@@ -201,16 +201,15 @@ pub fn transpile(
     std::fs::create_dir_all(out_dir)
         .with_context(|| format!("failed to create {}", out_dir.display()))?;
 
-    // Lower every function and emit one translation unit using the shared machine
-    // stack (so both stack- and register-passed arguments cross function calls).
-    // The mode flag is read during SSA *and* emission, so it wraps both.
+    // Lower every function and emit modular C using the shared machine stack (so
+    // both stack- and register-passed arguments cross function calls). The mode
+    // flag is read during SSA *and* emission, so it wraps both. The program is
+    // split into chunks of functions so the compiler never sees one giant TU.
+    const CHUNK_FUNCS: usize = 200;
     emit::set_shared_stack(true);
     let irfs: Vec<_> = funcs.iter().map(|f| lower(prog, f)).collect();
-    let unit = emit::structured::emit_unit(&irfs);
+    let (decls_h, chunks) = emit::structured::emit_split(&irfs, CHUNK_FUNCS);
     emit::set_shared_stack(false);
-
-    // program.c — the transpiled unit, with the HLE declarations in scope.
-    let program_c = format!("#include \"aret_hle.h\"\n{}", unit);
 
     // Memory Layout Mapper: restore data sections at their original VAs so
     // absolute pointers (global strings/tables) resolve at runtime.
@@ -243,8 +242,15 @@ pub fn transpile(
     write("aret_hle.h", HLE_H)?;
     write("aret_hle.c", HLE_C)?;
     write("aret_stubs.c", &emit_import_stubs(prog))?;
-    write("program.c", &program_c)?;
+    write("aret_decls.h", &decls_h)?;
     write("aret_main.c", &main_c)?;
+    // Each chunk is its own translation unit that includes the shared header.
+    let mut chunk_srcs: Vec<std::path::PathBuf> = Vec::with_capacity(chunks.len());
+    for (i, body) in chunks.iter().enumerate() {
+        let name = format!("chunk_{i}.c");
+        write(&name, &format!("#include \"aret_decls.h\"\n{}", body))?;
+        chunk_srcs.push(out_dir.join(name));
+    }
     // Memory layout: a blob-backed mapper, or a no-op when there is no addressable
     // data (so aret_main.c always links).
     let has_layout = layout.is_some();
@@ -258,41 +264,63 @@ pub fn transpile(
         None => write("aret_layout.c", "void __aret_map_memory(void) {}\n")?,
     }
 
-    // Compile + link natively. The stack-model C masks pointers to 32 bits, so a
-    // 32-bit source must be built as a 32-bit process (-m32); 64-bit as -m64.
+    // Compile every source to a .o in parallel, then link. The stack-model C masks
+    // pointers to 32 bits, so a 32-bit source must be built as a 32-bit process
+    // (-m32). Objects are non-PIC (-fno-pie) and linked -no-pie so our segments
+    // sit elsewhere and the original low VAs stay free for the layout mapper.
     let bits = prog.bitness.bits() as u32;
     let march = if bits == 32 { "-m32" } else { "-m64" };
     let cc = std::env::var("CC").unwrap_or_else(|_| "cc".to_string());
     let binary = out_dir.join("app");
 
-    let mut cmd = Command::new(&cc);
-    cmd.args([
-        march,
-        "-no-pie", // load our segments elsewhere; keep the original low VAs free
-        "-w",
-        "-fno-strict-aliasing",
-        "-fno-builtin",
-        "-O0",
-    ])
-    .arg(out_dir.join("program.c"))
-    .arg(out_dir.join("aret_hle.c"))
-    .arg(out_dir.join("aret_stubs.c"))
-    .arg(out_dir.join("aret_main.c"))
-    .arg(out_dir.join("aret_layout.c"));
+    let mut sources: Vec<std::path::PathBuf> = vec![
+        out_dir.join("aret_hle.c"),
+        out_dir.join("aret_stubs.c"),
+        out_dir.join("aret_main.c"),
+        out_dir.join("aret_layout.c"),
+    ];
     if has_layout {
-        cmd.arg(out_dir.join("aret_layout.S")); // assembles the .incbin blob
+        sources.push(out_dir.join("aret_layout.S"));
     }
-    let output = cmd
-        .arg("-I")
-        .arg(out_dir)
+    sources.extend(chunk_srcs);
+
+    use rayon::prelude::*;
+    let objs: Result<Vec<std::path::PathBuf>> = sources
+        .par_iter()
+        .map(|src| {
+            // Unique object name per source (so .c and .S of the same stem don't clash).
+            let obj = out_dir.join(format!("{}.o", src.file_name().unwrap().to_string_lossy()));
+            let out = Command::new(&cc)
+                .args([march, "-w", "-fno-strict-aliasing", "-fno-builtin", "-fno-pie", "-O0", "-c"])
+                .arg(src)
+                .arg("-I")
+                .arg(out_dir)
+                .arg("-o")
+                .arg(&obj)
+                .output()
+                .with_context(|| format!("failed to run {}", cc))?;
+            if !out.status.success() {
+                bail!(
+                    "compile {} failed:\n{}",
+                    src.display(),
+                    String::from_utf8_lossy(&out.stderr).trim()
+                );
+            }
+            Ok(obj)
+        })
+        .collect();
+    let objs = objs?;
+
+    let link = Command::new(&cc)
+        .args([march, "-no-pie"])
+        .args(&objs)
         .arg("-o")
         .arg(&binary)
         .output()
         .with_context(|| format!("failed to run {}", cc))?;
-
-    if !output.status.success() {
-        let err = String::from_utf8_lossy(&output.stderr);
-        bail!("native recompile failed:\n{}", err.trim());
+    if !link.status.success() {
+        let err = String::from_utf8_lossy(&link.stderr);
+        bail!("native link failed:\n{}", err.trim());
     }
 
     let run_output = if run {
