@@ -112,10 +112,16 @@ faisable la classe « gros programme non-VM-protégé », pas forcément un AAA 
 - Validé : les **130 fonctions** d'un vrai `.exe` CRT mingw produisent un module
   **accepté par `llvm-as`** et **compilé en objet par `llc -O2`**. Test :
   `tests/llvm_backend.rs`.
-- Portée honnête (proof of concept) : reste à faire — flottant/x87, largeurs
-  exactes (extend/truncate), un **chemin LLVM exécutable de bout en bout** (pile
-  partagée + HLE + dispatch, comme le transpileur C), et la **vérif d'équivalence**
-  sur le chemin LLVM (notre point fort à conserver).
+- ✅ **Chemin LLVM exécutable de bout en bout** (`--mode transpile --backend llvm`) :
+  un vrai PE Windows → LLVM IR → `llc` → **ELF natif qui tourne**, en réutilisant
+  tout le runtime C (HLE, main, dispatch, layout). **Parité avec le backend C** :
+  les 8 fixtures (string sur pile, imports indirects, données globales, appels
+  internes pile+registres, `printf`, tas, pointeurs de fonction, TEB) donnent la
+  même sortie correcte. Le backend LLVM supporte la pile partagée (param `%esp`,
+  appels via `aret_call`).
+- Portée honnête : reste à faire — flottant/x87 et largeurs exactes
+  (extend/truncate) encore approximés, et la **vérif d'équivalence** sur le chemin
+  LLVM (notre point fort à brancher dessus).
 
 ## 6. Reco
 
