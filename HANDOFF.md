@@ -199,11 +199,13 @@ bash bench/smt_rewrites.sh                            # preuves SMT des règles 
 - **Pilier 2 (passes SSA)** : ✅ const-prop, folding/simplif, DCE, propagation
   (intra + chaînes droites), reconstruction conditions, binding retour, sûreté `Asm`.
   Manque : GVN, propagation à travers les **vraies jonctions φ** (au-delà des chaînes).
-- **Pilier 3 (inférence de types §5)** : ❌ **NON COMMENCÉ**. C'est le prochain
-  grand levier de lisibilité (largeur/signe/ptr, **champs de struct** `obj->field_8`,
-  tableaux). Treillis + union-find. Risque : un type faux change la sémantique C →
-  garder les casts sémantiques explicites, n'inférer que pour l'affichage tant que
-  pas prouvé.
+- **Pilier 3 (inférence de types §5)** : ✅ **inférence COMPLÈTE** (`src/types/
+  mod.rs`, 991 l : union-find, ptr/code/signe, **structs**, **tableaux** stride) +
+  ✅ **émission de structs** (`((struct S*)base)->field_k`, packé offsets exacts →
+  **octet-identique**) + ✅ **promotion de pile typée** (slots `uintW_t` à largeur
+  prouvée par alias + masques redondants supprimés). Reste : variables/params
+  **signés/pointeurs** typés (changent la sémantique → exige plus d'alias), structs
+  **de pile**. Principe tenu : tout ce qui est émis est prouvé octet-exact (gate).
 - **Pilier 4 (recovery)** :
   - §6.1 switch/jump tables : ✅ + ✅ **`Stmt::Switch` typé dans l'IR** (index
     récupéré) + ✅ **tables relatives PIE 4o x64** (trace de la def atteignante du

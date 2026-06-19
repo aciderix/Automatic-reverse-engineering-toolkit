@@ -15,6 +15,7 @@ mod opt;
 mod ssa;
 mod structure;
 mod types;
+mod llm;
 mod verify;
 
 use anyhow::{Context, Result};
@@ -71,6 +72,12 @@ struct Args {
     /// Emit flat goto-based output instead of structured if/while.
     #[arg(long)]
     flat: bool,
+
+    /// (Emit mode) Enrich the output with LLM-suggested names/comments. OPTIONAL:
+    /// requires `ANTHROPIC_API_KEY` (and `curl`); without it the output is
+    /// unchanged. Rename-only, so it never changes semantics.
+    #[arg(long)]
+    llm: bool,
 
     /// Disable prologue scanning (faster, but only finds directly-called
     /// functions; skips code reached solely through vtables/callbacks).
@@ -177,10 +184,22 @@ fn main() -> Result<()> {
                     irf
                 })
                 .collect();
-            if args.flat {
-                out.push_str(&emit::emit_unit(&irfs));
+            let body = if args.flat {
+                emit::emit_unit(&irfs)
             } else {
-                out.push_str(&emit::structured::emit_unit(&irfs));
+                emit::structured::emit_unit(&irfs)
+            };
+            // Optional LLM naming pass (per function, so the prompt is focused).
+            // No API key → `annotate` returns the input unchanged.
+            if args.llm {
+                if let [single] = irfs.as_slice() {
+                    out.push_str(&llm::annotate(&body, single.entry));
+                } else {
+                    eprintln!("note: --llm names one function; pass --function");
+                    out.push_str(&body);
+                }
+            } else {
+                out.push_str(&body);
             }
         }
         Mode::Verify => {
