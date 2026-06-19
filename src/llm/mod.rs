@@ -134,29 +134,56 @@ fn replace_ident(src: &str, from: &str, to: &str) -> String {
     out
 }
 
+/// Does `name` already occur as a whole identifier token in `src`? Used to reject
+/// a proposed name that would collide with an existing symbol (a callee, runtime
+/// helper, struct field, or another variable), which a pure rename can't allow.
+fn occurs_as_token(src: &str, name: &str) -> bool {
+    let bytes = src.as_bytes();
+    let is_word = |c: u8| c.is_ascii_alphanumeric() || c == b'_';
+    let mut from = 0;
+    while let Some(rel) = src[from..].find(name) {
+        let i = from + rel;
+        let end = i + name.len();
+        let before_ok = i == 0 || !is_word(bytes[i - 1]);
+        let after_ok = end >= bytes.len() || !is_word(bytes[end]);
+        if before_ok && after_ok {
+            return true;
+        }
+        from = i + 1;
+    }
+    false
+}
+
 /// Apply a [`Naming`] to the emitted C of a function whose synthetic name is
 /// `sub_<entry:x>`. Rejects invalid/colliding/duplicate names so the result
 /// always still compiles. Returns the rewritten C.
 pub fn apply(emitted_c: &str, n: &Naming, entry: u64) -> String {
     let mut renames: Vec<(String, String)> = Vec::new();
     let mut used: HashSet<String> = HashSet::new();
+    let self_name = format!("sub_{:x}", entry);
+
+    // A name is acceptable only if it is a valid identifier AND does not already
+    // occur anywhere in the unit (so it can't shadow a callee/helper/field).
+    let acceptable = |name: &str, used: &HashSet<String>| {
+        valid_name(name) && !used.contains(name) && !occurs_as_token(emitted_c, name)
+    };
 
     // Function name first.
     if let Some(f) = &n.function {
-        if valid_name(f) && used.insert(f.clone()) {
-            renames.push((format!("sub_{:x}", entry), f.clone()));
+        if acceptable(f, &used) {
+            used.insert(f.clone());
+            renames.push((self_name.clone(), f.clone()));
         }
     }
-    // Then identifier renames, longest original first so `v12` is handled before
-    // `v1` cannot mis-match (whole-token matching already prevents that, but the
-    // order keeps output deterministic).
+    // Then identifier renames, longest original first for deterministic output.
     let mut items: Vec<(&String, &String)> = n.names.iter().collect();
     items.sort_by(|a, b| b.0.len().cmp(&a.0.len()).then(a.0.cmp(b.0)));
     for (orig, name) in items {
-        if orig == &format!("sub_{:x}", entry) {
+        if orig == &self_name {
             continue;
         }
-        if valid_name(name) && used.insert(name.clone()) {
+        if acceptable(name, &used) {
+            used.insert(name.clone());
             renames.push((orig.clone(), name.clone()));
         }
     }
@@ -342,6 +369,17 @@ mod tests {
         let out = apply(c, &n, 0);
         assert!(out.contains("v1")); // unchanged (keyword rejected)
         assert!(out.contains(" x")); // renamed
+    }
+
+    #[test]
+    fn apply_rejects_name_colliding_with_existing_symbol() {
+        // `memcpy` already occurs as a callee → must not be used as a rename.
+        let c = "uint64_t sub_0(uint64_t v1) { return memcpy(v1, v1, 8); }";
+        let mut names = HashMap::new();
+        names.insert("v1".to_string(), "memcpy".to_string()); // collides → rejected
+        let n = Naming { function: None, names, comment: None };
+        let out = apply(c, &n, 0);
+        assert!(out.contains("memcpy(v1, v1, 8)")); // both unchanged
     }
 
     #[test]
