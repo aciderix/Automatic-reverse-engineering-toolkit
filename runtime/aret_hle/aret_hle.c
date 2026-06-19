@@ -247,6 +247,15 @@ static char *aret_environ_arr[1] = { 0 };/* empty environment                   
 static void *aret_environ_var = aret_environ_arr;
 static int aret_mb_cur_max_var = 1;
 
+/* `_iob` / `__acrt_iob_func` / `__iob_func` called as a function: returns
+ * &_iob[index] (the stdio stream for that index). */
+uint32_t aret___acrt_iob_func(uint32_t esp) {
+    uint32_t i = arg(esp, 0); if (i > 2) i = 1;
+    return (uint32_t)(uintptr_t)(aret_iob + i * ARET_FILE_SIZE);
+}
+uint32_t aret__iob(uint32_t esp) { return aret___acrt_iob_func(esp); }
+uint32_t aret___iob_func(uint32_t esp) { return aret___acrt_iob_func(esp); }
+
 uint32_t aret_data_import(const char *name) {
     if (!strcmp(name, "_iob") || !strcmp(name, "__iob_func")) return (uint32_t)(uintptr_t)aret_iob;
     if (!strcmp(name, "__initenv")) return (uint32_t)(uintptr_t)&aret_initenv_var;

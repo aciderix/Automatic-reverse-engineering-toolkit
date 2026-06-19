@@ -93,6 +93,11 @@ struct Args {
     #[arg(long)]
     run: bool,
 
+    /// Transpile mode: override the entry point (hex address), e.g. to start at
+    /// `main` and skip a heavy CRT startup.
+    #[arg(long)]
+    entry: Option<String>,
+
     /// Transpile mode: target triple (informational for M1; the host C
     /// compiler builds a native binary at the source's bitness).
     #[arg(long)]
@@ -209,7 +214,15 @@ fn main() -> Result<()> {
             if let Some(t) = &args.target {
                 eprintln!("note: --target {} (M1 builds a native host binary at the source bitness)", t);
             }
-            let report = builder::transpile(&prog, &functions, &args.out_dir, args.run)?;
+            let entry_override = match &args.entry {
+                Some(s) => {
+                    let h = s.trim_start_matches("0x");
+                    Some(u64::from_str_radix(h, 16).context("invalid --entry hex")?)
+                }
+                None => None,
+            };
+            let report =
+                builder::transpile(&prog, &functions, &args.out_dir, args.run, entry_override)?;
             out.push_str(&report.render());
         }
     }

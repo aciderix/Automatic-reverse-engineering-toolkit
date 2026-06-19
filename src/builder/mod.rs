@@ -241,13 +241,15 @@ pub fn transpile(
     funcs: &[&Function],
     out_dir: &Path,
     run: bool,
+    entry_override: Option<u64>,
 ) -> Result<TranspileReport> {
     if funcs.is_empty() {
         bail!("no functions to transpile");
     }
     // The program's entry point is the C function `sub_<entry>`; confirm it was
-    // recovered before doing any work.
-    let entry = prog.entry;
+    // recovered before doing any work. `--entry` can override it (e.g. start at
+    // `main`, skipping a heavy CRT startup).
+    let entry = entry_override.unwrap_or(prog.entry);
     if !funcs.iter().any(|f| f.entry == entry) {
         bail!(
             "entry function 0x{:x} was not recovered (try without --function)",
