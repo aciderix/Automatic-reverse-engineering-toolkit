@@ -226,7 +226,7 @@ fn main() -> Result<()> {
         }
         Mode::Verify => {
             let limit = args.limit.unwrap_or(200);
-            let report = verify::run(&prog, &functions, limit);
+            let report = verify::run(&prog, &functions, limit, &args.backend);
             out.push_str(&report.render());
         }
         Mode::Transpile => {
