@@ -139,6 +139,18 @@ aret tests/m1/fixtures/hello_win32.exe --mode transpile --run
 #   | Hello from Windows, running native on Linux
 ```
 
+It also resolves imports called indirectly through a register
+(`mov reg,[iat]; call reg`) and includes a **Memory Layout Mapper** that places
+the binary's data sections back at their original virtual addresses, so programs
+that reference global data (strings/tables in `.rdata`/`.data`) by absolute
+address run correctly:
+
+```bash
+aret tests/m1/fixtures/hello_globals.exe --mode transpile --run
+#   | M2: first global string in .rdata
+#   | M2: second global, mapped at its original VA
+```
+
 The vision, design notes, and milestone roadmap live in
 [`docs/vision/`](docs/vision/) (start with `00-SYNTHESE-roadmap-UBT.md`). The HLE
 runtime is in [`runtime/aret_hle/`](runtime/aret_hle); the backend builder is in

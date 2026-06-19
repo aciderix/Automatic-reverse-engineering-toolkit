@@ -57,14 +57,14 @@ moitié faits. Chaque tranche élargit la classe de binaires supportés.
 | # | Tranche | Classe de binaires nouvellement exécutable | Briques |
 |---|---|---|---|
 | **M1** ✅ | **Interception d'API → shims HLE natifs**, recompile native | PE Win32 *freestanding* (imports kernel32) → ELF Linux natif | aret-existant + `runtime/aret_hle` |
-| M2 | Modèle d'imports + table de redirection génériques | console n'utilisant que la libc (file I/O, `malloc`, `str*`) | idem |
-| M3 | Shims Win32 → POSIX (`kernel32`/`msvcrt` de base) | petit `.exe` Windows console → ELF Linux | s'inspirer de Wine |
-| M4 | Memory layout mapper + relocations | binaires supposant une base fixe / données globales | `object` |
+| **M2** ✅ | **Imports indirects via registre** (`mov reg,[iat]; call reg`) + **Memory Layout Mapper** (données globales `.rdata`/`.data` remises à leur VA) | PE Win32 multi-références à données globales en mémoire absolue | `object` |
+| M3 | **Pile machine partagée** : passage d'arguments inter-fonctions par la pile (stdcall/cdecl) | programmes Win32 multi-fonctions à appels internes | refonte du modèle de frame |
+| M4 | Shims Win32/CRT élargis (`msvcrt` : `printf`, `malloc`, file I/O) | `.exe` console réaliste | s'inspirer de Wine |
 | M5 | Fallback émulateur (Unicorn) sur adresse inconnue | code partiellement obfusqué / sauts dynamiques | `unicorn-engine` |
 | M6 | Cible WebAssembly/WASI (au lieu d'un OS natif) | « cible universelle » de la note 3 | `wasmtime` |
 | M7 | GUI / graphisme (X11, puis DXVK) | applications fenêtrées, puis jeux | Wine/DXVK |
 
-On ne s'engage pas sur M3+ tant que M1–M2 ne tournent pas proprement. L'intérêt :
+On ne s'engage pas sur M_n+1 tant que M_n ne tourne pas proprement. L'intérêt :
 à chaque palier on a un **artefact démontrable** et un test de non-régression.
 
 ---
@@ -149,6 +149,40 @@ aret <binary> --target linux-x86_64 -o ./out      # transpile + recompile natif
 
 ---
 
+## 4 ter. M2 — ✅ FAIT (imports indirects + données globales)
+
+> Statut : implémenté et testé. Un PE qui charge le pointeur d'import dans un
+> registre (`mov esi,[IAT]; call esi`, plusieurs fois) et lit ses chaînes depuis
+> `.rdata` en **mémoire absolue** se transpile, se recompile et s'exécute
+> nativement avec la bonne sortie.
+
+```
+$ aret tests/m1/fixtures/hello_globals.exe --mode transpile --run
+  --- program output ---
+  | M2: first global string in .rdata
+  | M2: second global, mapped at its original VA
+```
+
+Pièces livrées :
+- **Interception des appels d'import indirects via registre** (`src/ir/build.rs`) :
+  un suivi `registre → import` repère `reg = *(IAT)` puis résout chaque `call reg`
+  vers le shim HLE nommé (en pelant le masque de troncature 32-bit `reg & 0xffffffff`).
+  Les registres callee-saved survivant aux appels, le motif « charger une fois,
+  appeler plusieurs fois » est couvert.
+- **Memory Layout Mapper** (`src/builder/`, génère `aret_layout.c`) : embryon du
+  composant du design doc. À l'exécution, `__aret_map_memory()` fait un
+  `mmap(MAP_FIXED)` couvrant les sections de données et y recopie les octets
+  d'origine, de sorte que les pointeurs **absolus** (chaînes/tables globales)
+  résolvent. Le binaire est lié `-no-pie` pour libérer les VAs basses d'origine.
+
+Limite connue (→ M3) : les **arguments passés par la pile entre fonctions
+transpilées** ne transitent pas, car chaque fonction modélise sa pile dans un
+`__frame[]` privé. Un appelant qui pousse `(h, s, n)` puis `call helper` ne les
+transmet pas — l'appelé lit des entrées indéfinies. C'est ce que résout la pile
+machine partagée de M3.
+
+---
+
 ## 5. Décisions d'architecture à trancher au moment de coder M1
 
 - **Mono-crate vs workspace** : la note 1 propose un workspace
@@ -168,13 +202,15 @@ aret <binary> --target linux-x86_64 -o ./out      # transpile + recompile natif
 
 - ✅ **Acté** : on garde ARET (C) comme socle ; la Phase 3 (HLE) est la priorité ;
   on avance par tranches de bout en bout ; on réutilise les briques externes au
-  lieu de les réécrire. **M1 est livré** (Windows→Linux natif, cf. §4).
-- ➡️ **Prochaine marche (M2)** : généraliser au-delà du fixture freestanding —
-  étendre la table de shims HLE (CRT msvcrt : `printf`, `malloc`, file I/O),
-  transpiler un programme multi-fonctions et lier ses appels internes, et
-  mapper les données globales (`.rdata`/`.data`) à leurs adresses (amorce du
-  Memory Layout Mapper, M4) pour les binaires qui référencent des chaînes en
-  mémoire absolue plutôt que sur la pile.
+  lieu de les réécrire. **M1 et M2 sont livrés** (cf. §4 et §4 ter).
+- ➡️ **Prochaine marche (M3)** : la **pile machine partagée**. Aujourd'hui chaque
+  fonction transpilée a son propre `__frame[]` local, donc les arguments stdcall/
+  cdecl poussés sur la pile par un appelant **ne parviennent pas** à l'appelé (cf.
+  §4 ter, limite connue). M3 modélise une pile unique partagée (esp global, push/
+  pop de `call`/`ret`) — la solution générale de la SBT (rev.ng/McSema) qui fait
+  marcher d'un coup toutes les conventions à pile et les appels internes. C'est
+  une refonte du modèle de frame (`src/opt/frame.rs`, émission) à mener avec soin
+  car 42 tests + l'équivalence différentielle 16/16 en dépendent.
 
 > Ce fichier est le point d'entrée « mémoire » du projet UBT. Les trois notes
 > d'origine sont conservées à côté, non éditées, comme cap de référence.

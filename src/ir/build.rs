@@ -188,10 +188,19 @@ pub fn build_ir(prog: &Program, func: &Function) -> IrFunction {
         b.pred = preds;
     }
 
-    // Name resolved import / PLT call targets (e.g. Direct(plt) -> "malloc").
-    for b in &mut blocks {
-        for s in &mut b.stmts {
-            name_calls_in_stmt(s, prog, bits);
+    // Name resolved import / PLT call targets (e.g. Direct(plt) -> "malloc"),
+    // and intercept indirect import calls. Compilers often load an import's IAT
+    // slot into a (callee-saved) register once and `call reg` repeatedly, so we
+    // track which registers currently hold an import function pointer and resolve
+    // calls through them too. The tracking is a simple forward scan invalidated
+    // on reassignment / opaque `Asm`.
+    {
+        let mut held: std::collections::HashMap<Location, String> = std::collections::HashMap::new();
+        for b in &mut blocks {
+            for s in &mut b.stmts {
+                name_calls_in_stmt(s, prog, bits, &held);
+                update_import_regs(s, prog, &mut held);
+            }
         }
     }
 
@@ -478,7 +487,9 @@ fn loc_str(l: &Location) -> String {
 /// Rewrite `Call { target: Direct(addr) }` to `Named(import)` when `addr` is a
 /// resolved PLT/IAT import. Internal `sub_*` targets are left as Direct so they
 /// keep getting forward-declared (recompilable).
-fn name_calls_in_expr(e: &mut Expr, prog: &Program, bits: u32) {
+type HeldImports = std::collections::HashMap<Location, String>;
+
+fn name_calls_in_expr(e: &mut Expr, prog: &Program, bits: u32, held: &HeldImports) {
     match e {
         Expr::Call { target, args, .. } => {
             if let CallTarget::Direct(a) = target {
@@ -486,40 +497,67 @@ fn name_calls_in_expr(e: &mut Expr, prog: &Program, bits: u32) {
                     *target = CallTarget::Named(sanitize_import(name));
                 }
             }
-            // Indirect call through a fixed IAT/GOT slot: `call [abs]` where `abs`
-            // is a known PE/ELF import. Resolve it to the named HLE shim (UBT
-            // Phase 3 / API interception). For 32-bit stdcall/cdecl the arguments
-            // live on the modelled stack, so hand the shim the current stack
-            // pointer; it reads its arguments at esp+0, esp+4, … (ABI-accurate).
-            let import = if let CallTarget::Indirect(inner) = &*target {
-                const_load_addr(inner).and_then(|a| prog.import_name(a)).map(str::to_string)
+            // Indirect import call (UBT Phase 3 / API interception). Two shapes:
+            //   * `call [abs]` — a direct dereference of a fixed IAT/GOT slot;
+            //   * `call reg`   — through a register previously loaded from an IAT
+            //     slot (`mov reg, [abs]`), tracked in `held`.
+            // For 32-bit stdcall/cdecl the arguments live on the modelled stack,
+            // so hand the shim the current stack pointer; it reads its arguments
+            // at esp+0, esp+4, … (ABI-accurate).
+            let import: Option<String> = if let CallTarget::Indirect(inner) = &*target {
+                if let Some(a) = const_load_addr(inner) {
+                    prog.import_name(a).map(sanitize_import)
+                } else if let Some(loc) = peeled_reg(inner) {
+                    held.get(loc).cloned()
+                } else {
+                    None
+                }
             } else {
                 None
             };
             if let Some(name) = import {
-                *target = CallTarget::Named(sanitize_import(&name));
+                *target = CallTarget::Named(name);
                 if bits == 32 && args.is_empty() {
                     *args = vec![Expr::Read(Location::Reg(RegId(4)))];
                 }
             }
             if let CallTarget::Indirect(x) = target {
-                name_calls_in_expr(x, prog, bits);
+                name_calls_in_expr(x, prog, bits, held);
             }
             for a in args.iter_mut() {
-                name_calls_in_expr(a, prog, bits);
+                name_calls_in_expr(a, prog, bits, held);
             }
         }
-        Expr::Load { addr, .. } => name_calls_in_expr(addr, prog, bits),
-        Expr::Unary(_, x) | Expr::Cast { expr: x, .. } => name_calls_in_expr(x, prog, bits),
+        Expr::Load { addr, .. } => name_calls_in_expr(addr, prog, bits, held),
+        Expr::Unary(_, x) | Expr::Cast { expr: x, .. } => name_calls_in_expr(x, prog, bits, held),
         Expr::Binary(_, a, b) => {
-            name_calls_in_expr(a, prog, bits);
-            name_calls_in_expr(b, prog, bits);
+            name_calls_in_expr(a, prog, bits, held);
+            name_calls_in_expr(b, prog, bits, held);
         }
         Expr::Select { cond, then_, else_ } => {
-            name_calls_in_expr(cond, prog, bits);
-            name_calls_in_expr(then_, prog, bits);
-            name_calls_in_expr(else_, prog, bits);
+            name_calls_in_expr(cond, prog, bits, held);
+            name_calls_in_expr(then_, prog, bits, held);
+            name_calls_in_expr(else_, prog, bits, held);
         }
+        _ => {}
+    }
+}
+
+/// Update the register→import tracking after statement `s`: record `reg = [iat]`
+/// loads of import slots, and invalidate a register when it is reassigned (or on
+/// an opaque `Asm`, which may clobber anything).
+fn update_import_regs(s: &Stmt, prog: &Program, held: &mut HeldImports) {
+    match s {
+        Stmt::Set { dst, expr } => {
+            if let Some(a) = const_load_addr(expr) {
+                if let Some(name) = prog.import_name(a) {
+                    held.insert(dst.clone(), sanitize_import(name));
+                    return;
+                }
+            }
+            held.remove(dst);
+        }
+        Stmt::Asm(_) => held.clear(),
         _ => {}
     }
 }
@@ -533,6 +571,27 @@ fn const_load_addr(e: &Expr) -> Option<u64> {
         }
     }
     None
+}
+
+/// The register a (possibly width-masked / cast) read resolves to. A 32-bit
+/// register read in the 64-bit-wide IR is `(reg & 0xffffffff)`, so peel that and
+/// any cast to recover the underlying `Reg` for import-pointer tracking.
+fn peeled_reg(e: &Expr) -> Option<&Location> {
+    match e {
+        Expr::Read(loc) => Some(loc),
+        Expr::Cast { expr, .. } => peeled_reg(expr),
+        Expr::Binary(BinOp::And, a, b) => {
+            // `reg & all-ones-mask` — a width truncation, not a real mask.
+            if let Expr::Const(m, _) = b.as_ref() {
+                let m = *m as u64;
+                if m == 0xff || m == 0xffff || m == 0xffff_ffff || m == u64::MAX {
+                    return peeled_reg(a);
+                }
+            }
+            None
+        }
+        _ => None,
+    }
 }
 
 /// Turn a raw import symbol into a valid C identifier for the HLE shim call
@@ -549,17 +608,17 @@ fn sanitize_import(name: &str) -> String {
     s
 }
 
-fn name_calls_in_stmt(s: &mut Stmt, prog: &Program, bits: u32) {
+fn name_calls_in_stmt(s: &mut Stmt, prog: &Program, bits: u32, held: &HeldImports) {
     match s {
         Stmt::Set { expr, .. } | Stmt::Assign { expr, .. } | Stmt::CallStmt(expr) => {
-            name_calls_in_expr(expr, prog, bits)
+            name_calls_in_expr(expr, prog, bits, held)
         }
         Stmt::Store { addr, value, .. } => {
-            name_calls_in_expr(addr, prog, bits);
-            name_calls_in_expr(value, prog, bits);
+            name_calls_in_expr(addr, prog, bits, held);
+            name_calls_in_expr(value, prog, bits, held);
         }
-        Stmt::Branch { cond, .. } => name_calls_in_expr(cond, prog, bits),
-        Stmt::Return(Some(e)) => name_calls_in_expr(e, prog, bits),
+        Stmt::Branch { cond, .. } => name_calls_in_expr(cond, prog, bits, held),
+        Stmt::Return(Some(e)) => name_calls_in_expr(e, prog, bits, held),
         _ => {}
     }
 }
