@@ -58,7 +58,7 @@ moitié faits. Chaque tranche élargit la classe de binaires supportés.
 |---|---|---|---|
 | **M1** ✅ | **Interception d'API → shims HLE natifs**, recompile native | PE Win32 *freestanding* (imports kernel32) → ELF Linux natif | aret-existant + `runtime/aret_hle` |
 | **M2** ✅ | **Imports indirects via registre** (`mov reg,[iat]; call reg`) + **Memory Layout Mapper** (données globales `.rdata`/`.data` remises à leur VA) | PE Win32 multi-références à données globales en mémoire absolue | `object` |
-| M3 | **Pile machine partagée** : passage d'arguments inter-fonctions par la pile (stdcall/cdecl) | programmes Win32 multi-fonctions à appels internes | refonte du modèle de frame |
+| **M3** ✅ | **Pile machine partagée** : passage d'arguments inter-fonctions, par la **pile** (stdcall/cdecl) **et par registres** (regparm/fastcall) | programmes Win32 multi-fonctions à appels internes | nouveau lowering gated |
 | M4 | Shims Win32/CRT élargis (`msvcrt` : `printf`, `malloc`, file I/O) | `.exe` console réaliste | s'inspirer de Wine |
 | M5 | Fallback émulateur (Unicorn) sur adresse inconnue | code partiellement obfusqué / sauts dynamiques | `unicorn-engine` |
 | M6 | Cible WebAssembly/WASI (au lieu d'un OS natif) | « cible universelle » de la note 3 | `wasmtime` |
@@ -183,6 +183,46 @@ machine partagée de M3.
 
 ---
 
+## 4 quater. M3 — ✅ FAIT (pile machine partagée : appels inter-fonctions)
+
+> Statut : implémenté et testé. Un programme Win32 multi-fonctions dont l'entrée
+> appelle un helper interne se transpile, se recompile et s'exécute nativement,
+> les arguments traversant l'appel **qu'ils soient passés par la pile** (args 4+
+> en cdecl/stdcall) **ou par registres** (gcc `-O1` regparm(3), `__fastcall`).
+
+```
+$ aret tests/m1/fixtures/hello_stackargs.exe --mode transpile --run
+  | M3: argument arrived via the shared STACK       # arg 6 passé sur la pile
+$ aret tests/m1/fixtures/hello_callchain.exe --mode transpile --run
+  | M3: passed through an internal call (1)          # args en registres eax/edx/ecx
+  | M3: passed through an internal call (2)
+```
+
+Conception (lowering **dédié au transpile**, isolé derrière un flag thread-local
+`emit::set_shared_stack` — les chemins verify/decompile et l'équivalence
+différentielle 16/16 sont inchangés, 42 tests verts) :
+
+- **Une seule pile machine globale** (`aret_stack`, dans `aret_main.c`) au lieu
+  d'un `__frame[]` par fonction. Chaque fonction transpilée prend le pointeur de
+  pile de l'appelant en paramètre (`uint64_t __esp`) ; ses accès `[ebp±d]`/
+  `[esp±d]` lisent/écrivent donc la **même** mémoire que l'appelant (on force le
+  lifting à garder ces accès en mémoire brute via `frames_off`, sans les replier
+  en locaux nommés).
+- **Modélisation du `call`** : un appel interne passe `__esp - 4` (l'adresse de
+  retour qu'empile le vrai `call`), de sorte que l'appelé relit ses arguments
+  pile à `[__esp + 4]`, `[__esp + 8]`, … — exactement là où l'appelant les a
+  écrits.
+- **Registres volatils threadés** : l'appel passe aussi `eax/ecx/edx` (liste
+  fixe), reçus comme paramètres, pour les conventions à registres. Réutilise et
+  généralise le mécanisme `reg_params` existant (jusque-là réservé au 64-bit
+  SysV) au 32-bit en mode partagé.
+
+Portée : convention d'appel à pile/registres standard couverte. Restent pour plus
+tard les cas pointus (variadique inter-fonctions complexe, retour de struct par
+valeur, `alloca`, nettoyage stdcall `ret N` dans du code esp-tracké exotique).
+
+---
+
 ## 5. Décisions d'architecture à trancher au moment de coder M1
 
 - **Mono-crate vs workspace** : la note 1 propose un workspace
@@ -202,15 +242,11 @@ machine partagée de M3.
 
 - ✅ **Acté** : on garde ARET (C) comme socle ; la Phase 3 (HLE) est la priorité ;
   on avance par tranches de bout en bout ; on réutilise les briques externes au
-  lieu de les réécrire. **M1 et M2 sont livrés** (cf. §4 et §4 ter).
-- ➡️ **Prochaine marche (M3)** : la **pile machine partagée**. Aujourd'hui chaque
-  fonction transpilée a son propre `__frame[]` local, donc les arguments stdcall/
-  cdecl poussés sur la pile par un appelant **ne parviennent pas** à l'appelé (cf.
-  §4 ter, limite connue). M3 modélise une pile unique partagée (esp global, push/
-  pop de `call`/`ret`) — la solution générale de la SBT (rev.ng/McSema) qui fait
-  marcher d'un coup toutes les conventions à pile et les appels internes. C'est
-  une refonte du modèle de frame (`src/opt/frame.rs`, émission) à mener avec soin
-  car 42 tests + l'équivalence différentielle 16/16 en dépendent.
+  lieu de les réécrire. **M1, M2 et M3 sont livrés** (cf. §4, §4 ter, §4 quater).
+- ➡️ **Prochaine marche (M4)** : élargir la couche HLE au CRT (`msvcrt` :
+  `printf` variadique lisant ses args sur la pile partagée, `malloc`/`free`,
+  file I/O `fopen`/`fread`/`fwrite`), pour transpiler un vrai `.exe` console non
+  freestanding. Puis M5 (fallback Unicorn), M6 (cible WASI), M7 (GUI/DXVK).
 
 > Ce fichier est le point d'entrée « mémoire » du projet UBT. Les trois notes
 > d'origine sont conservées à côté, non éditées, comme cap de référence.

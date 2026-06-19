@@ -151,6 +151,17 @@ aret tests/m1/fixtures/hello_globals.exe --mode transpile --run
 #   | M2: second global, mapped at its original VA
 ```
 
+Multi-function programs work too: a **shared machine stack** lets arguments cross
+internal calls, whether passed on the stack (cdecl/stdcall) or in registers
+(gcc `-O1` regparm / `__fastcall`). This lowering is gated behind a flag, so the
+`verify`/`decompile` paths and their differential-equivalence results are
+unchanged:
+
+```bash
+aret tests/m1/fixtures/hello_stackargs.exe --mode transpile --run
+#   | M3: argument arrived via the shared STACK
+```
+
 The vision, design notes, and milestone roadmap live in
 [`docs/vision/`](docs/vision/) (start with `00-SYNTHESE-roadmap-UBT.md`). The HLE
 runtime is in [`runtime/aret_hle/`](runtime/aret_hle); the backend builder is in

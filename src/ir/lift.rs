@@ -266,6 +266,13 @@ pub(crate) fn set_frames_off(off: bool) {
     FRAMES_OFF.with(|c| c.set(off));
 }
 
+/// Current frame-folding state (so `ir::build` can OR in a caller-forced value,
+/// e.g. the transpiler's shared-stack mode which needs every `[ebp+d]` to stay
+/// raw memory into the shared stack rather than a named local).
+pub(crate) fn frames_off() -> bool {
+    FRAMES_OFF.with(|c| c.get())
+}
+
 /// If operand `i` is a pure frame slot `[ebp/rbp ± disp]` (base = frame pointer,
 /// no index), return its displacement. These become named `Frame` locations.
 fn frame_disp(ins: &Instruction, i: u32) -> Option<i64> {

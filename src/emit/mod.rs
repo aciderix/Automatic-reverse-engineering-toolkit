@@ -379,6 +379,24 @@ pub(crate) fn int_bits(t: &Ty) -> u8 {
 const FRAME_SIZE: usize = 16384;
 const FRAME_TOP: usize = FRAME_SIZE - 2048;
 
+thread_local! {
+    /// Shared machine-stack mode (UBT M3): used by the transpiler so that the
+    /// entry rsp/rbp come from a `__esp` parameter (a pointer into one global
+    /// stack shared across functions) instead of a private per-call `__frame`
+    /// array. This is what lets stack-passed arguments cross function calls. Off
+    /// by default, so the verify/decompile paths are unchanged.
+    static SHARED_STACK: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Enable/disable shared machine-stack emission for the current thread.
+pub fn set_shared_stack(on: bool) {
+    SHARED_STACK.with(|c| c.set(on));
+}
+
+pub(crate) fn shared_stack() -> bool {
+    SHARED_STACK.with(|c| c.get())
+}
+
 /// Render the function's value declarations. Frame-base values (entry rsp/rbp)
 /// are pointed at a real per-call `__frame` array so generic stack accesses
 /// (arrays, rsp-relative spills) hit real memory instead of dereferencing an
@@ -391,8 +409,9 @@ pub(crate) fn value_decls(values: &BTreeSet<u32>, frame_base: &[u32], fp80: &[u3
     let fb: HashSet<u32> = frame_base.iter().copied().collect();
     let fp: HashSet<u32> = fp80.iter().copied().collect();
     let used_fb = values.iter().any(|v| fb.contains(v));
+    let shared = shared_stack();
     let mut out = String::new();
-    if used_fb {
+    if used_fb && !shared {
         // Plain automatic array (per-call, so recursion gets a fresh frame).
         let _ = writeln!(out, "    uint8_t __frame[{}];", FRAME_SIZE);
     }
@@ -410,7 +429,14 @@ pub(crate) fn value_decls(values: &BTreeSet<u32>, frame_base: &[u32], fp80: &[u3
         .filter(|v| !fp.contains(v))
         .map(|v| {
             if fb.contains(v) {
-                format!("v{} = (uint64_t)(__frame + {})", v, FRAME_TOP)
+                // Shared stack: entry rsp/rbp come from the `__esp` parameter (a
+                // pointer into the single global stack) so pushed arguments cross
+                // calls. Private frame: a fresh per-call array.
+                if shared {
+                    format!("v{} = __esp", v)
+                } else {
+                    format!("v{} = (uint64_t)(__frame + {})", v, FRAME_TOP)
+                }
             } else {
                 format!("v{} = 0", v)
             }
@@ -633,6 +659,16 @@ pub(crate) fn frame_params_locals(func: &IrFunction) -> (Vec<i64>, Vec<i64>) {
 /// The function's C signature. With `with_params`, recovered frame arguments
 /// become real parameters; otherwise `(void)`.
 pub(crate) fn signature(func: &IrFunction, with_params: bool) -> String {
+    // Shared machine-stack mode: every function takes the caller's stack pointer
+    // plus the volatile general registers (so both stack- and register-passed
+    // arguments cross calls). The register parameters are a fixed list.
+    if shared_stack() {
+        let mut p = vec!["uint64_t __esp".to_string()];
+        for v in &func.reg_params {
+            p.push(format!("uint64_t v{}", v));
+        }
+        return format!("uint64_t sub_{:x}({})", func.entry, p.join(", "));
+    }
     if !with_params {
         return format!("uint64_t sub_{:x}(void)", func.entry);
     }

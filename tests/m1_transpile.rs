@@ -97,3 +97,35 @@ fn m2_register_indirect_imports_and_global_data() {
         "missing second global line:\n{out}"
     );
 }
+
+#[test]
+fn m3_internal_call_register_args() {
+    if !has_m32() {
+        eprintln!("skipping M3 test: `cc -m32` unavailable (install gcc-multilib)");
+        return;
+    }
+    // A helper called twice through an internal call, arguments passed in
+    // registers (gcc -O1 regparm) — must cross the call via the shared machine
+    // stack's threaded registers.
+    let out = transpile_and_run("hello_callchain.exe");
+    assert!(
+        out.contains("M3: passed through an internal call (1)")
+            && out.contains("M3: passed through an internal call (2)"),
+        "internal register-arg call did not convey arguments:\n{out}"
+    );
+}
+
+#[test]
+fn m3_internal_call_stack_args() {
+    if !has_m32() {
+        eprintln!("skipping M3 test: `cc -m32` unavailable (install gcc-multilib)");
+        return;
+    }
+    // A 6-argument helper: arguments 4-6 are passed on the stack, so they must
+    // travel from caller to callee through the single shared machine stack.
+    let out = transpile_and_run("hello_stackargs.exe");
+    assert!(
+        out.contains("M3: argument arrived via the shared STACK"),
+        "stack-passed argument did not cross the call:\n{out}"
+    );
+}

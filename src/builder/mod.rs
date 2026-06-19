@@ -134,10 +134,17 @@ fn emit_layout(prog: &Program) -> Option<String> {
     Some(s)
 }
 
-/// Build IR for one recovered function and lower it through the standard chain.
+/// Build IR for one recovered function and lower it for shared-stack transpilation
+/// (UBT M3). Unlike the verify/decompile chain, this does *not* promote stack
+/// slots to private per-function locals: every stack access stays raw memory into
+/// one global stack, and `__esp` is threaded through calls so stack-passed
+/// arguments cross functions.
 fn lower(prog: &Program, f: &Function) -> ir::types::IrFunction {
+    // Force raw frame memory so `[ebp+d]` stays a load from the shared stack
+    // (build_ir ORs this in, then resets it afterwards).
+    ir::lift::set_frames_off(true);
     let mut irf = ir::build::build_ir(prog, f);
-    opt::frame::promote_stack_slots(&mut irf);
+    ir::build::thread_internal_call_esp(&mut irf);
     ssa::to_ssa(&mut irf);
     opt::optimize(&mut irf);
     irf
@@ -154,22 +161,25 @@ pub fn transpile(
     if funcs.is_empty() {
         bail!("no functions to transpile");
     }
-    std::fs::create_dir_all(out_dir)
-        .with_context(|| format!("failed to create {}", out_dir.display()))?;
-
-    // Lower every function and emit one translation unit.
-    let irfs: Vec<_> = funcs.iter().map(|f| lower(prog, f)).collect();
-    let unit = emit::structured::emit_unit(&irfs);
-
-    // The program's entry point is the C function `sub_<entry>`. Confirm it is
-    // among the emitted functions so the generated `main` can call it.
+    // The program's entry point is the C function `sub_<entry>`; confirm it was
+    // recovered before doing any work.
     let entry = prog.entry;
-    if !irfs.iter().any(|f| f.entry == entry) {
+    if !funcs.iter().any(|f| f.entry == entry) {
         bail!(
-            "entry function 0x{:x} was not recovered/emitted (try without --function)",
+            "entry function 0x{:x} was not recovered (try without --function)",
             entry
         );
     }
+    std::fs::create_dir_all(out_dir)
+        .with_context(|| format!("failed to create {}", out_dir.display()))?;
+
+    // Lower every function and emit one translation unit using the shared machine
+    // stack (so both stack- and register-passed arguments cross function calls).
+    // The mode flag is read during SSA *and* emission, so it wraps both.
+    emit::set_shared_stack(true);
+    let irfs: Vec<_> = funcs.iter().map(|f| lower(prog, f)).collect();
+    let unit = emit::structured::emit_unit(&irfs);
+    emit::set_shared_stack(false);
 
     // program.c — the transpiled unit, with the HLE declarations in scope.
     let program_c = format!("#include \"aret_hle.h\"\n{}", unit);
@@ -182,10 +192,19 @@ pub fn transpile(
     } else {
         ""
     };
-    // aret_main.c — a native entry that maps memory then drives the transpiled
-    // entry point.
+    // aret_main.c — a native entry that maps memory, sets up the single shared
+    // machine stack, then drives the transpiled entry point with the stack-top
+    // pointer. Every transpiled function threads this `__esp` through its calls.
     let main_c = format!(
-        "#include <stdint.h>\n\nvoid __aret_map_memory(void);\nuint64_t sub_{entry:x}(void);\n\nint main(void) {{\n{map_call}    return (int)sub_{entry:x}();\n}}\n",
+        "#include <stdint.h>\n\n\
+         /* One shared machine stack for all transpiled functions (UBT M3). */\n\
+         static uint8_t aret_stack[1u << 20];\n\n\
+         void __aret_map_memory(void);\n\
+         uint64_t sub_{entry:x}(uint64_t __esp, uint64_t a, uint64_t c, uint64_t d);\n\n\
+         int main(void) {{\n\
+         {map_call}    uint64_t esp = (uint64_t)(uintptr_t)(aret_stack + sizeof(aret_stack) - 16);\n\
+         \x20   return (int)sub_{entry:x}(esp, 0, 0, 0);\n\
+         }}\n",
     );
 
     let write = |name: &str, body: &str| -> Result<()> {

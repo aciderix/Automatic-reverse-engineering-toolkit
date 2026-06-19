@@ -38,7 +38,10 @@ pub fn build_ir(prog: &Program, func: &Function) -> IrFunction {
     // byte-addressed memory, and a function may read the same bytes back at a
     // finer granularity (e.g. 4-byte packed-float lanes). Named scalars would
     // alias-split those accesses; raw `__frame` keeps them byte-consistent.
-    let raw_frames = x87.is_some() || uses_xmm128_mem(func);
+    // OR in any caller-forced setting (the transpiler's shared-stack mode forces
+    // frames off so `[ebp+d]` incoming arguments stay raw loads from the shared
+    // stack instead of becoming undefined named locals).
+    let raw_frames = x87.is_some() || uses_xmm128_mem(func) || crate::ir::lift::frames_off();
     crate::ir::lift::set_frames_off(raw_frames);
 
     let mut blocks: Vec<Block> = Vec::with_capacity(order.len());
@@ -606,6 +609,88 @@ fn sanitize_import(name: &str) -> String {
         s.insert(0, '_');
     }
     s
+}
+
+/// UBT M3 (shared machine stack): give every internal `call` the caller's stack
+/// pointer minus one slot, modelling the return address the real `call` pushes.
+/// The callee (compiled assuming that pushed slot) then reads its stack arguments
+/// at `[__esp + 4]`, `[__esp + 8]`, … from the single shared stack — which is
+/// exactly where the caller wrote them. Imports (now `Named`) are untouched: HLE
+/// shims read their arguments at `[esp + 0]`. 32-bit only (64-bit passes
+/// arguments in registers).
+pub fn thread_internal_call_esp(irf: &mut IrFunction) {
+    if irf.bits != 32 {
+        return;
+    }
+    for b in &mut irf.blocks {
+        for s in &mut b.stmts {
+            thread_calls_in_stmt(s);
+        }
+    }
+}
+
+fn esp_minus_slot() -> Expr {
+    Expr::Binary(
+        BinOp::Sub,
+        Box::new(Expr::Read(Location::Reg(RegId(4)))),
+        Box::new(Expr::Const(4, Ty::int(32))),
+    )
+}
+
+/// Arguments handed to an internal `call` in shared-stack mode: the pushed-return
+/// stack pointer, then the volatile general registers eax/ecx/edx (matching the
+/// callee's fixed parameter list, so both stack- and register-passed arguments
+/// are conveyed).
+fn internal_call_args() -> Vec<Expr> {
+    vec![
+        esp_minus_slot(),
+        Expr::Read(Location::Reg(RegId(0))), // eax
+        Expr::Read(Location::Reg(RegId(1))), // ecx
+        Expr::Read(Location::Reg(RegId(2))), // edx
+    ]
+}
+
+fn thread_calls_in_expr(e: &mut Expr) {
+    match e {
+        Expr::Call { target, args, .. } => {
+            if matches!(target, CallTarget::Direct(_)) {
+                *args = internal_call_args();
+            }
+            if let CallTarget::Indirect(x) = target {
+                thread_calls_in_expr(x);
+            }
+            for a in args.iter_mut() {
+                thread_calls_in_expr(a);
+            }
+        }
+        Expr::Load { addr, .. } => thread_calls_in_expr(addr),
+        Expr::Unary(_, x) | Expr::Cast { expr: x, .. } => thread_calls_in_expr(x),
+        Expr::Binary(_, a, b) => {
+            thread_calls_in_expr(a);
+            thread_calls_in_expr(b);
+        }
+        Expr::Select { cond, then_, else_ } => {
+            thread_calls_in_expr(cond);
+            thread_calls_in_expr(then_);
+            thread_calls_in_expr(else_);
+        }
+        _ => {}
+    }
+}
+
+fn thread_calls_in_stmt(s: &mut Stmt) {
+    match s {
+        Stmt::Set { expr, .. } | Stmt::Assign { expr, .. } | Stmt::CallStmt(expr) => {
+            thread_calls_in_expr(expr)
+        }
+        Stmt::Store { addr, value, .. } => {
+            thread_calls_in_expr(addr);
+            thread_calls_in_expr(value);
+        }
+        Stmt::Branch { cond, .. } => thread_calls_in_expr(cond),
+        Stmt::Return(Some(e)) => thread_calls_in_expr(e),
+        _ => {}
+    }
 }
 
 fn name_calls_in_stmt(s: &mut Stmt, prog: &Program, bits: u32, held: &HeldImports) {

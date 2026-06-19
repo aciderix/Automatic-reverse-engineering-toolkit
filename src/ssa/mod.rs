@@ -233,6 +233,22 @@ pub fn to_ssa(func: &mut IrFunction) {
                 func.reg_params.push(v.0);
             }
         }
+    } else if crate::emit::shared_stack() {
+        // 32-bit shared machine stack (UBT M3): besides the stack, pass the
+        // volatile general registers eax/ecx/edx so register-passed arguments
+        // (gcc `-O1` regparm, `__fastcall`) cross calls. The list is FIXED so
+        // every function has the same parameter positions; a register that is not
+        // read before being written gets an unused placeholder value to keep the
+        // position stable.
+        for r in [0u16, 1, 2] {
+            match undef.get(&Location::Reg(RegId(r))).copied() {
+                Some(v) => func.reg_params.push(v.0),
+                None => {
+                    let d = func.fresh_value();
+                    func.reg_params.push(d.0);
+                }
+            }
+        }
     }
 
     // Frame-base values: the entry (undef) versions of rsp/rbp. Stack-variable

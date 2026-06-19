@@ -432,7 +432,12 @@ pub fn emit_unit(funcs: &[IrFunction]) -> String {
     // every call to a function defined here match its callee's arity so the unit
     // recompiles (call-site arguments — roadmap §15.4 #2).
     let mut funcs = funcs.to_vec();
-    super::fixup_call_arity(&mut funcs);
+    // In shared-stack mode every function takes exactly one parameter (`__esp`)
+    // and every internal call passes exactly one argument (the stack pointer), so
+    // the cdecl arity fixup must not run (it would truncate that argument).
+    if !super::shared_stack() {
+        super::fixup_call_arity(&mut funcs);
+    }
     let with_params = true;
     let mut body = String::new();
     let mut forward: BTreeSet<u64> = BTreeSet::new();
