@@ -384,6 +384,11 @@ pub fn transpile(
     let mut chunk_srcs: Vec<std::path::PathBuf> = Vec::new();
     if let Some(ir) = &llvm_ir {
         write("program.ll", ir)?;
+        // The C backend inlines the float helpers per chunk; the LLVM backend
+        // calls them as external symbols, so provide them as a linkable unit
+        // (the same helpers, with external linkage).
+        let float_c = format!("#include <stdint.h>\n{}", emit::FLOAT_HELPERS.replace("static inline ", ""));
+        write("aret_float.c", &float_c)?;
     } else {
         write("aret_decls.h", &decls_h)?;
         for (i, body) in chunks.iter().enumerate() {
@@ -424,6 +429,9 @@ pub fn transpile(
     ];
     if has_layout {
         sources.push(out_dir.join("aret_layout.S"));
+    }
+    if use_llvm {
+        sources.push(out_dir.join("aret_float.c")); // external float helpers
     }
     sources.extend(chunk_srcs);
 

@@ -200,6 +200,17 @@ fn teb_synthetic_process_environment() {
 }
 
 #[test]
+fn float_sse_arithmetic() {
+    if !has_m32() {
+        eprintln!("skipping float test: `cc -m32` unavailable (install gcc-multilib)");
+        return;
+    }
+    // SSE double arithmetic (mul/add) + int conversion via the __fp_* helpers.
+    let out = transpile_and_run("hello_float.exe");
+    assert!(out.contains("FLOAT: c=8 c10=85"), "float arithmetic wrong:\n{out}");
+}
+
+#[test]
 fn fs_file_roundtrip_with_path_translation() {
     if !has_m32() {
         eprintln!("skipping FS test: `cc -m32` unavailable (install gcc-multilib)");

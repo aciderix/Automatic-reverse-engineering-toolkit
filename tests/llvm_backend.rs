@@ -117,6 +117,7 @@ fn llvm_ir_is_valid_for_fixtures() {
         "hello_callchain.exe",
         "hello_printf.exe",
         "hello_heap.exe",
+        "hello_float.exe",
     ] {
         assert_valid_ir(fixture);
     }
