@@ -123,7 +123,27 @@ aret <binary> --mode cfg            # control-flow graph + call edges
 aret <binary> --function <name|hex> # restrict to one function
 aret <binary> -o out.c              # write to a file
 aret <binary> --split out_dir/      # one .c per function + index.csv
+aret <binary> --mode transpile --run # transpile to a NATIVE binary and run it
 ```
+
+### Transpilation (UBT) — running a foreign binary natively
+
+Beyond decompiling, ARET has the first end-to-end slice of a **Universal Binary
+Transpiler**: it takes a Windows PE, intercepts its OS API imports into a native
+High-Level-Emulation (HLE) shim layer, and recompiles the result into a *native*
+Linux ELF (no emulator, no Wine):
+
+```bash
+aret tests/m1/fixtures/hello_win32.exe --mode transpile --run
+#   --- program output ---
+#   | Hello from Windows, running native on Linux
+```
+
+The vision, design notes, and milestone roadmap live in
+[`docs/vision/`](docs/vision/) (start with `00-SYNTHESE-roadmap-UBT.md`). The HLE
+runtime is in [`runtime/aret_hle/`](runtime/aret_hle); the backend builder is in
+`src/builder/`. Requires a 32-bit native toolchain (`gcc-multilib`) to build the
+32-bit stack model; `gcc-mingw-w64-i686` to regenerate the PE fixtures.
 
 ## Roadmap (the honest path to "real and powerful")
 

@@ -4,6 +4,7 @@
 //! functions & CFG -> lift -> emit pseudo-C.
 
 mod analysis;
+mod builder;
 mod cfg;
 mod dataflow;
 mod decompile;
@@ -39,6 +40,9 @@ enum Mode {
     Emit,
     /// Verify recompilability: emit C per function, recompile, report the rate.
     Verify,
+    /// Transpile to a native executable for the target OS (UBT M1): intercept
+    /// API imports into HLE shims, link, and recompile natively.
+    Transpile,
 }
 
 #[derive(Parser, Debug)]
@@ -80,6 +84,19 @@ struct Args {
     /// Cap the number of functions processed (used by --mode verify).
     #[arg(long)]
     limit: Option<usize>,
+
+    /// Transpile mode: output directory for the generated C + native binary.
+    #[arg(long, default_value = "aret_out")]
+    out_dir: PathBuf,
+
+    /// Transpile mode: run the produced native binary and print its output.
+    #[arg(long)]
+    run: bool,
+
+    /// Transpile mode: target triple (informational for M1; the host C
+    /// compiler builds a native binary at the source's bitness).
+    #[arg(long)]
+    target: Option<String>,
 }
 
 /// Render one function as pseudo-C, structured unless `--flat` was given.
@@ -186,6 +203,13 @@ fn main() -> Result<()> {
         Mode::Verify => {
             let limit = args.limit.unwrap_or(200);
             let report = verify::run(&prog, &functions, limit);
+            out.push_str(&report.render());
+        }
+        Mode::Transpile => {
+            if let Some(t) = &args.target {
+                eprintln!("note: --target {} (M1 builds a native host binary at the source bitness)", t);
+            }
+            let report = builder::transpile(&prog, &functions, &args.out_dir, args.run)?;
             out.push_str(&report.render());
         }
     }

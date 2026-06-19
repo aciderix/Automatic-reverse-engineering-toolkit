@@ -191,7 +191,7 @@ pub fn build_ir(prog: &Program, func: &Function) -> IrFunction {
     // Name resolved import / PLT call targets (e.g. Direct(plt) -> "malloc").
     for b in &mut blocks {
         for s in &mut b.stmts {
-            name_calls_in_stmt(s, prog);
+            name_calls_in_stmt(s, prog, bits);
         }
     }
 
@@ -478,47 +478,88 @@ fn loc_str(l: &Location) -> String {
 /// Rewrite `Call { target: Direct(addr) }` to `Named(import)` when `addr` is a
 /// resolved PLT/IAT import. Internal `sub_*` targets are left as Direct so they
 /// keep getting forward-declared (recompilable).
-fn name_calls_in_expr(e: &mut Expr, prog: &Program) {
+fn name_calls_in_expr(e: &mut Expr, prog: &Program, bits: u32) {
     match e {
         Expr::Call { target, args, .. } => {
             if let CallTarget::Direct(a) = target {
                 if let Some(name) = prog.import_name(*a) {
-                    *target = CallTarget::Named(name.to_string());
+                    *target = CallTarget::Named(sanitize_import(name));
+                }
+            }
+            // Indirect call through a fixed IAT/GOT slot: `call [abs]` where `abs`
+            // is a known PE/ELF import. Resolve it to the named HLE shim (UBT
+            // Phase 3 / API interception). For 32-bit stdcall/cdecl the arguments
+            // live on the modelled stack, so hand the shim the current stack
+            // pointer; it reads its arguments at esp+0, esp+4, … (ABI-accurate).
+            let import = if let CallTarget::Indirect(inner) = &*target {
+                const_load_addr(inner).and_then(|a| prog.import_name(a)).map(str::to_string)
+            } else {
+                None
+            };
+            if let Some(name) = import {
+                *target = CallTarget::Named(sanitize_import(&name));
+                if bits == 32 && args.is_empty() {
+                    *args = vec![Expr::Read(Location::Reg(RegId(4)))];
                 }
             }
             if let CallTarget::Indirect(x) = target {
-                name_calls_in_expr(x, prog);
+                name_calls_in_expr(x, prog, bits);
             }
             for a in args.iter_mut() {
-                name_calls_in_expr(a, prog);
+                name_calls_in_expr(a, prog, bits);
             }
         }
-        Expr::Load { addr, .. } => name_calls_in_expr(addr, prog),
-        Expr::Unary(_, x) | Expr::Cast { expr: x, .. } => name_calls_in_expr(x, prog),
+        Expr::Load { addr, .. } => name_calls_in_expr(addr, prog, bits),
+        Expr::Unary(_, x) | Expr::Cast { expr: x, .. } => name_calls_in_expr(x, prog, bits),
         Expr::Binary(_, a, b) => {
-            name_calls_in_expr(a, prog);
-            name_calls_in_expr(b, prog);
+            name_calls_in_expr(a, prog, bits);
+            name_calls_in_expr(b, prog, bits);
         }
         Expr::Select { cond, then_, else_ } => {
-            name_calls_in_expr(cond, prog);
-            name_calls_in_expr(then_, prog);
-            name_calls_in_expr(else_, prog);
+            name_calls_in_expr(cond, prog, bits);
+            name_calls_in_expr(then_, prog, bits);
+            name_calls_in_expr(else_, prog, bits);
         }
         _ => {}
     }
 }
 
-fn name_calls_in_stmt(s: &mut Stmt, prog: &Program) {
+/// Address of a `call [abs]` slot: matches `Load { addr: Const(a) }` (an indirect
+/// call through a fixed memory location, i.e. a PE IAT or ELF GOT slot).
+fn const_load_addr(e: &Expr) -> Option<u64> {
+    if let Expr::Load { addr, .. } = e {
+        if let Expr::Const(a, _) = addr.as_ref() {
+            return Some(*a as u64);
+        }
+    }
+    None
+}
+
+/// Turn a raw import symbol into a valid C identifier for the HLE shim call
+/// (drops `@N` stdcall decoration and any other non-identifier characters).
+fn sanitize_import(name: &str) -> String {
+    let stem = name.split(['@', '+']).next().unwrap_or(name);
+    let mut s: String = stem
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() || c == '_' { c } else { '_' })
+        .collect();
+    if s.chars().next().map(|c| c.is_ascii_digit()).unwrap_or(true) {
+        s.insert(0, '_');
+    }
+    s
+}
+
+fn name_calls_in_stmt(s: &mut Stmt, prog: &Program, bits: u32) {
     match s {
         Stmt::Set { expr, .. } | Stmt::Assign { expr, .. } | Stmt::CallStmt(expr) => {
-            name_calls_in_expr(expr, prog)
+            name_calls_in_expr(expr, prog, bits)
         }
         Stmt::Store { addr, value, .. } => {
-            name_calls_in_expr(addr, prog);
-            name_calls_in_expr(value, prog);
+            name_calls_in_expr(addr, prog, bits);
+            name_calls_in_expr(value, prog, bits);
         }
-        Stmt::Branch { cond, .. } => name_calls_in_expr(cond, prog),
-        Stmt::Return(Some(e)) => name_calls_in_expr(e, prog),
+        Stmt::Branch { cond, .. } => name_calls_in_expr(cond, prog, bits),
+        Stmt::Return(Some(e)) => name_calls_in_expr(e, prog, bits),
         _ => {}
     }
 }

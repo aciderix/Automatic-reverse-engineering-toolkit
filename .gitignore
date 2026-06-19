@@ -1,4 +1,5 @@
 /target
+/aret_out
 **/*.rs.bk
 Cargo.lock.bak
 *.o

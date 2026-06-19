@@ -56,7 +56,7 @@ moitié faits. Chaque tranche élargit la classe de binaires supportés.
 
 | # | Tranche | Classe de binaires nouvellement exécutable | Briques |
 |---|---|---|---|
-| **M1** | **Stubs CRT POSIX** : `printf`/`puts`/`exit` interceptés, recompile Linux | console « hello world » à 1 import | aret-existant + couche C |
+| **M1** ✅ | **Interception d'API → shims HLE natifs**, recompile native | PE Win32 *freestanding* (imports kernel32) → ELF Linux natif | aret-existant + `runtime/aret_hle` |
 | M2 | Modèle d'imports + table de redirection génériques | console n'utilisant que la libc (file I/O, `malloc`, `str*`) | idem |
 | M3 | Shims Win32 → POSIX (`kernel32`/`msvcrt` de base) | petit `.exe` Windows console → ELF Linux | s'inspirer de Wine |
 | M4 | Memory layout mapper + relocations | binaires supposant une base fixe / données globales | `object` |
@@ -69,7 +69,43 @@ On ne s'engage pas sur M3+ tant que M1–M2 ne tournent pas proprement. L'intér
 
 ---
 
-## 4. M1 en détail — la première marche (« commence par… » des notes)
+## 4. M1 — ✅ FAIT (première marche bouclée de bout en bout)
+
+> Statut : implémenté et testé. Un PE Windows 32-bit *freestanding* (imports
+> `kernel32` : `GetStdHandle`/`WriteFile`/`ExitProcess`) est transpilé en C par
+> ARET, ses imports sont **interceptés** vers des shims HLE natifs, le tout est
+> recompilé en **ELF Linux natif** qui imprime exactement la sortie d'origine.
+
+```
+$ aret tests/m1/fixtures/hello_win32.exe --mode transpile --run
+ARET transpile (UBT M1) — native recompile
+  functions:  1
+  bitness:    32-bit
+  binary:     aret_out/app
+  --- program output ---
+  | Hello from Windows, running native on Linux
+$ file aret_out/app
+  ELF 32-bit LSB pie executable, Intel 80386 … for GNU/Linux  (aucun Wine, lié à la libc)
+```
+
+Pièces livrées :
+- **Interception d'API** (`src/ir/build.rs`, `name_calls_in_expr`) : un appel
+  indirect `call [IAT]` vers un import connu devient un appel nommé au shim HLE ;
+  en 32-bit stdcall, le shim reçoit le pointeur de pile et lit ses arguments à
+  `esp+0, esp+4, …` (ABI-exact, car l'appel modélisé n'empile pas d'adresse de
+  retour).
+- **Couche HLE** (`runtime/aret_hle/`) : embryon d'`aret_os_hle`. Implémente les
+  API Win32 en termes POSIX/libc, compilé **dans** le binaire final (natif, pas
+  d'émulateur).
+- **Builder** (`src/builder/`) : embryon d'`aret_builder`. Émet le C, lie le HLE
+  + un `main` généré, et invoque `cc -m32` pour produire l'ELF natif.
+- **Test e2e** (`tests/m1_transpile.rs`) : transpile + exécute + vérifie la
+  sortie (skip propre si `cc -m32` absent).
+
+Outillage requis pour rejouer/étendre M1 dans une session : `gcc-multilib`
+(`cc -m32`) ; `gcc-mingw-w64-i686` pour régénérer les fixtures PE.
+
+### 4 bis. M1 en détail — la première marche (« commence par… » des notes)
 
 La note 1 le dit explicitement : *« Commence par créer un Hello World Windows
 qui utilise printf, décompile-le, et écris le script Rust qui injecte une
@@ -132,10 +168,13 @@ aret <binary> --target linux-x86_64 -o ./out      # transpile + recompile natif
 
 - ✅ **Acté** : on garde ARET (C) comme socle ; la Phase 3 (HLE) est la priorité ;
   on avance par tranches de bout en bout ; on réutilise les briques externes au
-  lieu de les réécrire.
-- ❓ **À décider avec l'utilisateur avant de coder** : démarre-t-on M1
-  maintenant ? Quelle première cible de paire OS (Windows→Linux comme la note,
-  ou Linux→Linux pour valider la mécanique sans même toucher à Win32) ?
+  lieu de les réécrire. **M1 est livré** (Windows→Linux natif, cf. §4).
+- ➡️ **Prochaine marche (M2)** : généraliser au-delà du fixture freestanding —
+  étendre la table de shims HLE (CRT msvcrt : `printf`, `malloc`, file I/O),
+  transpiler un programme multi-fonctions et lier ses appels internes, et
+  mapper les données globales (`.rdata`/`.data`) à leurs adresses (amorce du
+  Memory Layout Mapper, M4) pour les binaires qui référencent des chaînes en
+  mémoire absolue plutôt que sur la pile.
 
 > Ce fichier est le point d'entrée « mémoire » du projet UBT. Les trois notes
 > d'origine sont conservées à côté, non éditées, comme cap de référence.
