@@ -129,3 +129,34 @@ fn m3_internal_call_stack_args() {
         "stack-passed argument did not cross the call:\n{out}"
     );
 }
+
+#[test]
+fn m4_variadic_printf() {
+    if !has_m32() {
+        eprintln!("skipping M4 test: `cc -m32` unavailable (install gcc-multilib)");
+        return;
+    }
+    // printf with several conversions: the HLE shim reads the variadic arguments
+    // from the shared machine stack and reproduces libc formatting.
+    let out = transpile_and_run("hello_printf.exe");
+    assert!(
+        out.contains("M4: int=42 hex=0xff str=hello char=Z pct=%"),
+        "printf conversions wrong:\n{out}"
+    );
+    assert!(out.contains("M4: malloc sum=100"), "second printf wrong:\n{out}");
+}
+
+#[test]
+fn m4_heap_and_string_runtime() {
+    if !has_m32() {
+        eprintln!("skipping M4 test: `cc -m32` unavailable (install gcc-multilib)");
+        return;
+    }
+    // malloc + an internal (shared-stack) fill + strlen + printf %s: a real heap
+    // and string runtime through the CRT shims.
+    let out = transpile_and_run("hello_heap.exe");
+    assert!(
+        out.contains("M4: heap=ABCDE len=5"),
+        "heap/string runtime wrong:\n{out}"
+    );
+}

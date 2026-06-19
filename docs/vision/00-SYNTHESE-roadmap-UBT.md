@@ -59,7 +59,7 @@ moitié faits. Chaque tranche élargit la classe de binaires supportés.
 | **M1** ✅ | **Interception d'API → shims HLE natifs**, recompile native | PE Win32 *freestanding* (imports kernel32) → ELF Linux natif | aret-existant + `runtime/aret_hle` |
 | **M2** ✅ | **Imports indirects via registre** (`mov reg,[iat]; call reg`) + **Memory Layout Mapper** (données globales `.rdata`/`.data` remises à leur VA) | PE Win32 multi-références à données globales en mémoire absolue | `object` |
 | **M3** ✅ | **Pile machine partagée** : passage d'arguments inter-fonctions, par la **pile** (stdcall/cdecl) **et par registres** (regparm/fastcall) | programmes Win32 multi-fonctions à appels internes | nouveau lowering gated |
-| M4 | Shims Win32/CRT élargis (`msvcrt` : `printf`, `malloc`, file I/O) | `.exe` console réaliste | s'inspirer de Wine |
+| **M4** ✅ | **Shims CRT** (`msvcrt`) : `printf` **variadique**, `malloc`/`free`/`calloc`/`realloc`, `mem*`/`str*`, `puts` | `.exe` console utilisant le runtime C | shims natifs |
 | M5 | Fallback émulateur (Unicorn) sur adresse inconnue | code partiellement obfusqué / sauts dynamiques | `unicorn-engine` |
 | M6 | Cible WebAssembly/WASI (au lieu d'un OS natif) | « cible universelle » de la note 3 | `wasmtime` |
 | M7 | GUI / graphisme (X11, puis DXVK) | applications fenêtrées, puis jeux | Wine/DXVK |
@@ -223,6 +223,36 @@ valeur, `alloca`, nettoyage stdcall `ret N` dans du code esp-tracké exotique).
 
 ---
 
+## 4 quinquies. M4 — ✅ FAIT (couche HLE pour le C runtime)
+
+> Statut : implémenté et testé. Un `.exe` console qui utilise le runtime C
+> (`printf`, `malloc`, `strlen`…) se transpile et s'exécute nativement.
+
+```
+$ aret tests/m1/fixtures/hello_printf.exe --mode transpile --run
+  | M4: int=42 hex=0xff str=hello char=Z pct=%
+  | M4: malloc sum=100
+$ aret tests/m1/fixtures/hello_heap.exe --mode transpile --run
+  | M4: heap=ABCDE len=5        # malloc + fill() interne (pile partagée) + strlen + printf %s
+```
+
+Pièces livrées (`runtime/aret_hle/`) :
+- **`printf` variadique** — le morceau central. Le shim lit le format à `[esp+0]`
+  et **consomme ses arguments variadiques sur la pile machine partagée**
+  (`[esp+4]`, `[esp+8]`, …). Chaque conversion est reformatée via le `snprintf`
+  natif avec **la même spec**, donc flags / largeur / précision / `%*d` / `%lld` /
+  `%f` se comportent exactement comme une libc réelle. Les pointeurs `%s` et la
+  chaîne de format résolvent grâce au Memory Layout Mapper (M2).
+- **Tas** : `malloc`/`calloc`/`realloc`/`free` (la libc native en `-m32` renvoie
+  des pointeurs 32-bit, valides dans le modèle).
+- **Mémoire / chaînes** : `mem{cpy,set,move}`, `str{len,cmp,cpy}`, `puts`,
+  `putchar`.
+- **Convention de nommage** : tout import intercepté devient `aret_<nom>`
+  (`aret_printf`, `aret_malloc`…), ce qui évite toute collision avec les vraies
+  fonctions libc que les shims appellent.
+
+---
+
 ## 5. Décisions d'architecture à trancher au moment de coder M1
 
 - **Mono-crate vs workspace** : la note 1 propose un workspace
@@ -242,11 +272,12 @@ valeur, `alloca`, nettoyage stdcall `ret N` dans du code esp-tracké exotique).
 
 - ✅ **Acté** : on garde ARET (C) comme socle ; la Phase 3 (HLE) est la priorité ;
   on avance par tranches de bout en bout ; on réutilise les briques externes au
-  lieu de les réécrire. **M1, M2 et M3 sont livrés** (cf. §4, §4 ter, §4 quater).
-- ➡️ **Prochaine marche (M4)** : élargir la couche HLE au CRT (`msvcrt` :
-  `printf` variadique lisant ses args sur la pile partagée, `malloc`/`free`,
-  file I/O `fopen`/`fread`/`fwrite`), pour transpiler un vrai `.exe` console non
-  freestanding. Puis M5 (fallback Unicorn), M6 (cible WASI), M7 (GUI/DXVK).
+  lieu de les réécrire. **M1, M2, M3 et M4 sont livrés** (cf. §4 → §4 quinquies).
+- ➡️ **Prochaine marche (M5)** : le **filet de sécurité** — quand la
+  décompilation statique ne couvre pas tout (code auto-modifiant, sauts calculés,
+  obfuscation), embarquer un mini-émulateur (`unicorn-engine`) dans le binaire
+  généré pour exécuter à la volée les blocs non découverts. Puis M6 (cible WASI),
+  M7 (GUI/DXVK).
 
 > Ce fichier est le point d'entrée « mémoire » du projet UBT. Les trois notes
 > d'origine sont conservées à côté, non éditées, comme cap de référence.

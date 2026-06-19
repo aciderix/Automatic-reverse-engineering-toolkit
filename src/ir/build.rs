@@ -597,18 +597,21 @@ fn peeled_reg(e: &Expr) -> Option<&Location> {
     }
 }
 
-/// Turn a raw import symbol into a valid C identifier for the HLE shim call
-/// (drops `@N` stdcall decoration and any other non-identifier characters).
+/// Turn a raw import symbol into the HLE shim's C identifier: drop `@N` stdcall
+/// decoration / non-identifier characters and prefix `aret_`. The prefix keeps
+/// shim names (e.g. `aret_printf`, `aret_malloc`) from colliding with the real
+/// libc functions the shims themselves call.
 fn sanitize_import(name: &str) -> String {
-    let stem = name.split(['@', '+']).next().unwrap_or(name);
-    let mut s: String = stem
+    let stem = name
+        .trim_start_matches('_')
+        .split(['@', '+'])
+        .next()
+        .unwrap_or(name);
+    let s: String = stem
         .chars()
         .map(|c| if c.is_ascii_alphanumeric() || c == '_' { c } else { '_' })
         .collect();
-    if s.chars().next().map(|c| c.is_ascii_digit()).unwrap_or(true) {
-        s.insert(0, '_');
-    }
-    s
+    format!("aret_{}", s)
 }
 
 /// UBT M3 (shared machine stack): give every internal `call` the caller's stack

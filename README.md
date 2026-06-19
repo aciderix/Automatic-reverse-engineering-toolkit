@@ -162,6 +162,17 @@ aret tests/m1/fixtures/hello_stackargs.exe --mode transpile --run
 #   | M3: argument arrived via the shared STACK
 ```
 
+The HLE layer (`runtime/aret_hle/`) also shims the C runtime — including a
+**variadic `printf`** that reads its arguments from the shared stack and reuses
+native `snprintf` for each conversion — so console programs that use `printf` /
+`malloc` / `strlen` run natively:
+
+```bash
+aret tests/m1/fixtures/hello_printf.exe --mode transpile --run
+#   | M4: int=42 hex=0xff str=hello char=Z pct=%
+#   | M4: malloc sum=100
+```
+
 The vision, design notes, and milestone roadmap live in
 [`docs/vision/`](docs/vision/) (start with `00-SYNTHESE-roadmap-UBT.md`). The HLE
 runtime is in [`runtime/aret_hle/`](runtime/aret_hle); the backend builder is in
