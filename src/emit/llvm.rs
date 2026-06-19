@@ -297,17 +297,33 @@ fn emit_expr(cx: &mut Ctx, e: &Expr) -> String {
             }
         }
         Expr::Binary(op, a, b) => emit_binary(cx, *op, a, b),
-        Expr::Unary(op, x) => {
-            let v = emit_expr(cx, x);
-            match op {
-                UnOp::Not => { let t = cx.fresh(); cx.line(&format!("{} = xor i64 {}, -1", t, v)); t }
-                UnOp::Neg => { let t = cx.fresh(); cx.line(&format!("{} = sub i64 0, {}", t, v)); t }
-                // Width changes: the lifter already emits explicit and-masks for
-                // sub-word widths, so model these as identity on the i64 pattern.
-                UnOp::SignExtend | UnOp::ZeroExtend | UnOp::Truncate => v,
+        Expr::Unary(op, x) => match op {
+            UnOp::Not => { let v = emit_expr(cx, x); let t = cx.fresh(); cx.line(&format!("{} = xor i64 {}, -1", t, v)); t }
+            UnOp::Neg => { let v = emit_expr(cx, x); let t = cx.fresh(); cx.line(&format!("{} = sub i64 0, {}", t, v)); t }
+            // Sign-extension must actually sign-extend the source width (e.g.
+            // `movsx`); zero-extension / truncation are no-ops because the lifter
+            // already and-masks sub-word values.
+            UnOp::SignExtend => emit_sign_extend(cx, x),
+            UnOp::ZeroExtend | UnOp::Truncate => emit_expr(cx, x),
+        },
+        Expr::Cast { to, expr } => {
+            let v = emit_expr(cx, expr);
+            let bits = match to {
+                Ty::Int { bits, .. } => *bits,
+                _ => 64,
+            };
+            if bits >= 64 {
+                v
+            } else {
+                let signed = matches!(to, Ty::Int { signed: Some(true), .. });
+                let tr = cx.fresh();
+                cx.line(&format!("{} = trunc i64 {} to i{}", tr, v, bits));
+                let r = cx.fresh();
+                let ext = if signed { "sext" } else { "zext" };
+                cx.line(&format!("{} = {} i{} {} to i64", r, ext, bits, tr));
+                r
             }
         }
-        Expr::Cast { expr, .. } => emit_expr(cx, expr),
         Expr::Addr(loc) => {
             // Address of a slot (rare here): not flat-addressable; approximate 0.
             cx.line(&format!("; TODO Addr({})", loc_slot_name(loc)));
@@ -326,6 +342,45 @@ fn emit_expr(cx: &mut Ctx, e: &Expr) -> String {
         }
         Expr::Phi(_) | Expr::Undef => "0".to_string(),
     }
+}
+
+/// Sign-extend an operand to i64, recovering the source width from the value it
+/// wraps: an `and`-mask (`x & 0xff/0xffff/0xffffffff`) or a sub-word memory load.
+fn emit_sign_extend(cx: &mut Ctx, e: &Expr) -> String {
+    // `x & mask` -> sext from the mask's width.
+    if let Expr::Binary(BinOp::And, x, m) = e {
+        if let Expr::Const(c, _) = m.as_ref() {
+            let w = match *c as u64 {
+                0xff => 8,
+                0xffff => 16,
+                0xffff_ffff => 32,
+                _ => 0,
+            };
+            if w != 0 {
+                let v = emit_expr(cx, x);
+                let tr = cx.fresh();
+                cx.line(&format!("{} = trunc i64 {} to i{}", tr, v, w));
+                let r = cx.fresh();
+                cx.line(&format!("{} = sext i{} {} to i64", r, w, tr));
+                return r;
+            }
+        }
+    }
+    // Sub-word load -> load at width, then sign-extend.
+    if let Expr::Load { addr, ty } = e {
+        let bits = int_bits(ty);
+        if bits < 64 {
+            let a = emit_expr(cx, addr);
+            let p = cx.fresh();
+            cx.line(&format!("{} = inttoptr i64 {} to ptr", p, a));
+            let t = cx.fresh();
+            cx.line(&format!("{} = load i{}, ptr {}", t, bits, p));
+            let r = cx.fresh();
+            cx.line(&format!("{} = sext i{} {} to i64", r, bits, t));
+            return r;
+        }
+    }
+    emit_expr(cx, e)
 }
 
 fn emit_binary(cx: &mut Ctx, op: BinOp, a: &Expr, b: &Expr) -> String {
