@@ -84,4 +84,9 @@ uint32_t __aret_gs(void);
  * transpiled `sub_<va>` (generated table in aret_dispatch.c). */
 uint64_t aret_call(uint32_t va, uint64_t esp, uint64_t a, uint64_t c, uint64_t d);
 
+/* Data imports (variables): for a known name returns a pointer to a synthetic
+ * object (e.g. the `_iob` stdio array), so the builder can patch the IAT slot to
+ * it; 0 for names we do not model. */
+uint32_t aret_data_import(const char *name);
+
 #endif /* ARET_HLE_H */

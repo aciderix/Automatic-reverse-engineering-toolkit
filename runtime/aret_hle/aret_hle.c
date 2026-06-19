@@ -25,6 +25,11 @@ static inline uint64_t arg64(uint32_t esp, int i) {
     return ((uint64_t)arg(esp, i + 1) << 32) | (uint64_t)arg(esp, i);
 }
 
+/* stdio routing (defined with the CRT shims below; the file subsystem above uses
+ * them to send writes to a synthetic `_iob` stream to the right fd). */
+static int iob_fd(uint32_t file);
+static void stdio_write(uint32_t file, const char *buf, size_t len);
+
 /* ------------------------------------------------------------------ */
 /* kernel32.dll                                                        */
 /* ------------------------------------------------------------------ */
@@ -97,41 +102,29 @@ uint32_t aret_GetCurrentProcessId(uint32_t esp) { (void)esp; return (uint32_t)ge
 /* msvcrt.dll — C runtime (UBT M4)                                     */
 /* ------------------------------------------------------------------ */
 
-/* printf, implemented by walking the format and pulling each variadic argument
- * from the shared machine stack. Each conversion is re-formatted with the native
- * `snprintf` using the *same* spec, so flags / width / precision behave exactly
- * like a real libc printf. Output goes to fd 1. */
-uint32_t aret_printf(uint32_t esp) {
-    const char *fmt = (const char *)(uintptr_t)arg(esp, 0);
+/* Format `fmt` into `out`, pulling each variadic argument from the 32-bit word
+ * array `a` (a[0], a[1], …). Used by printf (args on the shared stack) and by
+ * vfprintf (args at the passed va_list). Each conversion is re-formatted with the
+ * native `snprintf` using the *same* spec, so flags/width/precision/%lld/%f match
+ * a real libc. Returns the number of bytes written to `out`. */
+size_t aret_vformat(char *out, size_t cap, const char *fmt, const uint32_t *a) {
     if (!fmt) return 0;
-    int ai = 1; /* next stack-argument slot */
-    char out[8192];
+    int ai = 0;
     size_t o = 0;
     char spec[80];
-
-    for (const char *p = fmt; *p && o < sizeof(out) - 1;) {
-        if (*p != '%') {
-            out[o++] = *p++;
-            continue;
-        }
+    for (const char *p = fmt; *p && o < cap - 1;) {
+        if (*p != '%') { out[o++] = *p++; continue; }
         size_t si = 0;
-        spec[si++] = *p++; /* '%' */
-        if (*p == '%') {
-            out[o++] = '%';
-            p++;
-            continue;
-        }
-        /* flags / width / precision (with '*' pulling an int argument) */
+        spec[si++] = *p++;
+        if (*p == '%') { out[o++] = '%'; p++; continue; }
         while (*p && si < sizeof(spec) - 16 && strchr("-+ #0123456789.*", *p)) {
             if (*p == '*') {
-                int w = (int)arg(esp, ai++);
-                si += (size_t)snprintf(spec + si, sizeof(spec) - si, "%d", w);
+                si += (size_t)snprintf(spec + si, sizeof(spec) - si, "%d", (int)a[ai++]);
                 p++;
             } else {
                 spec[si++] = *p++;
             }
         }
-        /* length modifiers (track ll / L / j for 8-byte arguments) */
         int longlong = 0, seen_l = 0;
         while (*p == 'l' || *p == 'h' || *p == 'L' || *p == 'z' || *p == 'j' || *p == 't') {
             if (*p == 'l') { if (seen_l) longlong = 1; seen_l = 1; }
@@ -143,48 +136,123 @@ uint32_t aret_printf(uint32_t esp) {
         if (!conv) break;
         if (si < sizeof(spec) - 2) spec[si++] = conv;
         spec[si] = 0;
-
         char tmp[1024];
         int n = 0;
+        uint64_t w64;
         switch (conv) {
-            case 'd':
-            case 'i':
-                if (longlong) { n = snprintf(tmp, sizeof tmp, spec, (long long)arg64(esp, ai)); ai += 2; }
-                else { n = snprintf(tmp, sizeof tmp, spec, (int)arg(esp, ai)); ai += 1; }
+            case 'd': case 'i':
+                if (longlong) { w64 = ((uint64_t)a[ai + 1] << 32) | a[ai]; ai += 2; n = snprintf(tmp, sizeof tmp, spec, (long long)w64); }
+                else { n = snprintf(tmp, sizeof tmp, spec, (int)a[ai++]); }
                 break;
-            case 'u':
-            case 'x':
-            case 'X':
-            case 'o':
-                if (longlong) { n = snprintf(tmp, sizeof tmp, spec, (unsigned long long)arg64(esp, ai)); ai += 2; }
-                else { n = snprintf(tmp, sizeof tmp, spec, (unsigned)arg(esp, ai)); ai += 1; }
+            case 'u': case 'x': case 'X': case 'o':
+                if (longlong) { w64 = ((uint64_t)a[ai + 1] << 32) | a[ai]; ai += 2; n = snprintf(tmp, sizeof tmp, spec, (unsigned long long)w64); }
+                else { n = snprintf(tmp, sizeof tmp, spec, (unsigned)a[ai++]); }
                 break;
-            case 'c':
-                n = snprintf(tmp, sizeof tmp, spec, (int)arg(esp, ai)); ai += 1;
-                break;
-            case 'p':
-                n = snprintf(tmp, sizeof tmp, spec, (void *)(uintptr_t)arg(esp, ai)); ai += 1;
-                break;
+            case 'c': n = snprintf(tmp, sizeof tmp, spec, (int)a[ai++]); break;
+            case 'p': n = snprintf(tmp, sizeof tmp, spec, (void *)(uintptr_t)a[ai++]); break;
             case 's': {
-                const char *v = (const char *)(uintptr_t)arg(esp, ai); ai += 1;
+                const char *v = (const char *)(uintptr_t)a[ai++];
                 n = snprintf(tmp, sizeof tmp, spec, v ? v : "(null)");
                 break;
             }
             case 'e': case 'E': case 'f': case 'F': case 'g': case 'G': case 'a': case 'A': {
-                union { uint64_t u; double d; } u; u.u = arg64(esp, ai); ai += 2;
+                union { uint64_t u; double d; } u; u.u = ((uint64_t)a[ai + 1] << 32) | a[ai]; ai += 2;
                 n = snprintf(tmp, sizeof tmp, spec, u.d);
                 break;
             }
-            default:
-                n = snprintf(tmp, sizeof tmp, "%s", spec);
-                break;
+            default: n = snprintf(tmp, sizeof tmp, "%s", spec); break;
         }
         if (n < 0) n = 0;
-        for (int k = 0; k < n && o < sizeof(out) - 1; k++) out[o++] = tmp[k];
+        for (int k = 0; k < n && o < cap - 1; k++) out[o++] = tmp[k];
     }
+    out[o] = 0;
+    return o;
+}
+
+uint32_t aret_printf(uint32_t esp) {
+    const char *fmt = (const char *)(uintptr_t)arg(esp, 0);
+    const uint32_t *a = &((const uint32_t *)(uintptr_t)esp)[1]; /* args after fmt */
+    char out[8192];
+    size_t o = aret_vformat(out, sizeof out, fmt, a);
     ssize_t w = write(1, out, o);
     (void)w;
     return (uint32_t)o;
+}
+
+/* Synthetic msvcrt `_iob` (stdin/out/err FILE array). The CRT computes
+ * `&_iob[idx]`; we only need the address arithmetic to recover idx -> fd. */
+#define ARET_FILE_SIZE 32
+static uint8_t aret_iob[3 * ARET_FILE_SIZE];
+
+/* fd for a FILE* that is one of our _iob entries, else -1 (a real FILE*). */
+static int iob_fd(uint32_t file) {
+    uintptr_t base = (uintptr_t)aret_iob, f = (uintptr_t)file;
+    if (f >= base && f < base + sizeof(aret_iob)) {
+        return (int)((f - base) / ARET_FILE_SIZE); /* 0/1/2 */
+    }
+    return -1;
+}
+
+static void stdio_write(uint32_t file, const char *buf, size_t len) {
+    int fd = iob_fd(file);
+    if (fd >= 0) {
+        ssize_t w = write(fd, buf, len);
+        (void)w;
+    } else if (file) {
+        fwrite(buf, 1, len, (FILE *)(uintptr_t)file);
+    }
+}
+
+uint32_t aret_vfprintf(uint32_t esp) {
+    uint32_t file = arg(esp, 0);
+    const char *fmt = (const char *)(uintptr_t)arg(esp, 1);
+    const uint32_t *a = (const uint32_t *)(uintptr_t)arg(esp, 2); /* va_list */
+    char out[8192];
+    size_t o = aret_vformat(out, sizeof out, fmt, a);
+    stdio_write(file, out, o);
+    return (uint32_t)o;
+}
+
+uint32_t aret_fprintf(uint32_t esp) {
+    uint32_t file = arg(esp, 0);
+    const char *fmt = (const char *)(uintptr_t)arg(esp, 1);
+    const uint32_t *a = &((const uint32_t *)(uintptr_t)esp)[2]; /* args after fmt */
+    char out[8192];
+    size_t o = aret_vformat(out, sizeof out, fmt, a);
+    stdio_write(file, out, o);
+    return (uint32_t)o;
+}
+
+uint32_t aret_fputc(uint32_t esp) {
+    char c = (char)arg(esp, 0);
+    stdio_write(arg(esp, 1), &c, 1);
+    return (uint8_t)c;
+}
+
+uint32_t aret_vprintf(uint32_t esp) {
+    const char *fmt = (const char *)(uintptr_t)arg(esp, 0);
+    const uint32_t *a = (const uint32_t *)(uintptr_t)arg(esp, 1);
+    char out[8192];
+    size_t o = aret_vformat(out, sizeof out, fmt, a);
+    ssize_t w = write(1, out, o);
+    (void)w;
+    return (uint32_t)o;
+}
+
+/* Data imports (variables, not functions): the builder patches their IAT slot to
+ * point at these synthetic objects. Returns 0 for names we do not model (the slot
+ * is left as-is — fine for function imports, which are call-redirected). */
+static void *aret_initenv_var = 0;       /* char**: saved environment           */
+static char *aret_environ_arr[1] = { 0 };/* empty environment                   */
+static void *aret_environ_var = aret_environ_arr;
+static int aret_mb_cur_max_var = 1;
+
+uint32_t aret_data_import(const char *name) {
+    if (!strcmp(name, "_iob") || !strcmp(name, "__iob_func")) return (uint32_t)(uintptr_t)aret_iob;
+    if (!strcmp(name, "__initenv")) return (uint32_t)(uintptr_t)&aret_initenv_var;
+    if (!strcmp(name, "_environ")) return (uint32_t)(uintptr_t)&aret_environ_var;
+    if (!strcmp(name, "__mb_cur_max")) return (uint32_t)(uintptr_t)&aret_mb_cur_max_var;
+    return 0;
 }
 
 uint32_t aret_puts(uint32_t esp) {
@@ -320,12 +388,17 @@ uint32_t aret_fread(uint32_t esp) {
 }
 
 uint32_t aret_fwrite(uint32_t esp) {
-    const void *ptr = (const void *)(uintptr_t)arg(esp, 0);
-    return (uint32_t)fwrite(ptr, arg(esp, 1), arg(esp, 2), (FILE *)(uintptr_t)arg(esp, 3));
+    const char *ptr = (const char *)(uintptr_t)arg(esp, 0);
+    uint32_t size = arg(esp, 1), nmemb = arg(esp, 2), file = arg(esp, 3);
+    if (iob_fd(file) >= 0) { stdio_write(file, ptr, (size_t)size * nmemb); return nmemb; }
+    return (uint32_t)fwrite(ptr, size, nmemb, (FILE *)(uintptr_t)file);
 }
 
 uint32_t aret_fputs(uint32_t esp) {
-    return (uint32_t)fputs((const char *)(uintptr_t)arg(esp, 0), (FILE *)(uintptr_t)arg(esp, 1));
+    const char *s = (const char *)(uintptr_t)arg(esp, 0);
+    uint32_t file = arg(esp, 1);
+    if (iob_fd(file) >= 0) { stdio_write(file, s, strlen(s)); return 0; }
+    return (uint32_t)fputs(s, (FILE *)(uintptr_t)file);
 }
 
 uint32_t aret_fgets(uint32_t esp) {
