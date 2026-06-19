@@ -119,9 +119,12 @@ faisable la classe « gros programme non-VM-protégé », pas forcément un AAA 
   internes pile+registres, `printf`, tas, pointeurs de fonction, TEB) donnent la
   même sortie correcte. Le backend LLVM supporte la pile partagée (param `%esp`,
   appels via `aret_call`).
-- Portée honnête : reste à faire — flottant/x87 et largeurs exactes
-  (extend/truncate) encore approximés, et la **vérif d'équivalence** sur le chemin
-  LLVM (notre point fort à brancher dessus).
+- ✅ **Flottant SSE** : les opérations `double`/`float` (helpers `__fp_*`) sont
+  liées au binaire LLVM (`aret_float.c`). Fixture `hello_float` → `c=8 c10=85`
+  correct via LLVM.
+- Portée honnête : reste à faire — **x87** (`long double`, modélisé en i64 pour
+  l'instant), largeurs exactes (extend/truncate), et la **vérif d'équivalence**
+  sur le chemin LLVM (notre point fort à brancher dessus).
 
 ## 6. Reco
 
