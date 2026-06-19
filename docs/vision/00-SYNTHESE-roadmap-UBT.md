@@ -316,6 +316,17 @@ Pièces livrées (`runtime/aret_hle/`, purement additif — aucun changement Rus
     avant de toutes les fonctions + helpers float). Chaque chunk est compilé en
     `.o` **en parallèle** (rayon) puis lié — fini le `.c` unique de 403 Mo qui
     étouffe le compilateur.
+  - ✅ **`__int128` → fallback -m32**, **stubs faibles** aussi pour les `sub_`
+    non récupérés, **`-lm`** au lien.
+  - 🏁 **Jalon atteint** : le `.exe` packé de 27 Mo (Mighty Quest, 44 183 fn)
+    **produit un ELF Linux natif de 196 Mo** qui **lie proprement et démarre** :
+    le mapper mémoire s'exécute, l'entrée tourne… puis **segfault dans le code de
+    démarrage Windows** (`sub_4026c0`, `mov (%eax),%eax` avec `eax=0x10`).
+  - ➡️ **Prochain mur = l'environnement processus Windows** : le startup/packer
+    lit une structure processus (TEB/PEB via `fs:`, ou un résultat d'API stubé)
+    qu'on renvoie à 0, puis déréférence `[ptr+0x10]`. Étapes : modéliser `fs:` →
+    un vrai TEB/PEB synthétique, implémenter les API de bootstrap, gérer le
+    dépaquetage `.UBX`. (Et pour *jouer* : pont Win32/D3D → Wine + DXVK.)
 - ⏸️ **M5 (fallback Unicorn) différé** : il faudrait lier un émulateur **dans le
   binaire généré**, qui est `-m32` ; or l'environnement n'a pas de `libunicorn`
   32-bit (le paquet apt est 64-bit), donc un M5 réellement exécutable n'est pas
