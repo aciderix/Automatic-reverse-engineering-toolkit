@@ -42,6 +42,14 @@ pub fn optimize(func: &mut IrFunction) {
 /// `f(a, b)`. Arguments that hold a real value or a forwarded parameter are
 /// `Expr::Use(_)` and are left untouched, so no live argument is ever lost.
 fn prune_call_args(func: &mut IrFunction) {
+    // Shared machine-stack mode (transpiler) passes a *fixed* argument list to
+    // every call — the stack pointer plus the volatile registers — to match each
+    // callee's fixed parameter list. A register that folds to Undef must stay, or
+    // the call/callee arities disagree (a compile error once the callee's real
+    // prototype is in scope). So never trim in that mode.
+    if crate::emit::shared_stack() {
+        return;
+    }
     fn trim(args: &mut Vec<Expr>) {
         while matches!(args.last(), Some(Expr::Undef)) {
             args.pop();

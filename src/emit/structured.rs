@@ -437,10 +437,17 @@ impl Structurer {
 /// so any chunk can call any other function. (Empty `sub_x();` is compatible both
 /// with calls and with the parameterised definitions emitted in the chunks.)
 pub fn emit_split(funcs: &[IrFunction], chunk_size: usize) -> (String, Vec<String>) {
-    let mut funcs = funcs.to_vec();
-    if !super::shared_stack() {
-        super::fixup_call_arity(&mut funcs);
-    }
+    // The cdecl arity fixup (non-shared only) needs an owned, mutable copy. In
+    // shared-stack mode we skip it, so borrow directly — cloning tens of
+    // thousands of IR functions for a real binary is a needless memory spike.
+    let mut owned: Vec<IrFunction>;
+    let funcs: &[IrFunction] = if super::shared_stack() {
+        funcs
+    } else {
+        owned = funcs.to_vec();
+        super::fixup_call_arity(&mut owned);
+        &owned
+    };
     let with_params = true;
     let defined: BTreeSet<u64> = funcs.iter().map(|f| f.entry).collect();
     let mut forward: BTreeSet<u64> = BTreeSet::new();
@@ -449,7 +456,7 @@ pub fn emit_split(funcs: &[IrFunction], chunk_size: usize) -> (String, Vec<Strin
     let mut cur = String::new();
     let mut n = 0usize;
     let mut needs_float = false;
-    for f in &funcs {
+    for f in funcs {
         let body = emit_function(f, &mut forward, with_params);
         // The float helpers use `__int128`, unavailable under -m32, so only pull
         // them in when a function actually uses floating point (as `emit_unit`).

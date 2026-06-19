@@ -208,8 +208,12 @@ pub fn transpile(
     const CHUNK_FUNCS: usize = 200;
     emit::set_shared_stack(true);
     let irfs: Vec<_> = funcs.iter().map(|f| lower(prog, f)).collect();
+    let n_funcs = irfs.len();
     let (decls_h, chunks) = emit::structured::emit_split(&irfs, CHUNK_FUNCS);
     emit::set_shared_stack(false);
+    // The IR is no longer needed; free it before spawning the parallel compilers
+    // (which need the memory) on a large program.
+    drop(irfs);
 
     // Memory Layout Mapper: restore data sections at their original VAs so
     // absolute pointers (global strings/tables) resolve at runtime.
@@ -339,7 +343,7 @@ pub fn transpile(
     Ok(TranspileReport {
         out_dir: out_dir.to_path_buf(),
         binary,
-        functions: irfs.len(),
+        functions: n_funcs,
         bits,
         run_output,
     })
