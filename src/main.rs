@@ -142,6 +142,12 @@ fn run_unpack(prog: &Program, out_dir: &std::path::Path) -> Result<String> {
                 r.decrypted_bytes, r.total_bytes
             );
             out.push_str("  status:         OEP reached — payload is now in cleartext in memory\n");
+            if !r.imports_recovered.is_empty() {
+                let _ = writeln!(out, "  imports:        {} recovered (IAT reconstructed)", r.imports_recovered.len());
+                for e in r.imports_recovered.iter().take(8) {
+                    let _ = writeln!(out, "                    {} :: {} @ 0x{:x}", e.dll, e.func, e.slot_va);
+                }
+            }
             std::fs::create_dir_all(out_dir).ok();
             let pe_path = out_dir.join("unpacked.exe");
             std::fs::write(&pe_path, &r.dump_pe)

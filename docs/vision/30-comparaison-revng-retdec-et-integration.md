@@ -172,12 +172,30 @@ faisable la classe « gros programme non-VM-protégé », pas forcément un AAA 
   ces en-têtes et on pose le fichier en **raw==RVA**, ce qui **préserve la table
   des sections d'origine** (le PE reconstruit ré-expose UPX0/UPX1/UPX2 avec le
   code déballé, entrée = OEP). Sinon, repli sur un PE plat mono-section.
-- Limite honnête restante : pour UPX le **répertoire d'imports** n'est pas au
-  format standard (UPX remplit l'IAT directement, sans descripteur classique) →
-  `Imports: 0` dans le PE reconstruit. La reconstruction de ce répertoire (le
-  boulot de **Scylla**) est l'étape suivante : la rebâtir depuis les liaisons
-  `GetProcAddress`/écritures d'IAT que le moteur **trace déjà**. C'est ce qui
-  fermerait « packé → ELF natif **qui imprime** » sur la classe UPX.
+### ✅ FERMÉ : « packé → ELF natif qui imprime » (classe UPX)
+
+> La chaîne complète tourne de bout en bout sur un **vrai packer** :
+> `UPX .exe → déballage → PE propre → transpile → ELF Linux natif qui s'exécute`.
+
+- **Reconstruction d'imports (Scylla-style)** : le moteur trace désormais quelle
+  adresse résolue (`GetProcAddress`) est **écrite dans quel slot IAT** (hook
+  d'écriture filtrant les sentinelles) et quelle **DLL** (handle `LoadLibrary`).
+  Il regroupe par DLL et **synthétise un répertoire d'imports standard**
+  (IMAGE_IMPORT_DESCRIPTOR + ILT + IMAGE_IMPORT_BY_NAME) injecté dans le PE
+  reconstruit (layout raw==RVA, FirstThunk pointant sur les vrais slots).
+- **Mapper de mémoire élargi** : il embarque maintenant les sections
+  **exécutables** aussi — UPX fusionne `.rdata` dans une section de code, donc les
+  littéraux chaîne adressés en absolu (`%s` → `0x402000`) doivent être mappés.
+- **Résultat mesuré** : `hello_printf` packé UPX →
+  `--mode unpack` → `OEP 0x401000, imports recouvrés (KERNEL32!ExitProcess,
+  msvcrt!printf), unpacked.exe` → `--mode transpile --run` →
+  **`M4: int=42 hex=0xff str=hello char=Z pct=%` / `M4: malloc sum=100`**.
+  Test e2e `tests/unpack_e2e.rs` (skip sans `--features unpack`/`upx`/`cc -m32`).
+- Portée honnête : validé sur UPX (packer compresseur classique). Un protecteur
+  AAA (VM, anti-debug, TLS, IAT non-contiguë) demande plus de surface d'API
+  émulée et la gestion de l'anti-tamper — l'**architecture** est en place
+  (moteur CPU + modèle Win32 + reconstruction d'imports + rebuild PE), reste à
+  élargir la couverture.
 
 ## 5 bis. Démarré : backend LLVM (`--mode llvm`)
 

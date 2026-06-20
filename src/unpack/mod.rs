@@ -93,6 +93,13 @@ struct Trace {
     /// sentinel index -> imported function name (extended at run time by
     /// GetProcAddress). Sentinel address = TRAP_BASE + idx*8.
     imports: Vec<String>,
+    /// Parallel to `imports`: the DLL each function was resolved from (via the
+    /// LoadLibrary handle passed to GetProcAddress), when known.
+    import_dll: Vec<Option<String>>,
+    /// Fake module handle -> DLL name (from LoadLibrary/GetModuleHandle).
+    modules: Vec<(u32, String)>,
+    /// Reconstructed IAT: slot VA -> import index (a sentinel was stored there).
+    iat: std::collections::BTreeMap<u64, usize>,
     /// Image base (lowest mapped region) — answers GetModuleHandle(NULL).
     image_base: u64,
     /// Bump pointer for VirtualAlloc/Heap-backed memory.
@@ -130,6 +137,18 @@ unsafe fn rd_cstr(uc: *mut uc_engine, addr: u64) -> String {
     }
     s
 }
+/// Read a UTF-16LE string (kernel32 `*W` APIs), narrowed to ASCII for DLL names.
+unsafe fn rd_wstr(uc: *mut uc_engine, addr: u64) -> String {
+    let mut s = String::new();
+    for i in 0..256u64 {
+        let mut w: u16 = 0;
+        if uc_mem_read(uc, addr + i * 2, &mut w as *mut u16 as *mut c_void, 2) != 0 || w == 0 {
+            break;
+        }
+        s.push((w as u8) as char);
+    }
+    s
+}
 
 /// Service an imported call: read stdcall args from the emulated stack, model a
 /// native result, then simulate the stdcall return (pop retaddr + callee args).
@@ -145,12 +164,15 @@ unsafe fn handle_api(uc: *mut uc_engine, t: &mut Trace, idx: usize) {
     let (result, argbytes): (u32, u32) = match name.as_str() {
         "LoadLibraryA" | "LoadLibraryW" | "LoadLibraryExA" | "LoadLibraryExW"
         | "GetModuleHandleA" | "GetModuleHandleW" => {
+            let wide = name.ends_with('W');
+            let dll = if arg(0) == 0 { String::new() } else if wide { rd_wstr(uc, arg(0) as u64) } else { rd_cstr(uc, arg(0) as u64) };
             let h = if arg(0) == 0 {
                 t.image_base as u32
             } else {
                 let h = t.module_cursor;
                 t.module_cursor = t.module_cursor.wrapping_add(0x10000);
                 let _ = uc_mem_map(uc, h as u64, 0x1000, UC_PROT_ALL);
+                if !dll.is_empty() { t.modules.push((h, dll)); }
                 h
             };
             let argbytes = if name.starts_with("LoadLibraryEx") { 12 } else { 4 };
@@ -161,8 +183,10 @@ unsafe fn handle_api(uc: *mut uc_engine, t: &mut Trace, idx: usize) {
             // here too. arg1 is a name pointer (high) or an ordinal (low).
             let p = arg(1);
             let nm = if p >= 0x1_0000 { rd_cstr(uc, p as u64) } else { format!("ordinal_{p}") };
+            let dll = t.modules.iter().rev().find(|(h, _)| *h == arg(0)).map(|(_, d)| d.clone());
             let new_idx = t.imports.len();
             t.imports.push(nm);
+            t.import_dll.push(dll);
             ((TRAP_BASE + new_idx as u64 * 8) as u32, 8)
         }
         "VirtualAlloc" | "VirtualAllocEx" => {
@@ -193,9 +217,20 @@ unsafe fn handle_api(uc: *mut uc_engine, t: &mut Trace, idx: usize) {
     reg_set(uc, UC_X86_REG_EIP, retaddr); // resume at the caller's return address
 }
 
-extern "C" fn on_write(_uc: *mut uc_engine, _ty: c_int, addr: u64, _sz: c_int, _val: i64, ud: *mut c_void) {
+extern "C" fn on_write(_uc: *mut uc_engine, _ty: c_int, addr: u64, sz: c_int, val: i64, ud: *mut c_void) {
     let t = unsafe { &mut *(ud as *mut Trace) };
     t.written.insert(page_down(addr));
+    // The program storing a resolved import (a sentinel) into a slot reveals the
+    // IAT layout: record slot VA -> import index, for import-directory rebuild.
+    if sz == 4 {
+        let v = val as u32 as u64;
+        if v >= TRAP_BASE && v < TRAP_BASE + TRAP_SIZE && v % 8 == 0 {
+            let idx = ((v - TRAP_BASE) / 8) as usize;
+            if idx < t.imports.len() {
+                t.iat.insert(addr, idx);
+            }
+        }
+    }
 }
 
 extern "C" fn on_code(uc: *mut uc_engine, addr: u64, _sz: c_int, ud: *mut c_void) {
@@ -249,6 +284,9 @@ pub struct Unpacked {
     /// Full decrypted image as contiguous runs (VA, bytes) — the basis for a
     /// rebuilt clean PE.
     pub image_pages: Vec<(u64, Vec<u8>)>,
+    /// Reconstructed import table (slot VA, DLL, function), recovered from the
+    /// GetProcAddress bindings the program stored into its IAT.
+    pub iat: Vec<IatEntry>,
 }
 
 /// A region to load into the emulator: virtual address + initial bytes.
@@ -287,6 +325,9 @@ pub fn emulate_until_oep(
             faulted: None,
             lazy_budget: 256,
             imports: Vec::new(),
+            import_dll: Vec::new(),
+            modules: Vec::new(),
+            iat: std::collections::BTreeMap::new(),
             image_base,
             alloc_cursor: ALLOC_BASE,
             module_cursor: MODULE_BASE,
@@ -321,6 +362,7 @@ pub fn emulate_until_oep(
         for (slot_va, name) in imports {
             let idx = trace.imports.len();
             trace.imports.push(name.clone());
+            trace.import_dll.push(None); // the packed file's own (stub) imports
             wr32(uc, *slot_va, (TRAP_BASE + idx as u64 * 8) as u32);
         }
 
@@ -417,8 +459,26 @@ pub fn emulate_until_oep(
         }
         if let Some(v) = cur_va { image_pages.push((v, cur)); }
 
-        Ok(Unpacked { oep, regions: out, api_calls, image_pages })
+        // Reconstructed IAT: each slot the program filled with a resolved import,
+        // paired with the (DLL, function) it was bound to. Skip the packed file's
+        // own stub imports (no DLL recorded) — we want the *program's* imports.
+        let mut iat: Vec<IatEntry> = Vec::new();
+        for (&slot_va, &idx) in trace.iat.iter() {
+            if let Some(dll) = trace.import_dll.get(idx).cloned().flatten() {
+                iat.push(IatEntry { slot_va, dll, func: trace.imports[idx].clone() });
+            }
+        }
+
+        Ok(Unpacked { oep, regions: out, api_calls, image_pages, iat })
     }
+}
+
+/// One recovered import: the IAT slot, its DLL, and the function name.
+#[derive(Debug, Clone)]
+pub struct IatEntry {
+    pub slot_va: u64,
+    pub dll: String,
+    pub func: String,
 }
 
 /// Read `len` bytes starting at virtual address `va` from the dumped runs
@@ -451,12 +511,112 @@ fn read_va(runs: &[(u64, Vec<u8>)], va: u64, len: usize) -> Vec<u8> {
 /// Honest scope: it does not *reconstruct* a destroyed import directory (Scylla's
 /// job) — but it preserves an intact one, and the engine traces GetProcAddress
 /// bindings for the rebuild-from-scratch case.
-pub fn build_dump_pe(image_base: u64, oep: u64, runs: &[(u64, Vec<u8>)]) -> Vec<u8> {
-    // Try the faithful, header-preserving rebuild first.
-    if let Some(pe) = build_from_restored_headers(image_base, oep, runs) {
+pub fn build_dump_pe(image_base: u64, oep: u64, runs: &[(u64, Vec<u8>)], iat: &[IatEntry]) -> Vec<u8> {
+    // Try the faithful, header-preserving rebuild first (raw==RVA, so we can also
+    // inject a reconstructed import directory).
+    if let Some(mut pe) = build_from_restored_headers(image_base, oep, runs) {
+        inject_import_directory(&mut pe, iat);
         return pe;
     }
     build_synthetic_pe(image_base, oep, runs)
+}
+
+/// Append a reconstructed import directory to a raw==RVA PE and point the data
+/// directory at it — so a loader (and ARET's `--mode transpile`) names the IAT
+/// slots. This is the Scylla-style step: from the recovered (slot, DLL, func)
+/// bindings, synthesise standard IMAGE_IMPORT_DESCRIPTORs. Per DLL the slots are
+/// assumed contiguous (sorted); FirstThunk points at the real IAT.
+fn inject_import_directory(f: &mut Vec<u8>, iat: &[IatEntry]) {
+    use std::collections::BTreeMap;
+    if iat.is_empty() { return; }
+    let rd16 = |f: &[u8], o: usize| u16::from_le_bytes([f[o], f[o + 1]]);
+    let rd32 = |f: &[u8], o: usize| u32::from_le_bytes([f[o], f[o + 1], f[o + 2], f[o + 3]]);
+    let e_lfanew = rd32(f, 0x3C) as usize;
+    if e_lfanew + 0x78 >= f.len() || &f[e_lfanew..e_lfanew + 4] != b"PE\0\0" { return; }
+    let coff = e_lfanew + 4;
+    let nsec = rd16(f, coff + 2) as usize;
+    let opt_sz = rd16(f, coff + 16) as usize;
+    let o = coff + 20;
+    let image_base = rd32(f, o + 28) as u64;
+    let st = o + opt_sz;
+
+    // Group recovered imports by DLL, ordered by slot.
+    let mut groups: BTreeMap<String, Vec<(u64, String)>> = BTreeMap::new();
+    for e in iat {
+        groups.entry(e.dll.clone()).or_default().push((e.slot_va, e.func.clone()));
+    }
+    for v in groups.values_mut() { v.sort(); v.dedup(); }
+
+    // The blob is appended at the end; raw==RVA means file offset == RVA.
+    while f.len() % 4 != 0 { f.push(0); }
+    let blob_rva = f.len() as u32;
+    let ndesc = groups.len();
+    let desc_bytes = (ndesc + 1) * 20;
+    // Build the blob with a two-pass layout: reserve descriptors, then ILTs,
+    // name tables, and strings, tracking each RVA.
+    let mut blob = vec![0u8; desc_bytes];
+    let put32 = |b: &mut Vec<u8>, off: usize, v: u32| b[off..off + 4].copy_from_slice(&v.to_le_bytes());
+    let mut descs: Vec<(u32, u32, u32)> = Vec::new(); // (ilt_rva, name_rva, first_thunk_rva)
+
+    for (dll, funcs) in &groups {
+        // IMAGE_IMPORT_BY_NAME entries + ILT.
+        let mut ilt: Vec<u32> = Vec::new();
+        for (_, func) in funcs {
+            let ibn_rva = blob_rva + blob.len() as u32;
+            blob.extend_from_slice(&0u16.to_le_bytes()); // Hint
+            blob.extend_from_slice(func.as_bytes());
+            blob.push(0);
+            if blob.len() % 2 != 0 { blob.push(0); }
+            ilt.push(ibn_rva);
+        }
+        ilt.push(0); // null-terminate ILT
+        let ilt_rva = blob_rva + blob.len() as u32;
+        for v in &ilt { blob.extend_from_slice(&v.to_le_bytes()); }
+        let name_rva = blob_rva + blob.len() as u32;
+        blob.extend_from_slice(dll.as_bytes());
+        blob.push(0);
+        if blob.len() % 2 != 0 { blob.push(0); }
+        let first_thunk = (funcs[0].0 - image_base) as u32; // real IAT slot RVA
+        descs.push((ilt_rva, name_rva, first_thunk));
+    }
+    // Fill the descriptor array.
+    for (i, (ilt_rva, name_rva, first_thunk)) in descs.iter().enumerate() {
+        let d = i * 20;
+        put32(&mut blob, d, *ilt_rva);       // OriginalFirstThunk
+        put32(&mut blob, d + 12, *name_rva); // Name
+        put32(&mut blob, d + 16, *first_thunk); // FirstThunk
+    }
+
+    let blob_len = blob.len() as u32;
+    f.extend_from_slice(&blob);
+
+    // Point the import data directory (index 1) at the descriptors.
+    let dd_import = o + 96 + 8;
+    f[dd_import..dd_import + 4].copy_from_slice(&blob_rva.to_le_bytes());
+    f[dd_import + 4..dd_import + 8].copy_from_slice(&(desc_bytes as u32).to_le_bytes());
+    if rd32(f, o + 92) < 2 {
+        f[o + 92..o + 96].copy_from_slice(&2u32.to_le_bytes()); // NumberOfRvaAndSizes
+    }
+
+    // Extend the highest-RVA section to cover the appended blob.
+    let mut best = 0usize;
+    let mut best_va = 0u32;
+    for i in 0..nsec {
+        let s = st + i * 40;
+        let va = rd32(f, s + 12);
+        if va >= best_va { best_va = va; best = s; }
+    }
+    let new_end = blob_rva + blob_len;
+    let cover = new_end - best_va;
+    f[best + 8..best + 12].copy_from_slice(&cover.to_le_bytes());  // VirtualSize
+    f[best + 16..best + 20].copy_from_slice(&cover.to_le_bytes()); // SizeOfRawData
+    f[best + 36..best + 40].copy_from_slice(&0xE000_0060u32.to_le_bytes()); // RWX
+    // Grow SizeOfImage if needed.
+    let sect_align = rd32(f, o + 32).max(1);
+    let img = (best_va + cover + sect_align - 1) & !(sect_align - 1);
+    if rd32(f, o + 56) < img {
+        f[o + 56..o + 60].copy_from_slice(&img.to_le_bytes());
+    }
 }
 
 /// Faithful rebuild reusing the restored original headers (raw==RVA), preserving
@@ -616,7 +776,7 @@ pub fn unpack_program(prog: &crate::loader::Program, max_insns: usize) -> Result
         }
     }
     let image_base = res.image_pages.first().map(|(va, _)| *va).unwrap_or(0);
-    let dump_pe = build_dump_pe(image_base, res.oep, &res.image_pages);
+    let dump_pe = build_dump_pe(image_base, res.oep, &res.image_pages, &res.iat);
     Ok(UnpackReport {
         oep: res.oep,
         decrypted_bytes: changed,
@@ -624,6 +784,7 @@ pub fn unpack_program(prog: &crate::loader::Program, max_insns: usize) -> Result
         image: res.regions,
         api_calls: res.api_calls,
         image_pages: res.image_pages,
+        imports_recovered: res.iat,
         dump_pe,
     })
 }
@@ -636,6 +797,8 @@ pub struct UnpackReport {
     pub api_calls: u32,
     /// Full decrypted image as contiguous (VA, bytes) runs.
     pub image_pages: Vec<(u64, Vec<u8>)>,
+    /// Imports recovered from the GetProcAddress/IAT bindings (slot, DLL, func).
+    pub imports_recovered: Vec<IatEntry>,
     /// A rebuilt, statically-analysable PE32 of the decrypted image (entry=OEP).
     pub dump_pe: Vec<u8>,
 }

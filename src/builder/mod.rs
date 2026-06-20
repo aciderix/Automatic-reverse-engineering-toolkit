@@ -79,10 +79,15 @@ struct Layout {
 fn emit_layout(prog: &Program, blob_path: &Path) -> Option<Layout> {
     use std::fmt::Write as _;
 
+    // Embed every section's bytes at its original VA, including executable ones:
+    // code sections also hold absolute-addressed read-only data (string literals,
+    // jump tables, constants), and packers (UPX) merge .rdata into a code section.
+    // The transpiled functions run natively from the ELF's own segments, so the
+    // mapped original bytes serve only as data — harmless to map.
     let secs: Vec<&crate::loader::Section> = prog
         .sections
         .iter()
-        .filter(|s| !s.executable && s.address != 0 && !s.data.is_empty())
+        .filter(|s| s.address != 0 && !s.data.is_empty())
         .collect();
     if secs.is_empty() {
         return None;
