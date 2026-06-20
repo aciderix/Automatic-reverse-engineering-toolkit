@@ -118,6 +118,7 @@ fn llvm_ir_is_valid_for_fixtures() {
         "hello_printf.exe",
         "hello_heap.exe",
         "hello_float.exe",
+        "hello_float_x87.exe",
     ] {
         assert_valid_ir(fixture);
     }

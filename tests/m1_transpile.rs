@@ -211,6 +211,17 @@ fn float_sse_arithmetic() {
 }
 
 #[test]
+fn float_x87_long_double() {
+    if !has_m32() {
+        eprintln!("skipping x87 test: `cc -m32` unavailable (install gcc-multilib)");
+        return;
+    }
+    // Same arithmetic via the x87 FPU (the __x87_* long-double helpers).
+    let out = transpile_and_run("hello_float_x87.exe");
+    assert!(out.contains("FLOAT: c=8 c10=85"), "x87 float wrong:\n{out}");
+}
+
+#[test]
 fn fs_file_roundtrip_with_path_translation() {
     if !has_m32() {
         eprintln!("skipping FS test: `cc -m32` unavailable (install gcc-multilib)");

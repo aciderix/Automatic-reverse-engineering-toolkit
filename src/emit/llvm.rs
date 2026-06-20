@@ -31,9 +31,14 @@ pub fn emit_unit(funcs: &[IrFunction]) -> String {
         collect_call_names(f, &mut callees);
     }
     // Declare only *external* callees (a `declare` + `define` of the same symbol
-    // is a redefinition error).
+    // is a redefinition error). x87 helpers get their precise fp80 types.
     for name in callees.difference(&defined) {
-        let _ = writeln!(out, "declare i64 @{}(...)", name);
+        if let Some((ret_fp, arg_fp)) = x87_sig(name) {
+            let params: Vec<&str> = arg_fp.iter().map(|&f| llty(f)).collect();
+            let _ = writeln!(out, "declare {} @{}({})", llty(ret_fp), name, params.join(", "));
+        } else {
+            let _ = writeln!(out, "declare i64 @{}(...)", name);
+        }
     }
     // Shared-stack mode routes indirect calls through the dispatch helper.
     if super::shared_stack() {
@@ -85,6 +90,8 @@ struct Ctx {
     slots: BTreeSet<String>,
     /// alloca-declaration lines (emitted in the entry block).
     decls: String,
+    /// SSA value ids that are x87 80-bit values (`x86_fp80`), not `i64`.
+    fp80: std::collections::HashSet<u32>,
 }
 
 impl Ctx {
@@ -100,11 +107,40 @@ impl Ctx {
         }
         format!("%{}.addr", name)
     }
+    /// The alloca for SSA value `id` and its LLVM type (`x86_fp80` for x87
+    /// values, else `i64`).
+    fn vslot(&mut self, id: u32) -> (String, &'static str) {
+        let ty = if self.fp80.contains(&id) { "x86_fp80" } else { "i64" };
+        let name = format!("v{}", id);
+        if self.slots.insert(name.clone()) {
+            let _ = writeln!(self.decls, "  %{}.addr = alloca {}", name, ty);
+        }
+        (format!("%{}.addr", name), ty)
+    }
     fn line(&mut self, s: &str) {
         self.body.push_str("  ");
         self.body.push_str(s);
         self.body.push('\n');
     }
+}
+
+/// The LLVM signature of an `__x87_*` runtime helper: `(returns_fp80, arg_is_fp80
+/// per argument)`. `None` for non-x87 names.
+fn x87_sig(name: &str) -> Option<(bool, Vec<bool>)> {
+    let n = name.strip_prefix("__x87_")?;
+    Some(match n {
+        "ld32" | "ld64" | "ld80" | "ild16" | "ild32" | "ild64" => (true, vec![false]),
+        "st32" | "st64" | "st80" | "ist16" | "ist32" | "ist64" => (false, vec![false, true]),
+        "add" | "sub" | "mul" | "div" => (true, vec![true, true]),
+        "abs" | "neg" | "sqrt" => (true, vec![true]),
+        "one" | "zero" => (true, vec![]),
+        "lt" | "eq" | "un" => (false, vec![true, true]),
+        _ => return None,
+    })
+}
+
+fn llty(fp80: bool) -> &'static str {
+    if fp80 { "x86_fp80" } else { "i64" }
 }
 
 fn loc_slot_name(loc: &Location) -> String {
@@ -136,18 +172,24 @@ fn emit_function(func: &IrFunction) -> String {
     }
     let mut head = format!("define i64 @sub_{:x}({}) {{\n", f.entry, sig.join(", "));
 
-    let mut cx = Ctx { body: String::new(), tmp: 0, slots: BTreeSet::new(), decls: String::new() };
+    let mut cx = Ctx {
+        body: String::new(),
+        tmp: 0,
+        slots: BTreeSet::new(),
+        decls: String::new(),
+        fp80: f.fp80_values.iter().copied().collect(),
+    };
 
     // Bind register-parameter values to their slots.
     for v in &f.reg_params {
-        let s = cx.slot(&format!("v{}", v));
+        let (s, _) = cx.vslot(*v);
         cx.line(&format!("store i64 %v{}, ptr {}", v, s));
     }
 
     // Frame-base values (entry rsp/rbp).
     if shared {
         for v in &f.frame_base_values {
-            let s = cx.slot(&format!("v{}", v));
+            let (s, _) = cx.vslot(*v);
             cx.line(&format!("store i64 %esp, ptr {}", s));
         }
     } else if !f.frame_base_values.is_empty() {
@@ -157,7 +199,7 @@ fn emit_function(func: &IrFunction) -> String {
         let off = cx.fresh();
         cx.line(&format!("{} = add i64 {}, 14336", off, base));
         for v in &f.frame_base_values {
-            let s = cx.slot(&format!("v{}", v));
+            let (s, _) = cx.vslot(*v);
             cx.line(&format!("store i64 {}, ptr {}", off, s));
         }
     }
@@ -197,8 +239,8 @@ fn emit_stmt(cx: &mut Ctx, s: &Stmt) -> bool {
     match s {
         Stmt::Assign { dst, expr } => {
             let v = emit_expr(cx, expr);
-            let slot = cx.slot(&format!("v{}", dst.0));
-            cx.line(&format!("store i64 {}, ptr {}", v, slot));
+            let (slot, ty) = cx.vslot(dst.0);
+            cx.line(&format!("store {} {}, ptr {}", ty, v, slot));
             false
         }
         Stmt::Set { dst, expr } => {
@@ -268,9 +310,9 @@ fn emit_expr(cx: &mut Ctx, e: &Expr) -> String {
     match e {
         Expr::Const(c, _) => format!("{}", *c as i64 as i64),
         Expr::Use(v) => {
-            let slot = cx.slot(&format!("v{}", v.0));
+            let (slot, ty) = cx.vslot(v.0);
             let t = cx.fresh();
-            cx.line(&format!("{} = load i64, ptr {}", t, slot));
+            cx.line(&format!("{} = load {}, ptr {}", t, ty, slot));
             t
         }
         Expr::Read(loc) => {
@@ -429,6 +471,20 @@ fn emit_call(cx: &mut Ctx, target: &CallTarget, args: &[Expr]) -> String {
         if n.starts_with("asm:") {
             cx.line(&format!("; asm (unmodelled): {}", n.trim_start_matches("asm:")));
             return "0".to_string();
+        }
+        // x87 helper: typed `x86_fp80`/`i64` arguments and result.
+        if let Some((ret_fp, arg_fp)) = x87_sig(n) {
+            let argv: Vec<String> = args
+                .iter()
+                .enumerate()
+                .map(|(i, e)| {
+                    let v = emit_expr(cx, e);
+                    format!("{} {}", llty(arg_fp.get(i).copied().unwrap_or(false)), v)
+                })
+                .collect();
+            let t = cx.fresh();
+            cx.line(&format!("{} = call {} @{}({})", t, llty(ret_fp), n, argv.join(", ")));
+            return t;
         }
     }
     // Shared-stack indirect call: a function pointer holds the original code VA,
