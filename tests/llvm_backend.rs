@@ -103,6 +103,61 @@ fn llvm_backend_runs_native() {
     let _ = std::fs::remove_dir_all(&out_dir);
 }
 
+/// Transpile `fixture` with `backend` ("c" or "llvm"), run it, return stdout.
+fn transpile_run(fixture: &str, backend: &str) -> String {
+    let path = format!("{}/tests/m1/fixtures/{}", env!("CARGO_MANIFEST_DIR"), fixture);
+    let out_dir = std::env::temp_dir().join(format!(
+        "aret_diff_{}_{}_{}",
+        fixture.replace('.', "_"),
+        backend,
+        std::process::id()
+    ));
+    let aret = env!("CARGO_BIN_EXE_aret");
+    let output = Command::new(aret)
+        .args(["--mode", "transpile", "--backend", backend, "--run"])
+        .arg("--out-dir")
+        .arg(&out_dir)
+        .arg(&path)
+        .output()
+        .expect("failed to run aret");
+    let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+    assert!(output.status.success(), "{backend} transpile failed for {fixture}:\n{stdout}");
+    let _ = std::fs::remove_dir_all(&out_dir);
+    // Keep only the program-output lines (the report header differs in neither).
+    stdout
+        .lines()
+        .filter(|l| l.trim_start().starts_with('|'))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// The C and LLVM backends must produce identical program output (differential
+/// equivalence between the two backends across the whole fixture set).
+#[test]
+fn c_and_llvm_backends_agree() {
+    if !has_m32_and_llc() {
+        eprintln!("skipping differential test: need llc + cc -m32");
+        return;
+    }
+    for fixture in [
+        "hello_win32.exe",
+        "hello_globals.exe",
+        "hello_callchain.exe",
+        "hello_stackargs.exe",
+        "hello_printf.exe",
+        "hello_heap.exe",
+        "hello_fnptr.exe",
+        "hello_teb.exe",
+        "hello_float.exe",
+        "hello_float_x87.exe",
+    ] {
+        let c = transpile_run(fixture, "c");
+        let llvm = transpile_run(fixture, "llvm");
+        assert_eq!(c, llvm, "C and LLVM backends disagree on {fixture}");
+        assert!(!c.is_empty(), "no output for {fixture}");
+    }
+}
+
 #[test]
 fn llvm_ir_is_valid_for_fixtures() {
     if !has_llvm_as() {
