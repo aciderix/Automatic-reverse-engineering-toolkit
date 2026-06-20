@@ -58,10 +58,15 @@ needed.
 
 ## Status
 
-Decompression is fully reproduced and the image is recovered. The final
-import-resolution phase (and therefore the exact OEP + rebuilt IAT) is the
-remaining work; the checkpoint/resume scripts exist specifically to iterate on it
-without re-running the ~45-minute decompression each time.
+Decompression is **fully reproduced** and the image is recovered (`snap.exe`).
+The final blocker is now precisely diagnosed: at ~3.06B instructions the protector
+**executes real imported-DLL code** (a `user32.dll` internal routine) which then
+calls through `user32`'s own (unresolved) IAT — so finishing the unpack in pure
+emulation would require recursively linking every DLL's imports and emulating leaf
+syscalls, i.e. reimplementing Wine. The realistic path to a runnable dump is
+therefore Windows/Wine-side; see `WINDOWS_UNPACK_GUIDE.md`. The checkpoint/resume
+scripts remain useful for experimenting with that final phase in ~1 minute per
+iteration instead of ~45.
 
 This is **not** a general-purpose unpacker — it is a documented, reproducible
 case study of defeating one protector by emulation, for educational/analysis use
