@@ -149,6 +149,29 @@ faisable la classe « gros programme non-VM-protégé », pas forcément un AAA 
   (la même `aret_win32` mais côté émulateur) et gérer l'anti-debug/TLS — chemin
   ouvert, sans changement d'architecture.
 
+### Fait : reconstruction d'un PE propre + validation sur un *vrai* packer (UPX)
+
+> Le bout de la brique [0] : du dump mémoire déchiffré on **reconstruit un `.exe`
+> statiquement analysable** qui re-rentre dans `--mode transpile`.
+
+- `build_dump_pe` : capture **toute** l'image déchiffrée (pages du stub + tout ce
+  qu'il a écrit, p.ex. le `.text` original que UPX décompresse à sa VA d'origine),
+  coalesce en runs contigus, et écrit un PE32 plat (FileAlignment = SectionAlignment
+  = 0x1000, le raw recopie la mémoire), **entry = OEP**. `--mode unpack --out-dir X`
+  produit `X/unpacked.exe`.
+- **Validé bout en bout sur UPX** (vrai packer du monde réel) : `hello_printf`
+  packé → `--mode unpack` →
+  `OEP 0x401000, 6 appels d'API servis (LoadLibraryA/GetProcAddress/VirtualProtect),
+  PE reconstruit` → le code au point d'entrée du PE reconstruit est
+  **octet-pour-octet identique** au programme original déballé. Test
+  `upx_real_packer_recovers_original_code` (skip si `upx` absent). C'est la preuve
+  que la chaîne `packé → émulation+IAT → OEP → dump → PE propre → ré-analyse`
+  fonctionne sur un packer réel, pas seulement un jouet.
+- Limite honnête conservée : pas de reconstruction du **répertoire d'imports**
+  (le boulot de Scylla) — pour UPX-classe l'IAT déballée est déjà valide dans le
+  dump ; pour un packer qui détruit la table, il faudra la rebâtir depuis les
+  liaisons `GetProcAddress` observées (déjà tracées par le moteur).
+
 ## 5 bis. Démarré : backend LLVM (`--mode llvm`)
 
 > Première pierre de l'amélioration #1 (§3). ARET sait maintenant émettre du

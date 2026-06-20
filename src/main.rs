@@ -124,9 +124,10 @@ fn render_function(prog: &Program, func: &analysis::Function, flat: bool) -> Str
     }
 }
 
-/// `--mode unpack`: emulate the packer stub until it decrypts, report the OEP.
+/// `--mode unpack`: emulate the packer stub until it decrypts, report the OEP,
+/// and (with `--out-dir`) write a rebuilt clean PE of the decrypted image.
 #[cfg(feature = "unpack")]
-fn run_unpack(prog: &Program) -> Result<String> {
+fn run_unpack(prog: &Program, out_dir: &std::path::Path) -> Result<String> {
     use std::fmt::Write as _;
     let mut out = String::new();
     out.push_str("ARET dynamic unpack (Unicorn)\n");
@@ -141,6 +142,12 @@ fn run_unpack(prog: &Program) -> Result<String> {
                 r.decrypted_bytes, r.total_bytes
             );
             out.push_str("  status:         OEP reached — payload is now in cleartext in memory\n");
+            std::fs::create_dir_all(out_dir).ok();
+            let pe_path = out_dir.join("unpacked.exe");
+            std::fs::write(&pe_path, &r.dump_pe)
+                .with_context(|| format!("failed to write {}", pe_path.display()))?;
+            let _ = writeln!(out, "  rebuilt PE:     {} ({} bytes, entry=OEP)", pe_path.display(), r.dump_pe.len());
+            out.push_str("  next:           feed it back to `--mode transpile`\n");
         }
         Err(e) => {
             let _ = writeln!(out, "  status:         {}", e);
@@ -150,7 +157,7 @@ fn run_unpack(prog: &Program) -> Result<String> {
 }
 
 #[cfg(not(feature = "unpack"))]
-fn run_unpack(_prog: &Program) -> Result<String> {
+fn run_unpack(_prog: &Program, _out_dir: &std::path::Path) -> Result<String> {
     anyhow::bail!("--mode unpack requires building with `--features unpack` (needs libunicorn-dev)")
 }
 
@@ -169,7 +176,7 @@ fn main() -> Result<()> {
     if args.mode == Mode::Unpack {
         // Dynamic unpacking does not use static function recovery (the real code
         // is still encrypted) — emulate the stub instead.
-        return emit(&args, run_unpack(&prog)?);
+        return emit(&args, run_unpack(&prog, &args.out_dir)?);
     }
 
     let disasm = Disassembler::new(prog.bitness);

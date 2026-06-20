@@ -246,6 +246,9 @@ pub struct Unpacked {
     pub regions: Vec<(u64, Vec<u8>)>,
     /// Number of imported calls serviced by the Win32 model before the OEP.
     pub api_calls: u32,
+    /// Full decrypted image as contiguous runs (VA, bytes) — the basis for a
+    /// rebuilt clean PE.
+    pub image_pages: Vec<(u64, Vec<u8>)>,
 }
 
 /// A region to load into the emulator: virtual address + initial bytes.
@@ -377,8 +380,122 @@ pub fn emulate_until_oep(
                 out.push((r.va, buf));
             }
         }
-        Ok(Unpacked { oep, regions: out, api_calls })
+
+        // Capture the *full* decrypted image: every page the stub touched
+        // (original-stub pages + everything it wrote) within a sane window around
+        // the image base — this is where a packer reconstructs the real program
+        // (e.g. UPX decompresses into the original .text at its original VA).
+        let window = image_base..(image_base + 0x1000_0000);
+        let mut pages: BTreeSet<u64> = BTreeSet::new();
+        for &p in trace.initial_code.iter().chain(trace.written.iter()) {
+            if window.contains(&p) { pages.insert(p); }
+        }
+        for r in regions {
+            let mut p = page_down(r.va);
+            let end = page_up(r.va + r.bytes.len() as u64);
+            while p < end { if window.contains(&p) { pages.insert(p); } p += PAGE; }
+        }
+        // Coalesce contiguous pages into runs, reading each from the emulator.
+        let mut image_pages: Vec<(u64, Vec<u8>)> = Vec::new();
+        let mut cur_va: Option<u64> = None;
+        let mut cur: Vec<u8> = Vec::new();
+        let mut prev = 0u64;
+        for p in pages {
+            let mut buf = vec![0u8; PAGE as usize];
+            if uc_mem_read(uc, p, buf.as_mut_ptr() as *mut c_void, PAGE as usize) != 0 {
+                continue;
+            }
+            match cur_va {
+                Some(_) if p == prev + PAGE => cur.extend_from_slice(&buf),
+                _ => {
+                    if let Some(v) = cur_va { image_pages.push((v, std::mem::take(&mut cur))); }
+                    cur_va = Some(p);
+                    cur = buf;
+                }
+            }
+            prev = p;
+        }
+        if let Some(v) = cur_va { image_pages.push((v, cur)); }
+
+        Ok(Unpacked { oep, regions: out, api_calls, image_pages })
     }
+}
+
+/// Build a flat, statically-analysable PE32 from a dumped memory image: one
+/// section per contiguous run at its original VA (FileAlignment == 0x1000 so the
+/// raw layout mirrors memory), entry = OEP. This is the "rebuild a clean .exe"
+/// step ([0] in the pipeline): the output re-enters `--mode transpile`.
+///
+/// Honest scope: a memory dump with the original VAs and entry. It does not
+/// reconstruct a destroyed import directory (Scylla's job); for packers that keep
+/// the original imports (UPX-class) the dumped IAT is already valid.
+pub fn build_dump_pe(image_base: u64, oep: u64, runs: &[(u64, Vec<u8>)]) -> Vec<u8> {
+    const FA: u32 = 0x1000; // file & section alignment (raw mirrors memory)
+    let nsec = runs.len() as u32;
+    // headers: DOS(0x40) + PE sig(4) + COFF(20) + optional(0xE0) + sections(40*n)
+    let opt = 0xE0u32;
+    let hdr_unpadded = 0x40 + 4 + 20 + opt + 40 * nsec;
+    let hdr = (hdr_unpadded + FA - 1) & !(FA - 1);
+
+    // Assign each run a raw offset (page-aligned, packed after the header).
+    let mut raws: Vec<u32> = Vec::new();
+    let mut off = hdr;
+    for (_, bytes) in runs {
+        raws.push(off);
+        off += ((bytes.len() as u32 + FA - 1) & !(FA - 1)).max(FA);
+    }
+    let file_size = off as usize;
+    let mut f = vec![0u8; file_size];
+
+    let w16 = |f: &mut [u8], o: usize, v: u16| f[o..o + 2].copy_from_slice(&v.to_le_bytes());
+    let w32 = |f: &mut [u8], o: usize, v: u32| f[o..o + 4].copy_from_slice(&v.to_le_bytes());
+
+    // DOS header: "MZ" + e_lfanew at 0x3C.
+    f[0] = b'M'; f[1] = b'Z';
+    let pe_off = 0x40usize;
+    w32(&mut f, 0x3C, pe_off as u32);
+    // PE signature + COFF header.
+    f[pe_off] = b'P'; f[pe_off + 1] = b'E';
+    let coff = pe_off + 4;
+    w16(&mut f, coff, 0x014C);                 // Machine = i386
+    w16(&mut f, coff + 2, nsec as u16);        // NumberOfSections
+    w16(&mut f, coff + 16, opt as u16);        // SizeOfOptionalHeader
+    w16(&mut f, coff + 18, 0x0102 | 0x0002);   // Characteristics: EXE | 32BIT
+    // Optional header (PE32).
+    let o = coff + 20;
+    let last_end = runs.last().map(|(va, b)| {
+        (va - image_base) as u32 + ((b.len() as u32 + FA - 1) & !(FA - 1))
+    }).unwrap_or(0);
+    w16(&mut f, o, 0x010B);                     // Magic PE32
+    w32(&mut f, o + 16, (oep - image_base) as u32); // AddressOfEntryPoint (RVA)
+    w32(&mut f, o + 28, image_base as u32);     // ImageBase
+    w32(&mut f, o + 32, FA);                    // SectionAlignment
+    w32(&mut f, o + 36, FA);                    // FileAlignment
+    w16(&mut f, o + 40, 6); w16(&mut f, o + 42, 0); // OS version 6.0
+    w16(&mut f, o + 48, 6);                     // Subsystem-major (cosmetic)
+    w32(&mut f, o + 56, ((hdr + last_end + FA - 1) & !(FA - 1)).max(hdr)); // SizeOfImage
+    w32(&mut f, o + 60, hdr);                   // SizeOfHeaders
+    w16(&mut f, o + 68, 3);                     // Subsystem = CONSOLE
+    w32(&mut f, o + 92, 16);                    // NumberOfRvaAndSizes
+
+    // Section table.
+    let mut st = o + opt as usize;
+    for (i, (va, bytes)) in runs.iter().enumerate() {
+        let name = format!(".dmp{i}");
+        let nb = name.as_bytes();
+        f[st..st + nb.len().min(8)].copy_from_slice(&nb[..nb.len().min(8)]);
+        let vsize = (bytes.len() as u32 + FA - 1) & !(FA - 1);
+        w32(&mut f, st + 8, vsize);                 // VirtualSize
+        w32(&mut f, st + 12, (va - image_base) as u32); // VirtualAddress (RVA)
+        w32(&mut f, st + 16, vsize);                // SizeOfRawData
+        w32(&mut f, st + 20, raws[i]);              // PointerToRawData
+        w32(&mut f, st + 36, 0xE000_0060);          // RWX | code | initialized
+        // Copy the dumped bytes into the file at the raw offset.
+        let r = raws[i] as usize;
+        f[r..r + bytes.len()].copy_from_slice(bytes);
+        st += 40;
+    }
+    f
 }
 
 /// Drive the unpacker over a loaded program: map its sections, run the stub, and
@@ -408,12 +525,16 @@ pub fn unpack_program(prog: &crate::loader::Program, max_insns: usize) -> Result
             if a != b { changed += 1; }
         }
     }
+    let image_base = res.image_pages.first().map(|(va, _)| *va).unwrap_or(0);
+    let dump_pe = build_dump_pe(image_base, res.oep, &res.image_pages);
     Ok(UnpackReport {
         oep: res.oep,
         decrypted_bytes: changed,
         total_bytes: total,
         image: res.regions,
         api_calls: res.api_calls,
+        image_pages: res.image_pages,
+        dump_pe,
     })
 }
 
@@ -423,6 +544,10 @@ pub struct UnpackReport {
     pub total_bytes: usize,
     pub image: Vec<(u64, Vec<u8>)>,
     pub api_calls: u32,
+    /// Full decrypted image as contiguous (VA, bytes) runs.
+    pub image_pages: Vec<(u64, Vec<u8>)>,
+    /// A rebuilt, statically-analysable PE32 of the decrypted image (entry=OEP).
+    pub dump_pe: Vec<u8>,
 }
 
 #[cfg(test)]
@@ -505,5 +630,61 @@ mod tests {
         let r = emulate_until_oep(&regions, stub_va, &imports, 1_000_000).expect("unpack");
         assert_eq!(r.api_calls, 1, "the IAT call should have been serviced once");
         assert_eq!(r.oep, ALLOC_BASE, "OEP should be the VirtualAlloc'd buffer");
+    }
+
+    /// End-to-end on a *real* packer (UPX): pack a fixture, run the unpacker, and
+    /// check it services the stub's imports, recovers the OEP, and that the dumped
+    /// image at the OEP is byte-identical to the original unpacked program. Skips
+    /// when `upx` is unavailable.
+    #[test]
+    fn upx_real_packer_recovers_original_code() {
+        use std::process::Command;
+        let fixtures = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/m1/fixtures");
+        let orig = format!("{fixtures}/hello_printf.exe");
+        let packed = std::env::temp_dir().join(format!("aret_upx_{}.exe", std::process::id()));
+        let _ = std::fs::remove_file(&packed);
+
+        let status = Command::new("upx")
+            .args(["-q", "-o"]).arg(&packed).arg(&orig)
+            .status();
+        match status {
+            Ok(s) if s.success() => {}
+            _ => { eprintln!("skipping UPX test: upx unavailable"); return; }
+        }
+
+        let packed_bytes = std::fs::read(&packed).unwrap();
+        let prog = crate::loader::Program::load(&packed_bytes).expect("load packed");
+        let r = unpack_program(&prog, 50_000_000).expect("unpack UPX");
+
+        // The UPX stub resolves its imports (LoadLibrary/GetProcAddress/...) and
+        // jumps to the original entry, away from the packed stub's entry.
+        assert!(r.api_calls >= 1, "UPX stub should call imports");
+        assert_ne!(r.oep, prog.entry, "OEP must differ from the packed entry");
+
+        // The dumped image at the OEP must match the original program's bytes.
+        let orig_bytes = std::fs::read(&orig).unwrap();
+        let orig_prog = crate::loader::Program::load(&orig_bytes).unwrap();
+        let oep = r.oep;
+        let orig_at_oep = orig_prog.sections.iter().find_map(|s| {
+            if oep >= s.address && oep < s.address + s.data.len() as u64 {
+                let off = (oep - s.address) as usize;
+                Some(s.data[off..off + 16.min(s.data.len() - off)].to_vec())
+            } else { None }
+        }).expect("OEP not in original sections");
+
+        let dumped_at_oep = r.image_pages.iter().find_map(|(va, bytes)| {
+            if oep >= *va && oep < *va + bytes.len() as u64 {
+                let off = (oep - *va) as usize;
+                Some(bytes[off..off + 16.min(bytes.len() - off)].to_vec())
+            } else { None }
+        }).expect("OEP not in dumped image");
+
+        assert_eq!(orig_at_oep, dumped_at_oep, "decompressed code != original at OEP");
+
+        // The rebuilt PE must advertise the OEP as its entry point.
+        let rebuilt = crate::loader::Program::load(&r.dump_pe).expect("load rebuilt PE");
+        assert_eq!(rebuilt.entry, oep, "rebuilt PE entry should be the OEP");
+
+        let _ = std::fs::remove_file(&packed);
     }
 }
