@@ -128,6 +128,14 @@ faisable la classe « gros programme non-VM-protégé », pas forcément un AAA 
   la validité IR par fonction (100% sur 130 fonctions CRT et 300 fonctions d'un
   vrai ELF, à parité avec le backend C). *(Pas de SMT/Z3 dans le code — la vérif
   d'équivalence formelle reste aspirationnelle pour les deux backends.)*
+- ✅ **Passage à l'échelle (émission chunkée)** : un seul module `.ll` pour un
+  gros binaire devenait énorme (≈1,3 Go pour ~44 k fonctions) et faisait OOM
+  `llc` (≈8,5 Go de RSS). Corrigé comme côté C : `emit_split` produit **un module
+  LLVM autonome par paquet** (200 fonctions), chacun déclarant les symboles des
+  autres paquets (pas de redéfinition), compilés **en parallèle** par `llc` puis
+  liés. Le pic mémoire est borné à un petit module par cœur. Validé en multi-
+  paquets : 130 fonctions → 5 modules `.ll` indépendamment acceptés par `llvm-as`,
+  liés en un ELF qui tourne.
 - Portée honnête : reste un **chemin d'exécution LLVM** robuste sur de gros
   binaires (testé sur les fixtures) et le différentiel C↔LLVM automatisé.
 

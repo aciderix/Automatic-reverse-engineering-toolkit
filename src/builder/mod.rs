@@ -317,9 +317,14 @@ pub fn transpile(
     emit::set_shared_stack(true);
     let irfs: Vec<_> = funcs.iter().map(|f| lower(prog, f)).collect();
     let n_funcs = irfs.len();
-    // Program emission: either the LLVM IR backend (one module) or the chunked C
-    // backend. The runtime (HLE, main, dispatch, layout, stubs) is C either way.
-    let llvm_ir = if use_llvm { Some(emit::llvm::emit_unit(&irfs)) } else { None };
+    // Program emission: either the LLVM IR backend (chunked .ll modules) or the
+    // chunked C backend. The runtime (HLE, main, dispatch, layout, stubs) is C
+    // either way.
+    let llvm_chunks: Vec<String> = if use_llvm {
+        emit::llvm::emit_split(&irfs, CHUNK_FUNCS)
+    } else {
+        Vec::new()
+    };
     let (decls_h, chunks, undef_subs) = if use_llvm {
         (String::new(), Vec::new(), collect_undef_subs(&irfs))
     } else {
@@ -382,8 +387,12 @@ pub fn transpile(
     write("aret_main.c", &main_c)?;
     // Program: one LLVM IR module, or chunked C translation units.
     let mut chunk_srcs: Vec<std::path::PathBuf> = Vec::new();
-    if let Some(ir) = &llvm_ir {
-        write("program.ll", ir)?;
+    if use_llvm {
+        for (i, m) in llvm_chunks.iter().enumerate() {
+            let name = format!("program_{i}.ll");
+            write(&name, m)?;
+            chunk_srcs.push(out_dir.join(name));
+        }
         // The C backend inlines the float helpers per chunk; the LLVM backend
         // calls them as external symbols, so provide them as a linkable unit
         // (the same helpers, with external linkage).
@@ -435,21 +444,34 @@ pub fn transpile(
     }
     sources.extend(chunk_srcs);
 
+    let triple = if bits == 32 { "i386-pc-linux-gnu" } else { "x86_64-pc-linux-gnu" };
+    let llc = std::env::var("LLC").unwrap_or_else(|_| "llc".to_string());
     use rayon::prelude::*;
     let objs: Result<Vec<std::path::PathBuf>> = sources
         .par_iter()
         .map(|src| {
             // Unique object name per source (so .c and .S of the same stem don't clash).
             let obj = out_dir.join(format!("{}.o", src.file_name().unwrap().to_string_lossy()));
-            let out = Command::new(&cc)
-                .args([march, "-w", "-fno-strict-aliasing", "-fno-builtin", "-fno-pie", "-O0", "-c"])
-                .arg(src)
-                .arg("-I")
-                .arg(out_dir)
-                .arg("-o")
-                .arg(&obj)
-                .output()
-                .with_context(|| format!("failed to run {}", cc))?;
+            // LLVM IR chunks go through llc; C / asm through the C compiler.
+            let out = if src.extension().and_then(|e| e.to_str()) == Some("ll") {
+                Command::new(&llc)
+                    .args([&format!("-mtriple={triple}"), "-filetype=obj", "-O2", "-relocation-model=static"])
+                    .arg(src)
+                    .arg("-o")
+                    .arg(&obj)
+                    .output()
+                    .with_context(|| format!("failed to run {}", llc))?
+            } else {
+                Command::new(&cc)
+                    .args([march, "-w", "-fno-strict-aliasing", "-fno-builtin", "-fno-pie", "-O0", "-c"])
+                    .arg(src)
+                    .arg("-I")
+                    .arg(out_dir)
+                    .arg("-o")
+                    .arg(&obj)
+                    .output()
+                    .with_context(|| format!("failed to run {}", cc))?
+            };
             if !out.status.success() {
                 bail!(
                     "compile {} failed:\n{}",
@@ -460,25 +482,7 @@ pub fn transpile(
             Ok(obj)
         })
         .collect();
-    let mut objs = objs?;
-
-    // LLVM backend: compile the program module with llc and add its object.
-    if use_llvm {
-        let obj = out_dir.join("program.ll.o");
-        let triple = if bits == 32 { "i386-pc-linux-gnu" } else { "x86_64-pc-linux-gnu" };
-        let llc = std::env::var("LLC").unwrap_or_else(|_| "llc".to_string());
-        let out = Command::new(&llc)
-            .args([&format!("-mtriple={triple}"), "-filetype=obj", "-O2", "-relocation-model=static"])
-            .arg(out_dir.join("program.ll"))
-            .arg("-o")
-            .arg(&obj)
-            .output()
-            .with_context(|| format!("failed to run {}", llc))?;
-        if !out.status.success() {
-            bail!("llc failed:\n{}", String::from_utf8_lossy(&out.stderr).trim());
-        }
-        objs.push(obj);
-    }
+    let objs = objs?;
 
     let link = Command::new(&cc)
         .args([march, "-no-pie"])
