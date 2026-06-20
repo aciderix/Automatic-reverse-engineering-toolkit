@@ -117,6 +117,70 @@ struct Args {
     /// compiler builds a native binary at the source's bitness).
     #[arg(long)]
     target: Option<String>,
+
+    /// Merge an external IAT symbol map (JSON `{ "0xVA": "Name", ... }`) into the
+    /// program's imports — e.g. a Scylla-style reconstruction from an unpacker.
+    /// Lets ARET name calls through a rebuilt IAT that the PE headers don't list.
+    #[arg(long)]
+    iat_symbols: Option<PathBuf>,
+}
+
+/// Parse a `{ "0xhexva": "Name" }` IAT map and merge it into `prog.imports`.
+fn merge_iat_symbols(prog: &mut Program, path: &std::path::Path) -> Result<usize> {
+    let text = std::fs::read_to_string(path)
+        .with_context(|| format!("failed to read {}", path.display()))?;
+    // Minimal JSON-object-of-strings parser (avoids a serde dependency).
+    let mut n = 0;
+    for (k, v) in parse_str_map(&text) {
+        let hk = k.trim().trim_start_matches("0x");
+        if let Ok(va) = u64::from_str_radix(hk, 16) {
+            prog.imports.entry(va).or_insert(v);
+            n += 1;
+        }
+    }
+    if n == 0 {
+        bail!("no usable entries in {}", path.display());
+    }
+    Ok(n)
+}
+
+/// Extract `"key": "value"` string pairs from a flat JSON object.
+fn parse_str_map(text: &str) -> Vec<(String, String)> {
+    let mut out = Vec::new();
+    let b = text.as_bytes();
+    let mut i = 0;
+    let read_string = |b: &[u8], mut i: usize| -> Option<(String, usize)> {
+        while i < b.len() && b[i] != b'"' {
+            i += 1;
+        }
+        if i >= b.len() {
+            return None;
+        }
+        i += 1;
+        let start = i;
+        while i < b.len() && b[i] != b'"' {
+            i += 1;
+        }
+        if i >= b.len() {
+            return None;
+        }
+        Some((String::from_utf8_lossy(&b[start..i]).into_owned(), i + 1))
+    };
+    while i < b.len() {
+        let Some((key, ni)) = read_string(b, i) else { break };
+        i = ni;
+        while i < b.len() && b[i] != b':' && b[i] != b'}' {
+            i += 1;
+        }
+        if i >= b.len() || b[i] == b'}' {
+            break;
+        }
+        i += 1; // skip ':'
+        let Some((val, ni)) = read_string(b, i) else { break };
+        i = ni;
+        out.push((key, val));
+    }
+    out
 }
 
 /// Render one function as pseudo-C, structured unless `--flat` was given.
@@ -219,7 +283,12 @@ fn main() -> Result<()> {
     let data = std::fs::read(&args.binary)
         .with_context(|| format!("failed to read {}", args.binary.display()))?;
 
-    let prog = Program::load(&data)?;
+    let mut prog = Program::load(&data)?;
+
+    if let Some(path) = &args.iat_symbols {
+        let n = merge_iat_symbols(&mut prog, path)?;
+        eprintln!("note: merged {n} IAT symbols from {}", path.display());
+    }
 
     if args.mode == Mode::Info {
         let out = render_info(&prog);
@@ -528,4 +597,26 @@ fn render_cfg(f: &analysis::Function) -> String {
         let _ = writeln!(s, "  calls: {}", callees.join(", "));
     }
     s
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_str_map;
+
+    #[test]
+    fn parses_flat_iat_symbol_map() {
+        let json = r#"{ "0xdec020": "RegQueryValueExA", "0xdec07c": "GetTickCount" }"#;
+        let m = parse_str_map(json);
+        assert_eq!(m.len(), 2);
+        assert_eq!(m[0], ("0xdec020".to_string(), "RegQueryValueExA".to_string()));
+        assert_eq!(m[1].1, "GetTickCount");
+    }
+
+    #[test]
+    fn tolerates_whitespace_and_newlines() {
+        let json = "{\n  \"0x1000\" : \"foo\" ,\n  \"0x2000\":\"bar\"\n}";
+        let m = parse_str_map(json);
+        assert_eq!(m.len(), 2);
+        assert_eq!(m[1], ("0x2000".to_string(), "bar".to_string()));
+    }
 }
