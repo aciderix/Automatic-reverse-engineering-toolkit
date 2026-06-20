@@ -61,7 +61,11 @@ moitié faits. Chaque tranche élargit la classe de binaires supportés.
 | **M3** ✅ | **Pile machine partagée** : passage d'arguments inter-fonctions, par la **pile** (stdcall/cdecl) **et par registres** (regparm/fastcall) | programmes Win32 multi-fonctions à appels internes | nouveau lowering gated |
 | **M4** ✅ | **Shims CRT** (`msvcrt`) : `printf` **variadique**, `malloc`/`free`/`calloc`/`realloc`, `mem*`/`str*`, `puts` | `.exe` console utilisant le runtime C | shims natifs |
 | **FS** ✅ | **Sous-système Fichiers** : file I/O Win32/CRT + **traduction de chemins** `C:\…` → `prefix/drive_c/…` | programmes lisant/écrivant des fichiers | shims natifs |
-| M5 | Fallback émulateur (Unicorn) sur adresse inconnue ⏸️ *différé : pas de libunicorn 32-bit dans l'env* | code partiellement obfusqué / sauts dynamiques | `unicorn-engine` |
+| **LLVM** ✅ | **Backend LLVM IR** (rev.ng-style) à parité avec le C, **chunké** : passe à l'échelle réelle (jeu déballé 44 183 fonctions → 221 modules `.ll` → ELF 127 Mo, sans OOM) | mêmes binaires, via LLVM (multi-archi futur) | `llc` (`src/emit/llvm.rs`) |
+| **CRT+** ✅ | **Vrai CRT** : forward msvcrt → **libc hôte** (string/stdlib/stdio/ctype, `aret_crt.c`) | programmes C standard à large couverture runtime | libc native |
+| **W32** ✅ | **Couche Win32 native** : kernel32 → POSIX (timing, env, tas, atomiques, lstr*, `aret_win32.c`) | programmes Win32 utilisant kernel32 hors-GUI | POSIX natif |
+| **UNPACK** ✅ | **Moteur de déballage dynamique** (Unicorn) : émule le stub → détecte l'OEP par code auto-modifié → dump (`--features unpack`, `src/unpack`) | packers non-VM (déchiffrement en mémoire) | `libunicorn` |
+| M-link | **Brancher les stubs Win32 dans le moteur de déballage** (résoudre l'IAT du packer en émulation) ← *chaînon manquant identifié* | classe « gros programme packé non-VM » | `aret_win32` + `src/unpack` |
 | M6 | Cible WebAssembly/WASI (au lieu d'un OS natif) | « cible universelle » de la note 3 | `wasmtime` |
 | M7 | GUI / graphisme (X11, puis DXVK) | applications fenêtrées, puis jeux | Wine/DXVK |
 
