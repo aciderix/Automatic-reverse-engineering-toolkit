@@ -55,6 +55,33 @@ impl TranspileReport {
     }
 }
 
+/// Load a memory snapshot: the magic `ARETSNP1` then repeated records of
+/// `va: u64-LE, len: u64-LE, bytes[len]`. Produced by `tools/snapshot` from a
+/// frozen process's `/proc/<pid>/maps`+`mem` — the post-init game state that A+B
+/// seeds into the lifted code's initial memory.
+pub fn load_snapshot(path: &Path) -> Result<Vec<(u64, Vec<u8>)>> {
+    let data = std::fs::read(path).with_context(|| format!("failed to read {}", path.display()))?;
+    if data.len() < 8 || &data[..8] != b"ARETSNP1" {
+        bail!("{}: not an ARET snapshot (bad magic)", path.display());
+    }
+    let mut regions = Vec::new();
+    let mut i = 8;
+    while i + 16 <= data.len() {
+        let va = u64::from_le_bytes(data[i..i + 8].try_into().unwrap());
+        let len = u64::from_le_bytes(data[i + 8..i + 16].try_into().unwrap()) as usize;
+        i += 16;
+        if i + len > data.len() {
+            bail!("{}: truncated region at va {:#x}", path.display(), va);
+        }
+        regions.push((va, data[i..i + len].to_vec()));
+        i += len;
+    }
+    if regions.is_empty() {
+        bail!("{}: no regions", path.display());
+    }
+    Ok(regions)
+}
+
 /// Generated files for the Memory Layout Mapper.
 struct Layout {
     /// `aret_layout.c` — the section table + `__aret_map_memory()`.
@@ -81,30 +108,36 @@ struct Layout {
 /// `__aret_map_memory()` `mmap(MAP_FIXED)`s the span covering the data sections
 /// and copies each section's slice of the blob to its VA. (The binary is linked
 /// `-no-pie` so its own segments sit elsewhere and the original low VAs are free.)
-fn emit_layout(prog: &Program, blob_path: &Path) -> Option<Layout> {
+fn emit_layout(prog: &Program, blob_path: &Path, snapshot: Option<&[(u64, Vec<u8>)]>) -> Option<Layout> {
     use std::fmt::Write as _;
 
-    // Embed every section's bytes at its original VA, including executable ones:
-    // code sections also hold absolute-addressed read-only data (string literals,
-    // jump tables, constants), and packers (UPX) merge .rdata into a code section.
-    // The transpiled functions run natively from the ELF's own segments, so the
-    // mapped original bytes serve only as data — harmless to map.
-    let secs: Vec<&crate::loader::Section> = prog
-        .sections
-        .iter()
-        .filter(|s| s.address != 0 && !s.data.is_empty())
-        .collect();
-    if secs.is_empty() {
+    // The mapped initial memory comes from either a runtime snapshot (A+B: the
+    // game's post-init state, so lifted functions see real globals/heap) or the
+    // static section image. Executable sections are included too: code sections
+    // also hold absolute-addressed read-only data (string literals, jump tables,
+    // constants), and packers (UPX) merge .rdata into a code section. The
+    // transpiled functions run from the ELF's own segments, so the mapped bytes
+    // serve only as data.
+    let regions: Vec<(u64, Vec<u8>)> = match snapshot {
+        Some(s) => s.iter().filter(|(va, b)| *va != 0 && !b.is_empty()).cloned().collect(),
+        None => prog
+            .sections
+            .iter()
+            .filter(|s| s.address != 0 && !s.data.is_empty())
+            .map(|s| (s.address, s.data.clone()))
+            .collect(),
+    };
+    if regions.is_empty() {
         return None;
     }
 
-    // Concatenate section bytes into one blob; record (va, blob offset, len).
+    // Concatenate region bytes into one blob; record (va, blob offset, len).
     let mut blob: Vec<u8> = Vec::new();
     let mut table: Vec<(u64, usize, usize)> = Vec::new();
-    for sec in &secs {
+    for (va, bytes) in &regions {
         let off = blob.len();
-        blob.extend_from_slice(&sec.data);
-        table.push((sec.address, off, sec.data.len()));
+        blob.extend_from_slice(bytes);
+        table.push((*va, off, bytes.len()));
     }
 
     // The assembly embeds the blob at an absolute path so the assembler finds it
@@ -332,6 +365,7 @@ pub fn transpile(
     entry_override: Option<u64>,
     backend: &str,
     wasm: bool,
+    snapshot: Option<&[(u64, Vec<u8>)]>,
 ) -> Result<TranspileReport> {
     // WebAssembly target: the recovered C is portable, and wasm32's linear memory
     // *is* the 32-bit address space, so it is a natural target (32-bit pointers,
@@ -383,7 +417,7 @@ pub fn transpile(
     // Memory Layout Mapper: restore data sections at their original VAs so
     // absolute pointers (global strings/tables) resolve at runtime.
     let blob_path = out_dir.join("sections.bin");
-    let layout = emit_layout(prog, &blob_path);
+    let layout = emit_layout(prog, &blob_path, snapshot);
     let map_call = if layout.is_some() {
         // Map sections, then patch data-import IAT slots (which live in a mapped
         // section) to synthetic objects.
@@ -643,4 +677,39 @@ pub fn transpile(
         bits,
         run_output,
     })
+}
+
+#[cfg(test)]
+mod snapshot_tests {
+    use super::load_snapshot;
+    use std::io::Write;
+
+    #[test]
+    fn loads_aretsnp1_regions() {
+        let mut buf = Vec::new();
+        buf.extend_from_slice(b"ARETSNP1");
+        // region 1: va 0x401000, "code"
+        buf.extend_from_slice(&0x401000u64.to_le_bytes());
+        buf.extend_from_slice(&4u64.to_le_bytes());
+        buf.extend_from_slice(b"code");
+        // region 2: va 0x402000, "DATA!"
+        buf.extend_from_slice(&0x402000u64.to_le_bytes());
+        buf.extend_from_slice(&5u64.to_le_bytes());
+        buf.extend_from_slice(b"DATA!");
+        let path = std::env::temp_dir().join(format!("aret_snap_{}.snap", std::process::id()));
+        std::fs::File::create(&path).unwrap().write_all(&buf).unwrap();
+        let r = load_snapshot(&path).expect("load");
+        assert_eq!(r.len(), 2);
+        assert_eq!(r[0], (0x401000, b"code".to_vec()));
+        assert_eq!(r[1], (0x402000, b"DATA!".to_vec()));
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn rejects_bad_magic() {
+        let path = std::env::temp_dir().join(format!("aret_badsnap_{}.snap", std::process::id()));
+        std::fs::write(&path, b"NOTASNAP").unwrap();
+        assert!(load_snapshot(&path).is_err());
+        let _ = std::fs::remove_file(&path);
+    }
 }

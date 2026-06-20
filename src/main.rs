@@ -123,6 +123,12 @@ struct Args {
     /// Lets ARET name calls through a rebuilt IAT that the PE headers don't list.
     #[arg(long)]
     iat_symbols: Option<PathBuf>,
+
+    /// Transpile mode: seed initial memory from a runtime snapshot (ARETSNP1)
+    /// instead of the static sections — so a lifted function runs against the
+    /// program's real post-init state (the A+B "save-state" path).
+    #[arg(long)]
+    snapshot: Option<PathBuf>,
 }
 
 /// Parse a `{ "0xhexva": "Name" }` IAT map and merge it into `prog.imports`.
@@ -444,6 +450,14 @@ fn main() -> Result<()> {
                 }
                 None => None,
             };
+            let snapshot = match &args.snapshot {
+                Some(p) => {
+                    let r = builder::load_snapshot(p)?;
+                    eprintln!("note: seeding memory from snapshot {} ({} regions)", p.display(), r.len());
+                    Some(r)
+                }
+                None => None,
+            };
             let report = builder::transpile(
                 &prog,
                 &functions,
@@ -452,6 +466,7 @@ fn main() -> Result<()> {
                 entry_override,
                 &args.backend,
                 wasm,
+                snapshot.as_deref(),
             )?;
             out.push_str(&report.render());
         }
