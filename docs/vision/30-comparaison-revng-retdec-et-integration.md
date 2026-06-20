@@ -167,10 +167,17 @@ faisable la classe « gros programme non-VM-protégé », pas forcément un AAA 
   `upx_real_packer_recovers_original_code` (skip si `upx` absent). C'est la preuve
   que la chaîne `packé → émulation+IAT → OEP → dump → PE propre → ré-analyse`
   fonctionne sur un packer réel, pas seulement un jouet.
-- Limite honnête conservée : pas de reconstruction du **répertoire d'imports**
-  (le boulot de Scylla) — pour UPX-classe l'IAT déballée est déjà valide dans le
-  dump ; pour un packer qui détruit la table, il faudra la rebâtir depuis les
-  liaisons `GetProcAddress` observées (déjà tracées par le moteur).
+- Reconstruction **fidèle** quand le packer a **restauré les en-têtes PE
+  d'origine** en mémoire (cas UPX : `MZ`/`PE` au base de l'image) : on réutilise
+  ces en-têtes et on pose le fichier en **raw==RVA**, ce qui **préserve la table
+  des sections d'origine** (le PE reconstruit ré-expose UPX0/UPX1/UPX2 avec le
+  code déballé, entrée = OEP). Sinon, repli sur un PE plat mono-section.
+- Limite honnête restante : pour UPX le **répertoire d'imports** n'est pas au
+  format standard (UPX remplit l'IAT directement, sans descripteur classique) →
+  `Imports: 0` dans le PE reconstruit. La reconstruction de ce répertoire (le
+  boulot de **Scylla**) est l'étape suivante : la rebâtir depuis les liaisons
+  `GetProcAddress`/écritures d'IAT que le moteur **trace déjà**. C'est ce qui
+  fermerait « packé → ELF natif **qui imprime** » sur la classe UPX.
 
 ## 5 bis. Démarré : backend LLVM (`--mode llvm`)
 

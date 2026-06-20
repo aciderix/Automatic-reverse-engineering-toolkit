@@ -421,15 +421,105 @@ pub fn emulate_until_oep(
     }
 }
 
-/// Build a flat, statically-analysable PE32 from a dumped memory image: one
-/// section per contiguous run at its original VA (FileAlignment == 0x1000 so the
-/// raw layout mirrors memory), entry = OEP. This is the "rebuild a clean .exe"
-/// step ([0] in the pipeline): the output re-enters `--mode transpile`.
+/// Read `len` bytes starting at virtual address `va` from the dumped runs
+/// (zero-filled where the image has no page).
+fn read_va(runs: &[(u64, Vec<u8>)], va: u64, len: usize) -> Vec<u8> {
+    let mut out = vec![0u8; len];
+    for (base, bytes) in runs {
+        let end = base + bytes.len() as u64;
+        if va < end && va + len as u64 > *base {
+            let lo = va.max(*base);
+            let hi = (va + len as u64).min(end);
+            for a in lo..hi {
+                out[(a - va) as usize] = bytes[(a - *base) as usize];
+            }
+        }
+    }
+    out
+}
+
+/// Build a statically-analysable PE32 from a dumped memory image, entry = OEP.
+/// This is the "rebuild a clean .exe" step ([0] in the pipeline): the output
+/// re-enters `--mode transpile`.
 ///
-/// Honest scope: a memory dump with the original VAs and entry. It does not
-/// reconstruct a destroyed import directory (Scylla's job); for packers that keep
-/// the original imports (UPX-class) the dumped IAT is already valid.
+/// Preferred path: when the unpacked image has restored the **original PE
+/// headers** at the image base (UPX-class packers do), reuse them and lay the
+/// file out raw==RVA — this preserves the original **import directory**, so the
+/// rebuilt PE is fully faithful (imports intact). Fallback: a flat single-section
+/// dump when no header is present.
+///
+/// Honest scope: it does not *reconstruct* a destroyed import directory (Scylla's
+/// job) — but it preserves an intact one, and the engine traces GetProcAddress
+/// bindings for the rebuild-from-scratch case.
 pub fn build_dump_pe(image_base: u64, oep: u64, runs: &[(u64, Vec<u8>)]) -> Vec<u8> {
+    // Try the faithful, header-preserving rebuild first.
+    if let Some(pe) = build_from_restored_headers(image_base, oep, runs) {
+        return pe;
+    }
+    build_synthetic_pe(image_base, oep, runs)
+}
+
+/// Faithful rebuild reusing the restored original headers (raw==RVA), preserving
+/// the import directory. Returns None if no valid PE header sits at the base.
+fn build_from_restored_headers(image_base: u64, oep: u64, runs: &[(u64, Vec<u8>)]) -> Option<Vec<u8>> {
+    let hdr = read_va(runs, image_base, 0x1000);
+    if hdr.len() < 0x40 || &hdr[0..2] != b"MZ" { return None; }
+    let rd16 = |b: &[u8], o: usize| u16::from_le_bytes([b[o], b[o + 1]]);
+    let rd32 = |b: &[u8], o: usize| u32::from_le_bytes([b[o], b[o + 1], b[o + 2], b[o + 3]]);
+    let e_lfanew = rd32(&hdr, 0x3C) as usize;
+    if e_lfanew + 0x78 >= hdr.len() || &hdr[e_lfanew..e_lfanew + 4] != b"PE\0\0" { return None; }
+    let coff = e_lfanew + 4;
+    let nsec = rd16(&hdr, coff + 2) as usize;
+    let opt_sz = rd16(&hdr, coff + 16) as usize;
+    let o = coff + 20;
+    if rd16(&hdr, o) != 0x010B { return None; } // PE32 only
+    let sect_align = rd32(&hdr, o + 32);
+    let size_of_headers = rd32(&hdr, o + 60) as usize;
+    let st = o + opt_sz;
+    if st + nsec * 40 > hdr.len() || nsec == 0 || sect_align == 0 { return None; }
+
+    // Determine SizeOfImage from the section table (max RVA end).
+    let mut image_size: u32 = size_of_headers as u32;
+    let mut sects: Vec<(u32, u32)> = Vec::new(); // (rva, vsize)
+    for i in 0..nsec {
+        let s = st + i * 40;
+        let vsize = rd32(&hdr, s + 8);
+        let rva = rd32(&hdr, s + 12);
+        let raw_sz = rd32(&hdr, s + 16);
+        let vs = vsize.max(raw_sz);
+        let end = (rva + vs + sect_align - 1) & !(sect_align - 1);
+        image_size = image_size.max(end);
+        sects.push((rva, vs));
+    }
+    if image_size as usize > 0x4000_0000 { return None; } // sanity
+
+    // Lay the file out raw==RVA so the original directory RVAs stay valid.
+    let fa = sect_align;
+    let mut f = vec![0u8; image_size as usize];
+    let hb = read_va(runs, image_base, size_of_headers);
+    f[..hb.len()].copy_from_slice(&hb);
+
+    let w32 = |f: &mut [u8], o: usize, v: u32| f[o..o + 4].copy_from_slice(&v.to_le_bytes());
+    // Patch optional header: FileAlignment = SectionAlignment, entry = OEP.
+    w32(&mut f, o + 16, (oep - image_base) as u32);
+    w32(&mut f, o + 36, fa);
+    // Copy each section's memory image to file offset == RVA, patch raw ptr/size.
+    for (i, (rva, vs)) in sects.iter().enumerate() {
+        let s = st + i * 40;
+        let raw_sz = (vs + fa - 1) & !(fa - 1);
+        w32(&mut f, s + 16, raw_sz);  // SizeOfRawData
+        w32(&mut f, s + 20, *rva);    // PointerToRawData == VirtualAddress
+        let body = read_va(runs, image_base + *rva as u64, *vs as usize);
+        let dst = *rva as usize;
+        if dst + body.len() <= f.len() {
+            f[dst..dst + body.len()].copy_from_slice(&body);
+        }
+    }
+    Some(f)
+}
+
+/// Flat single-section PE for a dump with no usable headers.
+fn build_synthetic_pe(image_base: u64, oep: u64, runs: &[(u64, Vec<u8>)]) -> Vec<u8> {
     const FA: u32 = 0x1000; // file & section alignment (raw mirrors memory)
     let nsec = runs.len() as u32;
     // headers: DOS(0x40) + PE sig(4) + COFF(20) + optional(0xE0) + sections(40*n)
