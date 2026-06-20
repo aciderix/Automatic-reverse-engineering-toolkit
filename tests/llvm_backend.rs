@@ -151,6 +151,7 @@ fn c_and_llvm_backends_agree() {
         "hello_float.exe",
         "hello_float_x87.exe",
         "hello_crt.exe",
+        "hello_win32api.exe",
     ] {
         let c = transpile_run(fixture, "c");
         let llvm = transpile_run(fixture, "llvm");

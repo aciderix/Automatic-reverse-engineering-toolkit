@@ -238,6 +238,21 @@ fn crt_forwarding_to_libc() {
 }
 
 #[test]
+fn win32_native_kernel32_layer() {
+    if !has_m32() {
+        eprintln!("skipping Win32 test: `cc -m32` unavailable (install gcc-multilib)");
+        return;
+    }
+    // kernel32 surface mapped to native POSIX (aret_win32.c): heap (zero-init),
+    // interlocked atomics, environment round-trip, lstr*, monotonic timing.
+    let out = transpile_and_run("hello_win32api.exe");
+    assert!(
+        out.contains("W32: zero=1 ctr=41 ev=ok evlen=2 s=win32 slen=5 mono=1"),
+        "native Win32 layer wrong:\n{out}"
+    );
+}
+
+#[test]
 fn fs_file_roundtrip_with_path_translation() {
     if !has_m32() {
         eprintln!("skipping FS test: `cc -m32` unavailable (install gcc-multilib)");

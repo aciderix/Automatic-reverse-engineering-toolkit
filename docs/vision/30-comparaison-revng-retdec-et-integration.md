@@ -191,12 +191,43 @@ faisable la classe « gros programme non-VM-protégé », pas forcément un AAA 
   un `sub_<va>` à l'ABI pile-machine, pas une fonction cdecl native ; il faut le
   chemin `aret_call`. Laissé à des shims dédiés.
 
-## 6. Reco
+## 5 quater. Fait : la couche Win32 native (reco #2 / brique [3])
 
-1. **Court terme, gros gain** : pour [3], **brancher le vrai CRT natif** (mingw-w64)
-   au lieu de mes shims → débloque « vrai programme qui imprime ».
-2. **Moyen terme** : évaluer sérieusement **rev.ng** comme base de [1]+[2] (lift +
-   backend LLVM) ; concentrer ARET sur la **vérif d'équivalence** + la **colle Windows**.
-3. **Pour ton jeu** : [0] déballage déjà amorcé, mais l'objectif « natif sans
-   émulateur » d'un AAA packé reste hors de portée réaliste → Wine pour jouer,
-   ARET/Ghidra pour le protocole.
+> La **colle Windows** — ce que ni rev.ng ni RetDec ne fournissent. Implémentation
+> **native** (pas Wine) du sous-ensemble kernel32 qui a un équivalent POSIX propre
+> (`aret_win32.c`), même modèle que le CRT (lecture pile machine → POSIX, défs
+> fortes qui priment sur les stubs faibles).
+
+- Couverture : **timing** (GetTickCount, QueryPerformanceCounter/Frequency,
+  GetSystemTimeAsFileTime → `clock_gettime`/`gettimeofday`), **environnement/chemins**
+  (Get/SetEnvironmentVariableA, Get/SetCurrentDirectoryA, GetTempPathA,
+  OutputDebugStringA), **lstr*** (lstrlen/cpy/cat/cmp/cmpi → libc str*),
+  **tas** (GetProcessHeap, HeapAlloc/Free/ReAlloc, VirtualAlloc/Free,
+  Global/LocalAlloc → allocateur C, HEAP_ZERO_MEMORY → calloc), **atomiques**
+  (Interlocked Increment/Decrement/ExchangeAdd/Exchange/CompareExchange →
+  builtins `__atomic`).
+- Validé : fixture `hello_win32api` →
+  `W32: zero=1 ctr=41 ev=ok evlen=2 s=win32 slen=5 mono=1`, **identique** via les
+  backends C **et** LLVM. Un vrai programme Windows fait tourner ses appels
+  kernel32 directement sur des primitives Linux.
+- Portée honnête : sous-ensemble POSIX-mappable seulement (pas d'USER32/GUI, pas
+  de registre, pas de vraie machinerie de modules PE). Le reste = **Winelib**
+  (§4 [3]) — et c'est précisément cette couche qu'il faudra brancher sur le moteur
+  de déballage (§5) pour que le stub d'un packer résolve son IAT et déchiffre.
+
+## 6. Reco — état
+
+1. ✅ **CRT natif** (§5 ter) et ✅ **couche Win32 native** (§5 quater) : le vrai
+   runtime C + le sous-ensemble kernel32 POSIX-mappable tournent, testés C↔LLVM.
+   Reste, pour aller plus loin que le sous-ensemble POSIX : **Winelib** (USER32,
+   registre, modules).
+2. ✅ **Backend LLVM** chunké, à l'échelle réelle (§5 bis) ; ✅ **moteur de
+   déballage** Unicorn (§5). Le **chaînon manquant** est unique et clair :
+   brancher la **couche Win32 (stubs d'API) dans le moteur de déballage** pour
+   que le stub d'un packer résolve son IAT et déchiffre — alors le pipeline
+   [0]→[1]→[2]→[3] se referme sur la classe « packé non-VM ».
+3. **Pour ton jeu** : moteur de déballage prêt, mais son protecteur appelle l'IAT
+   avant de déchiffrer → il faut la couche Win32 dans l'émulateur (point 2).
+   L'objectif « natif sans émulateur » d'un AAA reste un objectif de longue
+   haleine ; les briques (lift, backend LLVM, CRT, Win32, déballage) sont en
+   place et testées une à une.

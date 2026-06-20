@@ -23,6 +23,8 @@ const HLE_H: &str = include_str!("../../runtime/aret_hle/aret_hle.h");
 const HLE_C: &str = include_str!("../../runtime/aret_hle/aret_hle.c");
 /// CRT forwarding layer (msvcrt → host libc); strong defs override the weak stubs.
 const CRT_C: &str = include_str!("../../runtime/aret_hle/aret_crt.c");
+/// Win32 layer (kernel32 subset → native POSIX); strong defs override weak stubs.
+const WIN32_C: &str = include_str!("../../runtime/aret_hle/aret_win32.c");
 
 pub struct TranspileReport {
     pub out_dir: std::path::PathBuf,
@@ -384,6 +386,7 @@ pub fn transpile(
     write("aret_hle.h", HLE_H)?;
     write("aret_hle.c", HLE_C)?;
     write("aret_crt.c", CRT_C)?;
+    write("aret_win32.c", WIN32_C)?;
     write("aret_stubs.c", &stubs)?;
     write("aret_dispatch.c", &emit_dispatch(&entries))?;
     write("aret_iat.c", &emit_iat_patch(prog))?;
@@ -434,6 +437,7 @@ pub fn transpile(
     let mut sources: Vec<std::path::PathBuf> = vec![
         out_dir.join("aret_hle.c"),
         out_dir.join("aret_crt.c"),
+        out_dir.join("aret_win32.c"),
         out_dir.join("aret_stubs.c"),
         out_dir.join("aret_dispatch.c"),
         out_dir.join("aret_iat.c"),
