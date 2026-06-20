@@ -270,6 +270,22 @@ fn win32_native_kernel32_layer() {
 }
 
 #[test]
+fn win32_system_info_and_sync() {
+    if !has_m32() {
+        eprintln!("skipping Win32-sys test: `cc -m32` unavailable (install gcc-multilib)");
+        return;
+    }
+    // Broader kernel32: GetSystemInfo, GetACP, GetModuleFileNameA,
+    // GetSystemDirectoryA, mutex/wait/release — all mapped to native/benign.
+    // (feat=0: mingw inlines IsProcessorFeaturePresent to read shared data.)
+    let out = transpile_and_run("hello_win32sys.exe");
+    assert!(
+        out.contains("W32SYS: page=4096 cpus=1 acp=1252 path=C:\\program.exe sysdir=C:\\Windows\\System32 feat=0 mtx=1 wait=0 rel=1"),
+        "broader Win32 layer wrong:\n{out}"
+    );
+}
+
+#[test]
 fn fs_file_roundtrip_with_path_translation() {
     if !has_m32() {
         eprintln!("skipping FS test: `cc -m32` unavailable (install gcc-multilib)");

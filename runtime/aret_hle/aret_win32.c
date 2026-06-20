@@ -187,3 +187,75 @@ uint32_t aret_InterlockedCompareExchange(uint32_t esp) {
     __atomic_compare_exchange_n(p, &cmp, xch, 0, __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST);
     return (uint32_t)cmp; /* the prior value */
 }
+
+/* ------------------------------------------------------------------ */
+/* System info / locale / process metadata                            */
+/* ------------------------------------------------------------------ */
+
+/* GetSystemInfo(LPSYSTEM_INFO) — fill a plausible 32-bit layout. */
+uint32_t aret_GetSystemInfo(uint32_t esp) {
+    uint32_t *si = (uint32_t *)WP(0);
+    if (si) {
+        si[0] = 0;            /* wProcessorArchitecture/wReserved (x86=0) */
+        si[1] = 0x1000;       /* dwPageSize */
+        si[2] = 0x10000;      /* lpMinimumApplicationAddress */
+        si[3] = 0x7ffeffff;   /* lpMaximumApplicationAddress */
+        si[4] = 1;            /* dwActiveProcessorMask */
+        si[5] = 1;            /* dwNumberOfProcessors */
+        si[6] = 586;          /* dwProcessorType */
+        si[7] = 0x10000;      /* dwAllocationGranularity */
+        si[8] = (6 << 8) | 1; /* wProcessorLevel/Revision (cosmetic) */
+    }
+    return 0;
+}
+uint32_t aret_GetNativeSystemInfo(uint32_t esp) { return aret_GetSystemInfo(esp); }
+
+uint32_t aret_GetACP(uint32_t esp)   { (void)esp; return 1252; } /* Windows-1252 */
+uint32_t aret_GetOEMCP(uint32_t esp) { (void)esp; return 437; }
+uint32_t aret_IsProcessorFeaturePresent(uint32_t esp) { (void)esp; return 1; }
+uint32_t aret_IsDebuggerPresent(uint32_t esp) { (void)esp; return 0; }
+uint32_t aret_IsBadReadPtr(uint32_t esp)  { return (uint32_t)(WU(0) == 0); }
+uint32_t aret_IsBadWritePtr(uint32_t esp) { return (uint32_t)(WU(0) == 0); }
+
+/* Copy a fixed Windows-ish path into the caller's buffer. These APIs take
+   (LPSTR lpBuffer, UINT uSize) — buffer first, then size. */
+static uint32_t fill_path(uint32_t esp, const char *path) {
+    char *buf = WS(0); uint32_t size = WU(1);
+    uint32_t len = (uint32_t)strlen(path);
+    if (buf && size > len) { memcpy(buf, path, len + 1); return len; }
+    return len;
+}
+uint32_t aret_GetSystemDirectoryA(uint32_t esp)  { return fill_path(esp, "C:\\Windows\\System32"); }
+uint32_t aret_GetWindowsDirectoryA(uint32_t esp) { return fill_path(esp, "C:\\Windows"); }
+
+/* GetModuleFileNameA(hModule, buf, size) — report a stable fake image path. */
+uint32_t aret_GetModuleFileNameA(uint32_t esp) {
+    const char *path = "C:\\program.exe";
+    char *buf = WS(1); uint32_t size = WU(2);
+    uint32_t len = (uint32_t)strlen(path);
+    if (buf && size > len) { memcpy(buf, path, len + 1); return len; }
+    return 0;
+}
+
+/* GetStartupInfoA(LPSTARTUPINFOA) — zero it (cb set); benign for CRT startup. */
+uint32_t aret_GetStartupInfoA(uint32_t esp) {
+    uint32_t *p = (uint32_t *)WP(0);
+    if (p) { memset(p, 0, 68); p[0] = 68; }
+    return 0;
+}
+
+/* ------------------------------------------------------------------ */
+/* Synchronisation / handles (single-process model)                   */
+/* ------------------------------------------------------------------ */
+
+uint32_t aret_CreateMutexA(uint32_t esp)        { (void)esp; return 0x100; } /* fake handle */
+uint32_t aret_OpenMutexA(uint32_t esp)          { (void)esp; return 0x100; }
+uint32_t aret_ReleaseMutex(uint32_t esp)        { (void)esp; return 1; }
+uint32_t aret_CreateEventA(uint32_t esp)        { (void)esp; return 0x101; }
+uint32_t aret_SetEvent(uint32_t esp)            { (void)esp; return 1; }
+uint32_t aret_ResetEvent(uint32_t esp)          { (void)esp; return 1; }
+uint32_t aret_WaitForSingleObject(uint32_t esp) { (void)esp; return 0; } /* WAIT_OBJECT_0 */
+uint32_t aret_SetConsoleCtrlHandler(uint32_t esp) { (void)esp; return 1; }
+uint32_t aret_FlushFileBuffers(uint32_t esp)    { (void)esp; return 1; }
+uint32_t aret_SetHandleCount(uint32_t esp)      { return WU(0); }
+uint32_t aret_GetFileType(uint32_t esp)         { (void)esp; return 2; } /* FILE_TYPE_CHAR */
