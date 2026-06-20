@@ -90,3 +90,13 @@ exercises features. So full coverage needs either faithfully emulating the calle
 DLL functions (i.e. a Wine-class environment) or **unioning several Wine runs**
 that trigger different features. There is no single trigger that binds everything,
 because the binary only binds what it actually uses.
+
+## OEP recovered: RVA 0x6545e0
+
+The original entry point was found statically (no single-stepping) via the CRT
+signature: `__security_init_cookie` (RVA 0x6676d0, calls QueryPerformanceCounter
++ GetTickCount) → its caller `__tmainCRTStartup` (RVA 0x667750: chkstk + SEH +
+/GS cookie + GetStartupInfo) → the wrapper calling it with **no internal callers**
+= the entry point at **RVA 0x6545e0**. Setting `AddressOfEntryPoint = 0x6545e0`
+on the decompressed image yields a cleanly-loadable unpacked PE for analysis
+(`find_oep.py`).
