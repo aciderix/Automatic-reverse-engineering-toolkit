@@ -111,10 +111,37 @@ L'objectif de l'utilisateur (« convertir A en natif B fonctionnel ») = couche 
 
 ## 3. CE QUI EST PERFECTIBLE (marche, mais à muscler)
 
-- **Complétude du lifter sur le code lourd en pointeurs de fonction.** Lua 5.4
-  (`lua.exe`) transpile (939 fn) et démarre mais **casse** : un pointeur-fonction
-  passé en **pile cdecl** (après `push ebx`) arrive corrompu → dispatch VM cassé.
-  Cas limite du modèle de pile machine / suivi d'`esp` — **bug réel à corriger**.
+### 3.0 Bugs lifter/structureur identifiés sur du vrai code (à corriger)
+
+- **Bug #2 — arête de sortie de boucle effondrée en `break` nu qui court-circuite
+  le bloc de résultat** *(trouvé par un autre agent sur MQEL `sub_493440`, un
+  désérialiseur)*. Une boucle de `strcmp` inline : le `jne mismatch` saute vers
+  un bloc (`sbb eax,eax; or eax,1`) qui **calcule le résultat** avant le point de
+  re-convergence `done`. Le structureur replie ce saut en un **`break` nu** qui
+  atterrit directement au test post-boucle, **en sautant le bloc de résultat** →
+  la valeur loop-carried (`v29`, initialisée à `0` = « match ») reste à son init.
+  Conséquence : tous les noms de champ « matchent » la 1ʳᵉ entrée → toutes les
+  valeurs écrites au mauvais offset (2/8 champs au lieu de 8/8).
+  - **Cause racine** : une arête qui **quitte la boucle vers un bloc autre que le
+    point de re-convergence** doit préserver les définitions (φ/copies) de ce bloc.
+    En SSA, la valeur lue après la boucle doit recevoir la def de **l'arête de
+    sortie « mismatch »**, pas seulement celle du back-edge. Analogue au bug
+    tail-call déjà corrigé (`internal_tailcall_args`) : l'**effet d'une arête de
+    flot** (ici la def de la valeur ; là l'ajustement d'`esp`) était omis.
+  - **Correctif attendu** : émettre le bloc `mismatch` sur le chemin du `break`
+    (break vers un label qui exécute `sbb;or`), **ou** ne pas effondrer ce saut en
+    `break` (le traiter comme un `goto` vers le bloc de résultat).
+  - **Pointeurs** : `src/structure/` (effondrement boucle/break), `src/ssa/`
+    (placement des φ sur les arêtes de sortie). Repro : `--mode transpile
+    --entry 0x493440 --iat-symbols iat_symbols_full.json`. Doit passer **8/8**.
+- **Bug — pointeur-fonction passé en pile cdecl corrompu.** Lua 5.4 (`lua.exe`)
+  transpile (939 fn) et démarre, mais un pointeur-fonction passé en **pile cdecl**
+  (après `push ebx`) arrive corrompu (`l_alloc` 0x403913 → 0xc42) → dispatch VM
+  cassé. Cas limite du modèle de pile machine / suivi d'`esp`. *Même famille que
+  Bug #2 : un effet d'arête/pile non préservé.*
+
+### 3.1 Autres axes perfectibles
+
 - **Backend LLVM = i386 seulement.** Le datalayout/triple sont 32-bit. Un ELF
   **ARM64** *exécutable* exige de porter tout le runtime en 64-bit (chantier).
 - **WASM** : pas d'I/O fichier sans `--dir` (bac à sable WASI) ; la **soupape asm**
@@ -171,8 +198,10 @@ ET en WASM, entièrement fonctionnel** — prouvé sur du vrai code OSS. Au-del�
 
 ## 6. Prochaines étapes concrètes (par valeur pour l'objectif de conversion)
 
-1. **Corriger le bug pointeur-fonction en pile cdecl** (§3) → débloque la classe
-   « interpréteurs » (Lua) et fiabilise le vrai code. *Lift, haute valeur.*
+1. **Corriger les bugs d'arête de flot (§3.0)** : Bug #2 (sortie de boucle qui
+   court-circuite le bloc de résultat) et le pointeur-fonction pile cdecl. Même
+   famille (effet d'arête non préservé en SSA/structuration) → fiabilise le vrai
+   code et débloque la classe « interpréteurs ». *Lift, haute valeur.*
 2. **vtables / appels indirects C++** (HANDOFF §6.3) → indispensable pour les
    vrais programmes C++. *Lift.*
 3. **Pruning par accessibilité** dans le transpile (`--function` + callees only)
@@ -186,3 +215,61 @@ ET en WASM, entièrement fonctionnel** — prouvé sur du vrai code OSS. Au-del�
 
 > Principe sacré (hérité du décompilateur) : **jamais de sortie incorrecte
 > présentée comme correcte.** Tout ce qui n'est pas sûr reste `Asm`/`__asm__`.
+
+---
+
+## 7. Briques externes à intégrer (réutiliser plutôt que réécrire)
+
+> Évaluées contre les trous des §3–§4. Statut : 🟢 à intégrer · 🟡 au choix
+> (recoupements) · 🟠 s'en inspirer (réutiliser le savoir/les tables) · 🔴
+> marginal/non-intégrable · ⚠️ à clarifier.
+
+### 7.1 Cœur — complétude du lift & backend (le plus structurant)
+
+| Brique | Apport | Trou comblé (§) | Statut |
+|---|---|---|---|
+| **Remill** (Trail of Bits) | Sémantique **complète** x86/amd64/aarch64 → **LLVM IR**, par instruction | **Complétude du lifter** (§3.0/§3) : supprime la soupape `asm`, supprime l'incomplétude. Approche rev.ng « réutiliser une sémantique complète ». **Levier n°1.** | 🟢 |
+| **rev.ng** | SBT mature : lift (QEMU/TCG) + backend LLVM → binaire **re-exécutable** | Cœur [1]+[2] entier. Soit base, soit inspiration (récupération de fonctions, dispatcher d'indirects généralisé) | 🟢/🟠 |
+| **LLVM** | Codegen multi-arch + opti + WASM | Backend [2] — **déjà intégré** ; approfondir pour **multi-arch natif (ARM)** | 🟢 (en place) |
+
+### 7.2 Couche OS / glue (couverture CRT-Win32 et **GUI**)
+
+| Brique | Apport | Trou comblé | Statut |
+|---|---|---|---|
+| **Winelib** | Lier le code lifté contre l'implémentation **native** de Win32/CRT/**USER32**/GDI de Wine | **Couverture totale CRT/Win32** (au-delà de mes 170 shims) **+ la couche GUI** = le mur des jeux (§4) | 🟢 |
+| **Wine** (exécution/extraction dynamique) | Faire **tourner** le programme (déballage, dump `/proc/mem`, extraction d'assets/ressources en cours d'exécution) | Brique **[0] déballage** + **[A] snapshot** (déjà utilisée), + extraction dynamique | 🟢 (en place) |
+| **Box86 / Box64** | Tables de **« wrapped libraries »** (mapping appel lib hôte → natif, conventions d'appel à la frontière) | **Mine pour étoffer la HLE** — même approche que la mienne, en plus complet. Réutiliser le *savoir*, pas le code | 🟠 |
+
+### 7.3 Récupération & vérification (vtables, indirects, équivalence)
+
+> Fort recoupement (sémantique + exécution symbolique). **En choisir un**, pas trois.
+
+| Brique | Apport | Trou comblé | Statut |
+|---|---|---|---|
+| **Triton** | Sémantique x86/x64/ARM (AST) + **exéc. symbolique** + taint, **C++ embarquable** | **vtables/indirects** (résolution par VSA/symbolique) + **vérif d'équivalence fonction entière** + déobfuscation. *Reco si un seul.* | 🟡 |
+| **angr** | CFG recovery, exéc. symbolique, VSA, VEX (Python) | Idem (récupération/indirects/vérif). Intégration par sous-process | 🟡 |
+| **Miasm** | IR + symbolique + émulation multi-arch | Idem ; recoupe angr/Triton | 🟡 |
+| **Unicorn** | Émulateur CPU | **Déjà intégré** (déballeur) ; élargir : analyse dynamique, exécution de snapshot | 🟢 (en place) |
+
+### 7.4 Lisibilité (couche LLM, strictement post-vérif)
+
+| Brique | Apport | Trou comblé | Statut |
+|---|---|---|---|
+| **LLM4Decompile** | LLM spécialisé binaire→C | **Couche LLM de lisibilité** (pilier 7 : noms/commentaires) — **uniquement après** la vérif, jamais présenté comme prouvé | 🟠 |
+
+### 7.5 Marginal / non-intégrable / à clarifier
+
+| Brique | Verdict |
+|---|---|
+| **Rosetta 2** (Apple) | 🔴 **Propriétaire/fermé → non intégrable.** Référence conceptuelle x86→ARM AOT seulement |
+| **Uroboros** | 🔴 But différent (**désassemblage réassemblable**, pas C/LLVM/WASM). Techniques de symbolisation marginalement utiles |
+| **Kaitai Struct** | 🔴 Niche : parser des **formats de données** exotiques (assets, `.UBX`, saves) — utile côté RE/protocole, pas pour le cœur de conversion |
+| **RAMF** | ⚠️ **Non reconnu de façon fiable** comme projet de binary-analysis. À ne pas inventer (principe « jamais de faux comme vrai ») → **fournir un lien / nom complet** pour évaluation |
+
+### 7.6 Si l'on n'en intègre que **trois** (par valeur pour « A → natif B »)
+
+1. **Remill** (ou rev.ng/QEMU) → complétude du lifter.
+2. **Winelib + Wine** → couverture Win32/CRT totale **+ GUI**.
+3. **Triton** → vtables C++ + vérif d'équivalence.
+
+LLVM et Unicorn (déjà en place) restent les fondations backend/dynamique.
