@@ -65,8 +65,8 @@ moitié faits. Chaque tranche élargit la classe de binaires supportés.
 | **CRT+** ✅ | **Vrai CRT** : forward msvcrt → **libc hôte** (string/stdlib/stdio/ctype, `aret_crt.c`) | programmes C standard à large couverture runtime | libc native |
 | **W32** ✅ | **Couche Win32 native** : kernel32 → POSIX (timing, env, tas, atomiques, lstr*, `aret_win32.c`) | programmes Win32 utilisant kernel32 hors-GUI | POSIX natif |
 | **UNPACK** ✅ | **Moteur de déballage dynamique** (Unicorn) : émule le stub → détecte l'OEP par code auto-modifié → dump (`--features unpack`, `src/unpack`) | packers non-VM (déchiffrement en mémoire) | `libunicorn` |
-| M-link | **Brancher les stubs Win32 dans le moteur de déballage** (résoudre l'IAT du packer en émulation) ← *chaînon manquant identifié* | classe « gros programme packé non-VM » | `aret_win32` + `src/unpack` |
-| M6 | Cible WebAssembly/WASI (au lieu d'un OS natif) | « cible universelle » de la note 3 | `wasmtime` |
+| **M-link** ✅ | **Stubs Win32 dans le moteur de déballage** (résout l'IAT du packer en émulation) → **boucle fermée** : packé UPX → ELF natif qui imprime, + validé sur du vrai OSS (SHA-256) | classe « gros programme packé non-VM » | `aret_win32` + `src/unpack` |
+| **M6** ✅ | **Cible WebAssembly** (`--target wasm`) : même C recouvré → `.wasm` qui tourne sous wasmtime ; 14 fixtures OK (dont SHA-256, appels indirects, x87, Win32) | « cible universelle » de la note 3 | `clang wasm32-wasi` + `wasmtime` |
 | M7 | GUI / graphisme (X11, puis DXVK) | applications fenêtrées, puis jeux | Wine/DXVK |
 
 On ne s'engage pas sur M_n+1 tant que M_n ne tourne pas proprement. L'intérêt :
