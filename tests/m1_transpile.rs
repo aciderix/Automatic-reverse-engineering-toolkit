@@ -328,17 +328,17 @@ fn stripped_full_crt_via_flirt() {
 
     let aret = env!("CARGO_BIN_EXE_aret");
     let out_dir = std::env::temp_dir().join(format!("aret_flirt_{}", std::process::id()));
-    // main is at a stable VA; entry-point discovery is a separate concern, so
-    // pass the address to isolate FLIRT's contribution (CRT recognition).
+    // Fully symbol-free: `main` is *discovered* from the startup call pattern,
+    // and the statically-linked CRT is recognized by FLIRT byte signatures.
     let output = Command::new(aret)
-        .args(["--mode", "transpile", "--run", "--entry", "0x401519", "--out-dir"])
+        .args(["--mode", "transpile", "--run", "--entry", "main", "--out-dir"])
         .arg(&out_dir).arg(&stripped)
         .output().expect("failed to run aret");
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(output.status.success(), "stripped transpile failed:\n{stdout}");
     assert!(
         stdout.contains("REALCRT: heap=real crt heap len=13"),
-        "FLIRT did not recognize the stripped CRT:\n{stdout}"
+        "FLIRT/main-discovery did not handle the stripped binary:\n{stdout}"
     );
     let _ = std::fs::remove_file(&stripped);
     let _ = std::fs::remove_dir_all(&out_dir);

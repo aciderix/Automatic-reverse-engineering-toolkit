@@ -45,6 +45,89 @@ pub struct AnalysisResult {
     pub instruction_count: usize,
 }
 
+/// Locate `main` in a stripped CRT binary by the call the startup makes to it.
+///
+/// The mingw/MSVC C-runtime startup (`__tmainCRTStartup`) sets up the cdecl
+/// arguments `argc`/`argv`/`envp` and then `call main`, storing the result as the
+/// process exit code. We look — only inside functions reachable from the entry
+/// point, to avoid matching an ordinary 3-argument call elsewhere — for a direct
+/// `call` whose target is a recovered, *non-library* function and which is
+/// immediately preceded by stores of the cdecl arguments to `[esp]`, `[esp+4]`
+/// (and usually `[esp+8]`). That target is `main`. Returns its address.
+pub fn find_main(prog: &Program, result: &AnalysisResult) -> Option<u64> {
+    use iced_x86::{Mnemonic, OpKind, Register};
+
+    let by_entry: HashMap<u64, &Function> = result.functions.iter().map(|f| (f.entry, f)).collect();
+
+    // Functions reachable from the program entry (the startup chain).
+    let mut reachable: BTreeSet<u64> = BTreeSet::new();
+    let mut queue: VecDeque<u64> = VecDeque::new();
+    queue.push_back(prog.entry);
+    while let Some(a) = queue.pop_front() {
+        if !reachable.insert(a) {
+            continue;
+        }
+        if let Some(f) = by_entry.get(&a) {
+            for &c in &f.callees {
+                if !reachable.contains(&c) {
+                    queue.push_back(c);
+                }
+            }
+        }
+        if reachable.len() > 64 {
+            break; // the startup chain is small; don't wander the whole program
+        }
+    }
+
+    let is_user_fn = |t: u64| -> bool {
+        by_entry.contains_key(&t)
+            && prog.import_name(t).is_none()
+            && prog.crt_symbol(t).is_none()
+            && !prog.is_startup_glue(t)
+    };
+    // A store `mov [esp+disp], _` with disp in {0,4,8} → an arg slot was written.
+    let arg_slot = |insn: &iced_x86::Instruction| -> Option<u64> {
+        if insn.mnemonic() == Mnemonic::Mov
+            && insn.op0_kind() == OpKind::Memory
+            && insn.memory_base() == Register::ESP
+            && insn.memory_index() == Register::None
+        {
+            let d = insn.memory_displacement64();
+            if d == 0 || d == 4 || d == 8 {
+                return Some(d);
+            }
+        }
+        None
+    };
+
+    for f in &result.functions {
+        if !reachable.contains(&f.entry) {
+            continue;
+        }
+        for block in f.blocks.values() {
+            let mut slots: BTreeSet<u64> = BTreeSet::new();
+            for insn in &block.insns {
+                if let Some(d) = arg_slot(&insn.raw) {
+                    slots.insert(d);
+                    continue;
+                }
+                if matches!(insn.flow, Flow::Call) {
+                    if let Some(t) = insn.target {
+                        // argc and argv at least, target is a user function.
+                        if slots.contains(&0) && slots.contains(&4) && is_user_fn(t) {
+                            return Some(t);
+                        }
+                    }
+                    slots.clear();
+                }
+                // Other instructions between the arg setup and the call are fine
+                // (the idiom interleaves the argc/argv loads); only a call resets.
+            }
+        }
+    }
+    None
+}
+
 /// Entry point: global decode, then build each function's CFG. When
 /// `prologue_scan` is set, also recover functions reached only indirectly by
 /// scanning executable sections for function prologues.

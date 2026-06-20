@@ -359,6 +359,16 @@ fn main() -> Result<()> {
                     {
                         eprintln!("note: --entry {s} resolved to 0x{a:x}");
                         Some(a)
+                    } else if matches!(s.as_str(), "main" | "auto") {
+                        // Stripped binary: discover `main` from the CRT startup's
+                        // call pattern (argc/argv setup then `call main`).
+                        match analysis::find_main(&prog, &result) {
+                            Some(a) => {
+                                eprintln!("note: --entry {s} discovered main at 0x{a:x} (no symbol)");
+                                Some(a)
+                            }
+                            None => bail!("--entry {s}: could not discover main (no symbol, no startup pattern)"),
+                        }
                     } else {
                         bail!("--entry: '{s}' is neither hex nor a known function symbol");
                     }
