@@ -119,12 +119,17 @@ faisable la classe « gros programme non-VM-protégé », pas forcément un AAA 
   internes pile+registres, `printf`, tas, pointeurs de fonction, TEB) donnent la
   même sortie correcte. Le backend LLVM supporte la pile partagée (param `%esp`,
   appels via `aret_call`).
-- ✅ **Flottant SSE** : les opérations `double`/`float` (helpers `__fp_*`) sont
-  liées au binaire LLVM (`aret_float.c`). Fixture `hello_float` → `c=8 c10=85`
-  correct via LLVM.
-- Portée honnête : reste à faire — **x87** (`long double`, modélisé en i64 pour
-  l'instant), largeurs exactes (extend/truncate), et la **vérif d'équivalence**
-  sur le chemin LLVM (notre point fort à brancher dessus).
+- ✅ **Flottant complet** : SSE (`__fp_*`) **et x87** (`long double` → `x86_fp80`,
+  émetteur type-conscient sur les valeurs `fp80`). Fixtures `hello_float`
+  (SSE) et `hello_float_x87` → `c=8 c10=85` corrects via les deux backends.
+- ✅ **Largeurs exactes** : `SignExtend`/`Cast` sign/zero-étendus à la bonne
+  largeur (plus d'identité i64).
+- ✅ **Vérification sur le chemin LLVM** : `--mode verify --backend llvm` mesure
+  la validité IR par fonction (100% sur 130 fonctions CRT et 300 fonctions d'un
+  vrai ELF, à parité avec le backend C). *(Pas de SMT/Z3 dans le code — la vérif
+  d'équivalence formelle reste aspirationnelle pour les deux backends.)*
+- Portée honnête : reste un **chemin d'exécution LLVM** robuste sur de gros
+  binaires (testé sur les fixtures) et le différentiel C↔LLVM automatisé.
 
 ## 6. Reco
 
