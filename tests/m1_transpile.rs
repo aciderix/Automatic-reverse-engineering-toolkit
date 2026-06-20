@@ -238,6 +238,23 @@ fn crt_forwarding_to_libc() {
 }
 
 #[test]
+fn real_oss_sha256_digest() {
+    if !has_m32() {
+        eprintln!("skipping SHA-256 test: `cc -m32` unavailable (install gcc-multilib)");
+        return;
+    }
+    // A real, recognizable open-source program — Brad Conte's public-domain
+    // SHA-256 (crypto-algorithms) — through the pipeline. Pure integer/memory
+    // (tables, rotates, loops); the digest must match the reference exactly, so
+    // any lowering bug would scramble it.
+    let out = transpile_and_run("hello_sha256.exe");
+    assert!(
+        out.contains("SHA256: df4fe12327c9300aa24d93f0fc01a593ad410dfc83055287040cb416e550921e"),
+        "real-OSS SHA-256 digest wrong:\n{out}"
+    );
+}
+
+#[test]
 fn win32_native_kernel32_layer() {
     if !has_m32() {
         eprintln!("skipping Win32 test: `cc -m32` unavailable (install gcc-multilib)");

@@ -25,14 +25,26 @@ fn has_m32() -> bool {
 
 #[test]
 fn upx_packed_pe_unpacks_then_transpiles_and_runs() {
+    // hello_printf: M4 line; a real-OSS SHA-256 program: its exact digest.
+    run_pipeline("hello_printf.exe", "M4: int=42 hex=0xff str=hello char=Z pct=%");
+    run_pipeline(
+        "hello_sha256.exe",
+        "SHA256: df4fe12327c9300aa24d93f0fc01a593ad410dfc83055287040cb416e550921e",
+    );
+}
+
+/// Pack `fixture` with UPX, unpack it, transpile the recovery, and assert the
+/// native run prints `expect`. Skips unless upx + llc + cc -m32 + the unpack
+/// feature are all available.
+fn run_pipeline(fixture: &str, expect: &str) {
     if !tool_ok("upx", "--version") || !tool_ok("llc", "--version") || !has_m32() {
         eprintln!("skipping unpack e2e: need upx + llc + cc -m32");
         return;
     }
     let aret = env!("CARGO_BIN_EXE_aret");
     let fixtures = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/m1/fixtures");
-    let orig = format!("{fixtures}/hello_printf.exe");
-    let tmp = std::env::temp_dir().join(format!("aret_e2e_{}", std::process::id()));
+    let orig = format!("{fixtures}/{fixture}");
+    let tmp = std::env::temp_dir().join(format!("aret_e2e_{}_{}", fixture.replace('.', "_"), std::process::id()));
     let _ = std::fs::remove_dir_all(&tmp);
     std::fs::create_dir_all(&tmp).unwrap();
     let packed = tmp.join("packed.exe");
@@ -55,7 +67,7 @@ fn upx_packed_pe_unpacks_then_transpiles_and_runs() {
     }
     assert!(out.status.success(), "unpack failed:\n{report}");
     assert!(report.contains("OEP recovered"), "no OEP:\n{report}");
-    assert!(report.contains("printf"), "printf import not recovered:\n{report}");
+    assert!(report.contains("printf"), "imports not reconstructed:\n{report}");
 
     let rebuilt = unpack_dir.join("unpacked.exe");
     assert!(rebuilt.exists(), "rebuilt PE not written");
@@ -68,8 +80,8 @@ fn upx_packed_pe_unpacks_then_transpiles_and_runs() {
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(out.status.success(), "transpile failed:\n{stdout}");
     assert!(
-        stdout.contains("M4: int=42 hex=0xff str=hello char=Z pct=%"),
-        "unpacked-then-transpiled binary wrong output:\n{stdout}"
+        stdout.contains(expect),
+        "unpacked-then-transpiled {fixture} wrong output (want {expect:?}):\n{stdout}"
     );
 
     let _ = std::fs::remove_dir_all(&tmp);
