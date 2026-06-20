@@ -52,3 +52,24 @@ runs fine under Wine) or on Windows: *IAT Autosearch → Get Imports → Fix Dum
 It handles forwarders/redirections and OEP search robustly. Everything needed
 (the binary self-unpacks, the DLL environment, a way to keep the process alive)
 is now in place.
+
+## Finding: the IAT is obfuscated (on-demand decryption)
+
+A live snapshot of the import table region (start of `.rdata`, RVA ~`0x9ec000`)
+shows the real imports **scattered among high-entropy encrypted values**, e.g.
+only the functions already called are present as valid pointers
+(`kernel32!GetTickCount`, `ntdll!RtlEnterCriticalSection`,
+`advapi32!RegQueryValueExA`, …) while the surrounding slots hold garbage.
+
+This means the protector **encrypts the IAT and decrypts entries on demand** (or
+routes calls through per-import decrypt stubs). Consequences:
+
+- A single memory dump never contains the full clean IAT — only the imports
+  exercised so far are decrypted.
+- A plain Scylla *Get Imports* is insufficient; defeating this needs either
+  forcing every import path to execute (so every entry decrypts) or reversing
+  the per-import decryption stub. That is a separate, protector-specific effort.
+
+So: decompression + execution are fully solved (the binary self-unpacks and runs
+under Wine), but a 100%-valid standalone rebuild is gated on the IAT obfuscation,
+which is an advanced protection beyond a one-shot dump.
