@@ -269,6 +269,41 @@ fn win32_native_kernel32_layer() {
     );
 }
 
+/// Transpile `fixture` starting at the named symbol, run it, return stdout.
+fn transpile_entry_run(fixture_name: &str, entry: &str) -> String {
+    let fixture = format!("{}/tests/m1/fixtures/{}", env!("CARGO_MANIFEST_DIR"), fixture_name);
+    let out_dir = std::env::temp_dir().join(format!(
+        "aret_e_{}_{}", fixture_name.replace('.', "_"), std::process::id()));
+    let aret = env!("CARGO_BIN_EXE_aret");
+    let output = Command::new(aret)
+        .args(["--mode", "transpile", "--run", "--entry", entry, "--out-dir"])
+        .arg(&out_dir).arg(&fixture)
+        .output().expect("failed to run aret");
+    let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+    assert!(output.status.success(), "transpile failed:\n{stdout}");
+    let _ = std::fs::remove_dir_all(&out_dir);
+    stdout
+}
+
+#[test]
+fn real_full_crt_program_from_main() {
+    if !has_m32() {
+        eprintln!("skipping full-CRT test: `cc -m32` unavailable (install gcc-multilib)");
+        return;
+    }
+    // A normally-compiled mingw program (full CRT statically linked: crt2.o,
+    // libmingwex, __main). We lift from `main` (resolved by symbol) and *bind*
+    // the statically-linked CRT (printf/malloc/strlen/free) to native shims by
+    // recognizing their symbols — instead of lifting the CRT's indirect-call
+    // machinery. argc/argv are threaded onto the machine stack.
+    let out = transpile_entry_run("hello_realcrt.exe", "main");
+    assert!(out.contains("REALCRT: argc=1"), "argc not threaded:\n{out}");
+    assert!(
+        out.contains("REALCRT: heap=real crt heap len=13"),
+        "real CRT heap/string path wrong:\n{out}"
+    );
+}
+
 #[test]
 fn win32_system_info_and_sync() {
     if !has_m32() {

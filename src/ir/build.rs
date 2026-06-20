@@ -498,6 +498,25 @@ fn name_calls_in_expr(e: &mut Expr, prog: &Program, bits: u32, held: &HeldImport
             if let CallTarget::Direct(a) = target {
                 if let Some(name) = prog.import_name(*a) {
                     *target = CallTarget::Named(sanitize_import(name));
+                } else if crate::emit::shared_stack() {
+                    // Statically-linked CRT recognized by symbol → bind to the
+                    // native shim (only when transpiling; keeps decompile output
+                    // structurally faithful). The shim reads its cdecl arguments
+                    // off the shared machine stack via esp, like an intercepted
+                    // import, so hand it the stack pointer.
+                    if let Some(name) = prog.crt_symbol(*a) {
+                        *target = CallTarget::Named(sanitize_import(name));
+                        if bits == 32 && args.is_empty() {
+                            *args = vec![Expr::Read(Location::Reg(RegId(4)))];
+                        }
+                    } else if prog.is_startup_glue(*a) {
+                        // mingw/MSVC startup glue (ctor/dtor runners, EH-frame,
+                        // pseudo-reloc) → native no-op, so `main` can run.
+                        *target = CallTarget::Named("aret_noop".to_string());
+                        if bits == 32 && args.is_empty() {
+                            *args = vec![Expr::Read(Location::Reg(RegId(4)))];
+                        }
+                    }
                 }
             }
             // Indirect import call (UBT Phase 3 / API interception). Two shapes:

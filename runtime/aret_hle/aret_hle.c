@@ -495,6 +495,9 @@ void aret_unimpl(const char *name) {
     fprintf(stderr, "ARET: unimplemented import called: %s\n", name);
 }
 
+/* Bound-away startup glue: do nothing, return 0. */
+uint32_t aret_noop(uint32_t esp) { (void)esp; return 0; }
+
 /* ------------------------------------------------------------------ */
 /* C runtime bring-up (mingw/MSVC startup)                            */
 /* ------------------------------------------------------------------ */

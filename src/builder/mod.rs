@@ -401,9 +401,17 @@ pub fn transpile(
          void __aret_map_memory(void);\n\
          void __aret_patch_iat(void);\n\
          uint64_t sub_{entry:x}(uint64_t __esp, uint64_t a, uint64_t c, uint64_t d);\n\n\
-         int main(void) {{\n\
-         {map_call}    uint64_t esp = (uint64_t)(uintptr_t)(aret_stack + sizeof(aret_stack) - 16);\n\
-         \x20   return (int)sub_{entry:x}(esp, 0, 0, 0);\n\
+         int main(int argc, char **argv) {{\n\
+         {map_call}    uint8_t *top = aret_stack + sizeof(aret_stack) - 64;\n\
+         \x20   /* Lay a cdecl frame so an entry at `main` reads argc/argv from the\n\
+         \x20      shared machine stack at [esp+4]/[esp+8]; harmless for a no-arg\n\
+         \x20      startup entry. */\n\
+         \x20   uint32_t *sp = (uint32_t *)top;\n\
+         \x20   sp[0] = 0;                                /* return address */\n\
+         \x20   sp[1] = (uint32_t)argc;                   /* argc  @ esp+4 */\n\
+         \x20   sp[2] = (uint32_t)(uintptr_t)argv;        /* argv  @ esp+8 */\n\
+         \x20   uint64_t esp = (uint64_t)(uintptr_t)top;\n\
+         \x20   return (int)sub_{entry:x}(esp, (uint32_t)argc, (uint32_t)(uintptr_t)argv, 0);\n\
          }}\n",
     );
 

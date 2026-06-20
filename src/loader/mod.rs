@@ -49,6 +49,29 @@ pub struct KnownSymbol {
     pub is_function: bool,
 }
 
+/// C-runtime functions ARET provides natively (aret_hle/aret_crt). A
+/// statically-linked call to one of these (recognized by symbol, see
+/// `Program::crt_symbol`) is bound to the native shim instead of being lifted —
+/// so a real full-CRT binary lifts only the user's code and uses the host
+/// runtime for the rest.
+const CRT_FUNCS: &[&str] = &[
+    // <stdio.h>
+    "printf", "fprintf", "sprintf", "snprintf", "puts", "putchar", "fputc",
+    "fputs", "fgets", "fwrite", "fread", "fopen", "fclose", "fseek", "ftell",
+    "fflush", "remove",
+    // <stdlib.h>
+    "malloc", "calloc", "realloc", "free", "atoi", "atol", "abs", "labs",
+    "strtol", "strtoul", "rand", "srand", "getenv",
+    // <string.h>
+    "memcpy", "memmove", "memset", "memcmp", "memchr", "strlen", "strcmp",
+    "strncmp", "strcpy", "strncpy", "strcat", "strncat", "strchr", "strrchr",
+    "strstr", "strspn", "strcspn", "strpbrk", "strtok", "strdup", "strcoll",
+    "strerror",
+    // <ctype.h>
+    "toupper", "tolower", "isalpha", "isdigit", "isalnum", "isspace", "isupper",
+    "islower", "ispunct", "iscntrl", "isprint", "isgraph", "isxdigit",
+];
+
 /// Format-agnostic view of the loaded program.
 pub struct Program {
     pub format: String,
@@ -217,6 +240,47 @@ impl Program {
     /// Imported function name for a PE IAT slot address, if any.
     pub fn import_name(&self, addr: u64) -> Option<&str> {
         self.imports.get(&addr).map(|s| s.as_str())
+    }
+
+    /// Recognize a *statically-linked* C-runtime function by its symbol, so a
+    /// call to it can be bound to the native HLE shim instead of lifting the
+    /// CRT's own (often indirect-call-heavy) implementation. Returns the symbol
+    /// name when `addr` is a function symbol whose base name (minus a leading
+    /// `_`) is a CRT function ARET provides natively (aret_crt/aret_hle). This is
+    /// symbol-based library recognition — the cheap form of IDA FLIRT, the lever
+    /// for real full-CRT binaries (lift the user's code, link the real runtime).
+    pub fn crt_symbol(&self, addr: u64) -> Option<&str> {
+        let s = self.symbols.get(&addr)?;
+        if !s.is_function {
+            return None;
+        }
+        let base = s.name.trim_start_matches('_');
+        if CRT_FUNCS.contains(&base) {
+            Some(s.name.as_str())
+        } else {
+            None
+        }
+    }
+
+    /// Recognize a mingw/MSVC *startup-glue* function — the global ctor/dtor
+    /// runners, EH-frame registration, and pseudo-relocator the CRT startup runs
+    /// before/around `main`. These walk compiler-built tables by indirect calls
+    /// that static recovery cannot fully resolve; binding them to a native no-op
+    /// lets the user's `main` run. (Honest cost: C++ global constructors are not
+    /// executed — a documented limitation, not a crash.)
+    pub fn is_startup_glue(&self, addr: u64) -> bool {
+        match self.symbols.get(&addr) {
+            Some(s) if s.is_function => {
+                let n = &s.name;
+                n.ends_with("__main")
+                    || n.contains("do_global_ctors")
+                    || n.contains("do_global_dtors")
+                    || n.contains("register_frame")
+                    || n.contains("register_frame_info")
+                    || n.contains("pei386_runtime_relocator")
+            }
+            _ => false,
+        }
     }
 
     /// Return the section containing `addr`, if any.

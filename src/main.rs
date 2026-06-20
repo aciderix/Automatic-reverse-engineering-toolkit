@@ -20,7 +20,7 @@ mod types;
 mod unpack;
 mod verify;
 
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 use clap::{Parser, ValueEnum};
 use disasm::Disassembler;
 use loader::Program;
@@ -292,10 +292,25 @@ fn main() -> Result<()> {
                     eprintln!("note: --target {} (M1 builds a native host binary at the source bitness)", t);
                 }
             }
+            // `--entry` accepts a hex address or a function symbol name (e.g.
+            // `main`) — the latter lets us skip a fragile CRT startup and lift
+            // from the user's entry, binding the recognized CRT natively.
             let entry_override = match &args.entry {
                 Some(s) => {
                     let h = s.trim_start_matches("0x");
-                    Some(u64::from_str_radix(h, 16).context("invalid --entry hex")?)
+                    if let Ok(a) = u64::from_str_radix(h, 16) {
+                        Some(a)
+                    } else if let Some(a) = prog
+                        .symbols
+                        .values()
+                        .find(|k| k.is_function && (k.name == *s || k.name.trim_start_matches('_') == *s))
+                        .map(|k| k.address)
+                    {
+                        eprintln!("note: --entry {s} resolved to 0x{a:x}");
+                        Some(a)
+                    } else {
+                        bail!("--entry: '{s}' is neither hex nor a known function symbol");
+                    }
                 }
                 None => None,
             };

@@ -73,6 +73,11 @@ uint32_t aret_SetFilePointer(uint32_t esp); /* (h, dist, *high, method) -> DWORD
  * so a large binary still links and reports exactly which APIs it needs. */
 void aret_unimpl(const char *name);
 
+/* No-op shim (returns 0) for recognized startup-glue functions (mingw/MSVC
+ * global ctor/dtor runners, EH-frame registration, pseudo-relocator) we bind
+ * away instead of lifting their indirect-call-heavy table walks. */
+uint32_t aret_noop(uint32_t esp);
+
 /* Segment bases for the transpiled code: `fs:[ea]` becomes a load/store at
  * `__aret_fs() + ea`, pointing into a synthetic TEB/PEB so the Windows startup's
  * thread/process-block reads work natively. gs is unused in 32-bit user mode. */
