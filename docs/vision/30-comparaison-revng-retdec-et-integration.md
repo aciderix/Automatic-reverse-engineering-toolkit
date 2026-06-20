@@ -135,9 +135,36 @@ faisable la classe « gros programme non-VM-protégé », pas forcément un AAA 
   autres paquets (pas de redéfinition), compilés **en parallèle** par `llc` puis
   liés. Le pic mémoire est borné à un petit module par cœur. Validé en multi-
   paquets : 130 fonctions → 5 modules `.ll` indépendamment acceptés par `llvm-as`,
-  liés en un ELF qui tourne.
+  liés en un ELF qui tourne. **Validé à l'échelle réelle** : le jeu déballé
+  (`MightyQuest`, **44 183 fonctions**) → **221 modules `.ll`** compilés en
+  parallèle par `llc` (≈120 Mo de RSS chacun, 4 en parallèle au lieu d'un seul
+  `llc` à 8,5 Go) → **ELF natif de 127 Mo** lié sans OOM.
 - Portée honnête : reste un **chemin d'exécution LLVM** robuste sur de gros
   binaires (testé sur les fixtures) et le différentiel C↔LLVM automatisé.
+
+## 5 ter. Fait : brancher le vrai CRT (reco #1)
+
+> Plutôt que réécrire le runtime C à la main, on **forwarde chaque point d'entrée
+> msvcrt vers la libc hôte** avec un marshalling fin et ABI-exact (`aret_crt.c`).
+
+- Mécanisme : chaque `aret_<name>` lit ses arguments cdecl sur la pile machine
+  partagée (`[esp+0]`, `[esp+4]`, …), appelle la **vraie** fonction libc, renvoie
+  le résultat dans le slot `eax`. Ce sont des **définitions fortes** qui priment
+  sur les stubs faibles du builder → lier l'unité élargit la couverture CRT, sans
+  toucher au dispatch. msvcrt ≈ libc pour le sous-ensemble C standard : c'est le
+  **vrai** runtime, pas une imitation.
+- Couverture ajoutée : `<string.h>` (strncpy/strcat/strrchr/strstr/strspn/strtok/
+  strdup/memcmp/memchr/_stricmp/_strnicmp…), `<stdlib.h>` (atol/abs/strtol/strtoul/
+  rand/srand/getenv), `<stdio.h>` (sprintf/snprintf/fflush — variadiques via le
+  formateur partagé `aret_vformat`), `<ctype.h>` (toupper/isdigit/…).
+- Validé : fixture `hello_crt` →
+  `CRT: s=reverse dot=.c sub=piler ci=0 up=Z dig=1 n=-123 hex=255 abs=42 mc=1`,
+  **identique** via les backends C **et** LLVM (`tests/m1_transpile.rs` +
+  différentiel `tests/llvm_backend.rs`).
+- Limite honnête : les fonctions à **callback** (comparateurs `qsort`/`bsearch`,
+  retour d'écriture `sscanf`) ne sont pas forwardées — un callback transpilé est
+  un `sub_<va>` à l'ABI pile-machine, pas une fonction cdecl native ; il faut le
+  chemin `aret_call`. Laissé à des shims dédiés.
 
 ## 6. Reco
 

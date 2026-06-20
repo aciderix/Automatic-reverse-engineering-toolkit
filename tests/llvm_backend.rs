@@ -150,6 +150,7 @@ fn c_and_llvm_backends_agree() {
         "hello_teb.exe",
         "hello_float.exe",
         "hello_float_x87.exe",
+        "hello_crt.exe",
     ] {
         let c = transpile_run(fixture, "c");
         let llvm = transpile_run(fixture, "llvm");

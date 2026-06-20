@@ -222,6 +222,22 @@ fn float_x87_long_double() {
 }
 
 #[test]
+fn crt_forwarding_to_libc() {
+    if !has_m32() {
+        eprintln!("skipping CRT test: `cc -m32` unavailable (install gcc-multilib)");
+        return;
+    }
+    // A spread of msvcrt functions (string build/search, case-insensitive compare,
+    // ctype, integer conversion, sprintf) forwarded to the genuine host libc
+    // through the shared machine stack (aret_crt.c).
+    let out = transpile_and_run("hello_crt.exe");
+    assert!(
+        out.contains("CRT: s=reverse dot=.c sub=piler ci=0 up=Z dig=1 n=-123 hex=255 abs=42 mc=1"),
+        "CRT forwarding wrong:\n{out}"
+    );
+}
+
+#[test]
 fn fs_file_roundtrip_with_path_translation() {
     if !has_m32() {
         eprintln!("skipping FS test: `cc -m32` unavailable (install gcc-multilib)");
