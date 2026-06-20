@@ -11,6 +11,12 @@ repository = "https://github.com/aciderix/Automatic-reverse-engineering-toolkit"
 name = "aret"
 path = "src/main.rs"
 
+[features]
+# Dynamic unpacker (`--mode unpack`). Links the system Unicorn CPU emulator
+# (libunicorn-dev) to run a packer's stub until it decrypts the real code, then
+# dump it. Off by default so the core toolkit needs no native emulator.
+unpack = []
+
 [dependencies]
 # Binary container parsing (PE / ELF / Mach-O)
 object = { version = "0.36", default-features = false, features = ["read", "std"] }

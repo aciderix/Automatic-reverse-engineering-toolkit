@@ -101,6 +101,31 @@ Limite honnête : même déballé, un AAA reste plein de comportements **dynamiq
 (résolution d'API au vol, callbacks) durs en statique pur. Le déballage rend
 faisable la classe « gros programme non-VM-protégé », pas forcément un AAA complet.
 
+### Fait : moteur de déballage dynamique (`--mode unpack`, `--features unpack`)
+
+> Le brique [0] amorcée pour de vrai, **sans Wine** : on réutilise l'émulateur
+> CPU **Unicorn** (lib système `libunicorn`, FFI fine dans `src/unpack/`).
+
+- Principe (cœur du déballage générique) : émuler depuis l'entry point en
+  **traçant chaque page écrite** par le stub ; dès qu'une instruction est
+  **fetchée depuis une page qui vient d'être écrite**, c'est du code
+  auto-modifié fraîchement déchiffré → on a atteint l'**OEP**. On s'arrête et le
+  payload est lisible en clair dans la mémoire de l'émulateur.
+- Implémenté : mapping des sections aux VA d'origine, pile, **TEB/PEB synthétique
+  + base FS** (pour passer le prologue Windows `fs:[0x30]`/`fs:[0x18]`),
+  **mapping paresseux** des pages allouées au vol (tolérance scratch), détection
+  d'OEP, dump de l'image déchiffrée, mesure des octets réécrits.
+- Validé : un mini-packer XOR auto-déchiffrant (le stub déchiffre 4 octets puis
+  saute dedans) → OEP détectée à la bonne adresse, payload récupéré en clair ;
+  un code non auto-modifiant ne produit **pas** de faux OEP. Tests
+  `src/unpack` (`cargo test --features unpack`).
+- Mur honnête sur le jeu réel : le protecteur de `MightyQuest` **appelle son IAT
+  (thunk near-null) avant de déchiffrer** → le moteur le **signale proprement**
+  (`stub reached unmapped 0x10 — needs an API/Win32 model`) au lieu de planter.
+  La suite logique est exactement la **couche Win32** (§4 [3], reco #2) branchée
+  sur ce moteur : stubber LoadLibrary/GetProcAddress/VirtualAlloc/… pour laisser
+  le stub résoudre puis déchiffrer. Le moteur est prêt à recevoir cette couche.
+
 ## 5 bis. Démarré : backend LLVM (`--mode llvm`)
 
 > Première pierre de l'amélioration #1 (§3). ARET sait maintenant émettre du

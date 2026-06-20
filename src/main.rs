@@ -16,6 +16,8 @@ mod opt;
 mod ssa;
 mod structure;
 mod types;
+#[cfg(feature = "unpack")]
+mod unpack;
 mod verify;
 
 use anyhow::{Context, Result};
@@ -45,6 +47,9 @@ enum Mode {
     /// Transpile to a native executable for the target OS (UBT M1): intercept
     /// API imports into HLE shims, link, and recompile natively.
     Transpile,
+    /// Dynamically unpack a packed PE: emulate the stub (Unicorn) until it
+    /// decrypts the payload, detect the OEP, and report. Requires `--features unpack`.
+    Unpack,
 }
 
 #[derive(Parser, Debug)]
@@ -119,6 +124,35 @@ fn render_function(prog: &Program, func: &analysis::Function, flat: bool) -> Str
     }
 }
 
+/// `--mode unpack`: emulate the packer stub until it decrypts, report the OEP.
+#[cfg(feature = "unpack")]
+fn run_unpack(prog: &Program) -> Result<String> {
+    use std::fmt::Write as _;
+    let mut out = String::new();
+    out.push_str("ARET dynamic unpack (Unicorn)\n");
+    let _ = writeln!(out, "  entry (packed): 0x{:x}", prog.entry);
+    match unpack::unpack_program(prog, 50_000_000) {
+        Ok(r) => {
+            let _ = writeln!(out, "  OEP recovered:  0x{:x}", r.oep);
+            let _ = writeln!(
+                out,
+                "  decrypted:      {} / {} bytes rewritten by the stub",
+                r.decrypted_bytes, r.total_bytes
+            );
+            out.push_str("  status:         OEP reached — payload is now in cleartext in memory\n");
+        }
+        Err(e) => {
+            let _ = writeln!(out, "  status:         {}", e);
+        }
+    }
+    Ok(out)
+}
+
+#[cfg(not(feature = "unpack"))]
+fn run_unpack(_prog: &Program) -> Result<String> {
+    anyhow::bail!("--mode unpack requires building with `--features unpack` (needs libunicorn-dev)")
+}
+
 fn main() -> Result<()> {
     let args = Args::parse();
     let data = std::fs::read(&args.binary)
@@ -129,6 +163,12 @@ fn main() -> Result<()> {
     if args.mode == Mode::Info {
         let out = render_info(&prog);
         return emit(&args, out);
+    }
+
+    if args.mode == Mode::Unpack {
+        // Dynamic unpacking does not use static function recovery (the real code
+        // is still encrypted) — emulate the stub instead.
+        return emit(&args, run_unpack(&prog)?);
     }
 
     let disasm = Disassembler::new(prog.bitness);
@@ -250,6 +290,7 @@ fn main() -> Result<()> {
             )?;
             out.push_str(&report.render());
         }
+        Mode::Unpack => unreachable!("handled before function recovery"),
     }
 
     if functions.is_empty() {
