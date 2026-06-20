@@ -73,3 +73,20 @@ routes calls through per-import decrypt stubs). Consequences:
 So: decompression + execution are fully solved (the binary self-unpacks and runs
 under Wine), but a 100%-valid standalone rebuild is gated on the IAT obfuscation,
 which is an advanced protection beyond a one-shot dump.
+
+## Result: headless import harvesting via the binding routine
+
+A write-watchpoint on the IAT region (resumed from the 3.0B checkpoint) shows the
+protector binds imports with a single generic routine — `mov [eax], edx` at a
+fixed address (eax = IAT slot, edx = resolved address). Capturing every write and
+resolving `edx` against the mapped DLL export tables recovers the imports
+**headless, without running the game** (`harvest_imports_emulated.py`): 55 imports
+across kernel32/ntdll/user32/advapi32 were recovered this way up to the point
+emulation diverges.
+
+Coverage limit: the binary binds imports **lazily** — only the entries needed up
+to a given execution point are written; the rest resolve on demand as the game
+exercises features. So full coverage needs either faithfully emulating the called
+DLL functions (i.e. a Wine-class environment) or **unioning several Wine runs**
+that trigger different features. There is no single trigger that binds everything,
+because the binary only binds what it actually uses.
