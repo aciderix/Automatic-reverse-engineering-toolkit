@@ -197,6 +197,36 @@ faisable la classe « gros programme non-VM-protégé », pas forcément un AAA 
   (moteur CPU + modèle Win32 + reconstruction d'imports + rebuild PE), reste à
   élargir la couverture.
 
+### Fait : démarrage CRT par **reconnaissance de bibliothèque** (reco #1, façon Wine)
+
+> La réponse « réutiliser plutôt que réécrire » appliquée au CRT : un vrai
+> programme compilé normalement **lie statiquement** le runtime C (mingw :
+> `crt2.o`/`libmingwex`/`__main`). Le lifter de ce CRT touche des **parcours de
+> tables par appels indirects** que la récupération statique ne résout pas → le
+> démarrage plantait. Plutôt que de perfectionner ce lifting, on **reconnaît** le
+> CRT et on le **branche sur le runtime natif** — sans le lifter.
+
+- **Reconnaissance par symbole** (FLIRT du pauvre) : `Program::crt_symbol`
+  identifie une fonction CRT statiquement liée par son symbole (stdio/stdlib/
+  string/ctype que `aret_hle`/`aret_crt` fournissent) ; `is_startup_glue`
+  reconnaît la colle mingw/MSVC (`__main`, exécuteurs de ctors/dtors globaux,
+  EH-frame, pseudo-relocator).
+- **Binding** (chemin transpile only) : un appel direct vers une fonction CRT
+  reconnue est lié au **shim natif** (esp threadé, comme un import) ; la colle de
+  démarrage est liée à un `aret_noop`. Les corps CRT ne sont alors jamais exécutés.
+- **Démarrage à `main`** : `--entry` accepte un **nom de symbole** (`main`), et
+  l'entrée native pose une trame cdecl pour passer **argc/argv** par la pile
+  machine (depuis les vrais argc/argv).
+- Résultat : un programme mingw **compilé normalement** (`hello_realcrt`, CRT
+  complet) lifté depuis `main` tourne **stable** sur les deux cibles — **ELF
+  natif ET WASM** — et imprime `REALCRT: argc=1 … heap=real crt heap len=13`
+  (malloc/strcpy/strlen/printf via le CRT reconnu). Test
+  `real_full_crt_program_from_main`.
+- Limite honnête : les **constructeurs globaux C++** ne sont pas exécutés (colle
+  de démarrage no-op), et la reconnaissance exige des **symboles** (un binaire
+  *strippé* demandera des signatures façon FLIRT). C'est exactement la marche
+  vers la **variante Wine** (lier `dlls/msvcrt` au lieu de reconnaître).
+
 ### Validé sur du *vrai* code open-source (pas que des fixtures jouets)
 
 - **SHA-256 de Brad Conte** (`crypto-algorithms`, domaine public) compilé en PE :
