@@ -1,0 +1,7 @@
+# never commit game/system DLLs, dumps, checkpoints or secrets
+*.dll
+*.exe
+*.bin
+ckpt/
+dllset/
+gamedlls/
