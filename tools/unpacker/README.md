@@ -71,3 +71,16 @@ iteration instead of ~45.
 This is **not** a general-purpose unpacker — it is a documented, reproducible
 case study of defeating one protector by emulation, for educational/analysis use
 on binaries you are authorized to analyze.
+
+
+## Update: the Wine approach completes the unpack
+
+Pure Unicorn emulation stops at the import-resolution phase (it would need a
+fully linked Windows DLL environment). Running the binary under a **real 32-bit
+Wine** with the game DLLs present lets the stub finish on its own — the original
+game code runs (observed: the engine's reporter/telemetry init executes after
+the OEP). `wine_unpack.py` launches it under Wine and snapshots the unpacked
+image from `/proc/<pid>/mem`, producing `wine_unpacked.exe` (decompressed
+`.text`/`.rdata`/`.data`). The header entry point still points at the stub; the
+real OEP + a portable import table are the remaining Scylla-style fix (see
+`WINDOWS_UNPACK_GUIDE.md`).
