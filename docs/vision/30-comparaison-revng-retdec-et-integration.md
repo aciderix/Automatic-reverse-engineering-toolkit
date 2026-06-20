@@ -197,6 +197,17 @@ faisable la classe « gros programme non-VM-protégé », pas forcément un AAA 
   (moteur CPU + modèle Win32 + reconstruction d'imports + rebuild PE), reste à
   élargir la couverture.
 
+### Validé sur du *vrai* code open-source (pas que des fixtures jouets)
+
+- **SHA-256 de Brad Conte** (`crypto-algorithms`, domaine public) compilé en PE :
+  6 fonctions, manipulation de bits/tables/boucles réelles. Transpilé (backends
+  **C et LLVM**) → **digest cryptographique exact** = la référence native
+  `sha256sum` (`df4fe123…550921e`). Et **chaîne complète** : packé UPX → déballé
+  (OEP + 4 imports reconstruits : ExitProcess/memset/printf/strlen) → transpilé →
+  **même digest correct**. Tests `real_oss_sha256_digest` + `tests/unpack_e2e.rs`.
+- Couverture **kernel32** élargie (system info, chemins, mutex/event/wait,
+  GetACP, GetModuleFileNameA…) → fixture `hello_win32sys`, parité C/LLVM.
+
 ## 5 bis. Démarré : backend LLVM (`--mode llvm`)
 
 > Première pierre de l'amélioration #1 (§3). ARET sait maintenant émettre du
