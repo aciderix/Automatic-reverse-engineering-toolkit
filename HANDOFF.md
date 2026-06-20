@@ -4,6 +4,12 @@
 > méthodologie, l'architecture réelle, les outils, l'état d'avancement honnête,
 > les pièges connus et les prochaines étapes. Lis ensuite `ROADMAP.md` (le plan
 > technique détaillé) et `README.md` (vue utilisateur).
+>
+> 🧭 **Objectif « convertir un binaire en natif d'un autre système / WASM » :**
+> l'état des lieux consolidé (acquis / perfectible / manque) est dans
+> **[`docs/vision/40-etat-des-lieux-conversion.md`](docs/vision/40-etat-des-lieux-conversion.md)**.
+> Ce HANDOFF couvre la **couche 1** (décompilateur vérifié) ; le doc 40 couvre la
+> **couche 2** (transpileur natif/WASM) qui s'appuie dessus.
 
 ---
 

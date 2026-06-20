@@ -1,5 +1,11 @@
 # Synthèse — d'ARET (décompilateur) vers UBT (transpilateur universel)
 
+> 📌 **État des lieux consolidé (à jour) :**
+> [`40-etat-des-lieux-conversion.md`](40-etat-des-lieux-conversion.md) —
+> acquis / perfectible / manque pour l'objectif « convertir un binaire en natif
+> d'un autre système ou WASM, sans émulation ». Lire en premier pour reprendre
+> sur une base saine ; ce document-ci reste la roadmap par milestones (M1→M7).
+>
 > Ce document relie la **vision UBT** des trois notes voisines
 > ([1](01-design-document-UBT.md) · [2](02-briques-open-source.md) ·
 > [3](03-projets-avances-SBT.md)) à l'**état réel du code ARET** dans ce dépôt.
