@@ -672,6 +672,21 @@ fn internal_call_args() -> Vec<Expr> {
     ]
 }
 
+/// Arguments for an internal *tail* call (a `jmp` to a function entry). Unlike a
+/// `call`, a `jmp` pushes no return address: the callee reuses the current frame,
+/// so it must receive the stack pointer **as-is** (not `esp - 4`). Passing
+/// `esp - 4` would shift every stack argument the callee reads by one slot — the
+/// bug that made a `push ebp;mov ebp,esp;pop ebp;jmp f` thunk hand `f` the wrong
+/// frame.
+fn internal_tailcall_args() -> Vec<Expr> {
+    vec![
+        Expr::Read(Location::Reg(RegId(4))), // esp unchanged (no pushed return addr)
+        Expr::Read(Location::Reg(RegId(0))), // eax
+        Expr::Read(Location::Reg(RegId(1))), // ecx
+        Expr::Read(Location::Reg(RegId(2))), // edx
+    ]
+}
+
 fn thread_calls_in_expr(e: &mut Expr) {
     match e {
         Expr::Call { target, args, .. } => {
@@ -713,7 +728,24 @@ fn thread_calls_in_stmt(s: &mut Stmt) {
             thread_calls_in_expr(value);
         }
         Stmt::Branch { cond, .. } => thread_calls_in_expr(cond),
-        Stmt::Return(Some(e)) => thread_calls_in_expr(e),
+        // A `Return(Call)` is a tail call (`jmp f`): the outermost call must get
+        // the stack pointer as-is (no pushed return slot). Nested calls inside its
+        // arguments are ordinary calls and keep the `esp - 4` model.
+        Stmt::Return(Some(e)) => {
+            if let Expr::Call { target, args, .. } = e {
+                if matches!(target, CallTarget::Direct(_) | CallTarget::Indirect(_)) {
+                    if let CallTarget::Indirect(x) = target {
+                        thread_calls_in_expr(x);
+                    }
+                    *args = internal_tailcall_args();
+                    for a in args.iter_mut() {
+                        thread_calls_in_expr(a);
+                    }
+                    return;
+                }
+            }
+            thread_calls_in_expr(e)
+        }
         _ => {}
     }
 }
