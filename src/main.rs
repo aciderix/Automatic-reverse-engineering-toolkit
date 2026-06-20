@@ -284,8 +284,13 @@ fn main() -> Result<()> {
             out.push_str(&report.render());
         }
         Mode::Transpile => {
+            let wasm = args.target.as_deref() == Some("wasm");
             if let Some(t) = &args.target {
-                eprintln!("note: --target {} (M1 builds a native host binary at the source bitness)", t);
+                if wasm {
+                    eprintln!("note: --target wasm (compile the recovered C to WebAssembly via clang/wasi)");
+                } else {
+                    eprintln!("note: --target {} (M1 builds a native host binary at the source bitness)", t);
+                }
             }
             let entry_override = match &args.entry {
                 Some(s) => {
@@ -301,6 +306,7 @@ fn main() -> Result<()> {
                 args.run,
                 entry_override,
                 &args.backend,
+                wasm,
             )?;
             out.push_str(&report.render());
         }
