@@ -119,12 +119,35 @@ faisable la classe « gros programme non-VM-protégé », pas forcément un AAA 
   saute dedans) → OEP détectée à la bonne adresse, payload récupéré en clair ;
   un code non auto-modifiant ne produit **pas** de faux OEP. Tests
   `src/unpack` (`cargo test --features unpack`).
-- Mur honnête sur le jeu réel : le protecteur de `MightyQuest` **appelle son IAT
-  (thunk near-null) avant de déchiffrer** → le moteur le **signale proprement**
-  (`stub reached unmapped 0x10 — needs an API/Win32 model`) au lieu de planter.
-  La suite logique est exactement la **couche Win32** (§4 [3], reco #2) branchée
-  sur ce moteur : stubber LoadLibrary/GetProcAddress/VirtualAlloc/… pour laisser
-  le stub résoudre puis déchiffrer. Le moteur est prêt à recevoir cette couche.
+### Fait : le chaînon — modèle Win32 **dans** le moteur de déballage
+
+> La couche Win32 branchée **à l'intérieur de l'émulateur** : un packer peut
+> maintenant résoudre son IAT et allouer sa mémoire pendant qu'on l'émule.
+
+- Mécanisme : chaque slot de l'IAT (`prog.imports`, VA → nom) est rempli d'une
+  **sentinelle** pointant dans une région-piège ; un `call [iat]` amène EIP sur
+  la sentinelle, interceptée par le hook de code → on lit les arguments stdcall
+  sur la pile émulée, on **modèle un résultat natif**, et on **simule le retour
+  stdcall** (pop retaddr + args, EIP = retour). Surface servie :
+  LoadLibrary*/GetModuleHandle* (handle factice), **GetProcAddress** (lie une
+  nouvelle sentinelle au nom demandé → trappée à son tour), **VirtualAlloc**
+  (arène bump réellement mappée), VirtualProtect/Free, GetVersion, etc.
+- Tolérance générique ajoutée : un accès **données** non mappé (n'importe où — le
+  CRT/SEH sonde near-null, le packer gratte du scratch) est **comblé par une page
+  zéro** ; seul un **fetch** non mappé (contrôle perdu, code non fabricable)
+  arrête et est signalé.
+- Validé : fixture packer qui **résout VirtualAlloc via son IAT**, écrit le
+  payload déchiffré dans le buffer rendu, et y saute → l'appel est servi (1 API)
+  et l'OEP tombe dans la mémoire allouée fraîchement écrite (`src/unpack` test
+  `iat_call_resolved_then_oep_in_allocated_memory`).
+- Sur `MightyQuest` : le moteur **passe désormais** le prologue near-null (plus de
+  faute) et tourne jusqu'au budget **sans code auto-modifié** (0 octet déchiffré)
+  → diagnostic honnête « rien à déballer ». Cohérent avec le nom du fichier
+  (`_unpacked_fixed`) : ce binaire est **déjà déballé** (sections `.UBX` dormantes,
+  entrée = vrai démarrage CRT). Le moteur est correct : il n'invente pas d'OEP.
+- Reste pour un *vrai* packer AAA : élargir la surface d'API servie en émulation
+  (la même `aret_win32` mais côté émulateur) et gérer l'anti-debug/TLS — chemin
+  ouvert, sans changement d'architecture.
 
 ## 5 bis. Démarré : backend LLVM (`--mode llvm`)
 

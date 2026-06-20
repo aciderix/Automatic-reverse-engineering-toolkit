@@ -134,6 +134,7 @@ fn run_unpack(prog: &Program) -> Result<String> {
     match unpack::unpack_program(prog, 50_000_000) {
         Ok(r) => {
             let _ = writeln!(out, "  OEP recovered:  0x{:x}", r.oep);
+            let _ = writeln!(out, "  API calls:      {} import(s) serviced by the Win32 model", r.api_calls);
             let _ = writeln!(
                 out,
                 "  decrypted:      {} / {} bytes rewritten by the stub",

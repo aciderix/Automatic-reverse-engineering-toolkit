@@ -70,6 +70,13 @@ const PAGE: u64 = 0x1000;
 fn page_down(a: u64) -> u64 { a & !(PAGE - 1) }
 fn page_up(a: u64) -> u64 { (a + PAGE - 1) & !(PAGE - 1) }
 
+// Reserved emulator regions for the Win32 import model (well clear of the image,
+// stack, and TEB/PEB).
+const TRAP_BASE: u64 = 0xB000_0000; // each imported function = TRAP_BASE + idx*8
+const TRAP_SIZE: u64 = 0x0010_0000; // up to 131072 distinct imports
+const ALLOC_BASE: u64 = 0x5000_0000; // VirtualAlloc/Heap arena (bump allocator)
+const MODULE_BASE: u32 = 0x6000_0000; // fake module handles
+
 /// State shared with the C callbacks (Unicorn passes it back as `user_data`).
 struct Trace {
     /// Pages written during emulation (candidate decrypted code).
@@ -83,6 +90,107 @@ struct Trace {
     /// Remaining on-demand zero pages we will map to let a stub that allocates
     /// scratch memory keep running (a standard unpacker tolerance).
     lazy_budget: u32,
+    /// sentinel index -> imported function name (extended at run time by
+    /// GetProcAddress). Sentinel address = TRAP_BASE + idx*8.
+    imports: Vec<String>,
+    /// Image base (lowest mapped region) — answers GetModuleHandle(NULL).
+    image_base: u64,
+    /// Bump pointer for VirtualAlloc/Heap-backed memory.
+    alloc_cursor: u64,
+    /// Next fake module handle.
+    module_cursor: u32,
+    /// Count of API calls serviced (diagnostics).
+    api_calls: u32,
+}
+
+unsafe fn reg_get(uc: *mut uc_engine, id: c_int) -> u32 {
+    let mut v: u32 = 0;
+    uc_reg_read(uc, id, &mut v as *mut u32 as *mut c_void);
+    v
+}
+unsafe fn reg_set(uc: *mut uc_engine, id: c_int, v: u32) {
+    uc_reg_write(uc, id, &v as *const u32 as *const c_void);
+}
+unsafe fn rd32(uc: *mut uc_engine, addr: u64) -> u32 {
+    let mut v: u32 = 0;
+    uc_mem_read(uc, addr, &mut v as *mut u32 as *mut c_void, 4);
+    v
+}
+unsafe fn wr32(uc: *mut uc_engine, addr: u64, v: u32) {
+    uc_mem_write(uc, addr, &v as *const u32 as *const c_void, 4);
+}
+unsafe fn rd_cstr(uc: *mut uc_engine, addr: u64) -> String {
+    let mut s = String::new();
+    for i in 0..256u64 {
+        let mut b: u8 = 0;
+        if uc_mem_read(uc, addr + i, &mut b as *mut u8 as *mut c_void, 1) != 0 || b == 0 {
+            break;
+        }
+        s.push(b as char);
+    }
+    s
+}
+
+/// Service an imported call: read stdcall args from the emulated stack, model a
+/// native result, then simulate the stdcall return (pop retaddr + callee args).
+/// Just enough of the Win32 surface for a packer to resolve its IAT and allocate
+/// scratch before it decrypts — the part [3]/Winelib would supply for real.
+unsafe fn handle_api(uc: *mut uc_engine, t: &mut Trace, idx: usize) {
+    t.api_calls += 1;
+    let name = t.imports.get(idx).cloned().unwrap_or_default();
+    let esp = reg_get(uc, UC_X86_REG_ESP) as u64;
+    let retaddr = rd32(uc, esp);
+    let arg = |k: u64| -> u32 { rd32(uc, esp + 4 + 4 * k) };
+
+    let (result, argbytes): (u32, u32) = match name.as_str() {
+        "LoadLibraryA" | "LoadLibraryW" | "LoadLibraryExA" | "LoadLibraryExW"
+        | "GetModuleHandleA" | "GetModuleHandleW" => {
+            let h = if arg(0) == 0 {
+                t.image_base as u32
+            } else {
+                let h = t.module_cursor;
+                t.module_cursor = t.module_cursor.wrapping_add(0x10000);
+                let _ = uc_mem_map(uc, h as u64, 0x1000, UC_PROT_ALL);
+                h
+            };
+            let argbytes = if name.starts_with("LoadLibraryEx") { 12 } else { 4 };
+            (h, argbytes)
+        }
+        "GetProcAddress" => {
+            // Bind a fresh sentinel to the requested proc so a later call traps
+            // here too. arg1 is a name pointer (high) or an ordinal (low).
+            let p = arg(1);
+            let nm = if p >= 0x1_0000 { rd_cstr(uc, p as u64) } else { format!("ordinal_{p}") };
+            let new_idx = t.imports.len();
+            t.imports.push(nm);
+            ((TRAP_BASE + new_idx as u64 * 8) as u32, 8)
+        }
+        "VirtualAlloc" | "VirtualAllocEx" => {
+            let (size_arg, ab) = if name.ends_with("Ex") { (2u64, 20u32) } else { (1u64, 16u32) };
+            let size = page_up(arg(size_arg).max(1) as u64);
+            let base = t.alloc_cursor;
+            let _ = uc_mem_map(uc, base, size as usize, UC_PROT_ALL);
+            t.alloc_cursor += size;
+            (base as u32, ab)
+        }
+        "VirtualProtect" => { if arg(3) != 0 { wr32(uc, arg(3) as u64, 0x40); } (1, 16) }
+        "VirtualFree" => (1, 12),
+        "VirtualQuery" => (0, 12),
+        "GetVersion" => (0x0A28_0106, 0),
+        "GetVersionExA" | "GetVersionExW" => (1, 4),
+        "GetCurrentProcessId" | "GetCurrentThreadId" => (0x1000, 0),
+        "GetTickCount" => (1, 0),
+        "IsDebuggerPresent" => (0, 0),
+        "GetLastError" => (0, 0),
+        "SetLastError" => (0, 4),
+        // Unknown import: return 0 and assume cdecl (caller cleans). Such calls
+        // are rare before the OEP; if one drifts the stack, we report honestly.
+        _ => (0, 0),
+    };
+
+    reg_set(uc, UC_X86_REG_EAX, result);
+    reg_set(uc, UC_X86_REG_ESP, (esp + 4 + argbytes as u64) as u32);
+    reg_set(uc, UC_X86_REG_EIP, retaddr); // resume at the caller's return address
 }
 
 extern "C" fn on_write(_uc: *mut uc_engine, _ty: c_int, addr: u64, _sz: c_int, _val: i64, ud: *mut c_void) {
@@ -92,6 +200,13 @@ extern "C" fn on_write(_uc: *mut uc_engine, _ty: c_int, addr: u64, _sz: c_int, _
 
 extern "C" fn on_code(uc: *mut uc_engine, addr: u64, _sz: c_int, ud: *mut c_void) {
     let t = unsafe { &mut *(ud as *mut Trace) };
+    // A fetch inside the import trap region is a call through the IAT: model it
+    // natively and resume at the caller (never an OEP).
+    if addr >= TRAP_BASE && addr < TRAP_BASE + TRAP_SIZE {
+        let idx = ((addr - TRAP_BASE) / 8) as usize;
+        unsafe { handle_api(uc, t, idx); }
+        return;
+    }
     let pg = page_down(addr);
     // Executing from a page we saw written this run, and which was not part of
     // the original stub: freshly-decrypted code => OEP reached.
@@ -101,11 +216,15 @@ extern "C" fn on_code(uc: *mut uc_engine, addr: u64, _sz: c_int, ud: *mut c_void
     }
 }
 
-extern "C" fn on_unmapped(uc: *mut uc_engine, _ty: c_int, addr: u64, _sz: c_int, _val: i64, ud: *mut c_void) -> bool {
+const UC_MEM_FETCH_UNMAPPED: c_int = 21;
+
+extern "C" fn on_unmapped(uc: *mut uc_engine, ty: c_int, addr: u64, _sz: c_int, _val: i64, ud: *mut c_void) -> bool {
     let t = unsafe { &mut *(ud as *mut Trace) };
-    // A near-null access is almost always a call/read through an unresolved
-    // import thunk: that needs a Win32 model, so stop and report it.
-    if addr >= 0x1_0000 && t.lazy_budget > 0 {
+    // An unmapped *data* read/write (anywhere — packers and the CRT/SEH startup
+    // probe scratch and near-null fields) is tolerated by backing it with a zero
+    // page, up to a budget. An unmapped *fetch* is lost control flow: we cannot
+    // fabricate code, so stop and report it honestly.
+    if ty != UC_MEM_FETCH_UNMAPPED && t.lazy_budget > 0 {
         t.lazy_budget -= 1;
         let pg = page_down(addr);
         if unsafe { uc_mem_map(uc, pg, PAGE as usize, UC_PROT_ALL) } == 0 {
@@ -125,6 +244,8 @@ pub struct Unpacked {
     pub oep: u64,
     /// Recovered (decrypted) memory image: (virtual address, bytes) per region.
     pub regions: Vec<(u64, Vec<u8>)>,
+    /// Number of imported calls serviced by the Win32 model before the OEP.
+    pub api_calls: u32,
 }
 
 /// A region to load into the emulator: virtual address + initial bytes.
@@ -137,9 +258,12 @@ pub struct Region {
 
 /// Emulate `regions` from `entry` until the stub decrypts and jumps to fresh
 /// code (OEP), then return the decrypted image. `regions` must cover the entry.
+/// `imports` are IAT slots (slot VA, function name): each slot is filled with a
+/// trap sentinel so a call through it is serviced by the Win32 model.
 pub fn emulate_until_oep(
     regions: &[Region],
     entry: u64,
+    imports: &[(u64, String)],
     max_insns: usize,
 ) -> Result<Unpacked, String> {
     unsafe {
@@ -152,12 +276,18 @@ pub fn emulate_until_oep(
         impl Drop for Closer { fn drop(&mut self) { unsafe { uc_close(self.0); } } }
         let _closer = Closer(uc);
 
+        let image_base = regions.iter().map(|r| page_down(r.va)).min().unwrap_or(0);
         let mut trace = Box::new(Trace {
             written: BTreeSet::new(),
             initial_code: BTreeSet::new(),
             oep: None,
             faulted: None,
             lazy_budget: 256,
+            imports: Vec::new(),
+            image_base,
+            alloc_cursor: ALLOC_BASE,
+            module_cursor: MODULE_BASE,
+            api_calls: 0,
         });
 
         // Map and load each region (page-aligned).
@@ -177,6 +307,18 @@ pub fn emulate_until_oep(
                 let mut p = start;
                 while p < end { trace.initial_code.insert(p); p += PAGE; }
             }
+        }
+
+        // Import trap region: filled with `ret` as a safety net (we normally
+        // redirect EIP in the code hook before it executes). Each IAT slot gets a
+        // sentinel pointing here, bound to its import name.
+        let _ = uc_mem_map(uc, TRAP_BASE, TRAP_SIZE as usize, UC_PROT_ALL);
+        let rets = vec![0xC3u8; TRAP_SIZE as usize];
+        let _ = uc_mem_write(uc, TRAP_BASE, rets.as_ptr() as *const c_void, rets.len());
+        for (slot_va, name) in imports {
+            let idx = trace.imports.len();
+            trace.imports.push(name.clone());
+            wr32(uc, *slot_va, (TRAP_BASE + idx as u64 * 8) as u32);
         }
 
         // A stack well away from the image.
@@ -214,13 +356,17 @@ pub fn emulate_until_oep(
         if let Some(f) = trace.faulted {
             if trace.oep.is_none() {
                 return Err(format!(
-                    "stub reached unmapped {:#x} before decrypting — needs an API/Win32 model",
-                    f
+                    "stub reached unmapped {:#x} after {} API call(s) — needs a wider Win32 model",
+                    f, trace.api_calls
                 ));
             }
         }
+        let api_calls = trace.api_calls;
         let oep = trace.oep.ok_or_else(|| {
-            "no OEP detected (no self-modified code executed within the instruction budget)".to_string()
+            format!(
+                "no OEP after {} API call(s) — no self-modified code executed within the budget",
+                api_calls
+            )
         })?;
 
         // Dump the (now decrypted) memory back out for every region.
@@ -231,11 +377,7 @@ pub fn emulate_until_oep(
                 out.push((r.va, buf));
             }
         }
-        // eax is sometimes used by stubs; read to keep the API exercised/tested.
-        let mut _eax: u32 = 0;
-        uc_reg_read(uc, UC_X86_REG_EAX, &mut _eax as *mut u32 as *mut c_void);
-
-        Ok(Unpacked { oep, regions: out })
+        Ok(Unpacked { oep, regions: out, api_calls })
     }
 }
 
@@ -252,7 +394,9 @@ pub fn unpack_program(prog: &crate::loader::Program, max_insns: usize) -> Result
         return Err("no loadable sections".into());
     }
     let before: Vec<Vec<u8>> = regions.iter().map(|r| r.bytes.clone()).collect();
-    let res = emulate_until_oep(&regions, prog.entry, max_insns)?;
+    let imports: Vec<(u64, String)> =
+        prog.imports.iter().map(|(va, name)| (*va, name.clone())).collect();
+    let res = emulate_until_oep(&regions, prog.entry, &imports, max_insns)?;
 
     // Measure how many bytes the stub rewrote (decrypted), per region.
     let mut changed = 0usize;
@@ -264,7 +408,13 @@ pub fn unpack_program(prog: &crate::loader::Program, max_insns: usize) -> Result
             if a != b { changed += 1; }
         }
     }
-    Ok(UnpackReport { oep: res.oep, decrypted_bytes: changed, total_bytes: total, image: res.regions })
+    Ok(UnpackReport {
+        oep: res.oep,
+        decrypted_bytes: changed,
+        total_bytes: total,
+        image: res.regions,
+        api_calls: res.api_calls,
+    })
 }
 
 pub struct UnpackReport {
@@ -272,6 +422,7 @@ pub struct UnpackReport {
     pub decrypted_bytes: usize,
     pub total_bytes: usize,
     pub image: Vec<(u64, Vec<u8>)>,
+    pub api_calls: u32,
 }
 
 #[cfg(test)]
@@ -307,7 +458,7 @@ mod tests {
             Region { va: payload_va, bytes: payload, is_entry: false },
         ];
 
-        let r = emulate_until_oep(&regions, stub_va, 1_000_000).expect("unpack");
+        let r = emulate_until_oep(&regions, stub_va, &[], 1_000_000).expect("unpack");
         assert_eq!(r.oep, payload_va, "OEP should be the decrypted payload");
         // The recovered payload region must now be the cleartext code.
         let (_, recovered) = r.regions.iter().find(|(va, _)| *va == payload_va).unwrap();
@@ -321,7 +472,38 @@ mod tests {
         // mov eax,1; jmp $ (infinite loop, no writes) — runs to the budget.
         let code = vec![0xB8, 0x01, 0x00, 0x00, 0x00, 0xEB, 0xFE];
         let regions = vec![Region { va, bytes: code, is_entry: true }];
-        let err = emulate_until_oep(&regions, va, 1000).unwrap_err();
+        let err = emulate_until_oep(&regions, va, &[], 1000).unwrap_err();
         assert!(err.contains("no OEP"), "unexpected: {err}");
+    }
+
+    /// A packer that resolves an import through its IAT (`call [iat]` ->
+    /// VirtualAlloc), writes the decrypted payload into the returned buffer, and
+    /// jumps to it. The Win32 model must service the call and return a usable
+    /// pointer, then the OEP must land in the allocated, freshly-written page.
+    #[test]
+    fn iat_call_resolved_then_oep_in_allocated_memory() {
+        let stub_va = 0x401000u64;
+        let iat_va = 0x402000u64; // one IAT slot, bound to VirtualAlloc
+
+        // VirtualAlloc(NULL, 0x1000, MEM_COMMIT, PAGE_EXECUTE_READWRITE);
+        // mov byte [eax], 0x90 ; jmp eax
+        let stub: Vec<u8> = vec![
+            0x6A, 0x40, //                   push 0x40
+            0x68, 0x00, 0x10, 0x00, 0x00, // push 0x1000
+            0x68, 0x00, 0x10, 0x00, 0x00, // push 0x1000
+            0x6A, 0x00, //                   push 0
+            0xFF, 0x15, 0x00, 0x20, 0x40, 0x00, // call dword [0x402000]
+            0xC6, 0x00, 0x90, //             mov byte [eax], 0x90
+            0xFF, 0xE0, //                   jmp eax
+        ];
+        let regions = vec![
+            Region { va: stub_va, bytes: stub, is_entry: true },
+            Region { va: iat_va, bytes: vec![0u8; 4], is_entry: false },
+        ];
+        let imports = vec![(iat_va, "VirtualAlloc".to_string())];
+
+        let r = emulate_until_oep(&regions, stub_va, &imports, 1_000_000).expect("unpack");
+        assert_eq!(r.api_calls, 1, "the IAT call should have been serviced once");
+        assert_eq!(r.oep, ALLOC_BASE, "OEP should be the VirtualAlloc'd buffer");
     }
 }
