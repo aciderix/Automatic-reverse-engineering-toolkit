@@ -388,12 +388,29 @@ impl Structurer {
                 let taken_in = taken.map(|t| in_loop[t]).unwrap_or(false);
                 let fall_in = fall.map(|f| in_loop[f]).unwrap_or(false);
                 if taken_in && !fall_in {
-                    self.line(depth + 1, &format!("if (!({})) break;", cs));
+                    // `fall` leaves the loop, `taken` stays in. Route the exit
+                    // edge through emit_seq (in loop ctx): it emits `break` only
+                    // when the target IS the follow block, otherwise it emits the
+                    // real exit target (inline / `goto`). A bare `break` here would
+                    // silently divert any non-follow exit to the follow block,
+                    // dropping that path's effects (Bug #2: loop-carried result).
+                    self.line(depth + 1, &format!("if (!({})) {{", cs));
+                    match fall {
+                        Some(fb) => self.emit_seq(fb, lctx, depth + 2),
+                        None => self.line(depth + 2, "break;"),
+                    }
+                    self.line(depth + 1, "}");
                     if let Some(t) = taken {
                         self.emit_seq(t, lctx, depth + 1);
                     }
                 } else if fall_in && !taken_in {
-                    self.line(depth + 1, &format!("if ({}) break;", cs));
+                    // `taken` leaves the loop, `fall` stays in (symmetric).
+                    self.line(depth + 1, &format!("if ({}) {{", cs));
+                    match taken {
+                        Some(t) => self.emit_seq(t, lctx, depth + 2),
+                        None => self.line(depth + 2, "break;"),
+                    }
+                    self.line(depth + 1, "}");
                     if let Some(fb) = fall {
                         self.emit_seq(fb, lctx, depth + 1);
                     }

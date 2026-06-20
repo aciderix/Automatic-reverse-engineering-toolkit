@@ -255,6 +255,25 @@ fn real_oss_sha256_digest() {
 }
 
 #[test]
+fn loop_exit_carrying_a_value() {
+    if !has_m32() {
+        eprintln!("skipping loop-exit test: `cc -m32` unavailable (install gcc-multilib)");
+        return;
+    }
+    // Regression for Bug #2: an inline strcmp whose "mismatch" exit edge computes
+    // the comparison result (sbb/or) on the way out of the loop, with a second
+    // exit edge (the "match" path) to a *different* block. The structurer must
+    // not collapse the value-carrying exit into a bare `break` that diverts to
+    // the other exit's follow block — that would drop the loop-carried result and
+    // the mismatch path would wrongly return 0. Expected: eq=0 lt<0 gt>0.
+    let out = transpile_and_run("loop_exit_value.exe");
+    assert!(
+        out.contains("LOOPEXIT: eq=0 lt=-1 gt=1"),
+        "loop-exit value dropped (Bug #2 regression):\n{out}"
+    );
+}
+
+#[test]
 fn win32_native_kernel32_layer() {
     if !has_m32() {
         eprintln!("skipping Win32 test: `cc -m32` unavailable (install gcc-multilib)");

@@ -49,11 +49,11 @@ bash bench/difftest.sh               # différentiel lift (-O0→-O3)
 ### Phase 1 — Correction des bugs d'arête de flot (FIABILITÉ) ⏳ EN COURS
 Le lift/structureur perd parfois l'**effet d'une arête** (def de valeur, ajustement
 de pile). Même famille que le tail-call déjà corrigé. Affecte **tout** vrai code.
-- **1a. Bug #2** — arête de sortie de boucle effondrée en `break` nu qui
+- **1a. Bug #2 ✅ FAIT** — arête de sortie de boucle effondrée en `break` nu qui
   court-circuite le bloc de résultat (cf. §3.0 de l'état des lieux ; `strcmp`
-  inline, `sub_493440`). *Livrable* : fixture minimale `loop_exit_value` + fix dans
-  `src/structure`/`src/ssa` (ou `emit::structured`). *Critère* : la fixture donne
-  le bon résultat sur les 2 chemins (match/mismatch) ; régression verte.
+  inline, `sub_493440`). *Fix* : `emit::structured::emit_loop` route la sortie de
+  l'en-tête par `emit_seq` (break seulement si cible = follow). *Vérifié* :
+  fixture `loop_exit_value` (`eq=0 lt=-1 gt=1`), 71 tests, diff 268/268.
 - **1b. Bug pointeur-fonction pile cdecl** (Lua : `l_alloc` 0x403913 → 0xc42).
   *Livrable* : fixture minimale (passer un pointeur-fonction par la pile cdecl puis
   l'appeler) + fix. *Critère* : la fixture appelle la bonne fonction ; Lua avance.
@@ -109,3 +109,18 @@ Chantiers longs (le « mur » des jeux). Documentés, pas prioritaires.
   reconnaissance CRT+FLIRT(mingw)+main-discovery ; déballeur Unicorn (boucle UPX
   fermée) ; snapshot A+B (validé sur le vrai jeu). Bugs ouverts : #2 (loop-exit),
   cdecl-ptr (Lua). **Focus courant : Phase 1a (Bug #2).**
+- **2026-06-20 — Phase 1a FAITE (Bug #2 corrigé).** Cause racine isolée dans
+  `src/emit/structured.rs::emit_loop` : la sortie conditionnelle de l'en-tête de
+  boucle émettait un `break;` nu, qui saute toujours vers l'**unique** `follow_idx`
+  calculé par `loop_info`. Quand l'arête de sortie vise un bloc **différent** du
+  follow (cas `strcmp` inline : la branche *mismatch* calcule `(ca<cb)?-1:1` via
+  l'idiome sbb/or sur le bloc de sortie), ce bloc était court-circuité → résultat
+  porté par la boucle perdu, code mort. **Fix** : router l'arête de sortie de
+  l'en-tête par `emit_seq(cible, lctx, …)` au lieu d'un `break;` codé en dur —
+  `emit_seq` n'émet `break` que si la cible **est** le follow, sinon émet le vrai
+  bloc cible (inline / `goto`). Symétrique pour les deux orientations taken/fall.
+  **Vérif** : fixture permanente `tests/m1/fixtures/loop_exit_value.{c,exe}` +
+  test `loop_exit_carrying_a_value` (`LOOPEXIT: eq=0 lt=-1 gt=1`, conforme à la
+  réf. Wine ; avant : `eq=0 lt=0 gt=0`). **71 tests verts** (m1_transpile 17→18) ;
+  différentiel **268/268** (-O0→-O3) sans régression. **Prochain : Phase 1b**
+  (pointeur-fonction sur pile cdecl, Lua `l_alloc`).
