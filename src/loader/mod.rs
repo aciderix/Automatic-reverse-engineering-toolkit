@@ -72,6 +72,23 @@ const CRT_FUNCS: &[&str] = &[
     "islower", "ispunct", "iscntrl", "isprint", "isgraph", "isxdigit",
 ];
 
+/// How many leading bytes to match a FLIRT signature against.
+const FLIRT_WINDOW: usize = 32;
+
+/// Is `name` (a possibly underscore-decorated symbol) a CRT function we shim?
+fn is_crt_name(name: &str) -> bool {
+    CRT_FUNCS.contains(&name.trim_start_matches('_'))
+}
+
+/// Is `name` a mingw/MSVC startup-glue function we bind to a no-op?
+fn is_glue_name(name: &str) -> bool {
+    name.ends_with("__main")
+        || name.contains("do_global_ctors")
+        || name.contains("do_global_dtors")
+        || name.contains("register_frame")
+        || name.contains("pei386_runtime_relocator")
+}
+
 /// Format-agnostic view of the loaded program.
 pub struct Program {
     pub format: String,
@@ -250,16 +267,26 @@ impl Program {
     /// symbol-based library recognition — the cheap form of IDA FLIRT, the lever
     /// for real full-CRT binaries (lift the user's code, link the real runtime).
     pub fn crt_symbol(&self, addr: u64) -> Option<&str> {
-        let s = self.symbols.get(&addr)?;
-        if !s.is_function {
+        // Symbol table is authoritative when present.
+        if let Some(s) = self.symbols.get(&addr) {
+            if s.is_function {
+                return if is_crt_name(&s.name) { Some(s.name.as_str()) } else { None };
+            }
+        }
+        // Stripped binary: recognize by FLIRT-lite signature instead.
+        let code = self.code_at(addr, FLIRT_WINDOW)?;
+        let name = crate::flirt::bundled().match_at(code)?;
+        if is_crt_name(name) { Some(name) } else { None }
+    }
+
+    /// Leading bytes of the code at `addr` (for signature matching).
+    fn code_at(&self, addr: u64, len: usize) -> Option<&[u8]> {
+        let sec = self.section_at(addr)?;
+        let off = (addr.checked_sub(sec.address)?) as usize;
+        if off >= sec.data.len() {
             return None;
         }
-        let base = s.name.trim_start_matches('_');
-        if CRT_FUNCS.contains(&base) {
-            Some(s.name.as_str())
-        } else {
-            None
-        }
+        Some(&sec.data[off..(off + len).min(sec.data.len())])
     }
 
     /// Recognize a mingw/MSVC *startup-glue* function — the global ctor/dtor
@@ -269,18 +296,16 @@ impl Program {
     /// lets the user's `main` run. (Honest cost: C++ global constructors are not
     /// executed — a documented limitation, not a crash.)
     pub fn is_startup_glue(&self, addr: u64) -> bool {
-        match self.symbols.get(&addr) {
-            Some(s) if s.is_function => {
-                let n = &s.name;
-                n.ends_with("__main")
-                    || n.contains("do_global_ctors")
-                    || n.contains("do_global_dtors")
-                    || n.contains("register_frame")
-                    || n.contains("register_frame_info")
-                    || n.contains("pei386_runtime_relocator")
+        if let Some(s) = self.symbols.get(&addr) {
+            if s.is_function {
+                return is_glue_name(&s.name);
             }
-            _ => false,
         }
+        // Stripped: FLIRT-lite signature.
+        self.code_at(addr, FLIRT_WINDOW)
+            .and_then(|c| crate::flirt::bundled().match_at(c))
+            .map(is_glue_name)
+            .unwrap_or(false)
     }
 
     /// Return the section containing `addr`, if any.

@@ -305,6 +305,46 @@ fn real_full_crt_program_from_main() {
 }
 
 #[test]
+fn stripped_full_crt_via_flirt() {
+    if !has_m32() {
+        eprintln!("skipping FLIRT test: `cc -m32` unavailable");
+        return;
+    }
+    // Strip the full-CRT fixture of all symbols, then transpile it. With no
+    // symbols, the statically-linked CRT (printf/malloc/strlen/free) and the
+    // startup glue (__main) must be recognized by FLIRT-lite *byte signatures*
+    // and bound natively — otherwise the CRT's indirect-call machinery crashes.
+    let strip = "i686-w64-mingw32-strip";
+    if Command::new(strip).arg("--version").stdout(Stdio::null()).stderr(Stdio::null())
+        .status().map(|s| !s.success()).unwrap_or(true)
+    {
+        eprintln!("skipping FLIRT test: {strip} unavailable");
+        return;
+    }
+    let src = format!("{}/tests/m1/fixtures/hello_realcrt.exe", env!("CARGO_MANIFEST_DIR"));
+    let stripped = std::env::temp_dir().join(format!("aret_stripped_{}.exe", std::process::id()));
+    std::fs::copy(&src, &stripped).unwrap();
+    assert!(Command::new(strip).arg(&stripped).status().unwrap().success(), "strip failed");
+
+    let aret = env!("CARGO_BIN_EXE_aret");
+    let out_dir = std::env::temp_dir().join(format!("aret_flirt_{}", std::process::id()));
+    // main is at a stable VA; entry-point discovery is a separate concern, so
+    // pass the address to isolate FLIRT's contribution (CRT recognition).
+    let output = Command::new(aret)
+        .args(["--mode", "transpile", "--run", "--entry", "0x401519", "--out-dir"])
+        .arg(&out_dir).arg(&stripped)
+        .output().expect("failed to run aret");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(output.status.success(), "stripped transpile failed:\n{stdout}");
+    assert!(
+        stdout.contains("REALCRT: heap=real crt heap len=13"),
+        "FLIRT did not recognize the stripped CRT:\n{stdout}"
+    );
+    let _ = std::fs::remove_file(&stripped);
+    let _ = std::fs::remove_dir_all(&out_dir);
+}
+
+#[test]
 fn win32_system_info_and_sync() {
     if !has_m32() {
         eprintln!("skipping Win32-sys test: `cc -m32` unavailable (install gcc-multilib)");
