@@ -231,12 +231,18 @@ pub fn analyze(prog: &Program, disasm: &Disassembler, prologue_scan: bool) -> An
 /// Phase A — decode every reachable instruction once, collecting the set of
 /// function entry points (entry + direct/indirect-target call sites).
 /// A high-confidence guess that `addr` begins a function, by its opening bytes.
-/// Used to filter address-taken candidates (a data word that points into code):
-/// the value already being a valid code address is the primary signal, this is
-/// the secondary one. Kept deliberately tight (common entry prologues only, no
-/// `push imm`/`mov eax,imm` which are far more frequent mid-body) to avoid
-/// seeding misaligned data as bogus functions.
-fn looks_like_func_start(prog: &Program, addr: u64) -> bool {
+/// Used to filter address-taken candidates: the value already being a valid code
+/// address is the primary signal, this is the secondary one. Kept deliberately
+/// tight (common entry prologues only) to avoid seeding interior bytes as bogus
+/// functions.
+///
+/// `allow_leaf` adds `mov reg,[esp+disp]` — a leaf function reading its first
+/// stack argument. That shape is also how many switch *case* bodies begin, so it
+/// is only safe for candidates sourced from a code *immediate* (a genuine
+/// by-value callback like Lua's `_getS`), never from a data word, where a
+/// jump-table's run of case-target pointers would otherwise be mistaken for
+/// functions.
+fn looks_like_func_start(prog: &Program, addr: u64, allow_leaf: bool) -> bool {
     let Some(code) = prog.read_from(addr) else { return false };
     let b0 = code[0];
     let b1 = code.get(1).copied().unwrap_or(0);
@@ -248,9 +254,8 @@ fn looks_like_func_start(prog: &Program, addr: u64) -> bool {
         || (b0 == 0x8b && b1 == 0xff)         // mov edi, edi (hot-patch pad)
         || (b0 == 0x89 && b1 == 0xff)
         || (b0 == 0xff && b1 == 0x25)         // jmp [mem] (import thunk)
-        // mov reg, [esp+disp] — a leaf function reading its first stack argument
-        // (modrm rm=100=SIB, mod≠11; SIB=24 → base=esp, no index).
-        || (b0 == 0x8b && (b1 & 0x07) == 0x04 && (b1 & 0xc0) != 0xc0 && b2 == 0x24)
+        // mov reg, [esp+disp] (modrm rm=100=SIB, mod≠11; SIB=24 → base=esp).
+        || (allow_leaf && b0 == 0x8b && (b1 & 0x07) == 0x04 && (b1 & 0xc0) != 0xc0 && b2 == 0x24)
 }
 
 /// Code-address immediates of an instruction: a `push imm32`/`mov reg,imm32`/
@@ -309,12 +314,12 @@ fn global_decode(
 
         // Pass 2b: address-taken function discovery. A frame-pointer-omitted
         // function (gcc/MSVC `-O2`) reached only through a pointer — a callback,
-        // a vtable slot, or a registration/dispatch table (Lua's `luaL_Reg`
-        // arrays, etc.) — is found by neither recursive descent (no direct call)
-        // nor the `push ebp` prologue scan. Scan pointer-aligned section data for
-        // values that point at an as-yet-undecoded, plausible function start.
-        // The `!global.contains_key` gate keeps us from splitting a function we
-        // already decoded, so reachable code (the regression corpus) is untouched.
+        // a vtable slot, a registration/dispatch table (Lua's `luaL_Reg` arrays)
+        // or a by-value `push imm32` — is found by neither recursive descent (no
+        // direct call) nor the `push ebp` prologue scan. Candidates come from two
+        // places: pointer-aligned section *data* words, and immediate operands in
+        // the decoded *code* stream. Both must point into an executable section,
+        // at a not-yet-decoded plausible function start.
         let ptr = (prog.bitness.bits() / 8) as usize;
         let exec: Vec<(u64, u64)> = prog
             .sections
@@ -323,53 +328,62 @@ fn global_decode(
             .map(|s| (s.address, s.address + s.data.len() as u64))
             .collect();
         let in_exec = |a: u64| a != 0 && exec.iter().any(|&(lo, hi)| a >= lo && a < hi);
-        let mut taken: VecDeque<u64> = VecDeque::new();
-        for sec in &prog.sections {
-            let d = &sec.data;
-            let mut off = 0usize;
-            while off + ptr <= d.len() {
-                let v = match ptr {
-                    8 => u64::from_le_bytes(d[off..off + 8].try_into().unwrap()),
-                    _ => u32::from_le_bytes([d[off], d[off + 1], d[off + 2], d[off + 3]]) as u64,
-                };
-                if in_exec(v)
-                    && !global.contains_key(&v)
-                    && looks_like_func_start(prog, v)
-                    && entries.insert(v)
-                {
-                    prologue_only.insert(v);
-                    taken.push_back(v);
-                }
-                off += ptr;
-            }
-        }
-        drain(prog, disasm, &mut global, &mut entries, &mut jump_tables, &mut taken);
-
-        // Pass 2c: address-taken via an immediate in *code*. A callback is often
-        // passed by value rather than stored in a table — `push imm32` /
-        // `mov reg,imm32` / `mov [esp+d],imm32` (e.g. a Lua protected-call
-        // `Pfunc`) — so the data scan misses it. Re-scan the decoded stream to a
-        // fixpoint for an immediate (or absolute `[imm32]` displacement) that
-        // points at an undecoded function start; each newly decoded function can
-        // reveal further pointers.
+        // Re-scan to a fixpoint (each newly decoded function reveals more
+        // pointers), draining candidates in *ascending* address order one at a
+        // time: a parent function decoded first then covers its own interior, so
+        // an intra-function block address (a jump-table case target stored in
+        // .rdata, a label pushed as an argument) is rejected by the
+        // `!global.contains_key` gate instead of splitting the function. We also
+        // skip resolved jump-table targets outright.
         loop {
-            let mut imm: VecDeque<u64> = VecDeque::new();
+            let jt_targets: BTreeSet<u64> =
+                jump_tables.values().flat_map(|v| v.iter().copied()).collect();
+            let mut cands: BTreeSet<u64> = BTreeSet::new();
+            for sec in &prog.sections {
+                let d = &sec.data;
+                let mut off = 0usize;
+                while off + ptr <= d.len() {
+                    let v = match ptr {
+                        8 => u64::from_le_bytes(d[off..off + 8].try_into().unwrap()),
+                        _ => {
+                            u32::from_le_bytes([d[off], d[off + 1], d[off + 2], d[off + 3]]) as u64
+                        }
+                    };
+                    // Data words: strict (a jump table's case-target run must
+                    // not look like a sequence of functions).
+                    if in_exec(v) && !global.contains_key(&v) && looks_like_func_start(prog, v, false)
+                    {
+                        cands.insert(v);
+                    }
+                    off += ptr;
+                }
+            }
             for insn in global.values() {
                 for v in imm_code_ptrs(&insn.raw) {
-                    if in_exec(v)
-                        && !global.contains_key(&v)
-                        && looks_like_func_start(prog, v)
-                        && entries.insert(v)
-                    {
-                        prologue_only.insert(v);
-                        imm.push_back(v);
+                    // Code immediates: a by-value callback — allow the leaf shape.
+                    if in_exec(v) && !global.contains_key(&v) && looks_like_func_start(prog, v, true) {
+                        cands.insert(v);
                     }
                 }
             }
-            if imm.is_empty() {
+            let mut progressed = false;
+            for c in cands {
+                // A function drained earlier this pass (lower address) may now
+                // cover `c`, or it may be a jump-table case target — either way
+                // it is interior, not an entry.
+                if global.contains_key(&c) || jt_targets.contains(&c) {
+                    continue;
+                }
+                if entries.insert(c) {
+                    prologue_only.insert(c);
+                    progressed = true;
+                    let mut q: VecDeque<u64> = VecDeque::from([c]);
+                    drain(prog, disasm, &mut global, &mut entries, &mut jump_tables, &mut q);
+                }
+            }
+            if !progressed {
                 break;
             }
-            drain(prog, disasm, &mut global, &mut entries, &mut jump_tables, &mut imm);
         }
     }
 
