@@ -198,3 +198,16 @@ Chantiers longs (le « mur » des jeux). Documentés, pas prioritaires.
   fixture `eq_cmp_negimm` (`10 0`) ; **75 tests** ; diff **268/268**. Lua : passe
   `pushcclosure` ; avance jusqu'au **GC** (`reallymarkobject`/`propagatemark`) —
   bug suivant.
+- **2026-06-21 — Phase 5d EN COURS (corruption GC, à investiguer).** Lua : après
+  `pushcclosure`, crash dans le **GC** mark : `reallymarkobject` ←
+  `propagatemark` ← `propagateall` ← `atomic` ← `entergen` (entrée GC
+  générationnel pendant openlibs). Instruction fautive : `movzbl (obj+8)` (lecture
+  du tag `tt_` d'un TValue) avec `obj = 0x8` — **champ de référence corrompu** dans
+  le graphe d'objets. Contrairement aux bugs 5a–5c (mislifts d'émission nets,
+  largeur/signe), ceci ressemble à une **corruption en amont** (construction d'objet
+  ou écriture de champ mal liftée), donc forensics plus profonde (suivre l'origine
+  du pointeur `0x8`). *Bilan session* : 6 fixes généraux commités (Bug #2, thunks +
+  setjmp/longjmp, retour fp x87, cmp signé/égalité vs immédiat négatif) ; Lua passe
+  de crash-au-démarrage → vérif version → lib `_G` → lib `package` → phase mark GC.
+  Régression stable (75 tests, diff 268/268) à chaque étape. **Prochain : tracer la
+  corruption GC (origine du pointeur 0x8) ; chercher d'autres mislifts largeur/signe.**
