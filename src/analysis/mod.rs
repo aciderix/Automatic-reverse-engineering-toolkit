@@ -240,13 +240,39 @@ fn looks_like_func_start(prog: &Program, addr: u64) -> bool {
     let Some(code) = prog.read_from(addr) else { return false };
     let b0 = code[0];
     let b1 = code.get(1).copied().unwrap_or(0);
+    let b2 = code.get(2).copied().unwrap_or(0);
     matches!(b0, 0x55 | 0x53 | 0x56 | 0x57) // push ebp/ebx/esi/edi
         || b0 == 0xe9                         // jmp rel32 (tail-call thunk)
         || (b0 == 0x83 && b1 == 0xec)         // sub esp, imm8
         || (b0 == 0x81 && b1 == 0xec)         // sub esp, imm32
         || (b0 == 0x8b && b1 == 0xff)         // mov edi, edi (hot-patch pad)
         || (b0 == 0x89 && b1 == 0xff)
-        || (b0 == 0xff && b1 == 0x25) // jmp [mem] (import thunk)
+        || (b0 == 0xff && b1 == 0x25)         // jmp [mem] (import thunk)
+        // mov reg, [esp+disp] — a leaf function reading its first stack argument
+        // (modrm rm=100=SIB, mod≠11; SIB=24 → base=esp, no index).
+        || (b0 == 0x8b && (b1 & 0x07) == 0x04 && (b1 & 0xc0) != 0xc0 && b2 == 0x24)
+}
+
+/// Code-address immediates of an instruction: a `push imm32`/`mov reg,imm32`/
+/// `mov [mem],imm32` whose immediate, or an absolute `[imm32]` memory operand,
+/// could be a taken function address. Branch displacements are `NearBranch`
+/// (not immediates) and so are excluded.
+fn imm_code_ptrs(insn: &iced_x86::Instruction) -> Vec<u64> {
+    use iced_x86::{OpKind, Register};
+    let mut out = Vec::new();
+    for i in 0..insn.op_count() {
+        match insn.op_kind(i) {
+            OpKind::Immediate32 | OpKind::Immediate32to64 => out.push(insn.immediate(i)),
+            OpKind::Memory
+                if insn.memory_base() == Register::None
+                    && insn.memory_index() == Register::None =>
+            {
+                out.push(insn.memory_displacement64())
+            }
+            _ => {}
+        }
+    }
+    out
 }
 
 fn global_decode(
@@ -318,6 +344,33 @@ fn global_decode(
             }
         }
         drain(prog, disasm, &mut global, &mut entries, &mut jump_tables, &mut taken);
+
+        // Pass 2c: address-taken via an immediate in *code*. A callback is often
+        // passed by value rather than stored in a table — `push imm32` /
+        // `mov reg,imm32` / `mov [esp+d],imm32` (e.g. a Lua protected-call
+        // `Pfunc`) — so the data scan misses it. Re-scan the decoded stream to a
+        // fixpoint for an immediate (or absolute `[imm32]` displacement) that
+        // points at an undecoded function start; each newly decoded function can
+        // reveal further pointers.
+        loop {
+            let mut imm: VecDeque<u64> = VecDeque::new();
+            for insn in global.values() {
+                for v in imm_code_ptrs(&insn.raw) {
+                    if in_exec(v)
+                        && !global.contains_key(&v)
+                        && looks_like_func_start(prog, v)
+                        && entries.insert(v)
+                    {
+                        prologue_only.insert(v);
+                        imm.push_back(v);
+                    }
+                }
+            }
+            if imm.is_empty() {
+                break;
+            }
+            drain(prog, disasm, &mut global, &mut entries, &mut jump_tables, &mut imm);
+        }
     }
 
     // Jump-table resolution is order-sensitive: it scans the instructions
