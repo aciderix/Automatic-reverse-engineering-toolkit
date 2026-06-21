@@ -335,3 +335,24 @@ Chantiers longs (le « mur » des jeux). Documentés, pas prioritaires.
   d'objet gris (`propagatemark`) → référence enfant `&array[i]`/champ à une adresse
   minuscule (0x8) → tag TValue lu à `[0x8+8]`. Suspecter la construction de table
   (`luaH_resize`/`setnodevector`/`luaH_new`) ou une écriture de champ 64↔32 bits.
+  *(Note : ce breadcrumb est antérieur ; la corruption GC a été résolue par 5d/5e
+  — Lua tourne. Conservé pour mémoire de méthode.)*
+- **2026-06-21 — Phase 5ter FAITE (classification structurelle).** La demande
+  ChatGPT « passer de l'observation à la contrainte » est implémentée : partition
+  `internal_funcs` (traduites) / `host_funcs` (jamais lowerées, corps élagué),
+  dispatch indirect routé vers des adaptateurs `aret_disp_<va>` → aucun chemin ne
+  peut atteindre un corps non émis, invariant de disjonction en `debug_assert`,
+  source unique `resolve_call`. Bug réel corrigé : shim `_initterm` au nom mort
+  (`aret__initterm` vs nom assaini `aret_initterm`) → renommé, gardé no-op.
+  **Clarification importante (anti-régression mentale)** : en revérifiant Lua j'ai
+  cru à une régression (crash) — en fait le crash existe **aussi sans mes
+  changements** (et au commit « Lua tourne nativement »). Cause : transpilé via le
+  **point d'entrée PE par défaut** (`_mainCRTStartup`, sas CRT Microsoft) au lieu
+  de `--entry <main>`. Le démarrage CRT MS n'est pas modélisé (HLE remplace le
+  runtime en bloc) → il faut entrer au `main`. **Tous** les builds « Lua
+  fonctionnel » utilisaient `--entry`. Donc **pas de régression** ; le code committé
+  est sain. *Vérifié* : 78 tests, diff 268/268, Lua entièrement fonctionnel avec
+  `--entry 0x420009` (tamis, `table.sort`, `string.format`, `math.pi^2`, `//`,
+  `gsub`). **Trou révélé (prochain)** : l'entrée **par défaut** (sas CRT) devrait
+  marcher seule (auto-`main` ou amorçage CRT survivable) pour ne plus dépendre du
+  flag — chantier « robustesse du démarrage », lié à Phase 3.
