@@ -177,8 +177,9 @@ fn x87_sig(name: &str) -> Option<(bool, Vec<bool>)> {
         "st32" | "st64" | "st80" | "ist16" | "ist32" | "ist64" => (false, vec![false, true]),
         "add" | "sub" | "mul" | "div" => (true, vec![true, true]),
         "abs" | "neg" | "sqrt" => (true, vec![true]),
-        "one" | "zero" => (true, vec![]),
+        "one" | "zero" | "retload" => (true, vec![]),
         "lt" | "eq" | "un" => (false, vec![true, true]),
+        "retstore" => (false, vec![true]),
         _ => return None,
     })
 }

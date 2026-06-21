@@ -87,7 +87,16 @@ Résoudre `call [vtable+k]` quand la vtable est en `.rodata` ; nommer la méthod
 *Livrable* : recovery vtables (analysis/ir) + fixture C++ virtuelle. *Critère* :
 un appel virtuel se résout et s'exécute correctement (différentiel).
 
-### Phase 5 — Complétude du lifter (réduire la soupape `asm`) ⬜
+### Phase 5 — Complétude du lifter (réduire la soupape `asm`) ⏳ EN COURS
+- **5a. Retour flottant x87 à travers un appel ✅ FAIT** (révélé par Lua). L'analyse
+  de profondeur x87 ne comptait pas le `st(0)` qu'un appel à une fonction renvoyant
+  un flottant empile → sous-débordement de pile → tout le bloc flottant retombait en
+  `asm` opaque (bug réel : la vérif de version de Lua prenait toujours sa branche
+  d'erreur). Fix : ensemble `FP_RETURNING` (fonctions au `ret` à profondeur 1),
+  un appel vers l'une d'elles compte `+1` ; **et** la valeur `st(0)` est acheminée
+  par un canal de retour fp partagé (`__x87_retstore`/`__x87_retload`,
+  `__aret_x87_ret`). *Vérifié* : fixture `fp_return_call` (`match`), 73 tests, diff
+  268/268. *Reste Lua* : `luaV_finishget` (indexation de table) dans `openlibs`.
 Couvrir les instructions restantes sûres (cf. HANDOFF backlog). Évaluer
 l'intégration **Remill** (sémantique complète → LLVM) comme accélérateur. *Critère* :
 baisse mesurée de l'incomplétude sur le jeu, différentiel sans régression.
@@ -152,3 +161,17 @@ Chantiers longs (le « mur » des jeux). Documentés, pas prioritaires.
   **268/268**. Lua tourne désormais startup→openlibs→interpréteur (setjmp/longjmp
   OK) mais bute sur une **erreur VM plus profonde** (« error message not a
   string ») — chantier séparé (complétude lifter, Phase 5).
+- **2026-06-21 — Phase 5a FAITE (retour flottant x87 à travers un appel).**
+  Diagnostic Lua : « error message not a string » venait de `luaL_checkversion_`
+  qui levait toujours « version mismatch ». Cause : `call lua_version` (renvoie
+  `double` en `st(0)`) non compté par l'analyse de profondeur x87 → underflow →
+  tout le bloc flottant en `asm` no-op → conditions `jp`/`je` undef → branche
+  d'erreur. Fix en 2 temps (sinon sortie *fausse présentée comme correcte*) :
+  (1) profondeur — `compute_fp_returning` (point fixe : fonctions au `ret` à
+  profondeur 1), un `call` vers l'une compte `+1` ; (2) valeur — canal de retour
+  fp partagé : `__x87_retstore` au `ret` d'une fonction fp, `__x87_retload` après
+  l'appel, global `__aret_x87_ret` (aret_hle.c). Set `FP_RETURNING` installé par
+  le pilote transpile uniquement (verify/decompile inchangés → diff stable).
+  **Vérif** : fixture `fp_return_call.{c,exe}` + test `fp_value_returned_across_a_call`
+  (`match`) ; **73 tests verts** ; diff **268/268**. Lua : vérif de version OK,
+  avance jusqu'à `luaV_finishget` (indexation table) dans `openlibs` — bug suivant.

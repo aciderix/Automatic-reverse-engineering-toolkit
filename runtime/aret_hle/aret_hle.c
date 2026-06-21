@@ -505,6 +505,10 @@ void aret_unimpl(const char *name) {
 /* Bound-away startup glue: do nothing, return 0. */
 uint32_t aret_noop(uint32_t esp) { (void)esp; return 0; }
 
+/* The x87 fp return channel (st(0) across calls). One shared definition; the
+ * __x87_retstore/__x87_retload helpers (emit::FLOAT_HELPERS) read/write it. */
+long double __aret_x87_ret;
+
 /* ------------------------------------------------------------------ */
 /* setjmp/longjmp support.                                            */
 /*                                                                    */

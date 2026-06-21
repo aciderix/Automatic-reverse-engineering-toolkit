@@ -1871,6 +1871,25 @@ fn x87call(name: &str, args: Vec<Expr>) -> Expr {
     Expr::Call { target: CallTarget::Named(name.to_string()), args, ret: Ty::Unknown }
 }
 
+/// The x87 stack slot at absolute depth `d` (st(0) = depth 0), so `ir::build` can
+/// connect a call's fp result and a fp-returning function's `ret` to the shared
+/// st(0) return channel.
+pub(crate) fn x87_slot(d: i32) -> Option<Location> {
+    fpr(d)
+}
+
+/// Store `v` (the x87 top of stack) into the fp return channel — emitted before a
+/// fp-returning function's `ret`.
+pub(crate) fn x87_ret_store(v: Expr) -> Stmt {
+    Stmt::CallStmt(x87call("__x87_retstore", vec![v]))
+}
+
+/// Read the fp return channel (st(0)) — emitted after a call to a fp-returning
+/// function, to recover the result the x87 ABI left in st(0).
+pub(crate) fn x87_ret_load() -> Expr {
+    x87call("__x87_retload", vec![])
+}
+
 /// Helper name for loading a memory operand of `ms` as a `long double`.
 fn x87_load_helper(ms: MemorySize) -> Option<&'static str> {
     Some(match ms {

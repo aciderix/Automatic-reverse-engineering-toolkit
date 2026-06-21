@@ -228,6 +228,13 @@ pub(crate) const FLOAT_HELPERS: &str = concat!(
     "static inline uint64_t __x87_lt(long double a,long double b){return a<b;}\n",
     "static inline uint64_t __x87_eq(long double a,long double b){return a==b;}\n",
     "static inline uint64_t __x87_un(long double a,long double b){return a!=a||b!=b;}\n",
+    // fp return channel: the x87 ABI returns floats in st(0). A fp-returning
+    // function stores its st(0) here at `ret`; a caller reads it back after the
+    // call. Backed by one shared global (defined in aret_hle.c) so the value
+    // crosses translation-unit boundaries between chunks.
+    "extern long double __aret_x87_ret;\n",
+    "static inline uint64_t __x87_retstore(long double v){__aret_x87_ret=v;return 0;}\n",
+    "static inline long double __x87_retload(void){return __aret_x87_ret;}\n",
     // `rep stos`: fill `n` elements at `d` with the low bytes of `v` (forward, DF=0).
     "static inline uint64_t __rep_stos8(uint64_t d,uint64_t v,uint64_t n){uint8_t* p=(uint8_t*)(uintptr_t)d;for(uint64_t i=0;i<n;i++)p[i]=(uint8_t)v;return 0;}\n",
     "static inline uint64_t __rep_stos16(uint64_t d,uint64_t v,uint64_t n){uint16_t* p=(uint16_t*)(uintptr_t)d;for(uint64_t i=0;i<n;i++)p[i]=(uint16_t)v;return 0;}\n",

@@ -422,6 +422,13 @@ pub fn transpile(
             entry
         );
     }
+    // Identify functions that return an fp value in st(0), so the x87 depth
+    // analysis counts the result a `call` to one of them pushes. Without this a
+    // call to e.g. `double lua_version(...)` underflows the modelled x87 stack and
+    // the whole function's float ops degrade to opaque asm (a real-program bug:
+    // Lua's version check then always takes its error path).
+    ir::build::set_fp_returning(ir::build::compute_fp_returning(funcs));
+
     std::fs::create_dir_all(out_dir)
         .with_context(|| format!("failed to create {}", out_dir.display()))?;
 

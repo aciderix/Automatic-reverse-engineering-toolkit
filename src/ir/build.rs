@@ -32,7 +32,13 @@ pub fn build_ir(prog: &Program, func: &Function) -> IrFunction {
     // a concrete slot. `None` if the function should not be x87-modelled (any
     // unmodelled FPU op, ambiguous depth, or a float→int store whose rounding we
     // cannot prove) — those instructions then degrade to a sound `Asm`.
-    let x87 = x87_states(func);
+    let (x87, fp_calls) = match x87_states(func) {
+        Some((ops, calls)) => (Some(ops), calls),
+        None => (None, HashMap::new()),
+    };
+    // Does this function itself return an fp value (st(0))? Then store st(0) into
+    // the fp return channel at each `ret`, so callers can recover it.
+    let self_returns_fp = FP_RETURNING.with(|c| c.borrow().contains(&func.entry));
     // Keep every stack access as raw `__frame` memory (no named scalars) when the
     // function spills 80-bit x87 values OR 128-bit XMM registers: those go through
     // byte-addressed memory, and a function may read the same bytes back at a
@@ -65,6 +71,14 @@ pub fn build_ir(prog: &Program, func: &Function) -> IrFunction {
             };
             fold_ro_loads(&mut s, insn, prog);
             stmts.extend(s);
+            // A call to a fp-returning function leaves its result in st(0): recover
+            // it from the fp return channel into the slot the depth analysis says
+            // it lands in, so subsequent x87 ops read the real value (not undef).
+            if let Some(&depth) = fp_calls.get(&insn.address) {
+                if let Some(slot) = crate::ir::lift::x87_slot(depth as i32) {
+                    stmts.push(Stmt::Set { dst: slot, expr: crate::ir::lift::x87_ret_load() });
+                }
+            }
         }
 
         // Internal successors (block indices), in CFG order.
@@ -114,7 +128,16 @@ pub fn build_ir(prog: &Program, func: &Function) -> IrFunction {
             // Model the return value as the result register (rax/eax family),
             // so its computation stays live (analogous to the text pipeline's
             // `return eax`).
-            Flow::Return => stmts.push(Stmt::Return(Some(Expr::Read(Location::Reg(RegId(0)))))),
+            Flow::Return => {
+                // An fp-returning function leaves st(0) (slot 0, since the terminal
+                // x87 depth is 1) in the fp return channel for its caller.
+                if self_returns_fp {
+                    if let Some(slot) = crate::ir::lift::x87_slot(0) {
+                        stmts.push(crate::ir::lift::x87_ret_store(Expr::Read(slot)));
+                    }
+                }
+                stmts.push(Stmt::Return(Some(Expr::Read(Location::Reg(RegId(0))))));
+            }
             Flow::Indirect => {
                 let last = blk.insns.last().unwrap();
                 // A resolved jump table (the analysis attached case edges) with an
@@ -235,16 +258,99 @@ fn uses_xmm128_mem(func: &Function) -> bool {
     })
 }
 
-/// Static x87 stack-depth + rounding-mode analysis. Returns, per modelled FPU
-/// instruction address, `(stack_depth_before, truncation_mode)`, or `None` to
-/// disable x87 modelling for the whole function — a sound bail: those ops then
-/// fall back to `Asm` (flagged INCOMPLETE) rather than risk a wrong lifting.
-fn x87_states(func: &Function) -> Option<HashMap<u64, (u32, bool)>> {
+thread_local! {
+    /// Entry addresses of functions that return a floating-point value (in
+    /// `st(0)` per the x87 ABI). A `call` to one of these pushes onto the x87
+    /// stack, which the depth analysis must count. Installed once per transpile by
+    /// `set_fp_returning`; empty for the verify/decompile paths (calls then
+    /// modelled as x87-neutral, i.e. the prior behavior — no differential change).
+    static FP_RETURNING: std::cell::RefCell<std::collections::HashSet<u64>> =
+        std::cell::RefCell::new(std::collections::HashSet::new());
+}
+
+/// Install the set of fp-returning function entry addresses for x87 depth
+/// tracking on this thread (computed by `compute_fp_returning`).
+pub fn set_fp_returning(set: std::collections::HashSet<u64>) {
+    FP_RETURNING.with(|c| *c.borrow_mut() = set);
+}
+
+/// Does the instruction call a function known to return an fp value in `st(0)`?
+/// Only resolved for direct near calls; indirect calls are treated as x87-neutral.
+fn call_returns_fp(ins: &iced_x86::Instruction, fp: &std::collections::HashSet<u64>) -> bool {
+    use iced_x86::FlowControl;
+    if ins.flow_control() != FlowControl::Call {
+        return false;
+    }
+    fp.contains(&ins.near_branch_target())
+}
+
+/// A genuine bail of the x87 depth analysis: an unmodelled op, unprovable
+/// rounding, a stack under/overflow, or an ambiguous join depth. The function's
+/// FPU ops then fall back to a sound `Asm` (flagged INCOMPLETE).
+struct X87Bail;
+
+/// Result of the x87 depth pass: per-op `(depth_before, needs_trunc)`, the
+/// per-fp-call `address -> depth the result lands at`, and the terminal depth at
+/// each reached `ret`.
+struct X87Info {
+    ops: HashMap<u64, (u32, bool)>,
+    fp_calls: HashMap<u64, u32>,
+    ret_depths: Vec<i32>,
+}
+
+/// Static x87 stack-depth + rounding-mode analysis (the thread-local
+/// `FP_RETURNING` set models fp-returning calls as a push). Returns the per-op
+/// depth map and the fp-call sites, or `None` to disable x87 modelling for the
+/// whole function.
+fn x87_states(func: &Function) -> Option<(HashMap<u64, (u32, bool)>, HashMap<u64, u32>)> {
+    FP_RETURNING.with(|c| {
+        x87_depth_pass(func, &c.borrow())
+            .ok()
+            .map(|i| (i.ops, i.fp_calls))
+    })
+}
+
+/// Does `func` return an fp value? True iff every reachable `ret` leaves exactly
+/// one value on the x87 stack (the `st(0)` return). Used by `compute_fp_returning`.
+fn func_returns_fp(func: &Function, fp: &std::collections::HashSet<u64>) -> bool {
+    match x87_depth_pass(func, fp) {
+        Ok(i) => !i.ret_depths.is_empty() && i.ret_depths.iter().all(|&d| d == 1),
+        Err(_) => false,
+    }
+}
+
+/// Compute the fixpoint of fp-returning functions: a function returns fp if its
+/// terminal x87 depth is 1, which can depend on fp-returning callees, so iterate
+/// until stable. Cheap (the set only grows, bounded by the function count).
+pub fn compute_fp_returning(funcs: &[&Function]) -> std::collections::HashSet<u64> {
+    let mut set = std::collections::HashSet::new();
+    loop {
+        let mut changed = false;
+        for f in funcs {
+            if !set.contains(&f.entry) && func_returns_fp(f, &set) {
+                set.insert(f.entry);
+                changed = true;
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+    set
+}
+
+/// One forward propagation of the x87 stack depth over the CFG. Returns the
+/// per-op `(depth_before, needs_trunc)` map plus the terminal depth at each
+/// reached `ret` block (for fp-return detection).
+fn x87_depth_pass(
+    func: &Function,
+    fp: &std::collections::HashSet<u64>,
+) -> Result<X87Info, X87Bail> {
     use crate::ir::lift::{is_x87, x87_delta};
     use iced_x86::Mnemonic;
 
     if !func.blocks.values().any(|b| b.insns.iter().any(|i| is_x87(&i.raw))) {
-        return None;
+        return Err(X87Bail);
     }
 
     let order: Vec<u64> = func.blocks.keys().copied().collect();
@@ -257,30 +363,53 @@ fn x87_states(func: &Function) -> Option<HashMap<u64, (u32, bool)>> {
     entry_sp[entry_i] = 0;
     let mut work = vec![entry_i];
     let mut out: HashMap<u64, (u32, bool)> = HashMap::new();
+    let mut fp_calls: HashMap<u64, u32> = HashMap::new();
+    let mut ret_depths: Vec<i32> = Vec::new();
 
     while let Some(bi) = work.pop() {
         let blk = &func.blocks[&order[bi]];
         let mut sp = entry_sp[bi];
         for (k, insn) in blk.insns.iter().enumerate() {
             let ins = &insn.raw;
+            // A call to an fp-returning function leaves its result in st(0); the
+            // x87 ABI keeps the stack otherwise empty across calls, so this single
+            // push is the only adjustment a call needs. Record where the result
+            // lands (`sp` before the push) so the lifter can recover it from the
+            // fp return channel.
+            if call_returns_fp(ins, fp) {
+                if sp < 0 {
+                    return Err(X87Bail);
+                }
+                fp_calls.insert(insn.address, sp as u32);
+                sp += 1;
+                if !(0..=8).contains(&sp) {
+                    return Err(X87Bail);
+                }
+                continue;
+            }
             if !is_x87(ins) {
                 continue;
             }
-            let delta = x87_delta(ins)?; // unmodelled FPU op → bail whole function
+            // unmodelled FPU op → bail whole function
+            let delta = x87_delta(ins).ok_or(X87Bail)?;
             // float→int store (`fist`/`fistp`, but not the always-truncating
             // `fisttp`) is only sound when the rounding mode is truncation.
             let needs_trunc = matches!(ins.mnemonic(), Mnemonic::Fist | Mnemonic::Fistp);
             if needs_trunc && !truncate_active(&blk.insns, k) {
-                return None;
+                return Err(X87Bail);
             }
             if !(0..=8).contains(&sp) {
-                return None;
+                return Err(X87Bail);
             }
             out.insert(insn.address, (sp as u32, needs_trunc));
             sp += delta;
             if !(0..=8).contains(&sp) {
-                return None;
+                return Err(X87Bail);
             }
+        }
+        // Terminal depth at a `ret`: an fp-returning function leaves st(0) here.
+        if matches!(blk.terminator, crate::disasm::Flow::Return) {
+            ret_depths.push(sp);
         }
         for &s in &blk.successors {
             if let Some(&si) = bidx.get(&s) {
@@ -288,12 +417,12 @@ fn x87_states(func: &Function) -> Option<HashMap<u64, (u32, bool)>> {
                     entry_sp[si] = sp;
                     work.push(si);
                 } else if entry_sp[si] != sp {
-                    return None; // ambiguous stack depth at a join
+                    return Err(X87Bail); // ambiguous stack depth at a join
                 }
             }
         }
     }
-    Some(out)
+    Ok(X87Info { ops: out, fp_calls, ret_depths })
 }
 
 /// Is the x87 rounding mode proven to be truncation at instruction `idx` of

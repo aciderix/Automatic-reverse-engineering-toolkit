@@ -274,6 +274,23 @@ fn loop_exit_carrying_a_value() {
 }
 
 #[test]
+fn fp_value_returned_across_a_call() {
+    if !has_m32() {
+        eprintln!("skipping fp-return test: `cc -m32` unavailable (install gcc-multilib)");
+        return;
+    }
+    // A double returned in st(0) and compared by the caller (fucomi). The x87
+    // depth analysis must count the call's st(0) push and the value must be
+    // threaded through the fp return channel — otherwise the comparison runs on
+    // an undefined operand (the bug behind Lua's always-failing version check).
+    let out = transpile_and_run("fp_return_call.exe");
+    assert!(
+        out.contains("FPRET: match"),
+        "fp value not returned across the call:\n{out}"
+    );
+}
+
+#[test]
 fn setjmp_longjmp_nonlocal_exit() {
     if !has_m32() {
         eprintln!("skipping setjmp test: `cc -m32` unavailable (install gcc-multilib)");
