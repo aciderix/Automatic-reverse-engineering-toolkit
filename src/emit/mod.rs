@@ -366,7 +366,15 @@ pub(crate) fn expr_c(e: &Expr) -> String {
             match target {
                 CallTarget::Direct(addr) => format!("sub_{:x}({})", addr, a.join(", ")),
                 CallTarget::Named(n) if n.starts_with("asm:") => {
-                    format!("0 /*{}*/", n)
+                    // An unmodelled instruction in expression position. In the
+                    // runnable transpile, fail loud (abort) rather than substitute
+                    // 0 for an unknown effect — the comma keeps it an expression.
+                    // The read-only decompile keeps the readable comment form.
+                    if shared_stack() {
+                        format!("(aret_unmodelled({:?}), 0)", n.strip_prefix("asm:").unwrap_or(n))
+                    } else {
+                        format!("0 /*{}*/", n)
+                    }
                 }
                 CallTarget::Named(n) => format!("{}({})", n, a.join(", ")),
                 CallTarget::Indirect(e) => {
