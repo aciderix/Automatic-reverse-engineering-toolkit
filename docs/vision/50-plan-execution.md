@@ -94,9 +94,30 @@ CRT** (FLIRT mingw/MSVC). Volet (a) prioritaire car c'est le blocage mesuré.
   bruit), tourne parfaitement. *Vérifié* : fixture strippée FPO
   `address_taken_callback` (callback via table de pointeurs, `RESULT=42`) ; **81
   tests** (m1 27→28) ; diff **268/268**.
-- *Reste 3a* : ~225 fonctions encore manquantes au strippé (entrées hors
-  whitelist — feuilles `8b 44 24`, pointeurs non alignés) ; un appel indirect
-  reste non résolu (`0x418643`).
+- **3a-bis. Address-taken par immédiats + prologues feuilles ✅ FAIT.** Deux
+  ajouts portant le recall strippé **762 → 971/987** : (1) passe 2c — scan du flux
+  décodé (à point fixe) pour un **immédiat**/`[imm32]` absolu visant un début de
+  fonction non décodé (callback passé par valeur : `push imm32`, `mov [esp+d],
+  imm32` — le `Pfunc` des appels protégés Lua, ex. `_f_luaopen`) que le scan de
+  données ne voit pas ; (2) `looks_like_func_start` accepte aussi `mov reg,[esp+
+  disp]` (fonctions feuilles lisant leur 1er arg pile, ex. `_getS`). Les **appels
+  indirects non résolus disparaissent**. Garde `!global.contains_key` conservée →
+  corpus intact. *Vérifié* : 81 tests, diff 268/268, Lua symbolé inchangé (987).
+- **3b-amorce. Shims CRT « morts » (double tiret) corrigés ✅ FAIT.** Même bug que
+  `_initterm` : `sanitize_import` retire les tirets de tête → le générateur appelle
+  `aret_lock` (import `_lock`), `aret_getmainargs` (`__getmainargs`), etc., mais une
+  série de shims manuels avaient gardé les tirets (`aret__lock`, `aret___getmainargs`,
+  `aret___p__fmode`, `aret___acrt_iob_func`…) → **morts** (chaque appel retombait sur
+  le stub faible « unimplemented »). Renommés vers la forme assainie (les défs fortes
+  écrasent les stubs faibles) ; supprimé les doublons de `aret_crt.c` (`aret_errno`,
+  `aret_onexit`). Effet : Lua strippé ne meurt plus sur `_lock` ; ces internes msvcrt
+  font enfin leur vrai travail (no-op / retour de pointeur) pour tout binaire. 81
+  tests, diff 268/268, Lua symbolé toujours parfait.
+- *Reste 3a* : ~16 fonctions encore manquantes au strippé ; surtout, une fonction
+  reste **mal récupérée** (frontières) → Lua strippé bute désormais sur une erreur
+  *interne* Lua (« function or expression needs too many registers ») = un sous-
+  programme miscompilé parmi les 971. Forensics ciblée à faire (diff symbolé/strippé
+  des frontières de fonctions).
 - *Reste 3b* : signatures FLIRT pour `ucrtbase`/`msvcr*` (MSVC) + DB plus large
   via `--mode gensig`. *Critère* : un exe MSVC strippé reconnaît son CRT et tourne.
 
