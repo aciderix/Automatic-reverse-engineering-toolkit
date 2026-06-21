@@ -528,3 +528,23 @@ fn fs_file_roundtrip_with_path_translation() {
     );
     let _ = std::fs::remove_dir_all(&prefix);
 }
+
+#[test]
+fn auto_main_entry_skips_crt_startup() {
+    if !has_m32() {
+        eprintln!("skipping auto-entry test: `cc -m32` unavailable (install gcc-multilib)");
+        return;
+    }
+    // The PE entry is a CRT bootstrap (`_mainCRTStartup@0`) that prints a "boot"
+    // marker before calling main. With auto-`main` selection the transpiler
+    // starts at `main` and never runs the bootstrap, so only "main" prints.
+    let out = transpile_and_run("auto_main_entry.exe");
+    assert!(
+        out.contains("AUTOENTRY: main"),
+        "main marker missing (did the entry redirect to main?):\n{out}"
+    );
+    assert!(
+        !out.contains("AUTOENTRY: boot"),
+        "bootstrap ran — entry was not redirected to main:\n{out}"
+    );
+}

@@ -356,3 +356,18 @@ Chantiers longs (le « mur » des jeux). Documentés, pas prioritaires.
   `gsub`). **Trou révélé (prochain)** : l'entrée **par défaut** (sas CRT) devrait
   marcher seule (auto-`main` ou amorçage CRT survivable) pour ne plus dépendre du
   flag — chantier « robustesse du démarrage », lié à Phase 3.
+- **2026-06-21 — Robustesse du démarrage : auto-`main` par défaut.** Comble le
+  trou ci-dessus. `analysis::auto_main_entry(prog)` : si le point d'entrée du PE
+  est un amorçage CRT (symbole `*CRTStartup` ou `is_startup_glue`) **et** qu'il
+  existe un symbole de fonction `main`/`_main` à une adresse distincte, le
+  transpileur démarre au `main` (note explicite affichée) et saute le sas CRT non
+  modélisé ; le `main` généré pose une frame cdecl synthétique (`argc`/`argv`).
+  **Garde-fou** : un binaire *freestanding* (entrée = sa propre logique, **pas**
+  de symbole `main` séparé — cas de toutes les fixtures `_mainCRTStartup@0`) est
+  laissé intact. Effet : `aret -m transpile lua.exe` **marche sans `--entry`**.
+  `--entry <addr>` force l'entrée d'origine si l'on veut le sas complet. *Vérifié* :
+  nouvelle fixture+test `auto_main_entry` (l'amorçage imprime « boot » puis appelle
+  `main` ; le redirect ne laisse passer que « main ») ; **79 tests** (m1 25→26) ;
+  diff **268/268** ; Lua OK sans flag. *Reste* (binaires **strippés**) : rendre
+  `find_main` (motif argc/argv→`call main`) plus robuste — il échoue encore sur le
+  mingw de Lua ; couvert par Phase 3 (reconnaissance CRT MSVC).

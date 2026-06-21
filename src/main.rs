@@ -448,7 +448,15 @@ fn main() -> Result<()> {
                         bail!("--entry: '{s}' is neither hex nor a known function symbol");
                     }
                 }
-                None => None,
+                // No `--entry`: if the program entry is a CRT bootstrap
+                // (`*CRTStartup`) and a distinct `main` symbol exists, start at
+                // `main` and skip the startup we do not model. Guarded so a
+                // freestanding binary (entry *is* its logic, no separate `main`)
+                // is untouched — its entry keeps driving. `--entry <addr>` forces
+                // the original entry back if the full startup is ever wanted.
+                None => analysis::auto_main_entry(&prog).inspect(|&a| {
+                    eprintln!("note: entry 0x{:x} is CRT startup; starting at main 0x{a:x} (use --entry to override)", prog.entry);
+                }),
             };
             let snapshot = match &args.snapshot {
                 Some(p) => {

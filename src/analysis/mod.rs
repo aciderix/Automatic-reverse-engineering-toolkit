@@ -128,6 +128,33 @@ pub fn find_main(prog: &Program, result: &AnalysisResult) -> Option<u64> {
     None
 }
 
+/// Conservatively choose `main` as the transpile entry when the program's own
+/// entry is a CRT bootstrap (`*CRTStartup`) and a distinct `main`/`_main`
+/// function symbol exists. Returns `None` for a freestanding binary (no such
+/// symbol, or the entry already *is* `main`) so its entry is left untouched.
+///
+/// The native CRT startup (`__tmainCRTStartup` and friends) runs MSVC/mingw
+/// runtime initialization we replace wholesale with the HLE; re-running it
+/// reaches unmodelled internals. Starting at `main` (with a synthetic argc/argv
+/// frame laid by the generated `main`) is the sound, documented default.
+pub fn auto_main_entry(prog: &Program) -> Option<u64> {
+    // The entry must look like a CRT bootstrap; otherwise leave it alone.
+    let entry_is_bootstrap = prog
+        .symbol_name(prog.entry)
+        .is_some_and(|n| n.contains("CRTStartup"))
+        || prog.is_startup_glue(prog.entry);
+    if !entry_is_bootstrap {
+        return None;
+    }
+    // A user `main` symbol distinct from the entry (mingw/MSVC decorate it
+    // `main`/`_main`; never the `@`-suffixed stdcall freestanding form).
+    prog.symbols
+        .values()
+        .find(|k| k.is_function && (k.name == "main" || k.name == "_main"))
+        .map(|k| k.address)
+        .filter(|&a| a != prog.entry)
+}
+
 /// Entry point: global decode, then build each function's CFG. When
 /// `prologue_scan` is set, also recover functions reached only indirectly by
 /// scanning executable sections for function prologues.
