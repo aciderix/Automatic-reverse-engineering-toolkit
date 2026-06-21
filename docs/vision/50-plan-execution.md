@@ -581,3 +581,33 @@ le verdict est maintenant beaucoup plus digne de confiance. *Reste pour Lua SOUN
 modéliser les ~31 internes CRT statiques (x87/SSE dans printf/locale), OU les reconnaître
 host-backed (FLIRT élargi). *Cohérence à finir* : la forme `asm:` no-op encore au runtime
 au lieu d'`abort` (Stmt::Asm, lui, abort) — à uniformiser.
+
+### Ordre logique : (1) sûreté runtime ✅ FAIT — (2) réduire partial ⏳ DIAGNOSTIQUÉ
+Philosophie : **d'abord la sûreté (rien de faux en silence), puis la complétude**.
+- **(1) Cohérence runtime ✅ FAIT.** La forme **appel `asm:`** (instruction non
+  modélisée en position d'expression, ex. `fstp [mem]`) émettait `0 /*asm:…*/` —
+  no-op silencieux. En mode transpile elle émet maintenant `(aret_unmodelled("…"),0)`
+  → **abort**. Combiné à `Stmt::Asm` (déjà abort), **toute** instruction non
+  modélisée, en statement OU expression, échoue bruyamment quand atteinte. Vérifié :
+  Lua tourne entièrement (rien d'atteint → rien n'abort ; l'abort est un filet, pas
+  un changement de comportement). 85 tests, diff 268/268. → **le principe sacré tient
+  désormais au runtime, pas seulement à la conversion.**
+- **(2) Réduire `partial → 0` — DIAGNOSTIC PRÉCIS (pas encore corrigé).** Les 31
+  partial de Lua se répartissent en : (a) **~4 fonctions Lua VIVANTES** (`forprep`,
+  `intarith`, `math_abs`, `lua_number2strx`) dont le chemin **flottant** fait
+  **abandonner l'analyse de profondeur x87** (joins de pile ambigus : un bloc atteint
+  avec deux profondeurs différentes → bail → *toutes* les ops x87 de la fonction en
+  asm). Leurs chemins entiers marchent (d'où Lua fonctionnel). (b) **~27 internes CRT
+  flottants MORTS** (famille `_D2A`/dtoa de David Gay, `__mingw_pformat`, libm
+  `__*l_internal`) — injoignables car leurs points d'entrée publics (printf/sprintf/
+  strtod/math) sont **host-backed** ; ils sont liftés mais jamais appelés. **Vérité
+  importante** : le verdict les compte (conservateur — on ne *prouve* pas qu'ils sont
+  morts, un appel indirect pourrait les viser), donc 31 est honnête.
+  *Voies pour (2)* — par ordre de valeur × sûreté :
+  1. **Réconciliation des joins x87** (les 4 vivantes) — cœur Phase 5, délicat
+     (correctness x87 critique) → session dédiée, difftest à chaque pas.
+  2. **Host-back des libm restantes** (sqrt, ldexp, variantes `*l`) — *réel* (vraie
+     libm) mais l'ABI `long double` (args 80-bit sur la pile) demande un marshalling
+     dédié, ≠ macro `MATH1` (qui lit des `double`). Gain modeste (~4-6).
+  3. **Élimination de code mort** (ne pas lifter une fonction sans site d'appel) —
+     réduirait les 27 mortes, mais conservatisme requis (appels indirects).
