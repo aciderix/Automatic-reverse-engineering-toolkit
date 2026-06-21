@@ -126,6 +126,26 @@ Résoudre `call [vtable+k]` quand la vtable est en `.rodata` ; nommer la méthod
 *Livrable* : recovery vtables (analysis/ir) + fixture C++ virtuelle. *Critère* :
 un appel virtuel se résout et s'exécute correctement (différentiel).
 
+### Phase 5-soup — Réduire `partial(asm) → 0` : indirections (modèle 3 niveaux) ⏳ EN COURS
+Cadre proposé (ChatGPT) pour ramener proprement le compteur `partial` à zéro, du
+plus déterministe au plus dynamique. Mesuré par le verdict de solidité + `--strict`.
+- **Niveau 1 — thunks mémoire `jmp [mem]` / `call [mem]` ✅ FAIT.** `jmp [mem]`
+  (pointeur non indexé) lifté en **appel indirect tail sound** (lit le pointeur au
+  runtime, dispatch) ; `call [mem]` déjà géré. Lua → `0 partial`, SOUND. (Détail :
+  journal §4.) Une **résolution statique** vers appel direct (quand le slot est
+  prouvé constant, ex. `.rdata`/IAT) reste une *optimisation* future, jamais au
+  prix de la justesse (slot `.data` inscriptible).
+- **Niveau 2 — indirections CRT / ABI runtime ⬜.** Symboles structurels du runtime
+  (`____lc_codepage_func`, `__pctype`, `__mb_cur_max`, tables `_pctype`/locale…) :
+  indirection déterministe mais propre au CRT. À traiter une fois le niveau 1
+  stabilisé pour ne pas polluer la lecture. *Livrable* : reconnaissance + liaison
+  host de ces tables/accesseurs. *Critère* : un binaire qui les exerce reste SOUND.
+- **Niveau 3 — indirects dynamiques vrais ⬜.** `call eax`, tables de saut non
+  résolues, pointeurs calculés → **analyse points-to / reconstruction CFG**, autre
+  ordre de complexité (recouvre Phase 4 vtables). *Livrable* : sur-ensemble de
+  cibles prouvé par fonction, sinon échec bruyant. *Critère* : un appel virtuel /
+  pointeur calculé se résout, différentiel sans régression.
+
 ### Phase 5 — Complétude du lifter (réduire la soupape `asm`) ⏳ EN COURS
 - **5a. Retour flottant x87 à travers un appel ✅ FAIT** (révélé par Lua). L'analyse
   de profondeur x87 ne comptait pas le `st(0)` qu'un appel à une fonction renvoyant
