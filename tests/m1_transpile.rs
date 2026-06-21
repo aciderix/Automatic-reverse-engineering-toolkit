@@ -274,6 +274,23 @@ fn loop_exit_carrying_a_value() {
 }
 
 #[test]
+fn signed_compare_against_negative_immediate() {
+    if !has_m32() {
+        eprintln!("skipping signed-cmp test: `cc -m32` unavailable (install gcc-multilib)");
+        return;
+    }
+    // `cmp r32, imm32; jge` where the immediate is a negative 32-bit constant
+    // (-1000999). It must be sign-extended for the signed comparison, not read as
+    // the zero-extended +4293913049 — the bug behind Lua's index2value treating a
+    // negative (pseudo) stack index as a huge positive one. Expected: 1 0 1.
+    let out = transpile_and_run("signed_cmp_negimm.exe");
+    assert!(
+        out.contains("SIGNCMP: 1 0 1"),
+        "signed compare vs negative immediate wrong:\n{out}"
+    );
+}
+
+#[test]
 fn fp_value_returned_across_a_call() {
     if !has_m32() {
         eprintln!("skipping fp-return test: `cc -m32` unavailable (install gcc-multilib)");

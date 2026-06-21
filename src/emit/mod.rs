@@ -518,10 +518,60 @@ fn sctype(bits: u8) -> &'static str {
     }
 }
 
+/// If `e` is sign-extended from a sub-64-bit width — a `& 0xff/0xffff/0xffffffff`
+/// mask or a sub-word load — return that width in bits; else `None`. Used to
+/// recover the width of a signed comparison so a constant sibling operand can be
+/// sign-extended from the *same* width.
+fn signed_width(e: &Expr) -> Option<u8> {
+    match e {
+        Expr::Binary(BinOp::And, _, m) => match m.as_ref() {
+            Expr::Const(0xff, _) => Some(8),
+            Expr::Const(0xffff, _) => Some(16),
+            Expr::Const(0xffffffff, _) => Some(32),
+            _ => None,
+        },
+        Expr::Load { ty, .. } => {
+            let b = int_bits(ty);
+            if b < 64 {
+                Some(b)
+            } else {
+                None
+            }
+        }
+        _ => None,
+    }
+}
+
+/// Render `e` as a signed `int64_t` interpreted at `w` bits. A constant is
+/// sign-extended from `w` (so a 32-bit `0xfff0b9d9` is `-1000999`, not the
+/// zero-extended `+4293913049` that silently breaks `cmp r32, imm32; jge`);
+/// non-constant operands defer to `signed_cast`, which derives their own width.
+fn signed_cast_w(e: &Expr, w: u8) -> String {
+    if let Expr::Const(c, _) = e {
+        if (1..64).contains(&w) {
+            let m = (1u128 << w) - 1;
+            let v = (*c as u128) & m;
+            let signed: i128 = if (v >> (w - 1)) & 1 == 1 {
+                v as i128 - (1i128 << w)
+            } else {
+                v as i128
+            };
+            return format!("(int64_t)({})", signed);
+        }
+    }
+    signed_cast(e)
+}
+
 fn binary_c(op: BinOp, a: &Expr, b: &Expr) -> String {
     use BinOp::*;
     let u = |x: &Expr| format!("(uint64_t)({})", expr_c(x));
-    let s = |o: &str| format!("({} {} {})", signed_cast(a), o, signed_cast(b));
+    // Signed comparison/division: interpret both operands at a common width, so a
+    // constant operand sign-extends from the same width as its (often masked)
+    // sibling rather than being read as a large positive 64-bit value.
+    let s = |o: &str| {
+        let w = signed_width(a).or_else(|| signed_width(b)).unwrap_or(64);
+        format!("({} {} {})", signed_cast_w(a, w), o, signed_cast_w(b, w))
+    };
     let un = |o: &str| format!("({} {} {})", u(a), o, u(b));
     let plain = |o: &str| format!("({} {} {})", expr_c(a), o, expr_c(b));
     match op {

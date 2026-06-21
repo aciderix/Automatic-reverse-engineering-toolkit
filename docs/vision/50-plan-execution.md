@@ -175,3 +175,15 @@ Chantiers longs (le « mur » des jeux). Documentés, pas prioritaires.
   **Vérif** : fixture `fp_return_call.{c,exe}` + test `fp_value_returned_across_a_call`
   (`match`) ; **73 tests verts** ; diff **268/268**. Lua : vérif de version OK,
   avance jusqu'à `luaV_finishget` (indexation table) dans `openlibs` — bug suivant.
+- **2026-06-21 — Phase 5b FAITE (comparaison signée vs immédiat négatif).**
+  Diagnostic Lua : `luaV_finishget` levait « attempt to index » car `index2value`
+  renvoyait `&g->nilvalue` (chemin index positif hors-borne) pour un index
+  *négatif* `-1`. Cause : `cmp r32, imm32 ; jge` où l'immédiat négatif `-1000999`
+  (0xfff0b9d9) était zéro-étendu en `+4293913049` au lieu d'être signé-étendu →
+  `-1 >= +4.29e9` faux → mauvaise branche. Les immédiats sont typés `int(64)`
+  (lift) ; à l'émission d'une comparaison signée, l'opérande masqué (32 bits)
+  était signé-étendu mais pas la constante. Fix (`emit::binary_c`/`signed_cast_w`)
+  : largeur commune déduite du masque du frère, la constante est signé-étendue à
+  cette largeur. **Général** (toute comparaison/division signée vs immédiat
+  négatif). *Vérifié* : fixture `signed_cmp_negimm` (`1 0 1`) ; **74 tests** ;
+  diff **268/268**. Lua : passe `openlibs` ; crash suivant plus profond (exécution).
