@@ -28,6 +28,7 @@
 #include <ctype.h>
 #include <time.h>
 #include <locale.h>
+#include <math.h>
 
 /* Read cdecl argument `i` (a 32-bit word) from the modelled stack. */
 static inline uint32_t a32(uint32_t esp, int i) {
@@ -144,6 +145,42 @@ uint32_t aret_localeconv(uint32_t esp) { (void)esp; return RP(localeconv()); }
  * accept and return it — matching the documented startup-glue limitation that C++
  * global dtors are not executed. */
 uint32_t aret_onexit(uint32_t esp) { return AU(0); }
+
+/* ------------------------------------------------------------------ */
+/* <math.h> — the transcendental libm functions. Their statically-linked */
+/* bodies are dense x87 (and don't model), so bind them to the host libm.*/
+/* Args are cdecl `double`s on the machine stack ([esp], [esp+8]); the    */
+/* result is returned in st(0), which our caller recovers from the x87    */
+/* return channel (__aret_x87_ret, see aret_hle.c / FLOAT_HELPERS).       */
+/* ------------------------------------------------------------------ */
+extern long double __aret_x87_ret;
+#define AD(i)  (*(double *)(uintptr_t)(esp + (unsigned)(i) * 8))
+#define MATH1(name, fn) uint32_t aret_##name(uint32_t esp) { __aret_x87_ret = fn(AD(0)); return 0; }
+#define MATH2(name, fn) uint32_t aret_##name(uint32_t esp) { __aret_x87_ret = fn(AD(0), AD(1)); return 0; }
+MATH2(pow, pow)
+MATH1(exp, exp)
+MATH1(log, log)
+MATH1(log10, log10)
+MATH1(log2, log2)
+MATH1(sin, sin)
+MATH1(cos, cos)
+MATH1(tan, tan)
+MATH1(asin, asin)
+MATH1(acos, acos)
+MATH1(atan, atan)
+MATH2(atan2, atan2)
+MATH1(sinh, sinh)
+MATH1(cosh, cosh)
+MATH1(tanh, tanh)
+MATH2(fmod, fmod)
+MATH2(hypot, hypot)
+MATH1(cbrt, cbrt)
+MATH1(exp2, exp2)
+MATH1(expm1, expm1)
+MATH1(log1p, log1p)
+#undef MATH1
+#undef MATH2
+#undef AD
 
 /* ------------------------------------------------------------------ */
 /* <ctype.h> — classification / case (often called, not inlined)      */

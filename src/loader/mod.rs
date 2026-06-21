@@ -70,6 +70,11 @@ const CRT_FUNCS: &[&str] = &[
     // <ctype.h>
     "toupper", "tolower", "isalpha", "isdigit", "isalnum", "isspace", "isupper",
     "islower", "ispunct", "iscntrl", "isprint", "isgraph", "isxdigit",
+    // <math.h> — transcendentals whose dense x87 bodies don't model; bound to
+    // the host libm (the shims return through the x87 fp channel).
+    "pow", "exp", "exp2", "expm1", "log", "log10", "log2", "log1p",
+    "sin", "cos", "tan", "asin", "acos", "atan", "atan2",
+    "sinh", "cosh", "tanh", "fmod", "hypot", "cbrt",
 ];
 
 /// How many leading bytes to match a FLIRT signature against.
