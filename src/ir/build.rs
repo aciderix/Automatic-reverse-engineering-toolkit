@@ -197,6 +197,16 @@ pub fn build_ir(prog: &Program, func: &Function) -> IrFunction {
                         )))),
                         None => stmts.push(Stmt::Asm(last.text.clone())),
                     }
+                } else if let Some(target) = crate::ir::lift::mem_indirect_target(&last.raw) {
+                    // `jmp [mem]` through a non-indexed pointer (a function-pointer
+                    // table slot in .data/.rdata, e.g. `____lc_codepage_func`) is an
+                    // indirect tail call: read the pointer at run time and dispatch
+                    // `return (*ptr)(args)`. Sound regardless of whether the slot is
+                    // later repatched, unlike resolving it to a fixed target.
+                    stmts.push(Stmt::Return(Some(tail_call(
+                        CallTarget::Indirect(Box::new(target)),
+                        bits,
+                    ))));
                 } else {
                     stmts.push(Stmt::Asm(last.text.clone()));
                 }

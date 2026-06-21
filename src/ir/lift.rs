@@ -360,6 +360,21 @@ fn mem_addr_raw(ins: &Instruction) -> Option<(Expr, u32)> {
 }
 
 /// Value of operand `i`.
+/// The loaded value of an indirect `jmp`/`call` through *memory* — the function
+/// pointer — as an Expr, for lifting `jmp [mem]` as an indirect tail call. Only
+/// for a non-indexed, non-segment memory operand (`jmp [imm32]`, `jmp [reg]`,
+/// `jmp [reg+disp]`); an *indexed* operand (`jmp [tbl+idx*4]`) is a jump table,
+/// handled elsewhere, and returns None here.
+pub(crate) fn mem_indirect_target(ins: &Instruction) -> Option<Expr> {
+    if ins.op0_kind() != OpKind::Memory
+        || ins.memory_index() != Register::None
+        || ins.segment_prefix() != Register::None
+    {
+        return None;
+    }
+    op_value(ins, 0)
+}
+
 fn op_value(ins: &Instruction, i: u32) -> Option<Expr> {
     match ins.op_kind(i) {
         OpKind::Register => read_reg(ins.op_register(i)),

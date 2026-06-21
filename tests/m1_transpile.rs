@@ -631,3 +631,19 @@ fn soundness_verdict_reported() {
     );
     let _ = std::fs::remove_dir_all(&out_dir);
 }
+
+#[test]
+fn jmp_through_memory_pointer_is_an_indirect_tailcall() {
+    if !has_m32() {
+        eprintln!("skipping jmp[mem] test: `cc -m32` unavailable (install gcc-multilib)");
+        return;
+    }
+    // A no-arg thunk that tail-jumps through a function pointer in .data
+    // (`jmp dword ptr [g_hook]`). It must lift to a real indirect tail call; left
+    // as opaque asm it would abort (aret_unmodelled) and never print.
+    let out = transpile_and_run("jmp_mem_tailcall.exe");
+    assert!(
+        out.contains("JT=42"),
+        "jmp [mem] not lifted as an indirect tail call:\n{out}"
+    );
+}
