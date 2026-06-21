@@ -254,3 +254,67 @@ uint32_t aret_wcslen(uint32_t esp) {
     while (s[n]) n++;
     return n;
 }
+
+/* ------------------------------------------------------------------ */
+/* <time.h> calendar — struct tm marshalling (host/guest ABI)         */
+/* ------------------------------------------------------------------ */
+/* msvcrt `struct tm` is 9 ints {sec,min,hour,mday,mon,year,wday,yday,isdst} —
+ * the same first 9 fields, in order, as the host's struct tm (which only adds
+ * extra trailing members). So gmtime/localtime return a pointer to a 9-int guest
+ * buffer filled from the host result, and mktime/strftime read that layout back
+ * into a host struct tm. The static buffer matches msvcrt (whose gmtime/localtime
+ * also return a pointer into per-thread static storage). */
+static int32_t aret_tm[9];
+static uint32_t aret_pack_tm(const struct tm *t) {
+    if (!t) return 0;
+    aret_tm[0] = t->tm_sec;  aret_tm[1] = t->tm_min;   aret_tm[2] = t->tm_hour;
+    aret_tm[3] = t->tm_mday; aret_tm[4] = t->tm_mon;   aret_tm[5] = t->tm_year;
+    aret_tm[6] = t->tm_wday; aret_tm[7] = t->tm_yday;  aret_tm[8] = t->tm_isdst;
+    return (uint32_t)(uintptr_t)aret_tm;
+}
+static struct tm aret_unpack_tm(const int32_t *g) {
+    struct tm t; memset(&t, 0, sizeof t);
+    if (g) {
+        t.tm_sec = g[0];  t.tm_min = g[1];   t.tm_hour = g[2];
+        t.tm_mday = g[3]; t.tm_mon = g[4];   t.tm_year = g[5];
+        t.tm_wday = g[6]; t.tm_yday = g[7];  t.tm_isdst = g[8];
+    }
+    return t;
+}
+uint32_t aret_gmtime(uint32_t esp) {
+    const int32_t *p = (const int32_t *)AP(0);   /* const time_t* (32-bit) */
+    time_t tt = p ? (time_t)*p : 0;
+    return aret_pack_tm(gmtime(&tt));
+}
+uint32_t aret_localtime(uint32_t esp) {
+    const int32_t *p = (const int32_t *)AP(0);
+    time_t tt = p ? (time_t)*p : 0;
+    return aret_pack_tm(localtime(&tt));
+}
+uint32_t aret_mktime(uint32_t esp) {
+    struct tm t = aret_unpack_tm((const int32_t *)AP(0));
+    return (uint32_t)(int32_t)mktime(&t);
+}
+uint32_t aret_strftime(uint32_t esp) {
+    char *s = AS(0); size_t max = AU(1); const char *fmt = ACS(2);
+    struct tm t = aret_unpack_tm((const int32_t *)AP(3));
+    return (uint32_t)strftime(s, max, fmt ? fmt : "", &t);
+}
+/* difftime returns a double — recovered through the x87 channel like libm. */
+uint32_t aret_difftime(uint32_t esp) {
+    __aret_x87_ret = difftime((time_t)(int32_t)AU(0), (time_t)(int32_t)AU(1));
+    return 0;
+}
+/* system(cmd): faithfully forward — the original program intends to run it. */
+uint32_t aret_system(uint32_t esp) { return (uint32_t)system(ACS(0)); }
+
+/* tmpnam([s]): a unique temporary name. msvcrt returns a bare name (used under
+ * the temp dir); a monotonic counter suffices and is path-translated on open. */
+uint32_t aret_tmpnam(uint32_t esp) {
+    static unsigned ctr = 0;
+    static char buf[64];
+    char *out = AS(0);
+    if (!out) out = buf;
+    snprintf(out, 64, "aret_tmp_%u", ++ctr);
+    return (uint32_t)(uintptr_t)out;
+}

@@ -467,6 +467,35 @@ uint32_t aret_remove(uint32_t esp) {
     return (uint32_t)remove(path);
 }
 
+uint32_t aret_rename(uint32_t esp) {
+    char from[1024], to[1024];
+    translate_path((const char *)(uintptr_t)arg(esp, 0), from, sizeof from);
+    translate_path((const char *)(uintptr_t)arg(esp, 1), to, sizeof to);
+    make_parents(to);
+    return (uint32_t)rename(from, to);
+}
+
+/* freopen(path, mode, stream): reopen `stream` on `path`. A null/synthetic _iob
+ * stream cannot be handed to host freopen, so close it (if a real FILE*) and open
+ * the path fresh — the returned FILE* is what the program keeps using. */
+uint32_t aret_freopen(uint32_t esp) {
+    const char *name = (const char *)(uintptr_t)arg(esp, 0);
+    const char *mode = (const char *)(uintptr_t)arg(esp, 1);
+    uint32_t stream = arg(esp, 2);
+    char path[1024];
+    translate_path(name, path, sizeof path);
+    if (path_is_write_mode(mode)) make_parents(path);
+    FILE *f = fopen(path, mode ? mode : "rb");
+    if (f && iob_fd(stream) < 0 && stream) fclose((FILE *)(uintptr_t)stream);
+    return (uint32_t)(uintptr_t)f;
+}
+
+uint32_t aret_tmpfile(uint32_t esp) { (void)esp; return (uint32_t)(uintptr_t)tmpfile(); }
+
+/* setvbuf(stream, buf, mode, size): buffering is an optimization with no
+ * observable effect on correct output; accept and report success. */
+uint32_t aret_setvbuf(uint32_t esp) { (void)esp; return 0; }
+
 /* Win32 file API — handles are POSIX file descriptors in this model, so the
  * existing aret_ReadFile/aret_WriteFile (which treat the handle as an fd) work
  * unchanged with handles returned here. */

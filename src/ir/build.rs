@@ -32,7 +32,7 @@ pub fn build_ir(prog: &Program, func: &Function) -> IrFunction {
     // a concrete slot. `None` if the function should not be x87-modelled (any
     // unmodelled FPU op, ambiguous depth, or a float→int store whose rounding we
     // cannot prove) — those instructions then degrade to a sound `Asm`.
-    let (x87, fp_calls) = match x87_states(func) {
+    let (x87, fp_calls) = match x87_states(prog, func) {
         Some((ops, calls)) => (Some(ops), calls),
         None => (None, HashMap::new()),
     };
@@ -304,12 +304,32 @@ pub fn set_fp_returning(set: std::collections::HashSet<u64>) {
 
 /// Does the instruction call a function known to return an fp value in `st(0)`?
 /// Only resolved for direct near calls; indirect calls are treated as x87-neutral.
-fn call_returns_fp(ins: &iced_x86::Instruction, fp: &std::collections::HashSet<u64>) -> bool {
-    use iced_x86::FlowControl;
-    if ins.flow_control() != FlowControl::Call {
-        return false;
+fn call_returns_fp(
+    prog: &Program,
+    ins: &iced_x86::Instruction,
+    fp: &std::collections::HashSet<u64>,
+) -> bool {
+    use iced_x86::{FlowControl, OpKind, Register};
+    match ins.flow_control() {
+        // Direct call: a recovered fp-returning function (statically-linked libm)
+        // or an import thunk (`jmp [IAT]`) to an fp-returning import.
+        FlowControl::Call => {
+            let t = ins.near_branch_target();
+            fp.contains(&t)
+                || (t != 0 && prog.import_thunk(t).is_some_and(is_fp_returning_lib))
+        }
+        // Indirect call straight through an IAT slot (`call [imm32]`) to an
+        // fp-returning import — e.g. msvcrt `difftime` returns a `double`.
+        FlowControl::IndirectCall
+            if ins.op0_kind() == OpKind::Memory
+                && ins.memory_base() == Register::None
+                && ins.memory_index() == Register::None =>
+        {
+            prog.import_name(ins.memory_displacement64())
+                .is_some_and(is_fp_returning_lib)
+        }
+        _ => false,
     }
-    fp.contains(&ins.near_branch_target())
 }
 
 /// A genuine bail of the x87 depth analysis: an unmodelled op, unprovable
@@ -330,9 +350,9 @@ struct X87Info {
 /// `FP_RETURNING` set models fp-returning calls as a push). Returns the per-op
 /// depth map and the fp-call sites, or `None` to disable x87 modelling for the
 /// whole function.
-fn x87_states(func: &Function) -> Option<(HashMap<u64, (u32, bool)>, HashMap<u64, u32>)> {
+fn x87_states(prog: &Program, func: &Function) -> Option<(HashMap<u64, (u32, bool)>, HashMap<u64, u32>)> {
     FP_RETURNING.with(|c| {
-        x87_depth_pass(func, &c.borrow())
+        x87_depth_pass(prog, func, &c.borrow())
             .ok()
             .map(|i| (i.ops, i.fp_calls))
     })
@@ -340,8 +360,8 @@ fn x87_states(func: &Function) -> Option<(HashMap<u64, (u32, bool)>, HashMap<u64
 
 /// Does `func` return an fp value? True iff every reachable `ret` leaves exactly
 /// one value on the x87 stack (the `st(0)` return). Used by `compute_fp_returning`.
-fn func_returns_fp(func: &Function, fp: &std::collections::HashSet<u64>) -> bool {
-    match x87_depth_pass(func, fp) {
+fn func_returns_fp(prog: &Program, func: &Function, fp: &std::collections::HashSet<u64>) -> bool {
+    match x87_depth_pass(prog, func, fp) {
         Ok(i) => !i.ret_depths.is_empty() && i.ret_depths.iter().all(|&d| d == 1),
         Err(_) => false,
     }
@@ -350,7 +370,7 @@ fn func_returns_fp(func: &Function, fp: &std::collections::HashSet<u64>) -> bool
 /// Compute the fixpoint of fp-returning functions: a function returns fp if its
 /// terminal x87 depth is 1, which can depend on fp-returning callees, so iterate
 /// until stable. Cheap (the set only grows, bounded by the function count).
-pub fn compute_fp_returning(funcs: &[&Function]) -> std::collections::HashSet<u64> {
+pub fn compute_fp_returning(prog: &Program, funcs: &[&Function]) -> std::collections::HashSet<u64> {
     let mut set = std::collections::HashSet::new();
     // Seed with libm/CRT functions known to return a double in st(0): their own
     // bodies are too complex to depth-analyze (and would bail), but the ABI
@@ -364,7 +384,7 @@ pub fn compute_fp_returning(funcs: &[&Function]) -> std::collections::HashSet<u6
     loop {
         let mut changed = false;
         for f in funcs {
-            if !set.contains(&f.entry) && func_returns_fp(f, &set) {
+            if !set.contains(&f.entry) && func_returns_fp(prog, f, &set) {
                 set.insert(f.entry);
                 changed = true;
             }
@@ -392,7 +412,7 @@ fn is_fp_returning_lib(name: &str) -> bool {
             | "fabs" | "copysign" | "fmin" | "fmax" | "fdim" | "remainder"
             | "nextafter" | "scalbn" | "scalbln" | "tgamma" | "lgamma"
             | "erf" | "erfc" | "fma" | "drem" | "significand" | "logb"
-            | "strtod" | "atof" | "strtold"
+            | "strtod" | "atof" | "strtold" | "difftime"
     )
 }
 
@@ -400,6 +420,7 @@ fn is_fp_returning_lib(name: &str) -> bool {
 /// per-op `(depth_before, needs_trunc)` map plus the terminal depth at each
 /// reached `ret` block (for fp-return detection).
 fn x87_depth_pass(
+    prog: &Program,
     func: &Function,
     fp: &std::collections::HashSet<u64>,
 ) -> Result<X87Info, X87Bail> {
@@ -433,7 +454,7 @@ fn x87_depth_pass(
             // push is the only adjustment a call needs. Record where the result
             // lands (`sp` before the push) so the lifter can recover it from the
             // fp return channel.
-            if call_returns_fp(ins, fp) {
+            if call_returns_fp(prog, ins, fp) {
                 if sp < 0 {
                     return Err(X87Bail);
                 }
@@ -744,9 +765,42 @@ pub fn host_shim_name(prog: &Program, addr: u64) -> Option<String> {
 /// outside the proven-correct subset? Such a function is only *partially*
 /// simulated (correct only where control reaches the translated parts).
 pub fn has_opaque_asm(irf: &IrFunction) -> bool {
+    // An unmodelled instruction surfaces two ways: a `Stmt::Asm` (statement form)
+    // or an `asm:`-named call *expression* (e.g. an unmodelled `fstp [mem]` that
+    // produces no value — emitted as `0 /* asm: … */`). Both are silent no-ops in
+    // the runnable C, so either makes the function partially simulated.
+    fn expr_has_asm(e: &Expr) -> bool {
+        match e {
+            Expr::Call { target, args, .. } => {
+                matches!(target, CallTarget::Named(n) if n.starts_with("asm:"))
+                    || matches!(target, CallTarget::Indirect(x) if expr_has_asm(x))
+                    || args.iter().any(expr_has_asm)
+            }
+            Expr::Load { addr, .. } => expr_has_asm(addr),
+            Expr::Unary(_, x) | Expr::Cast { expr: x, .. } => expr_has_asm(x),
+            Expr::Binary(_, a, b) => expr_has_asm(a) || expr_has_asm(b),
+            Expr::Select { cond, then_, else_ } => {
+                expr_has_asm(cond) || expr_has_asm(then_) || expr_has_asm(else_)
+            }
+            _ => false,
+        }
+    }
+    fn stmt_has_asm(s: &Stmt) -> bool {
+        match s {
+            Stmt::Asm(_) => true,
+            Stmt::Set { expr, .. } | Stmt::Assign { expr, .. } | Stmt::CallStmt(expr) => {
+                expr_has_asm(expr)
+            }
+            Stmt::Store { addr, value, .. } => expr_has_asm(addr) || expr_has_asm(value),
+            Stmt::Branch { cond, .. } => expr_has_asm(cond),
+            Stmt::Switch { value, .. } => expr_has_asm(value),
+            Stmt::Return(Some(e)) => expr_has_asm(e),
+            _ => false,
+        }
+    }
     irf.blocks
         .iter()
-        .any(|b| b.stmts.iter().any(|s| matches!(s, Stmt::Asm(_))))
+        .any(|b| b.stmts.iter().any(stmt_has_asm))
 }
 
 fn name_calls_in_expr(e: &mut Expr, prog: &Program, bits: u32, held: &HeldImports) {
