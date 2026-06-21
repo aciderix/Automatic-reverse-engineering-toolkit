@@ -211,3 +211,10 @@ Chantiers longs (le « mur » des jeux). Documentés, pas prioritaires.
   de crash-au-démarrage → vérif version → lib `_G` → lib `package` → phase mark GC.
   Régression stable (75 tests, diff 268/268) à chaque étape. **Prochain : tracer la
   corruption GC (origine du pointeur 0x8) ; chercher d'autres mislifts largeur/signe.**
+  *Breadcrumb forensics* : `reallymarkobject`/beaucoup de fonctions internes Lua
+  utilisent **regparm** (`eax`/`edx`/`ecx`, pas la pile) — `reallymarkobject` :
+  `eax=g, edx=o`. Donc lire les args via les **paramètres-registres** de la
+  fonction liftée, pas via `[mesp+…]` (sinon valeurs fantômes). Crash : traversée
+  d'objet gris (`propagatemark`) → référence enfant `&array[i]`/champ à une adresse
+  minuscule (0x8) → tag TValue lu à `[0x8+8]`. Suspecter la construction de table
+  (`luaH_resize`/`setnodevector`/`luaH_new`) ou une écriture de champ 64↔32 bits.
