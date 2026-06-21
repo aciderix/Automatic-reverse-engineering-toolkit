@@ -42,6 +42,10 @@ pub struct TranspileReport {
     /// gap — a call site that cannot do the right thing. Empty ⇒ every direct
     /// call resolves to translated code or a native shim.
     pub unresolved: Vec<u64>,
+    /// Imports the program *calls* for which no shim is implemented: each link to
+    /// the weak stub that warns and returns 0 — a silent wrong result (e.g.
+    /// `qsort` leaving its array unsorted). Names are sanitized (`aret_qsort`).
+    pub unimplemented_imports: Vec<String>,
     /// Captured stdout if the binary was run, else `None`.
     pub run_output: Option<String>,
 }
@@ -53,7 +57,7 @@ impl TranspileReport {
     /// completeness — it does not certify indirect-call coverage (those targets
     /// are not knowable statically; the runtime fails loud on an unrecovered one).
     pub fn is_sound(&self) -> bool {
-        self.unresolved.is_empty() && self.partial == 0
+        self.unresolved.is_empty() && self.partial == 0 && self.unimplemented_imports.is_empty()
     }
 }
 
@@ -72,15 +76,23 @@ impl TranspileReport {
             s.push_str("  soundness:  SOUND — every direct call resolves, no opaque asm\n");
         } else {
             s.push_str(&format!(
-                "  soundness:  INCOMPLETE — {} unresolved direct call(s), {} partial(asm) function(s)\n",
+                "  soundness:  INCOMPLETE — {} unresolved direct call(s), {} partial(asm) function(s), {} unimplemented import(s)\n",
                 self.unresolved.len(),
-                self.partial
+                self.partial,
+                self.unimplemented_imports.len(),
             ));
             for &a in self.unresolved.iter().take(10) {
                 s.push_str(&format!("              ! direct call to unrecovered 0x{a:x}\n"));
             }
             if self.unresolved.len() > 10 {
                 s.push_str(&format!("              … and {} more\n", self.unresolved.len() - 10));
+            }
+            for n in self.unimplemented_imports.iter().take(10) {
+                let raw = n.strip_prefix("aret_").unwrap_or(n);
+                s.push_str(&format!("              ! calls unimplemented import: {raw}\n"));
+            }
+            if self.unimplemented_imports.len() > 10 {
+                s.push_str(&format!("              … and {} more\n", self.unimplemented_imports.len() - 10));
             }
         }
         s.push_str(&format!("  output dir: {}\n", self.out_dir.display()));
@@ -444,6 +456,116 @@ fn collect_undef_subs(irfs: &[ir::types::IrFunction]) -> Vec<u64> {
     called.difference(&defined).copied().collect()
 }
 
+/// Every `aret_*` shim with a real definition in the embedded runtime sources.
+/// A called shim *not* in this set resolves to the weak "unimplemented" stub at
+/// link time — i.e. it warns and returns 0, a guess. Parsed from the source
+/// (rather than hand-listed) so it never drifts from what is actually shimmed.
+fn implemented_shims() -> std::collections::BTreeSet<String> {
+    let sources = [HLE_C, CRT_C, WIN32_C];
+    let mut set = std::collections::BTreeSet::new();
+    // 1. Direct definitions: `aret_x(uint32_t`.
+    for src in sources {
+        let b = src.as_bytes();
+        let mut i = 0;
+        while let Some(p) = src[i..].find("aret_") {
+            let start = i + p;
+            let mut end = start;
+            while end < b.len() && (b[end].is_ascii_alphanumeric() || b[end] == b'_') {
+                end += 1;
+            }
+            if src[end..].trim_start().starts_with("(uint32_t") {
+                set.insert(src[start..end].to_string());
+            }
+            i = end.max(start + 1);
+        }
+    }
+    // 2. Macro-generated definitions (e.g. `MATH1(pow, pow)` → `aret_pow`):
+    // discover any macro whose body token-pastes `aret_##<first-param>`, then add
+    // `aret_<name>` for each invocation's first argument. Self-maintaining: a new
+    // shim macro is picked up without touching this code.
+    let firstarg = |s: &str| -> Option<String> {
+        let p = s.find('(')?;
+        let name: String = s[p + 1..]
+            .chars()
+            .take_while(|&c| c.is_ascii_alphanumeric() || c == '_')
+            .collect();
+        (!name.is_empty()).then_some(name)
+    };
+    let mut gen_macros: Vec<(String, String)> = Vec::new(); // (macro, first-param)
+    for src in sources {
+        for line in src.lines() {
+            if let Some(rest) = line.trim_start().strip_prefix("#define ") {
+                if let (Some(paren), Some(param)) = (rest.find('('), firstarg(rest)) {
+                    let mac = rest[..paren].trim().to_string();
+                    if rest.contains(&format!("aret_##{param}")) {
+                        gen_macros.push((mac, param));
+                    }
+                }
+            }
+        }
+    }
+    for src in sources {
+        for line in src.lines() {
+            let t = line.trim();
+            for (mac, _) in &gen_macros {
+                if t.starts_with(&format!("{mac}(")) {
+                    if let Some(name) = firstarg(t) {
+                        set.insert(format!("aret_{name}"));
+                    }
+                }
+            }
+        }
+    }
+    set
+}
+
+/// Named shims a recovered function actually *calls* (`CallTarget::Named`), e.g.
+/// `aret_qsort` for an intercepted `qsort` import. Intersected against
+/// `implemented_shims` to find calls that would hit the unimplemented stub.
+fn collect_named_calls(irfs: &[ir::types::IrFunction]) -> std::collections::BTreeSet<String> {
+    use ir::types::{CallTarget, Expr, Stmt};
+    use std::collections::BTreeSet;
+    let mut names: BTreeSet<String> = BTreeSet::new();
+    fn ex(e: &Expr, out: &mut BTreeSet<String>) {
+        match e {
+            Expr::Call { target, args, .. } => {
+                if let CallTarget::Named(n) = target {
+                    out.insert(n.clone());
+                }
+                if let CallTarget::Indirect(x) = target {
+                    ex(x, out);
+                }
+                for a in args {
+                    ex(a, out);
+                }
+            }
+            Expr::Load { addr, .. } => ex(addr, out),
+            Expr::Unary(_, x) | Expr::Cast { expr: x, .. } => ex(x, out),
+            Expr::Binary(_, a, b) => { ex(a, out); ex(b, out); }
+            Expr::Select { cond, then_, else_ } => { ex(cond, out); ex(then_, out); ex(else_, out); }
+            _ => {}
+        }
+    }
+    fn st(s: &Stmt, out: &mut BTreeSet<String>) {
+        match s {
+            Stmt::Set { expr, .. } | Stmt::Assign { expr, .. } | Stmt::CallStmt(expr) => ex(expr, out),
+            Stmt::Store { addr, value, .. } => { ex(addr, out); ex(value, out); }
+            Stmt::Branch { cond, .. } => ex(cond, out),
+            Stmt::Switch { value, .. } => ex(value, out),
+            Stmt::Return(Some(e)) => ex(e, out),
+            _ => {}
+        }
+    }
+    for f in irfs {
+        for b in &f.blocks {
+            for s in &b.stmts {
+                st(s, &mut names);
+            }
+        }
+    }
+    names
+}
+
 /// Build IR for one recovered function and lower it for shared-stack transpilation
 /// (UBT M3). Unlike the verify/decompile chain, this does *not* promote stack
 /// slots to private per-function locals: every stack access stays raw memory into
@@ -557,6 +679,15 @@ pub fn transpile(
         emit::structured::emit_split(&irfs, CHUNK_FUNCS)
     };
     emit::set_shared_stack(false);
+    // Soundness: which called shims have no real implementation (they would hit
+    // the weak "unimplemented" stub — warn + return 0, a silent wrong result).
+    let unimplemented_imports: Vec<String> = {
+        let impl_set = implemented_shims();
+        collect_named_calls(&irfs)
+            .into_iter()
+            .filter(|n| n.starts_with("aret_") && !impl_set.contains(n) && !is_setjmp_intrinsic(n))
+            .collect()
+    };
     // The IR is no longer needed; free it before spawning the parallel compilers
     // (which need the memory) on a large program.
     drop(irfs);
@@ -755,6 +886,7 @@ pub fn transpile(
             partial: n_partial,
             host_backed: n_host,
             unresolved: undef_subs.clone(),
+            unimplemented_imports: unimplemented_imports.clone(),
             bits,
             run_output,
         });
@@ -838,6 +970,7 @@ pub fn transpile(
         partial: n_partial,
         host_backed: n_host,
         unresolved: undef_subs.clone(),
+        unimplemented_imports: unimplemented_imports.clone(),
         bits,
         run_output,
     })

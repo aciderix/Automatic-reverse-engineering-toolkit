@@ -218,3 +218,39 @@ CTYPE1(isprint, isprint)
 CTYPE1(isgraph, isgraph)
 CTYPE1(isxdigit, isxdigit)
 #undef CTYPE1
+
+/* ------------------------------------------------------------------ */
+/* <stdlib.h> — qsort / bsearch (callback into transpiled code)       */
+/* ------------------------------------------------------------------ */
+/* The comparator is a transpiled `sub_<va>` using the machine-stack ABI, not a
+ * native cdecl function, so it cannot be handed to libc directly. Forward to the
+ * real qsort/bsearch with a trampoline that invokes the guest comparator through
+ * aret_call, laying a cdecl frame ([esp+4]=a, [esp+8]=b) on a scratch stack with
+ * room below for the callee's own frame. Not reentrant — one active sort/search
+ * at a time, which qsort/bsearch satisfy (they do not nest the comparator). */
+static uint32_t aret_cmp_va;
+static int aret_cmp_tramp(const void *a, const void *b) {
+    static uint8_t scratch[64 * 1024];
+    uint32_t *f = (uint32_t *)(void *)(scratch + sizeof(scratch) - 64);
+    f[1] = (uint32_t)(uintptr_t)a; /* arg0 @ [esp+4] */
+    f[2] = (uint32_t)(uintptr_t)b; /* arg1 @ [esp+8] */
+    return (int)(int32_t)aret_call(aret_cmp_va, (uint32_t)(uintptr_t)f, 0, 0, 0);
+}
+uint32_t aret_qsort(uint32_t esp) {
+    aret_cmp_va = AU(3);
+    qsort(AP(0), AU(1), AU(2), aret_cmp_tramp);
+    return 0;
+}
+uint32_t aret_bsearch(uint32_t esp) {
+    aret_cmp_va = AU(4);
+    return (uint32_t)(uintptr_t)bsearch(AP(0), AP(1), AU(2), AU(3), aret_cmp_tramp);
+}
+
+/* <wchar.h> — Windows wchar_t is 16-bit (host's is 32-bit), so count 16-bit
+ * units directly rather than forwarding to host wcslen. */
+uint32_t aret_wcslen(uint32_t esp) {
+    const uint16_t *s = (const uint16_t *)(uintptr_t)a32(esp, 0);
+    uint32_t n = 0;
+    while (s[n]) n++;
+    return n;
+}

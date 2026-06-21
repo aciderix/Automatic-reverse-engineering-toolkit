@@ -647,3 +647,19 @@ fn jmp_through_memory_pointer_is_an_indirect_tailcall() {
         "jmp [mem] not lifted as an indirect tail call:\n{out}"
     );
 }
+
+#[test]
+fn qsort_callback_into_transpiled_comparator() {
+    if !has_m32() {
+        eprintln!("skipping qsort test: `cc -m32` unavailable (install gcc-multilib)");
+        return;
+    }
+    // qsort's comparator is a transpiled sub_<va> with the machine-stack ABI, so
+    // the shim must call it back through aret_call (a host->guest callback). If
+    // qsort were an unimplemented no-op the array would print unsorted.
+    let out = transpile_and_run("qsort_cb.exe");
+    assert!(
+        out.contains("1,2,3,5,7,9"),
+        "qsort callback not dispatched into the transpiled comparator:\n{out}"
+    );
+}
