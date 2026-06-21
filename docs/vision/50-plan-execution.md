@@ -101,6 +101,19 @@ Couvrir les instructions restantes sûres (cf. HANDOFF backlog). Évaluer
 l'intégration **Remill** (sémantique complète → LLVM) comme accélérateur. *Critère* :
 baisse mesurée de l'incomplétude sur le jeu, différentiel sans régression.
 
+### Phase 5bis — Frontière host/traduit explicite dans l'IR ✅ FAIT
+Question soulevée (ChatGPT) : marquer proprement la frontière entre fonctions
+**liftables sûres**, **opaques host-backed**, **partiellement simulées**. Avant :
+décisions éparpillées (par site d'appel dans `name_calls_in_expr` ; `import_name`/
+`import_thunk`/`crt_symbol`/`is_startup_glue` dispersés ; arg `esp` dupliqué 3×).
+Fix : **`resolve_call` unique** (`CallBinding::{Shim{name,thread_esp}, Internal}`)
+— source de vérité de la liaison d'appel. + requêtes de classification
+`host_shim_name` / `has_opaque_asm`, et un **rapport** par fonction (`classes: N
+lifted, M partial(asm), K host-backed`). *Vérifié* : comportement préservé (78
+tests, diff 268/268, Lua OK) ; Lua = 896 traduites / 1 partielle / 90 host-backed.
+*Reste* (si on va plus loin) : attacher la classe à l'`IrFunction` et élaguer les
+corps host-backed (sauf appels indirects).
+
 ### Phase 6 — Inférence de types (LISIBILITÉ + JUSTESSE) ⬜
 Largeur/signe/ptr puis agrégats `obj->field_8` (HANDOFF §5). *Critère* : types
 affichés, **jamais** au prix de la sémantique (casts explicites conservés).

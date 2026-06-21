@@ -676,38 +676,77 @@ fn loc_str(l: &Location) -> String {
 /// keep getting forward-declared (recompilable).
 type HeldImports = std::collections::HashMap<Location, String>;
 
+/// How a direct call target is backed — the IR-level boundary between code we
+/// translate ourselves and code the host runtime stands in for. Computed in one
+/// place (`resolve_call`) so every call site agrees on the classification.
+enum CallBinding {
+    /// Backed by a native shim `aret_<name>`: an intercepted import, an import
+    /// thunk (`jmp *[IAT]`), a statically-linked CRT/libm function recognized by
+    /// symbol, or startup glue mapped to a no-op. The body is *not* translated;
+    /// the real host runtime provides the behavior. `thread_esp` is whether the
+    /// shim reads its cdecl arguments off the shared machine stack (so the lifted
+    /// call must hand it the stack pointer).
+    Shim { name: String, thread_esp: bool },
+    /// An internal function we translate and emit as `sub_<addr>`.
+    Internal,
+}
+
+/// Classify a *direct* call target. The priority encodes the frontier:
+/// intercepted import → import thunk → (transpile only) statically-linked CRT/libm
+/// by symbol → startup glue → otherwise an internal lifted function. The CRT/glue
+/// bindings apply only in shared-stack (transpile) mode, so decompile output stays
+/// structurally faithful.
+fn resolve_call(prog: &Program, addr: u64) -> CallBinding {
+    // An intercepted import called directly (e.g. an ELF PLT stub): args come from
+    // the original calling convention, so no machine-stack esp is threaded.
+    if let Some(name) = prog.import_name(addr) {
+        return CallBinding::Shim { name: sanitize_import(name), thread_esp: false };
+    }
+    // `call <thunk>` where the thunk tail-jumps through an IAT slot: bind to the
+    // import shim at the genuine call site; the shim reads cdecl args off the stack.
+    if let Some(name) = prog.import_thunk(addr).map(|s| s.to_string()) {
+        return CallBinding::Shim { name: sanitize_import(&name), thread_esp: true };
+    }
+    if crate::emit::shared_stack() {
+        // Statically-linked CRT/libm recognized by symbol → native shim.
+        if let Some(name) = prog.crt_symbol(addr) {
+            return CallBinding::Shim { name: sanitize_import(name), thread_esp: true };
+        }
+        // mingw/MSVC startup glue (ctor/dtor runners, EH-frame, pseudo-reloc) → no-op.
+        if prog.is_startup_glue(addr) {
+            return CallBinding::Shim { name: "aret_noop".to_string(), thread_esp: true };
+        }
+    }
+    CallBinding::Internal
+}
+
+/// The host shim a direct call to `addr` binds to, if any — i.e. the function at
+/// `addr` is backed by the host runtime (a shim/glue) rather than translated.
+/// A single boundary query built on `resolve_call`, for classification/reporting.
+pub fn host_shim_name(prog: &Program, addr: u64) -> Option<String> {
+    match resolve_call(prog, addr) {
+        CallBinding::Shim { name, .. } => Some(name),
+        CallBinding::Internal => None,
+    }
+}
+
+/// Does the lifted function contain opaque `Asm` fallbacks — instructions left
+/// outside the proven-correct subset? Such a function is only *partially*
+/// simulated (correct only where control reaches the translated parts).
+pub fn has_opaque_asm(irf: &IrFunction) -> bool {
+    irf.blocks
+        .iter()
+        .any(|b| b.stmts.iter().any(|s| matches!(s, Stmt::Asm(_))))
+}
+
 fn name_calls_in_expr(e: &mut Expr, prog: &Program, bits: u32, held: &HeldImports) {
     match e {
         Expr::Call { target, args, .. } => {
             if let CallTarget::Direct(a) = target {
-                if let Some(name) = prog.import_name(*a) {
-                    *target = CallTarget::Named(sanitize_import(name));
-                } else if let Some(name) = prog.import_thunk(*a).map(|s| s.to_string()) {
-                    // `call <thunk>` where the thunk tail-jumps through an IAT slot:
-                    // bind to the import shim here, at the genuine call site. In
-                    // 32-bit the shim reads its cdecl args off the machine stack.
-                    *target = CallTarget::Named(sanitize_import(&name));
-                    if bits == 32 && args.is_empty() {
+                if let CallBinding::Shim { name, thread_esp } = resolve_call(prog, *a) {
+                    *target = CallTarget::Named(name);
+                    if thread_esp && bits == 32 && args.is_empty() {
                         *args = vec![Expr::Read(Location::Reg(RegId(4)))];
-                    }
-                } else if crate::emit::shared_stack() {
-                    // Statically-linked CRT recognized by symbol → bind to the
-                    // native shim (only when transpiling; keeps decompile output
-                    // structurally faithful). The shim reads its cdecl arguments
-                    // off the shared machine stack via esp, like an intercepted
-                    // import, so hand it the stack pointer.
-                    if let Some(name) = prog.crt_symbol(*a) {
-                        *target = CallTarget::Named(sanitize_import(name));
-                        if bits == 32 && args.is_empty() {
-                            *args = vec![Expr::Read(Location::Reg(RegId(4)))];
-                        }
-                    } else if prog.is_startup_glue(*a) {
-                        // mingw/MSVC startup glue (ctor/dtor runners, EH-frame,
-                        // pseudo-reloc) → native no-op, so `main` can run.
-                        *target = CallTarget::Named("aret_noop".to_string());
-                        if bits == 32 && args.is_empty() {
-                            *args = vec![Expr::Read(Location::Reg(RegId(4)))];
-                        }
                     }
                 }
             }

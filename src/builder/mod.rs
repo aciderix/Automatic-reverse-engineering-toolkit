@@ -31,6 +31,12 @@ pub struct TranspileReport {
     pub binary: std::path::PathBuf,
     pub functions: usize,
     pub bits: u32,
+    /// Function classification (the IR-level frontier): fully translated, only
+    /// *partially* simulated (some opaque `asm`), and host-backed (a call to it is
+    /// redirected to a native shim — the real runtime stands in for it).
+    pub lifted: usize,
+    pub partial: usize,
+    pub host_backed: usize,
     /// Captured stdout if the binary was run, else `None`.
     pub run_output: Option<String>,
 }
@@ -40,6 +46,10 @@ impl TranspileReport {
         let mut s = String::new();
         s.push_str("ARET transpile (UBT M1) — native recompile\n");
         s.push_str(&format!("  functions:  {}\n", self.functions));
+        s.push_str(&format!(
+            "  classes:    {} lifted, {} partial(asm), {} host-backed\n",
+            self.lifted, self.partial, self.host_backed
+        ));
         s.push_str(&format!("  bitness:    {}-bit\n", self.bits));
         s.push_str(&format!("  output dir: {}\n", self.out_dir.display()));
         s.push_str(&format!("  binary:     {}\n", self.binary.display()));
@@ -440,6 +450,19 @@ pub fn transpile(
     emit::set_shared_stack(true);
     let irfs: Vec<_> = funcs.iter().map(|f| lower(prog, f)).collect();
     let n_funcs = irfs.len();
+    // Classify each recovered function at the host/translate frontier: host-backed
+    // (a call to it is redirected to a native shim — body irrelevant), partially
+    // simulated (some opaque `asm`), or fully translated. Reported for honesty.
+    let (mut n_host, mut n_partial, mut n_lifted) = (0usize, 0usize, 0usize);
+    for (f, irf) in funcs.iter().zip(&irfs) {
+        if ir::build::host_shim_name(prog, f.entry).is_some() {
+            n_host += 1;
+        } else if ir::build::has_opaque_asm(irf) {
+            n_partial += 1;
+        } else {
+            n_lifted += 1;
+        }
+    }
     // Program emission: either the LLVM IR backend (chunked .ll modules) or the
     // chunked C backend. The runtime (HLE, main, dispatch, layout, stubs) is C
     // either way.
@@ -645,6 +668,9 @@ pub fn transpile(
             out_dir: out_dir.to_path_buf(),
             binary,
             functions: n_funcs,
+            lifted: n_lifted,
+            partial: n_partial,
+            host_backed: n_host,
             bits,
             run_output,
         });
@@ -724,6 +750,9 @@ pub fn transpile(
         out_dir: out_dir.to_path_buf(),
         binary,
         functions: n_funcs,
+        lifted: n_lifted,
+        partial: n_partial,
+        host_backed: n_host,
         bits,
         run_output,
     })
