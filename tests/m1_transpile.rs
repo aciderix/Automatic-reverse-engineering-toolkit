@@ -274,6 +274,24 @@ fn loop_exit_carrying_a_value() {
 }
 
 #[test]
+fn bytecode_dispatch_loop() {
+    if !has_m32() {
+        eprintln!("skipping dispatch-loop test: `cc -m32` unavailable (install gcc-multilib)");
+        return;
+    }
+    // An interpreter dispatch loop: each handler re-dispatches via computed goto,
+    // so the loop *header* ends in the jump-table switch and the index register is
+    // consumed by the table load (often in a predecessor block). Exercises both
+    // the switch-headed loop (else an empty `while(1){}`) and the address-keyed
+    // switch (switch on the loaded target address). This is Lua's luaV_execute.
+    let out = transpile_and_run("dispatch_loop.exe");
+    assert!(
+        out.contains("INTERP: 11"),
+        "bytecode dispatch loop wrong:\n{out}"
+    );
+}
+
+#[test]
 fn computed_goto_dispatch_table() {
     if !has_m32() {
         eprintln!("skipping computed-goto test: `cc -m32` unavailable (install gcc-multilib)");

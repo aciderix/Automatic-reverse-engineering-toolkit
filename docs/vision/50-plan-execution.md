@@ -225,6 +225,23 @@ Chantiers longs (le « mur » des jeux). Documentés, pas prioritaires.
   (`6 15 105 1005`) ; **77 tests** ; diff 268/268. Lua : dispatch résolu, mais
   `luaV_execute` **boucle** (timeout) — opcode mal lifté en aval, bug suivant.
   Diagnostic amélioré : `aret_call` imprime désormais la VA non résolue.
+- **2026-06-21 — Phase 5f FAITE → 🎉 LUA TOURNE NATIVEMENT.** Deux bugs de la
+  boucle de dispatch : (1) **switch en tête de boucle** — `emit_loop` ne gérait pas
+  un terminateur `Switch` (tombait dans `_ => {}`) → corps de boucle vide →
+  `while(1){}` infini. Toute boucle d'interpréteur (en-tête finissant par le
+  switch) était cassée. Fix : `emit_loop` émet le switch + les blocs cibles dans la
+  boucle. (2) **switch à clé-adresse** — le computed-goto `mov reg,[tab+idx*4];
+  jmp reg` **écrase** le registre d'index (et le `mov` est souvent dans un bloc
+  prédécesseur), donc l'index est irrécupérable au `jmp`. Solution : switcher sur
+  le **registre de saut** (= l'adresse chargée) avec des cas **clés par VA cible**
+  (= l'adresse du bloc handler, = l'entrée de table chargée). `Stmt::Switch.cases`
+  porte désormais la vraie clé (index OU VA) ; l'émetteur l'utilise. + shim
+  `localeconv`. *Vérifié* : fixture `dispatch_loop` (`INTERP: 11`) ; **78 tests** ;
+  diff 268/268. **Lua 5.4.7 (PE Windows 612 Ko, 987 fns) → ELF Linux natif** :
+  `print(6*7)`=42, `fib(20)`=6765, boucles (5050), tables, `ipairs` (385),
+  concaténation, méthodes string, récursion — **tout correct**. Reste : formatage
+  **flottant** (`%.2f`, `1/3`) produit des octets faux (passage de `double`
+  variadiques par la pile partagée) — bug suivant, isolé.
 - **2026-06-21 — Phase 5d EN COURS (corruption GC, à investiguer).** Lua : après
   `pushcclosure`, crash dans le **GC** mark : `reallymarkobject` ←
   `propagatemark` ← `propagateall` ← `atomic` ← `entergen` (entrée GC

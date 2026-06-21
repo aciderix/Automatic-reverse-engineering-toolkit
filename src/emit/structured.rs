@@ -327,16 +327,19 @@ impl Structurer {
                 None
             }
             Stmt::Jump(_) => self.succ[i].first().copied(),
-            Stmt::Switch { value, .. } => {
-                // Dispatch on the index; cases are this block's CFG successors in
-                // table order. The out-of-range path was branched off before the
-                // table, so the default is unreachable — route it to case 0.
+            Stmt::Switch { value, cases, .. } => {
+                // Cases are this block's CFG successors in table order. The case
+                // *key* comes from the IR: an index (0,1,2… for `jmp [tab+idx]`) or
+                // a target VA (for an address-keyed computed goto, where we switch
+                // on the loaded address). The out-of-range path was branched off
+                // before the table, so the default is unreachable — route to case 0.
                 self.line(depth, &format!("switch ({}) {{", expr_c(&value)));
-                let cases = self.succ[i].clone();
-                for (k, &t) in cases.iter().enumerate() {
-                    self.line(depth + 1, &format!("case {}: goto {};", k, label(self.nodes[t])));
+                let succ = self.succ[i].clone();
+                for (k, &t) in succ.iter().enumerate() {
+                    let key = cases.get(k).map(|(v, _)| *v).unwrap_or(k as i128);
+                    self.line(depth + 1, &format!("case {}: goto {};", key, label(self.nodes[t])));
                 }
-                if let Some(&t0) = cases.first() {
+                if let Some(&t0) = succ.first() {
                     self.line(depth + 1, &format!("default: goto {};", label(self.nodes[t0])));
                 }
                 self.line(depth, "}");
@@ -433,6 +436,29 @@ impl Structurer {
             Stmt::Return(e) => {
                 let v = e.map(|x| expr_c(&x)).unwrap_or_else(|| "0".into());
                 self.line(depth + 1, &format!("return {};", v));
+            }
+            // A loop header that ends in a jump-table dispatch (the canonical
+            // interpreter loop: `while(1){ fetch; switch(op){...} }`). Without this
+            // the switch falls through `_ =>` and the loop body is empty — an
+            // infinite `while(1){}`. Emit the dispatch, then the case-target blocks
+            // *inside* the loop so their `goto header` edges fold to `continue`.
+            Stmt::Switch { value, cases, .. } => {
+                self.line(depth + 1, &format!("switch ({}) {{", expr_c(&value)));
+                let succ = self.succ[header].clone();
+                for (k, &t) in succ.iter().enumerate() {
+                    let key = cases.get(k).map(|(v, _)| *v).unwrap_or(k as i128);
+                    self.line(depth + 2, &format!("case {}: goto {};", key, label(self.nodes[t])));
+                }
+                if let Some(&t0) = succ.first() {
+                    self.line(depth + 2, &format!("default: goto {};", label(self.nodes[t0])));
+                }
+                self.line(depth + 1, "}");
+                let mut seen = std::collections::BTreeSet::new();
+                for &t in &succ {
+                    if seen.insert(t) {
+                        self.emit_seq(t, lctx, depth + 1);
+                    }
+                }
             }
             _ => {}
         }

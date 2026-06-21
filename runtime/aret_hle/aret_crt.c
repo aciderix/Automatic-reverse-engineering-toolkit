@@ -27,6 +27,7 @@
 #include <stdio.h>
 #include <ctype.h>
 #include <time.h>
+#include <locale.h>
 
 /* Read cdecl argument `i` (a 32-bit word) from the modelled stack. */
 static inline uint32_t a32(uint32_t esp, int i) {
@@ -132,6 +133,11 @@ uint32_t aret_time(uint32_t esp) {
     return (uint32_t)t;
 }
 uint32_t aret_clock(uint32_t esp) { (void)esp; return (uint32_t)clock(); }
+
+/* localeconv: both msvcrt and glibc put `char *decimal_point` first in `struct
+ * lconv`, which is all number formatting (Lua's lua_number2str) reads. Forward to
+ * the host's "C"-locale lconv. */
+uint32_t aret_localeconv(uint32_t esp) { (void)esp; return RP(localeconv()); }
 
 /* ------------------------------------------------------------------ */
 /* <ctype.h> — classification / case (often called, not inlined)      */
