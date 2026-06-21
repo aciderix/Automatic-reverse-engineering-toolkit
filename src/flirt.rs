@@ -116,11 +116,15 @@ impl FlirtDb {
         FlirtDb { sigs }
     }
 
-    /// Recognize the function whose code begins at `code`: the first signature
-    /// whose masked pattern matches the leading bytes. Longer signatures are
-    /// tried first so a more specific match wins.
+    /// Recognize the function whose code begins at `code`: the signature whose
+    /// masked pattern matches the most leading bytes. If two signatures with
+    /// *different* names match equally well (e.g. mingw `sprintf`/`fprintf`,
+    /// byte-identical but for the wildcarded `call __mingw_v{s,f}printf` target),
+    /// the match is ambiguous and we return `None` — binding the wrong CRT
+    /// function would be an incorrect result presented as correct.
     pub fn match_at(&self, code: &[u8]) -> Option<&str> {
         let mut best: Option<(&str, usize)> = None;
+        let mut ambiguous = false;
         for s in &self.sigs {
             if code.len() < s.bytes.len() {
                 continue;
@@ -131,12 +135,24 @@ impl FlirtDb {
                 .zip(s.mask.iter())
                 .enumerate()
                 .all(|(i, (b, &keep))| !keep || code[i] == *b);
-            if hit {
-                let sig_match_len = s.mask.iter().filter(|&&m| m).count();
-                if best.map_or(true, |(_, l)| sig_match_len > l) {
-                    best = Some((s.name.as_str(), sig_match_len));
+            if !hit {
+                continue;
+            }
+            let len = s.mask.iter().filter(|&&m| m).count();
+            match best {
+                None => best = Some((s.name.as_str(), len)),
+                Some((bn, bl)) => {
+                    if len > bl {
+                        best = Some((s.name.as_str(), len));
+                        ambiguous = false;
+                    } else if len == bl && s.name != bn {
+                        ambiguous = true;
+                    }
                 }
             }
+        }
+        if ambiguous {
+            return None;
         }
         best.map(|(n, _)| n)
     }
@@ -174,6 +190,21 @@ mod tests {
         // A different prologue must not match.
         let c = [0x53, 0x89, 0xe5, 0xe8, 0x11, 0x22, 0x33, 0x44, 0xc3];
         assert_eq!(db.match_at(&c), None);
+    }
+
+    #[test]
+    fn ambiguous_match_returns_none() {
+        // mingw `sprintf`/`fprintf` are byte-identical but for the wildcarded
+        // `call __mingw_v{s,f}printf` target, so both signatures match the same
+        // code equally well. Binding either would be a guess → must be None.
+        let code = [0x83, 0xec, 0x1c, 0xe8, 0x11, 0x22, 0x33, 0x44, 0xc3];
+        let f = gen_signature("_fprintf", &code).unwrap();
+        let s = gen_signature("_sprintf", &code).unwrap();
+        let db = FlirtDb::parse(&format!("{f}\n{s}"));
+        assert_eq!(db.match_at(&code), None, "ambiguous CRT match must not guess");
+        // A single signature for the same bytes is unambiguous.
+        let db1 = FlirtDb::parse(&f);
+        assert_eq!(db1.match_at(&code), Some("_fprintf"));
     }
 
     #[test]
