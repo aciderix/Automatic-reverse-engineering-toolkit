@@ -212,6 +212,7 @@ fn global_decode(
             .filter_map(|(addr, insn)| {
                 resolve_jump_table(prog, insn)
                     .or_else(|| resolve_pie_jump_table(prog, &global, insn))
+                    .or_else(|| resolve_abs_jump_table(prog, &global, insn))
                     .map(|t| (*addr, t))
             })
             .collect();
@@ -258,14 +259,20 @@ fn resolve_jump_table(prog: &Program, insn: &Insn) -> Option<Vec<u64>> {
         return None;
     };
 
-    // Every entry, in index order *with duplicates preserved*: the structured
-    // emitter maps `case k -> successors[k]`, so collapsing duplicate targets
-    // (common when several switch labels share a body) would shift every later
-    // case onto the wrong block. Stop at the first non-code word (table end).
+    read_jump_table(prog, table, ptr as u64)
+}
+
+/// Read a pointer-sized table of absolute code addresses at `table`, in index
+/// order *with duplicates preserved* (the structured emitter maps `case k ->
+/// successors[k]`, so collapsing duplicate targets — common when several switch
+/// labels share a body — would shift every later case onto the wrong block).
+/// Stops at the first non-code word (table end); needs >= 2 distinct targets to
+/// count as a real dispatch table.
+fn read_jump_table(prog: &Program, table: u64, ptr: u64) -> Option<Vec<u64>> {
     let mut targets = Vec::new();
     let mut distinct = BTreeSet::new();
     for i in 0..1024u64 {
-        let ea = table + i * ptr as u64;
+        let ea = table + i * ptr;
         let entry = match if ptr == 8 { prog.read_u64(ea) } else { prog.read_u32(ea).map(|v| v as u64) } {
             Some(e) => e,
             None => break,
@@ -276,13 +283,55 @@ fn resolve_jump_table(prog: &Program, insn: &Insn) -> Option<Vec<u64>> {
         distinct.insert(entry);
         targets.push(entry);
     }
-    // Require at least two *distinct* targets to count as a real jump table (a run
-    // of one repeated address is not a switch dispatch).
     if distinct.len() >= 2 {
         Some(targets)
     } else {
         None
     }
+}
+
+/// Resolve a computed-goto / register-indirect jump table:
+///
+/// ```text
+///   mov  tgt, [table + idx*ptr]   (table = absolute code-address array)
+///   jmp  tgt
+/// ```
+///
+/// The compiler emits this for GCC `&&label` computed gotos (e.g. an interpreter
+/// dispatch loop) and dense switches: a load of an absolute target from a static
+/// table, then an indirect jump through the register. Returns the table's targets.
+fn resolve_abs_jump_table(prog: &Program, global: &BTreeMap<u64, Insn>, jmp: &Insn) -> Option<Vec<u64>> {
+    use iced_x86::{Mnemonic, OpKind, Register};
+    let j = &jmp.raw;
+    if j.op0_kind() != OpKind::Register {
+        return None;
+    }
+    let tgt = j.op0_register().full_register();
+    let ptr = (prog.bitness.bits() / 8) as u32;
+    // Reaching definition of the jump register, just before the jump: it must be a
+    // `mov tgt, [table + idx*ptr]` from a static (absolute or rip-relative) table.
+    for (_, ins) in global.range(..jmp.address).rev().take(8) {
+        let r = &ins.raw;
+        if r.op0_kind() != OpKind::Register || r.op0_register().full_register() != tgt {
+            continue;
+        }
+        if r.mnemonic() == Mnemonic::Mov
+            && r.op1_kind() == OpKind::Memory
+            && r.memory_index() != Register::None
+            && r.memory_index_scale() == ptr
+        {
+            let table = if r.is_ip_rel_memory_operand() {
+                r.ip_rel_memory_address()
+            } else if r.memory_base() == Register::None {
+                r.memory_displacement64()
+            } else {
+                return None; // based + indexed: not a static table
+            };
+            return read_jump_table(prog, table, ptr as u64);
+        }
+        return None; // tgt last written by something other than a table load
+    }
+    None
 }
 
 /// Resolve the PIE relative jump-table idiom ending in `jmp reg`:
@@ -418,6 +467,7 @@ fn drain(
             let jt = if flow == Flow::Indirect {
                 resolve_jump_table(prog, &insn)
                     .or_else(|| resolve_pie_jump_table(prog, global, &insn))
+                    .or_else(|| resolve_abs_jump_table(prog, global, &insn))
             } else {
                 None
             };

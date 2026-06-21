@@ -146,7 +146,8 @@ pub fn build_ir(prog: &Program, func: &Function) -> IrFunction {
                     // Index from the jump's own memory operand (`jmp [t+idx*8]`),
                     // or recovered from the PIE idiom (`jmp reg`).
                     let value = crate::ir::lift::switch_index(&last.raw)
-                        .or_else(|| pie_switch_index(func, &last.raw));
+                        .or_else(|| pie_switch_index(func, &last.raw))
+                        .or_else(|| abs_switch_index(func, &last.raw));
                     match value {
                         Some(value) => {
                             let cases = succ
@@ -600,6 +601,35 @@ fn pie_switch_index(func: &Function, jmp: &iced_x86::Instruction) -> Option<Expr
             && i.raw.memory_index() != Register::None
             && i.raw.memory_index_scale() == 4
             && i.raw.op0_register().full_register() == tgt
+    })?;
+    crate::ir::lift::reg_value(mov.raw.memory_index())
+}
+
+/// Recover the switch index of an absolute-table computed goto (`mov tgt,
+/// [table + idx*ptr]; jmp tgt`): a read of the load's index register. Mirrors
+/// `pie_switch_index` but for the load-then-jump form (GCC `&&label` dispatch).
+fn abs_switch_index(func: &Function, jmp: &iced_x86::Instruction) -> Option<Expr> {
+    use iced_x86::{Mnemonic, OpKind, Register};
+    if jmp.op0_kind() != OpKind::Register {
+        return None;
+    }
+    let tgt = jmp.op0_register().full_register();
+    let jmp_addr = jmp.ip();
+    let mut window: Vec<&crate::disasm::Insn> = func
+        .blocks
+        .values()
+        .flat_map(|b| b.insns.iter())
+        .filter(|i| i.address < jmp_addr)
+        .collect();
+    window.sort_by_key(|i| i.address);
+    let mov = window.iter().rev().take(10).find(|i| {
+        let r = &i.raw;
+        r.mnemonic() == Mnemonic::Mov
+            && r.op0_kind() == OpKind::Register
+            && r.op0_register().full_register() == tgt
+            && r.op1_kind() == OpKind::Memory
+            && r.memory_index() != Register::None
+            && r.memory_base() == Register::None
     })?;
     crate::ir::lift::reg_value(mov.raw.memory_index())
 }

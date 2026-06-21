@@ -299,7 +299,7 @@ fn emit_dispatch(entries: &[u64]) -> String {
 \x20       if (aret_tab[m].va == va) return aret_tab[m].fn(esp, a, c, d);\n\
 \x20       if (aret_tab[m].va < va) lo = m + 1; else hi = m - 1;\n\
 \x20   }\n\
-\x20   aret_unimpl(\"indirect call to unrecovered address\");\n\
+\x20   { char msg[64]; snprintf(msg, sizeof msg, \"indirect call to unrecovered 0x%x\", va); aret_unimpl(msg); }\n\
 \x20   return 0;\n\
 }\n",
     );

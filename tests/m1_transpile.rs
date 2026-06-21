@@ -274,6 +274,23 @@ fn loop_exit_carrying_a_value() {
 }
 
 #[test]
+fn computed_goto_dispatch_table() {
+    if !has_m32() {
+        eprintln!("skipping computed-goto test: `cc -m32` unavailable (install gcc-multilib)");
+        return;
+    }
+    // A GCC computed goto (&&label) compiles to `mov reg,[tab+idx*4]; jmp reg` —
+    // an absolute-address dispatch table, the shape of an interpreter loop (Lua's
+    // luaV_execute). The lifter must resolve the table targets and recover the
+    // index. Expected: each op reaches its own label.
+    let out = transpile_and_run("computed_goto.exe");
+    assert!(
+        out.contains("CGOTO: 6 15 105 1005"),
+        "computed-goto dispatch mis-resolved:\n{out}"
+    );
+}
+
+#[test]
 fn switch_with_duplicate_case_targets() {
     if !has_m32() {
         eprintln!("skipping switch-dup test: `cc -m32` unavailable (install gcc-multilib)");

@@ -213,6 +213,18 @@ Chantiers longs (le « mur » des jeux). Documentés, pas prioritaires.
   `switch_dup_targets` (`1000 2001 2002 3003 2004 5005`) ; **76 tests** ; diff
   268/268. Lua : **plus de crash GC** (exit 0) ; reste un « indirect call to
   unrecovered address » (pointeur de fonction non récupéré) — bug suivant.
+- **2026-06-21 — Phase 5e FAITE (résolution computed-goto / table absolue).**
+  L'« indirect call to unrecovered 0x4264dc » pointait *à l'intérieur* de
+  `luaV_execute` : la boucle d'interprétation Lua utilise un computed-goto
+  (`mov reg,[disptab+op*4] ; jmp reg`, `LUA_USE_JUMPTABLE` activé par mingw). Ni
+  `resolve_jump_table` (`jmp [mem]`) ni le résolveur PIE ne matchaient ce
+  *load-then-jump* à table absolue → repli en appel indirect non résolu. Ajout :
+  `resolve_abs_jump_table` (analyse) + `abs_switch_index` (récup de l'index) pour
+  l'idiome `mov reg,[table+idx*ptr] ; jmp reg`. **Général** (interpréteurs,
+  switches denses, GCC `&&label`). *Vérifié* : fixture `computed_goto`
+  (`6 15 105 1005`) ; **77 tests** ; diff 268/268. Lua : dispatch résolu, mais
+  `luaV_execute` **boucle** (timeout) — opcode mal lifté en aval, bug suivant.
+  Diagnostic amélioré : `aret_call` imprime désormais la VA non résolue.
 - **2026-06-21 — Phase 5d EN COURS (corruption GC, à investiguer).** Lua : après
   `pushcclosure`, crash dans le **GC** mark : `reallymarkobject` ←
   `propagatemark` ← `propagateall` ← `atomic` ← `entergen` (entrée GC
