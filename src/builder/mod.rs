@@ -37,8 +37,24 @@ pub struct TranspileReport {
     pub lifted: usize,
     pub partial: usize,
     pub host_backed: usize,
+    /// Soundness: addresses of unrecovered functions that are nonetheless the
+    /// target of a *direct* `call` in recovered code. Each is a statically-known
+    /// gap — a call site that cannot do the right thing. Empty ⇒ every direct
+    /// call resolves to translated code or a native shim.
+    pub unresolved: Vec<u64>,
     /// Captured stdout if the binary was run, else `None`.
     pub run_output: Option<String>,
+}
+
+impl TranspileReport {
+    /// A binary is *sound* when nothing in it is known, at translation time, to
+    /// misbehave: no direct call to an unrecovered function, and no function left
+    /// partially simulated (opaque `asm` emits as a no-op). This is honest
+    /// completeness — it does not certify indirect-call coverage (those targets
+    /// are not knowable statically; the runtime fails loud on an unrecovered one).
+    pub fn is_sound(&self) -> bool {
+        self.unresolved.is_empty() && self.partial == 0
+    }
 }
 
 impl TranspileReport {
@@ -51,6 +67,22 @@ impl TranspileReport {
             self.lifted, self.partial, self.host_backed
         ));
         s.push_str(&format!("  bitness:    {}-bit\n", self.bits));
+        // Soundness verdict — the honest answer to "will this binary behave?".
+        if self.is_sound() {
+            s.push_str("  soundness:  SOUND — every direct call resolves, no opaque asm\n");
+        } else {
+            s.push_str(&format!(
+                "  soundness:  INCOMPLETE — {} unresolved direct call(s), {} partial(asm) function(s)\n",
+                self.unresolved.len(),
+                self.partial
+            ));
+            for &a in self.unresolved.iter().take(10) {
+                s.push_str(&format!("              ! direct call to unrecovered 0x{a:x}\n"));
+            }
+            if self.unresolved.len() > 10 {
+                s.push_str(&format!("              … and {} more\n", self.unresolved.len() - 10));
+            }
+        }
         s.push_str(&format!("  output dir: {}\n", self.out_dir.display()));
         s.push_str(&format!("  binary:     {}\n", self.binary.display()));
         if let Some(out) = &self.run_output {
@@ -720,6 +752,7 @@ pub fn transpile(
             lifted: n_lifted,
             partial: n_partial,
             host_backed: n_host,
+            unresolved: undef_subs.clone(),
             bits,
             run_output,
         });
@@ -802,6 +835,7 @@ pub fn transpile(
         lifted: n_lifted,
         partial: n_partial,
         host_backed: n_host,
+        unresolved: undef_subs.clone(),
         bits,
         run_output,
     })

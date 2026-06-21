@@ -601,3 +601,33 @@ fn address_taken_callback_recovered_when_stripped() {
         "address-taken callback not recovered (indirect call unresolved?):\n{out}"
     );
 }
+
+#[test]
+fn soundness_verdict_reported() {
+    if !has_m32() {
+        eprintln!("skipping soundness test: `cc -m32` unavailable (install gcc-multilib)");
+        return;
+    }
+    // A fully-recovered freestanding fixture must be reported SOUND, and --strict
+    // must accept it (exit 0).
+    let fixture = format!(
+        "{}/tests/m1/fixtures/hello_win32.exe",
+        env!("CARGO_MANIFEST_DIR")
+    );
+    let out_dir = std::env::temp_dir().join(format!("aret_sound_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&out_dir);
+    let output = Command::new(env!("CARGO_BIN_EXE_aret"))
+        .args(["--mode", "transpile", "--strict"])
+        .arg("--out-dir")
+        .arg(&out_dir)
+        .arg(&fixture)
+        .output()
+        .expect("failed to run aret");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(output.status.success(), "--strict rejected a sound binary:\n{stdout}");
+    assert!(
+        stdout.contains("soundness:  SOUND"),
+        "expected SOUND verdict:\n{stdout}"
+    );
+    let _ = std::fs::remove_dir_all(&out_dir);
+}

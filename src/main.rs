@@ -104,6 +104,13 @@ struct Args {
     #[arg(long)]
     run: bool,
 
+    /// Transpile mode: exit non-zero if the result is not provably sound (any
+    /// direct call to an unrecovered function, or any partially-simulated
+    /// function with opaque asm). For pipelines that must never ship a binary
+    /// known to misbehave.
+    #[arg(long)]
+    strict: bool,
+
     /// Transpile mode: override the entry point (hex address), e.g. to start at
     /// `main` and skip a heavy CRT startup.
     #[arg(long)]
@@ -477,6 +484,14 @@ fn main() -> Result<()> {
                 snapshot.as_deref(),
             )?;
             out.push_str(&report.render());
+            if args.strict && !report.is_sound() {
+                emit(&args, out)?;
+                bail!(
+                    "--strict: result is not sound ({} unresolved direct call(s), {} partial(asm) function(s))",
+                    report.unresolved.len(),
+                    report.partial
+                );
+            }
         }
         Mode::Unpack => unreachable!("handled before function recovery"),
         Mode::Gensig => unreachable!("handled before function recovery"),
