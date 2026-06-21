@@ -114,6 +114,27 @@ tests, diff 268/268, Lua OK) ; Lua = 896 traduites / 1 partielle / 90 host-backe
 *Reste* (si on va plus loin) : attacher la classe à l'`IrFunction` et élaguer les
 corps host-backed (sauf appels indirects).
 
+### Phase 5ter — Classification *structurelle* (contrainte, pas observation) ✅ FAIT
+Demande (ChatGPT) : passer de l'observation à la **contrainte** dans le compilateur.
+Un Shim ne doit **pas** générer de corps IR traduit ; un Internal suit une
+traduction stricte ; aucune fonction host-backed ne doit apparaître comme
+entièrement traduite ; les cas ambigus échouent en debug. Fix dans `builder` :
+**partition** des fonctions récupérées en `internal_funcs` (lowerées normalement)
+vs `host_funcs` (VA + nom de shim, **jamais lowerées** — corps élagué). On
+n'élague **jamais** le point d'entrée. Le **dispatch indirect** route désormais
+chaque VA host-backed vers un adaptateur `aret_disp_<va>` qui appelle le shim
+natif — donc *aucun* chemin (direct ou indirect) ne peut atteindre un corps
+non émis. **Invariant** (debug_assert) : les deux classes sont disjointes (une VA
+n'est jamais à la fois traduite et host-backed). Source unique : `resolve_call`.
+Bug réel trouvé et corrigé en passant : `_initterm` était assaini en
+`aret_initterm` mais le shim manuel s'appelait `aret__initterm` (double tiret,
+mort) → le no-op faible était utilisé. Renommé en `aret_initterm` (+ `_e`), gardé
+en **no-op** (sous notre HLE le CRT est remplacé en bloc ; exécuter les ctors
+d'origine atteint du MSVC interne non modélisé). *Vérifié* : 78 tests, diff
+268/268, Lua entièrement fonctionnel (`--entry <main>` pour sauter le démarrage
+CRT, comme prévu) — tamis d'Ératosthène, `table.sort`, `string.format`,
+`math.pi^2`, `//`, `gsub`. Classes Lua inchangées : 896 / 1 / 90.
+
 ### Phase 6 — Inférence de types (LISIBILITÉ + JUSTESSE) ⬜
 Largeur/signe/ptr puis agrégats `obj->field_8` (HANDOFF §5). *Critère* : types
 affichés, **jamais** au prix de la sémantique (casts explicites conservés).

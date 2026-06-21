@@ -640,17 +640,13 @@ uint32_t aret___getmainargs(uint32_t esp) {
     return 0;
 }
 
-/* _initterm(start, end): a table of constructor function pointers (original code
- * VAs). Dispatch each non-null one through aret_call. */
-uint32_t aret__initterm(uint32_t esp) {
-    uint32_t s = arg(esp, 0), e = arg(esp, 1);
-    for (uint32_t p = s; p < e; p += 4) {
-        uint32_t fn = *(uint32_t *)(uintptr_t)p;
-        if (fn) aret_call(fn, esp, 0, 0, 0);
-    }
-    return 0;
-}
-uint32_t aret__initterm_e(uint32_t esp) { aret__initterm(esp); return 0; }
+/* _initterm walks a table of CRT/global constructor pointers. Under our HLE the
+ * C runtime is replaced wholesale (stdio via aret_iob, locale, etc.), so running
+ * the original initializers reaches MSVC-internal setup we do not model. Bind it
+ * (and its `_e` variant) to a no-op — the sanitized name `aret_initterm` is what
+ * the generator references, and these strong defs override its weak stub. */
+uint32_t aret_initterm(uint32_t esp) { (void)esp; return 0; }
+uint32_t aret_initterm_e(uint32_t esp) { (void)esp; return 0; }
 
 /* ------------------------------------------------------------------ */
 /* Synthetic TEB / PEB (Windows process environment, x86)             */

@@ -534,7 +534,7 @@ fn fold_ro_loads(stmts: &mut [Stmt], insn: &crate::disasm::Insn, prog: &Program)
     // Low 8 bytes at `abs`, and (for a 128-bit load) the next 8 at `abs+8`. The
     // value comes from the relocation's captured read-only bytes (object files)
     // or from reading the absolute read-only address (linked executables).
-    let mut fold_half = |stmts: &mut [Stmt], byte_off: u64, reloc_val: Option<u64>| {
+    let fold_half = |stmts: &mut [Stmt], byte_off: u64, reloc_val: Option<u64>| {
         if size as u64 <= byte_off {
             return;
         }
