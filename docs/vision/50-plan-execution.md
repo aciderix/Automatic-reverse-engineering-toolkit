@@ -493,3 +493,21 @@ non résolu, 3 partial) → graphe d'appels directs entièrement récupéré. S�
 construction : l'abort ne se déclenche que sur un trou réellement atteint, donc
 les binaires qui marchaient marchent toujours (Lua symbolé reste parfait).
 **83 tests** (m1 +soundness_verdict), diff **268/268**.
+
+### Réduction `partial(asm) → 0` (niveau 1 : thunks `jmp [mem]`) ✅ FAIT
+Plan ChatGPT (3 niveaux : thunks mémoire constants → indirections CRT → indirects
+dynamiques) — cohérent et raccord. Commencé par le **niveau 1**, mais corrigé sur
+la **justesse** : la « résolution statique vers appel direct » n'est qu'une
+*optimisation* (le slot `.data` est inscriptible, peut être repatché). Le fix
+**sound** est de lifter `jmp [mem]` (pointeur non indexé) en **vrai appel indirect
+tail** : lire le pointeur au runtime et dispatcher (`return (*ptr)(args)`).
+`mem_indirect_target` exclut les opérandes indexés (`jmp [tbl+idx*4]` = table, géré
+ailleurs) et la mémoire à segment. **Jalon** : le dernier `partial` de Lua
+(`____lc_codepage_func`, `jmp [0x432090]` vers une table de pointeurs `.data`)
+disparaît → **Lua symbolé = `0 partial`, verdict SOUND**, et **toujours
+entièrement fonctionnel** (tamis, tri, flottants, format, gsub). Lua strippé : 0
+partial aussi. **Premier vrai programme transpilé avec une preuve statique de
+solidité, pas seulement « observé comme marchant ».** Fixture+test
+`jmp_mem_tailcall` (`jmp *0x402000` → `JT=42`) ; **84 tests** ; diff **268/268**.
+*Reste* (niveaux 2/3, si besoin) : indirections CRT structurelles, puis indirects
+dynamiques (`call eax`, tables, points-to) — non requis pour Lua.
