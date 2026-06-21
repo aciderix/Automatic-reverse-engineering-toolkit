@@ -342,6 +342,15 @@ fn func_returns_fp(func: &Function, fp: &std::collections::HashSet<u64>) -> bool
 /// until stable. Cheap (the set only grows, bounded by the function count).
 pub fn compute_fp_returning(funcs: &[&Function]) -> std::collections::HashSet<u64> {
     let mut set = std::collections::HashSet::new();
+    // Seed with libm/CRT functions known to return a double in st(0): their own
+    // bodies are too complex to depth-analyze (and would bail), but the ABI
+    // guarantees the fp return, and a caller must count the st(0) they push (e.g.
+    // Lua's OP_POW calls `pow`; miscounting it desyncs the whole VM's x87 stack).
+    for f in funcs {
+        if is_fp_returning_lib(&f.name) {
+            set.insert(f.entry);
+        }
+    }
     loop {
         let mut changed = false;
         for f in funcs {
@@ -355,6 +364,25 @@ pub fn compute_fp_returning(funcs: &[&Function]) -> std::collections::HashSet<u6
         }
     }
     set
+}
+
+/// Standard C/libm functions that return a floating-point value in st(0) (the
+/// 32-bit x87 ABI). Recognized by symbol name so a call counts the pushed result
+/// even when the callee's own body can't be x87-depth-analyzed.
+fn is_fp_returning_lib(name: &str) -> bool {
+    let n = name.trim_start_matches('_');
+    let n = n.strip_suffix('l').unwrap_or(n); // long-double variants: powl, sqrtl…
+    matches!(
+        n,
+        "pow" | "sqrt" | "exp" | "exp2" | "expm1" | "log" | "log2" | "log10" | "log1p"
+            | "sin" | "cos" | "tan" | "asin" | "acos" | "atan" | "atan2"
+            | "sinh" | "cosh" | "tanh" | "asinh" | "acosh" | "atanh"
+            | "fmod" | "modf" | "ldexp" | "frexp" | "hypot" | "cbrt"
+            | "ceil" | "floor" | "round" | "trunc" | "rint" | "nearbyint"
+            | "fabs" | "copysign" | "fmin" | "fmax" | "fdim" | "remainder"
+            | "nextafter" | "scalbn" | "scalbln" | "tgamma" | "lgamma"
+            | "erf" | "erfc" | "fma" | "drem" | "significand" | "logb"
+    )
 }
 
 /// One forward propagation of the x87 stack depth over the CFG. Returns the

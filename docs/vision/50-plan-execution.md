@@ -257,6 +257,17 @@ Chantiers longs (le « mur » des jeux). Documentés, pas prioritaires.
   x87 aux joins (au lieu d'abandonner toute la fonction) — p.ex. autoriser une
   divergence quand un chemin a un `st(0)` non consommé, ou analyser par région.
   78 tests verts ; diff 268/268 (aucune régression).
+- **2026-06-21 — Phase 5g SUITE : arithmétique flottante du VM débloquée.** Cause
+  réelle des joins ambigus = **appels fp non comptés** (un `call f` où `f` renvoie
+  un `double` en `st(0)` doit compter `+1`, sinon la pile x87 désync). Trois fixes :
+  (1) **libm reconnu fp par nom** (`pow`/`sqrt`/`exp`/`floor`/… — leur corps libm
+  est trop complexe à analyser mais l'ABI garantit le retour fp ; seed du point
+  fixe `compute_fp_returning`). (2) **`fprem`** (reste partiel = `fmod` inliné)
+  modélisé : `__x87_fmod` + C2=0 → la boucle `do{fprem}while(C2)` sort d'un coup.
+  (3) shim `_onexit`. Effet : `luaV_execute` **ne bute plus** ; `7/2`→3.5,
+  `1/3`→0.333…, `math.sqrt(2)`→1.414, `math.sin(0)`→0, `math.pi`→3.14159 — **OK**.
+  78 tests ; diff 268/268. *Reste* : littéraux flottants (`1.5*2.5`) **crashent**
+  (parsing `strtod`/lexer) et `2^10`→0.0 (chemin `OP_POW`) — bugs suivants isolés.
 - **2026-06-21 — Phase 5d EN COURS (corruption GC, à investiguer).** Lua : après
   `pushcclosure`, crash dans le **GC** mark : `reallymarkobject` ←
   `propagatemark` ← `propagateall` ← `atomic` ← `entergen` (entrée GC

@@ -1960,6 +1960,7 @@ pub(crate) fn x87_delta(ins: &Instruction) -> Option<i32> {
         Fadd | Fsub | Fsubr | Fmul | Fdiv | Fdivr => 0,
         Fiadd | Fisub | Fisubr | Fimul | Fidiv | Fidivr => 0,
         Fabs | Fchs | Fsqrt | Fxch | Frndint => 0,
+        Fprem | Fprem1 => 0,
         Fcomi | Fucomi => 0,
         // Status-word compares (32-bit float idiom) + status-word store.
         Fcom | Fucom | Ficom => 0,
@@ -2087,6 +2088,17 @@ fn x87_try(insn: &Insn, sp: i32, trunc: bool) -> Option<Vec<Stmt>> {
             let h = if trunc { "__x87_trunc" } else { "__x87_rint" };
             vec![Stmt::Set { dst: fpr(st0)?, expr: x87call(h, vec![Expr::Read(fpr(st0)?)]) }]
         }
+        // Partial remainder st0 = st0 - st1*trunc(st0/st1). The hardware reduces by
+        // a bounded amount per execution and re-runs in a `do { fprem } while(C2)`
+        // loop; we compute the *full* fmod in one step and clear C2 (status bit 10)
+        // so the completion loop — `fnstsw; sahf; jp` — exits at once.
+        Fprem | Fprem1 => vec![
+            Stmt::Set {
+                dst: fpr(st0)?,
+                expr: x87call("__x87_fmod", vec![Expr::Read(fpr(st0)?), Expr::Read(fpr(sp - 2)?)]),
+            },
+            Stmt::Set { dst: fsw(), expr: konst(0) },
+        ],
 
         // --- exchange st0, st(i) (default st1) ----------------------------
         Fxch => {

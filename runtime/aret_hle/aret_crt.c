@@ -139,6 +139,12 @@ uint32_t aret_clock(uint32_t esp) { (void)esp; return (uint32_t)clock(); }
  * the host's "C"-locale lconv. */
 uint32_t aret_localeconv(uint32_t esp) { (void)esp; return RP(localeconv()); }
 
+/* _onexit(func): register an at-exit callback (a transpiled `sub_`, not a native
+ * function pointer), returning `func` on success. We do not run these at exit, so
+ * accept and return it — matching the documented startup-glue limitation that C++
+ * global dtors are not executed. */
+uint32_t aret_onexit(uint32_t esp) { return AU(0); }
+
 /* ------------------------------------------------------------------ */
 /* <ctype.h> — classification / case (often called, not inlined)      */
 /* ------------------------------------------------------------------ */
