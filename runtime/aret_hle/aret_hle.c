@@ -249,12 +249,11 @@ static int aret_mb_cur_max_var = 1;
 
 /* `_iob` / `__acrt_iob_func` / `__iob_func` called as a function: returns
  * &_iob[index] (the stdio stream for that index). */
-uint32_t aret___acrt_iob_func(uint32_t esp) {
+uint32_t aret_acrt_iob_func(uint32_t esp) {
     uint32_t i = arg(esp, 0); if (i > 2) i = 1;
     return (uint32_t)(uintptr_t)(aret_iob + i * ARET_FILE_SIZE);
 }
-uint32_t aret__iob(uint32_t esp) { return aret___acrt_iob_func(esp); }
-uint32_t aret___iob_func(uint32_t esp) { return aret___acrt_iob_func(esp); }
+uint32_t aret_iob_func(uint32_t esp) { return aret_acrt_iob_func(esp); }
 
 uint32_t aret_data_import(const char *name) {
     if (!strcmp(name, "_iob") || !strcmp(name, "__iob_func")) return (uint32_t)(uintptr_t)aret_iob;
@@ -602,18 +601,20 @@ uint32_t aret_MultiByteToWideChar(uint32_t esp) { (void)esp; return 0; }
 uint32_t aret_WideCharToMultiByte(uint32_t esp) { (void)esp; return 0; }
 uint32_t aret_GetCommandLineA(uint32_t esp) { (void)esp; return (uint32_t)(uintptr_t)"program"; }
 
-/* msvcrt internal globals exposed as pointer-returning functions */
-static int aret_fmode = 0, aret_commode = 0, aret_errno_v = 0;
-uint32_t aret___p__fmode(uint32_t esp) { (void)esp; return (uint32_t)(uintptr_t)&aret_fmode; }
-uint32_t aret___p__commode(uint32_t esp) { (void)esp; return (uint32_t)(uintptr_t)&aret_commode; }
-uint32_t aret__errno(uint32_t esp) { (void)esp; return (uint32_t)(uintptr_t)&aret_errno_v; }
-uint32_t aret___set_app_type(uint32_t esp) { (void)esp; return 0; }
-uint32_t aret___setusermatherr(uint32_t esp) { (void)esp; return 0; }
-uint32_t aret__amsg_exit(uint32_t esp) { _exit((int)arg(esp, 0)); return 0; }
-uint32_t aret__cexit(uint32_t esp) { (void)esp; return 0; }
-uint32_t aret__lock(uint32_t esp) { (void)esp; return 0; }
-uint32_t aret__unlock(uint32_t esp) { (void)esp; return 0; }
-uint32_t aret__onexit(uint32_t esp) { return arg(esp, 0); }
+/* msvcrt internal globals exposed as pointer-returning functions. Names match
+ * sanitize_import() (leading underscores stripped), so the generator's call to
+ * e.g. `aret_errno` for import `_errno` binds here (these strong defs override
+ * the weak unimplemented stubs). */
+static int aret_fmode = 0, aret_commode = 0;
+uint32_t aret_p__fmode(uint32_t esp) { (void)esp; return (uint32_t)(uintptr_t)&aret_fmode; }
+uint32_t aret_p__commode(uint32_t esp) { (void)esp; return (uint32_t)(uintptr_t)&aret_commode; }
+/* aret_errno / aret_onexit live in aret_crt.c (the canonical sanitized names). */
+uint32_t aret_set_app_type(uint32_t esp) { (void)esp; return 0; }
+uint32_t aret_setusermatherr(uint32_t esp) { (void)esp; return 0; }
+uint32_t aret_amsg_exit(uint32_t esp) { _exit((int)arg(esp, 0)); return 0; }
+uint32_t aret_cexit(uint32_t esp) { (void)esp; return 0; }
+uint32_t aret_lock(uint32_t esp) { (void)esp; return 0; }
+uint32_t aret_unlock(uint32_t esp) { (void)esp; return 0; }
 uint32_t aret_signal(uint32_t esp) { (void)esp; return 0; }
 uint32_t aret_atexit(uint32_t esp) { (void)esp; return 0; }
 uint32_t aret_setlocale(uint32_t esp) { (void)esp; return (uint32_t)(uintptr_t)"C"; }
@@ -632,7 +633,7 @@ uint32_t aret_strncmp(uint32_t esp) {
 
 /* __getmainargs(int* argc, char*** argv, char*** env, int wild, _startupinfo*) */
 static char *aret_argv0[] = { (char *)"program", 0 };
-uint32_t aret___getmainargs(uint32_t esp) {
+uint32_t aret_getmainargs(uint32_t esp) {
     uint32_t pargc = arg(esp, 0), pargv = arg(esp, 1), penv = arg(esp, 2);
     if (pargc) *(int32_t *)(uintptr_t)pargc = 1;
     if (pargv) *(uint32_t *)(uintptr_t)pargv = (uint32_t)(uintptr_t)aret_argv0;
