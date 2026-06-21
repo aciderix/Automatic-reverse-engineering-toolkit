@@ -465,3 +465,31 @@ Chantiers longs (le « mur » des jeux). Documentés, pas prioritaires.
   calcule ; reste un segfault en aval (queue longue de recall ~38 fns + libm
   `sprintf` traduit). Symbolé : **987, parfait, inchangé**. **82 tests** (lib
   48→49, +unit `ambiguous_match`), diff **268/268** à chaque étape.
+
+### Porte de solidité (sûreté du pipeline = principe sacré rendu vérifiable) ✅ FAIT
+Objectif : ne **jamais** livrer un binaire qui « a l'air de marcher » mais ment ;
+rendre toute incomplétude **visible à la conversion** et **bruyante au runtime**.
+Distinction clé : on ne peut pas garantir la **complétude** (récupérer 100 % d'un
+strippé quelconque est indécidable), mais on garantit la **solidité** (ce qu'on
+produit marche, ou le dit). Trois apports :
+- **Verdict de solidité** dans le rapport transpile : `SOUND` (tout appel direct
+  résout, aucun asm opaque) vs `INCOMPLETE — N appels directs non résolus, M
+  fonctions partial(asm)` + liste des adresses. Mesure honnête (ne certifie pas la
+  couverture des appels **indirects**, non connaissable statiquement).
+- **`--strict`** : sortie non-nulle si non-sound → un pipeline ne livre jamais un
+  binaire connu défaillant.
+- **Échec bruyant au runtime** : (1) une **instruction non modélisée** (`Stmt::Asm`)
+  n'est plus un commentaire no-op silencieux dans le chemin transpile — elle appelle
+  `aret_unmodelled(texte)` qui **abort** (un no-op serait une sortie fausse
+  présentée comme correcte) ; (2) un appel (direct stub faible / indirect hors table)
+  vers une **fonction non récupérée** abort aussi (au lieu de renvoyer 0 qui se
+  propage). Les **imports** sans shim gardent warn+0 (fonctions *connues*, souvent
+  no-op-ables, listées dans le rapport).
+Découvertes : les fixtures freestanding sont **SOUND** ; Lua symbolé a **0 appel
+direct non résolu** mais **1 fonction partial(asm)** (`____lc_codepage_func`, un
+thunk locale hors chemin chaud) → le vrai reste à ramener à zéro est la
+modélisation d'instructions, pas des fonctions manquantes ; Lua strippé idem (0
+non résolu, 3 partial) → graphe d'appels directs entièrement récupéré. Sûr par
+construction : l'abort ne se déclenche que sur un trou réellement atteint, donc
+les binaires qui marchaient marchent toujours (Lua symbolé reste parfait).
+**83 tests** (m1 +soundness_verdict), diff **268/268**.
