@@ -542,6 +542,22 @@ fn signed_width(e: &Expr) -> Option<u8> {
     }
 }
 
+/// Render `e` truncated to `w` bits for an *equality* comparison: a constant is
+/// masked to `w` (so a sign-extended `-1` = `0xffffffffffffffff` becomes the
+/// 32-bit `0xffffffff` that the masked operand can actually equal); a non-constant
+/// is explicitly `& maskW` so both sides compare their low `w` bits, matching a
+/// `cmp r{w}` flag computation. A full-width (`w == 64`) compare is unchanged.
+fn mask_w(e: &Expr, w: u8) -> String {
+    if !(1..64).contains(&w) {
+        return expr_c(e);
+    }
+    let m: u64 = if w >= 64 { u64::MAX } else { (1u64 << w) - 1 };
+    match e {
+        Expr::Const(c, _) => const_c(((*c as u128) & (m as u128)) as i128),
+        _ => format!("({} & 0x{:x}ULL)", expr_c(e), m),
+    }
+}
+
 /// Render `e` as a signed `int64_t` interpreted at `w` bits. A constant is
 /// sign-extended from `w` (so a 32-bit `0xfff0b9d9` is `-1000999`, not the
 /// zero-extended `+4293913049` that silently breaks `cmp r32, imm32; jge`);
@@ -574,6 +590,15 @@ fn binary_c(op: BinOp, a: &Expr, b: &Expr) -> String {
     };
     let un = |o: &str| format!("({} {} {})", u(a), o, u(b));
     let plain = |o: &str| format!("({} {} {})", expr_c(a), o, expr_c(b));
+    // Equality at a common width: a `cmp r32, imm` sets ZF from a 32-bit compare,
+    // so a sign-extended immediate (-1 → 0xffffffffffffffff) must be truncated to
+    // the operand width recovered from a masked sibling — otherwise it never
+    // equals the 32-bit operand (0xffffffff), e.g. a `dec; jne -1` loop counter
+    // never terminates.
+    let eq = |o: &str| {
+        let w = signed_width(a).or_else(|| signed_width(b)).unwrap_or(64);
+        format!("({} {} {})", mask_w(a, w), o, mask_w(b, w))
+    };
     match op {
         Add => plain("+"),
         Sub => plain("-"),
@@ -584,8 +609,8 @@ fn binary_c(op: BinOp, a: &Expr, b: &Expr) -> String {
         // Left operand cast to 64-bit: a small/constant operand is otherwise an
         // `int`, and `1 << 32` (shift ≥ width) is undefined behaviour in C.
         Shl => format!("({} << {})", u(a), expr_c(b)),
-        Eq => plain("=="),
-        Ne => plain("!="),
+        Eq => eq("=="),
+        Ne => eq("!="),
         Shr => format!("({} >> {})", u(a), expr_c(b)),
         Sar => format!("({} >> {})", signed_cast(a), expr_c(b)),
         UDiv => un("/"),

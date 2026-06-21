@@ -187,3 +187,14 @@ Chantiers longs (le « mur » des jeux). Documentés, pas prioritaires.
   cette largeur. **Général** (toute comparaison/division signée vs immédiat
   négatif). *Vérifié* : fixture `signed_cmp_negimm` (`1 0 1`) ; **74 tests** ;
   diff **268/268**. Lua : passe `openlibs` ; crash suivant plus profond (exécution).
+- **2026-06-21 — Phase 5c FAITE (égalité vs immédiat négatif).** Diagnostic Lua :
+  crash dans `lua_pushcclosure` (chargement lib `package`) — la boucle de copie
+  d'upvalues ne terminait pas. Cause : `cmp r32, -1 ; jne` (compteur 32 bits) où
+  l'immédiat `-1` était signé-étendu en `0xffffffffffffffff` (64 bits) mais
+  comparé via `Eq/Ne` (`plain`, non masqué) à un opérande masqué 32 bits
+  `0xffffffff` → jamais égal → boucle infinie → pointeur hors-borne. Fix
+  (`emit::binary_c` `eq`/`mask_w`) : `Eq`/`Ne` comparent à la largeur commune
+  (déduite du masque), la constante est tronquée à cette largeur. *Vérifié* :
+  fixture `eq_cmp_negimm` (`10 0`) ; **75 tests** ; diff **268/268**. Lua : passe
+  `pushcclosure` ; avance jusqu'au **GC** (`reallymarkobject`/`propagatemark`) —
+  bug suivant.

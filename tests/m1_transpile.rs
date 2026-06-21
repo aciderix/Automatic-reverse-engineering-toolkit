@@ -274,6 +274,23 @@ fn loop_exit_carrying_a_value() {
 }
 
 #[test]
+fn equality_compare_against_negative_immediate() {
+    if !has_m32() {
+        eprintln!("skipping eq-cmp test: `cc -m32` unavailable (install gcc-multilib)");
+        return;
+    }
+    // A countdown loop terminating on `i != -1` (cmp r32, -1; jne). The
+    // sign-extended 64-bit immediate must be truncated to the 32-bit counter
+    // width, or the loop never sees equality and runs off the end (the bug behind
+    // lua_pushcclosure's upvalue loop). Expected: 10 0.
+    let out = transpile_and_run("eq_cmp_negimm.exe");
+    assert!(
+        out.contains("EQIMM: 10 0"),
+        "equality compare vs negative immediate wrong:\n{out}"
+    );
+}
+
+#[test]
 fn signed_compare_against_negative_immediate() {
     if !has_m32() {
         eprintln!("skipping signed-cmp test: `cc -m32` unavailable (install gcc-multilib)");
