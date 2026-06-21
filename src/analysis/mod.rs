@@ -99,22 +99,59 @@ pub fn find_main(prog: &Program, result: &AnalysisResult) -> Option<u64> {
         }
         None
     };
+    // `eax` (the call's result) is the process exit status: the startup saves it
+    // (`mov [mem], eax`) before tearing down. This separates the real `call main`
+    // from the CRT helper calls a startup makes first (whose results feed back
+    // into setup, e.g. an argv-parsing loop). Scan the few instructions after the
+    // call, stopping once `eax` is clobbered or another call intervenes.
+    let writes_eax = |insn: &iced_x86::Instruction| -> bool {
+        insn.mnemonic() == Mnemonic::Call
+            || (insn.op0_kind() == OpKind::Register
+                && matches!(
+                    insn.op0_register(),
+                    Register::EAX | Register::AX | Register::AL | Register::AH | Register::RAX
+                ))
+    };
+    let saves_result = |insns: &[Insn], call_i: usize| -> bool {
+        for insn in insns.iter().skip(call_i + 1).take(5) {
+            if insn.raw.mnemonic() == Mnemonic::Mov
+                && insn.raw.op0_kind() == OpKind::Memory
+                && insn.raw.op1_kind() == OpKind::Register
+                && matches!(insn.raw.op1_register(), Register::EAX | Register::RAX)
+            {
+                return true; // result stored → exit-code save
+            }
+            if writes_eax(&insn.raw) {
+                return false; // result consumed/clobbered before any store
+            }
+        }
+        false
+    };
 
+    // The real `call main(argc, argv, …)` is the first call that both sets the
+    // argument slots *and* saves its result as the exit code. The CRT helper
+    // calls a startup makes first do not save their result, so they are rejected
+    // — returning the wrong `main` would silently mistranslate the program. We
+    // walk the startup chain in entry order (the startup sits at a low address);
+    // None ⇒ caller falls back to an explicit `--entry <addr>` rather than a guess.
     for f in &result.functions {
         if !reachable.contains(&f.entry) {
             continue;
         }
         for block in f.blocks.values() {
             let mut slots: BTreeSet<u64> = BTreeSet::new();
-            for insn in &block.insns {
+            for (i, insn) in block.insns.iter().enumerate() {
                 if let Some(d) = arg_slot(&insn.raw) {
                     slots.insert(d);
                     continue;
                 }
                 if matches!(insn.flow, Flow::Call) {
                     if let Some(t) = insn.target {
-                        // argc and argv at least, target is a user function.
-                        if slots.contains(&0) && slots.contains(&4) && is_user_fn(t) {
+                        if slots.contains(&0)
+                            && slots.contains(&4)
+                            && is_user_fn(t)
+                            && saves_result(&block.insns, i)
+                        {
                             return Some(t);
                         }
                     }

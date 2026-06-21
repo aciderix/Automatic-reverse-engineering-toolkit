@@ -371,3 +371,20 @@ Chantiers longs (le « mur » des jeux). Documentés, pas prioritaires.
   diff **268/268** ; Lua OK sans flag. *Reste* (binaires **strippés**) : rendre
   `find_main` (motif argc/argv→`call main`) plus robuste — il échoue encore sur le
   mingw de Lua ; couvert par Phase 3 (reconnaissance CRT MSVC).
+- **2026-06-21 — `find_main` corrigé : ne renvoyait pas le bon `main` (strippés).**
+  Le motif d'origine renvoyait le **premier** `call` à 3 args-pile vers une fonction
+  utilisateur. Or l'amorçage MSVC/mingw fait **plusieurs** appels à des helpers CRT
+  (3 args pile) **avant** `call main` → sur Lua strippé il renvoyait `0x431420`
+  (helper) au lieu du vrai `main` `0x420009`. **Renvoyer un faux `main`, c'est de
+  la sortie incorrecte présentée comme correcte** (principe sacré). Fix : exiger
+  le **signal du code de sortie** — le résultat de `main` (`eax`) est sauvegardé
+  (`mov [mem], eax`) juste après l'appel, avant clobber, alors que les helpers
+  consomment le leur dans une boucle de setup → ils sont rejetés. On prend le
+  **premier** candidat ainsi qualifié (l'amorçage est à basse adresse) ; sinon
+  `None` (→ l'utilisateur passe `--entry <addr>`, pas de devinette). Sur Lua
+  strippé : discovery correcte → `main` `0x420009`. *(Le binaire strippé ne tourne
+  pas encore complètement — helpers CRT non reconnus, `_lock`/indirects ; c'est la
+  reconnaissance FLIRT CRT de Phase 3, distincte.)* *Vérifié* : fixture **strippée**
+  `crt_main_discovery` (decoy 3-args avant `main`, `main` imprimé) + test
+  `find_main_discovers_real_main_in_stripped_crt` ; **80 tests** (m1 26→27) ;
+  diff **268/268** ; Lua par défaut OK.

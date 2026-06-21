@@ -548,3 +548,39 @@ fn auto_main_entry_skips_crt_startup() {
         "bootstrap ran — entry was not redirected to main:\n{out}"
     );
 }
+
+#[test]
+fn find_main_discovers_real_main_in_stripped_crt() {
+    if !has_m32() {
+        eprintln!("skipping find_main test: `cc -m32` unavailable (install gcc-multilib)");
+        return;
+    }
+    // A *stripped* binary whose startup calls a 3-stack-arg decoy before `main`.
+    // `--entry auto` runs the call-pattern heuristic (no symbols); it must land
+    // on `main` (which prints) and not the decoy (which prints nothing).
+    let fixture = format!(
+        "{}/tests/m1/fixtures/crt_main_discovery.exe",
+        env!("CARGO_MANIFEST_DIR")
+    );
+    let out_dir =
+        std::env::temp_dir().join(format!("aret_findmain_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&out_dir);
+    let output = Command::new(env!("CARGO_BIN_EXE_aret"))
+        .args(["--mode", "transpile", "--entry", "auto", "--run"])
+        .arg("--out-dir")
+        .arg(&out_dir)
+        .arg(&fixture)
+        .output()
+        .expect("failed to run aret");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        output.status.success(),
+        "transpile failed:\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    assert!(
+        stdout.contains("MAIN argc="),
+        "discovery did not land on main (decoy chosen?):\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    let _ = std::fs::remove_dir_all(&out_dir);
+}
