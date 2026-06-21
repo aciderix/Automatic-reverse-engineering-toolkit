@@ -230,6 +230,25 @@ pub fn analyze(prog: &Program, disasm: &Disassembler, prologue_scan: bool) -> An
 
 /// Phase A — decode every reachable instruction once, collecting the set of
 /// function entry points (entry + direct/indirect-target call sites).
+/// A high-confidence guess that `addr` begins a function, by its opening bytes.
+/// Used to filter address-taken candidates (a data word that points into code):
+/// the value already being a valid code address is the primary signal, this is
+/// the secondary one. Kept deliberately tight (common entry prologues only, no
+/// `push imm`/`mov eax,imm` which are far more frequent mid-body) to avoid
+/// seeding misaligned data as bogus functions.
+fn looks_like_func_start(prog: &Program, addr: u64) -> bool {
+    let Some(code) = prog.read_from(addr) else { return false };
+    let b0 = code[0];
+    let b1 = code.get(1).copied().unwrap_or(0);
+    matches!(b0, 0x55 | 0x53 | 0x56 | 0x57) // push ebp/ebx/esi/edi
+        || b0 == 0xe9                         // jmp rel32 (tail-call thunk)
+        || (b0 == 0x83 && b1 == 0xec)         // sub esp, imm8
+        || (b0 == 0x81 && b1 == 0xec)         // sub esp, imm32
+        || (b0 == 0x8b && b1 == 0xff)         // mov edi, edi (hot-patch pad)
+        || (b0 == 0x89 && b1 == 0xff)
+        || (b0 == 0xff && b1 == 0x25) // jmp [mem] (import thunk)
+}
+
 fn global_decode(
     prog: &Program,
     disasm: &Disassembler,
@@ -261,6 +280,44 @@ fn global_decode(
             }
         }
         drain(prog, disasm, &mut global, &mut entries, &mut jump_tables, &mut extra);
+
+        // Pass 2b: address-taken function discovery. A frame-pointer-omitted
+        // function (gcc/MSVC `-O2`) reached only through a pointer — a callback,
+        // a vtable slot, or a registration/dispatch table (Lua's `luaL_Reg`
+        // arrays, etc.) — is found by neither recursive descent (no direct call)
+        // nor the `push ebp` prologue scan. Scan pointer-aligned section data for
+        // values that point at an as-yet-undecoded, plausible function start.
+        // The `!global.contains_key` gate keeps us from splitting a function we
+        // already decoded, so reachable code (the regression corpus) is untouched.
+        let ptr = (prog.bitness.bits() / 8) as usize;
+        let exec: Vec<(u64, u64)> = prog
+            .sections
+            .iter()
+            .filter(|s| s.executable)
+            .map(|s| (s.address, s.address + s.data.len() as u64))
+            .collect();
+        let in_exec = |a: u64| a != 0 && exec.iter().any(|&(lo, hi)| a >= lo && a < hi);
+        let mut taken: VecDeque<u64> = VecDeque::new();
+        for sec in &prog.sections {
+            let d = &sec.data;
+            let mut off = 0usize;
+            while off + ptr <= d.len() {
+                let v = match ptr {
+                    8 => u64::from_le_bytes(d[off..off + 8].try_into().unwrap()),
+                    _ => u32::from_le_bytes([d[off], d[off + 1], d[off + 2], d[off + 3]]) as u64,
+                };
+                if in_exec(v)
+                    && !global.contains_key(&v)
+                    && looks_like_func_start(prog, v)
+                    && entries.insert(v)
+                {
+                    prologue_only.insert(v);
+                    taken.push_back(v);
+                }
+                off += ptr;
+            }
+        }
+        drain(prog, disasm, &mut global, &mut entries, &mut jump_tables, &mut taken);
     }
 
     // Jump-table resolution is order-sensitive: it scans the instructions

@@ -77,10 +77,28 @@ Transpiler **une fonction + uniquement ses callees** (fermeture transitive), pas
 tout le binaire. *Livrable* : `--prune`/auto avec `--function`. *Critère* :
 transpiler `sub_X` d'un gros binaire ne sort que la fermeture, compile, tourne.
 
-### Phase 3 — Reconnaissance CRT MSVC (UNIVERSALITÉ « exe quelconque ») ⬜
-Signatures FLIRT pour `ucrtbase`/`msvcr*` (MSVC), pas seulement mingw. *Livrable* :
-DB MSVC via `--mode gensig` + reconnaissance. *Critère* : un exe MSVC strippé
-reconnaît son CRT et tourne.
+### Phase 3 — Universalité des binaires **strippés** ⏳ EN COURS
+Deux volets : (a) **récupération de fonctions** sans symboles, (b) **reconnaissance
+CRT** (FLIRT mingw/MSVC). Volet (a) prioritaire car c'est le blocage mesuré.
+- **3a. Découverte des fonctions adressées (address-taken) ✅ FAIT.** Mesure : Lua
+  symbolé récupère **987** fonctions, strippé seulement **314** — le scan de
+  prologue ne connaît que `55 8B EC` (cadre de pile), or `-O2` omet le pointeur de
+  cadre → 673 fonctions (cibles d'appels indirects : callbacks, vtables, tables
+  `luaL_Reg`) jamais trouvées. Fix : passe 2b dans `global_decode` — scan des mots
+  alignés des sections pour des **pointeurs vers du code** visant un début de
+  fonction plausible (`looks_like_func_start` : `55/53/56/57`, `83 ec`, `81 ec`,
+  `8b ff`, `ff 25`, `e9` — 90 % des entrées) **non encore décodé** (garde
+  `!global.contains_key` → ne scinde jamais une fonction déjà récupérée, donc
+  corpus régression intact). Lua strippé : **314 → 762** fonctions, tourne bien plus
+  loin (plus de crash alloc/`_lock`). Symbolé : **987 inchangé** (la garde évite le
+  bruit), tourne parfaitement. *Vérifié* : fixture strippée FPO
+  `address_taken_callback` (callback via table de pointeurs, `RESULT=42`) ; **81
+  tests** (m1 27→28) ; diff **268/268**.
+- *Reste 3a* : ~225 fonctions encore manquantes au strippé (entrées hors
+  whitelist — feuilles `8b 44 24`, pointeurs non alignés) ; un appel indirect
+  reste non résolu (`0x418643`).
+- *Reste 3b* : signatures FLIRT pour `ucrtbase`/`msvcr*` (MSVC) + DB plus large
+  via `--mode gensig`. *Critère* : un exe MSVC strippé reconnaît son CRT et tourne.
 
 ### Phase 4 — vtables / appels indirects C++ (VRAI CODE C++) ⬜
 Résoudre `call [vtable+k]` quand la vtable est en `.rodata` ; nommer la méthode.
@@ -388,3 +406,20 @@ Chantiers longs (le « mur » des jeux). Documentés, pas prioritaires.
   `crt_main_discovery` (decoy 3-args avant `main`, `main` imprimé) + test
   `find_main_discovers_real_main_in_stripped_crt` ; **80 tests** (m1 26→27) ;
   diff **268/268** ; Lua par défaut OK.
+- **2026-06-21 — Phase 3a FAITE (découverte address-taken) → strippés tournent
+  bien plus loin.** Blocage mesuré : Lua strippé ne récupérait que **314/987**
+  fonctions (le scan de prologue ne voit que `55 8B EC`, mais `-O2` omet le cadre).
+  Les 673 manquantes sont des cibles d'appels **indirects** (callbacks, vtables,
+  tables `luaL_Reg`). Fix : passe 2b dans `analysis::global_decode` — scan des
+  mots **alignés** de toutes les sections pour des pointeurs dans une section
+  exécutable visant un **début de fonction plausible** (`looks_like_func_start`,
+  ~90 % des entrées) et **non déjà décodé** (`!global.contains_key` → garde
+  anti-scission : les fonctions atteignables/corpus restent intactes). Résultat :
+  Lua strippé **314 → 762** fonctions, ne plante plus sur l'allocateur/`_lock` ;
+  Lua symbolé **987 inchangé** et toujours parfait (la garde évite tout bruit).
+  **Vérif** : fixture strippée FPO `address_taken_callback` (callback atteint
+  uniquement via une table de pointeurs, `RESULT=42`) + test
+  `address_taken_callback_recovered_when_stripped` ; **81 tests** (m1 27→28) ; diff
+  **268/268** (aucune régression — confirmé que la garde protège le corpus). *Reste*
+  : recall strippé encore partiel (762/987 — feuilles `8b 44 24`, pointeurs non
+  alignés), un appel indirect non résolu (`0x418643`) ; puis volet 3b (FLIRT MSVC).

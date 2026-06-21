@@ -584,3 +584,20 @@ fn find_main_discovers_real_main_in_stripped_crt() {
     );
     let _ = std::fs::remove_dir_all(&out_dir);
 }
+
+#[test]
+fn address_taken_callback_recovered_when_stripped() {
+    if !has_m32() {
+        eprintln!("skipping address-taken test: `cc -m32` unavailable (install gcc-multilib)");
+        return;
+    }
+    // A stripped, frame-pointer-omitted callback reached only through a
+    // function-pointer table in .data. Neither recursive descent nor the
+    // `push ebp` prologue scan finds it; address-taken discovery must, or the
+    // indirect call returns 0 (unrecovered) instead of 42.
+    let out = transpile_and_run("address_taken_callback.exe");
+    assert!(
+        out.contains("RESULT=42"),
+        "address-taken callback not recovered (indirect call unresolved?):\n{out}"
+    );
+}
