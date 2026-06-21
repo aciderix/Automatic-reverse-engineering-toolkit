@@ -26,7 +26,15 @@ fn body_line(s: &Stmt) -> Option<String> {
             expr_c(value)
         )),
         Stmt::CallStmt(e) => Some(format!("(void)({});", expr_c(e))),
-        Stmt::Asm(t) => Some(format!("/* asm: {} */", t)),
+        // An instruction the lifter could not model. In the read-only decompile
+        // it is a comment; in the *transpile* (shared-stack) path it is live code
+        // that must not silently no-op — reaching it means we would guess at an
+        // unknown effect, so fail loud with the instruction text instead.
+        Stmt::Asm(t) => Some(if super::shared_stack() {
+            format!("aret_unmodelled({:?});", t)
+        } else {
+            format!("/* asm: {} */", t)
+        }),
         Stmt::Set { dst: Location::Frame(d), expr } => {
             Some(format!("{} = {};", frame_name(*d), expr_c(expr)))
         }

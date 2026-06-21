@@ -73,6 +73,12 @@ uint32_t aret_SetFilePointer(uint32_t esp); /* (h, dist, *high, method) -> DWORD
  * so a large binary still links and reports exactly which APIs it needs. */
 void aret_unimpl(const char *name);
 
+/* An instruction the lifter could not model, reached at run time. Continuing
+ * would substitute a no-op for an unknown effect — a silent wrong result — so we
+ * fail loud (print the instruction and abort) instead. The transpile report's
+ * `partial(asm)` count lists how many functions still contain one statically. */
+void aret_unmodelled(const char *insn);
+
 /* No-op shim (returns 0) for recognized startup-glue functions (mingw/MSVC
  * global ctor/dtor runners, EH-frame registration, pseudo-relocator) we bind
  * away instead of lifting their indirect-call-heavy table walks. */

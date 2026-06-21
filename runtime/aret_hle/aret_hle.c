@@ -532,6 +532,15 @@ void aret_unimpl(const char *name) {
     fprintf(stderr, "ARET: unimplemented import called: %s\n", name);
 }
 
+/* Reached an instruction the lifter could not model: fail loud rather than
+ * silently substitute a no-op (which would be a wrong result presented as
+ * correct). The address/text pinpoints what to model next. */
+void aret_unmodelled(const char *insn) {
+    fprintf(stderr, "ARET: reached an unmodelled instruction: %s\n", insn);
+    fprintf(stderr, "ARET: aborting — translation is incomplete here; refusing to guess.\n");
+    abort();
+}
+
 /* Bound-away startup glue: do nothing, return 0. */
 uint32_t aret_noop(uint32_t esp) { (void)esp; return 0; }
 
