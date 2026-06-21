@@ -274,6 +274,24 @@ fn loop_exit_carrying_a_value() {
 }
 
 #[test]
+fn switch_with_duplicate_case_targets() {
+    if !has_m32() {
+        eprintln!("skipping switch-dup test: `cc -m32` unavailable (install gcc-multilib)");
+        return;
+    }
+    // A jump-table switch where several cases share a body (1,2,4 -> 2000),
+    // producing duplicate jump-table entries. The structurer maps case k ->
+    // successors[k]; collapsing duplicate targets shifts every later case onto the
+    // wrong block (the bug that routed a Lua GC userdata into the upvalue case).
+    // Expected: each index reaches its own arm.
+    let out = transpile_and_run("switch_dup_targets.exe");
+    assert!(
+        out.contains("JT: 1000 2001 2002 3003 2004 5005"),
+        "switch with duplicate case targets mis-dispatched:\n{out}"
+    );
+}
+
+#[test]
 fn equality_compare_against_negative_immediate() {
     if !has_m32() {
         eprintln!("skipping eq-cmp test: `cc -m32` unavailable (install gcc-multilib)");

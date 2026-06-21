@@ -198,6 +198,21 @@ Chantiers longs (le « mur » des jeux). Documentés, pas prioritaires.
   fixture `eq_cmp_negimm` (`10 0`) ; **75 tests** ; diff **268/268**. Lua : passe
   `pushcclosure` ; avance jusqu'au **GC** (`reallymarkobject`/`propagatemark`) —
   bug suivant.
+- **2026-06-21 — Phase 5d FAITE (table de saut : cibles dupliquées).** Hypothèse
+  validée (méthodo ChatGPT) : **PAS l'ABI** (regparm `eax/edx` lu correctement —
+  confirmé en lisant `o` via le bon param-registre), mais **construction du graphe
+  d'objets via un mauvais dispatch de switch**. Cause exacte : `resolve_jump_table`
+  **dédupliquait** les cibles (`seen.insert`). Or l'émetteur structuré fait
+  `case k -> successors[k]` ; en collapsant les doublons (plusieurs `case`
+  partageant un corps), tous les cas après le 1er doublon glissent sur le mauvais
+  bloc. Dans `reallymarkobject`, le userdata (index 3) était routé vers le cas
+  **upvalue** → lecture de `userdata[+8]` (=len=8) comme `uv->v` → `[0x8+8]` →
+  crash. Fix : garder **toutes** les entrées dans l'ordre (doublons préservés) ;
+  exiger ≥2 cibles *distinctes* pour valider une table. **Général** (tout switch à
+  cibles partagées : machines à états, dispatch). *Vérifié* : fixture
+  `switch_dup_targets` (`1000 2001 2002 3003 2004 5005`) ; **76 tests** ; diff
+  268/268. Lua : **plus de crash GC** (exit 0) ; reste un « indirect call to
+  unrecovered address » (pointeur de fonction non récupéré) — bug suivant.
 - **2026-06-21 — Phase 5d EN COURS (corruption GC, à investiguer).** Lua : après
   `pushcclosure`, crash dans le **GC** mark : `reallymarkobject` ←
   `propagatemark` ← `propagateall` ← `atomic` ← `entergen` (entrée GC

@@ -258,8 +258,12 @@ fn resolve_jump_table(prog: &Program, insn: &Insn) -> Option<Vec<u64>> {
         return None;
     };
 
+    // Every entry, in index order *with duplicates preserved*: the structured
+    // emitter maps `case k -> successors[k]`, so collapsing duplicate targets
+    // (common when several switch labels share a body) would shift every later
+    // case onto the wrong block. Stop at the first non-code word (table end).
     let mut targets = Vec::new();
-    let mut seen = BTreeSet::new();
+    let mut distinct = BTreeSet::new();
     for i in 0..1024u64 {
         let ea = table + i * ptr as u64;
         let entry = match if ptr == 8 { prog.read_u64(ea) } else { prog.read_u32(ea).map(|v| v as u64) } {
@@ -269,11 +273,12 @@ fn resolve_jump_table(prog: &Program, insn: &Insn) -> Option<Vec<u64>> {
         if !prog.is_executable(entry) {
             break;
         }
-        if seen.insert(entry) {
-            targets.push(entry);
-        }
+        distinct.insert(entry);
+        targets.push(entry);
     }
-    if targets.len() >= 2 {
+    // Require at least two *distinct* targets to count as a real jump table (a run
+    // of one repeated address is not a switch dispatch).
+    if distinct.len() >= 2 {
         Some(targets)
     } else {
         None
