@@ -416,6 +416,13 @@ uint32_t aret_fgets(uint32_t esp) {
     return r ? (uint32_t)(uintptr_t)buf : 0;
 }
 
+uint32_t aret_fflush(uint32_t esp) {
+    uint32_t file = arg(esp, 0);
+    if (!file) { fflush(NULL); return 0; }      /* flush every host stream */
+    if (iob_fd(file) >= 0) return 0;            /* _iob: unbuffered write(), nothing to flush */
+    return (uint32_t)fflush((FILE *)(uintptr_t)file);
+}
+
 uint32_t aret_fseek(uint32_t esp) {
     return (uint32_t)fseek((FILE *)(uintptr_t)arg(esp, 0), (long)(int32_t)arg(esp, 1), (int)arg(esp, 2));
 }
@@ -497,6 +504,43 @@ void aret_unimpl(const char *name) {
 
 /* Bound-away startup glue: do nothing, return 0. */
 uint32_t aret_noop(uint32_t esp) { (void)esp; return 0; }
+
+/* ------------------------------------------------------------------ */
+/* setjmp/longjmp support.                                            */
+/*                                                                    */
+/* The actual setjmp()/longjmp() are expanded at the lifted call site */
+/* (macros in aret_decls.h), so they run in the lifted function's own */
+/* native frame — the native call stack mirrors the program's logical */
+/* stack 1:1, so a native longjmp unwinds it exactly as intended. A   */
+/* shim function could not: its setjmp frame would have returned       */
+/* before the longjmp, which is undefined.                            */
+/*                                                                    */
+/* This maps the program's own jmp_buf address (the key) to a host    */
+/* jmp_buf, so a longjmp finds the context its matching setjmp saved.  */
+/* Reused by address, matching the LIFO nesting of protected calls.   */
+/* Excluded from WASM: WASI has no usable setjmp/longjmp, and the     */
+/* macro block that needs these is emitted only for the native target. */
+/* ------------------------------------------------------------------ */
+#ifndef __wasm__
+#include <setjmp.h>
+jmp_buf *aret_jmpbuf_for(uint32_t key) {
+    enum { N = 512 };
+    static uint32_t keys[N];
+    static jmp_buf bufs[N];
+    static int n = 0;
+    for (int i = 0; i < n; i++)
+        if (keys[i] == key) return &bufs[i];
+    if (n < N) { keys[n] = key; return &bufs[n++]; }
+    keys[0] = key;   /* extreme nesting: reuse rather than overflow */
+    return &bufs[0];
+}
+
+/* longjmp is safe to wrap in a function (unlike setjmp): it unwinds *to* a
+ * setjmp elsewhere, so its own frame need not survive. */
+void aret_longjmp_do(uint32_t key, int val) {
+    longjmp(*aret_jmpbuf_for(key), val ? val : 1);
+}
+#endif /* !__wasm__ */
 
 /* ------------------------------------------------------------------ */
 /* C runtime bring-up (mingw/MSVC startup)                            */

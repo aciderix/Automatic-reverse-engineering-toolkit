@@ -274,6 +274,23 @@ fn loop_exit_carrying_a_value() {
 }
 
 #[test]
+fn setjmp_longjmp_nonlocal_exit() {
+    if !has_m32() {
+        eprintln!("skipping setjmp test: `cc -m32` unavailable (install gcc-multilib)");
+        return;
+    }
+    // msvcrt setjmp (`_setjmp3`) is reached through an import thunk; longjmp
+    // unwinds five frames back to it. Exercises import-thunk resolution and the
+    // setjmp/longjmp intrinsics (host setjmp/longjmp expanded at the lifted call
+    // site, in the caller's own native frame). Expected: the longjmp value, 42.
+    let out = transpile_and_run("setjmp_longjmp.exe");
+    assert!(
+        out.contains("SETJMP: caught=42"),
+        "setjmp/longjmp non-local exit wrong:\n{out}"
+    );
+}
+
+#[test]
 fn win32_native_kernel32_layer() {
     if !has_m32() {
         eprintln!("skipping Win32 test: `cc -m32` unavailable (install gcc-multilib)");
@@ -371,10 +388,12 @@ fn win32_system_info_and_sync() {
     }
     // Broader kernel32: GetSystemInfo, GetACP, GetModuleFileNameA,
     // GetSystemDirectoryA, mutex/wait/release — all mapped to native/benign.
-    // (feat=0: mingw inlines IsProcessorFeaturePresent to read shared data.)
+    // feat=1: IsProcessorFeaturePresent is imported and reached via an import
+    // thunk; resolving the thunk binds the call to the real shim (returns 1),
+    // instead of the old behavior where the unresolved thunk path returned 0.
     let out = transpile_and_run("hello_win32sys.exe");
     assert!(
-        out.contains("W32SYS: page=4096 cpus=1 acp=1252 path=C:\\program.exe sysdir=C:\\Windows\\System32 feat=0 mtx=1 wait=0 rel=1"),
+        out.contains("W32SYS: page=4096 cpus=1 acp=1252 path=C:\\program.exe sysdir=C:\\Windows\\System32 feat=1 mtx=1 wait=0 rel=1"),
         "broader Win32 layer wrong:\n{out}"
     );
 }

@@ -54,9 +54,23 @@ de pile). Même famille que le tail-call déjà corrigé. Affecte **tout** vrai 
   inline, `sub_493440`). *Fix* : `emit::structured::emit_loop` route la sortie de
   l'en-tête par `emit_seq` (break seulement si cible = follow). *Vérifié* :
   fixture `loop_exit_value` (`eq=0 lt=-1 gt=1`), 71 tests, diff 268/268.
-- **1b. Bug pointeur-fonction pile cdecl** (Lua : `l_alloc` 0x403913 → 0xc42).
-  *Livrable* : fixture minimale (passer un pointeur-fonction par la pile cdecl puis
-  l'appeler) + fix. *Critère* : la fixture appelle la bonne fonction ; Lua avance.
+- **1b. Bug pointeur-fonction pile cdecl ✅ NON REPRODUIT (résolu autrement)**.
+  Le passage d'un pointeur-fonction par la pile cdecl puis son appel **fonctionne**
+  (repro minimale `/tmp/fnptr_stack.c` → `r=142 s=130` ; et Lua passe `lua_newstate`,
+  donc l'allocateur enregistré est bien dispatché). Le vrai blocage révélé par Lua
+  était ailleurs (thunks d'import + setjmp/longjmp), corrigé ci-dessous.
+- **1c. setjmp/longjmp + thunks d'import ✅ FAIT** (révélé par Lua 5.4.7).
+  (a) **Thunks d'import** : `call <thunk>` où `thunk = jmp *[IAT]` n'était pas
+  reconnu comme appel d'import → liaison perdue. `Program::import_thunk` les
+  résout ; `call thunk` se lie au shim **au vrai site d'appel**. Corrige aussi
+  `IsProcessorFeaturePresent` (atteint enfin son shim). (b) **setjmp/longjmp** :
+  macros expansées au site d'appel lifté (le setjmp/longjmp hôte s'exécute dans la
+  frame native de la fonction liftée ; la pile native reflète la pile logique 1:1,
+  donc longjmp déroule correctement). Support `aret_jmpbuf_for`/`aret_longjmp_do`.
+  (c) `time`/`clock` shims ; `aret_fflush` rendu conscient des flux `_iob`.
+  *Vérifié* : fixture `setjmp_longjmp` (`caught=42`, longjmp déroule 5 frames),
+  72 tests, diff 268/268. *Reste Lua* : tourne jusqu'à l'interpréteur mais une
+  erreur VM plus profonde demeure (« error message not a string ») — hors 1c.
 
 ### Phase 2 — Pruning par accessibilité (CONVERSION CIBLÉE) ⬜
 Transpiler **une fonction + uniquement ses callees** (fermeture transitive), pas
@@ -124,3 +138,17 @@ Chantiers longs (le « mur » des jeux). Documentés, pas prioritaires.
   réf. Wine ; avant : `eq=0 lt=0 gt=0`). **71 tests verts** (m1_transpile 17→18) ;
   différentiel **268/268** (-O0→-O3) sans régression. **Prochain : Phase 1b**
   (pointeur-fonction sur pile cdecl, Lua `l_alloc`).
+- **2026-06-21 — Phase 1b/1c FAITE (thunks d'import + setjmp/longjmp).** Cible
+  réelle : Lua 5.4.7 (`lua.exe` mingw, 987 fns liftées depuis `main`). Diagnostic :
+  1b (pointeur-fonction cdecl) **ne se reproduit pas** ; le crash venait des
+  **thunks d'import** (`call thunk; thunk: jmp *[IAT]`) jamais liés à l'import, et
+  de l'absence de **setjmp/longjmp**. Fixes : `loader::import_thunk` (résout le
+  thunk → shim au vrai site) ; macros setjmp/longjmp expansées au site lifté
+  + `aret_jmpbuf_for`/`aret_longjmp_do` (aret_hle.c, gardé `#ifndef __wasm__`) ;
+  shims `time`/`clock` ; `aret_fflush` conscient de `_iob`. Effet bonus :
+  `IsProcessorFeaturePresent` atteint son shim (win32sys `feat` 0→1, attendu
+  corrigé). **Vérif** : fixture `setjmp_longjmp.{c,exe}` + test
+  `setjmp_longjmp_nonlocal_exit` (`caught=42`) ; **72 tests verts** ; diff
+  **268/268**. Lua tourne désormais startup→openlibs→interpréteur (setjmp/longjmp
+  OK) mais bute sur une **erreur VM plus profonde** (« error message not a
+  string ») — chantier séparé (complétude lifter, Phase 5).

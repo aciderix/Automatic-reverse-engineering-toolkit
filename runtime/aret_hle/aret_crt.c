@@ -26,6 +26,7 @@
 #include <stdlib.h>
 #include <stdio.h>
 #include <ctype.h>
+#include <time.h>
 
 /* Read cdecl argument `i` (a 32-bit word) from the modelled stack. */
 static inline uint32_t a32(uint32_t esp, int i) {
@@ -116,7 +117,21 @@ uint32_t aret_snprintf(uint32_t esp) {
 }
 /* snprintf and _snprintf both sanitize to aret_snprintf. */
 
-uint32_t aret_fflush(uint32_t esp) { uint32_t f = AU(0); return (uint32_t)fflush(f ? (FILE *)(uintptr_t)f : NULL); }
+/* aret_fflush lives in aret_hle.c (next to the synthetic _iob machinery): a
+ * flush of a stdin/out/err stream must NOT be passed to the host fflush as a
+ * raw pointer — those are our unbuffered _iob entries, not host FILE*. */
+
+/* ------------------------------------------------------------------ */
+/* <time.h> — wall-clock seconds and process clock (msvcrt uses 32-bit */
+/* time_t for `time`; the result is the 32-bit eax slot).             */
+/* ------------------------------------------------------------------ */
+
+uint32_t aret_time(uint32_t esp) {
+    int32_t t = (int32_t)time(NULL);
+    if (AU(0)) *(int32_t *)AP(0) = t;   /* optional time_t* out-param */
+    return (uint32_t)t;
+}
+uint32_t aret_clock(uint32_t esp) { (void)esp; return (uint32_t)clock(); }
 
 /* ------------------------------------------------------------------ */
 /* <ctype.h> — classification / case (often called, not inlined)      */

@@ -498,6 +498,14 @@ fn name_calls_in_expr(e: &mut Expr, prog: &Program, bits: u32, held: &HeldImport
             if let CallTarget::Direct(a) = target {
                 if let Some(name) = prog.import_name(*a) {
                     *target = CallTarget::Named(sanitize_import(name));
+                } else if let Some(name) = prog.import_thunk(*a).map(|s| s.to_string()) {
+                    // `call <thunk>` where the thunk tail-jumps through an IAT slot:
+                    // bind to the import shim here, at the genuine call site. In
+                    // 32-bit the shim reads its cdecl args off the machine stack.
+                    *target = CallTarget::Named(sanitize_import(&name));
+                    if bits == 32 && args.is_empty() {
+                        *args = vec![Expr::Read(Location::Reg(RegId(4)))];
+                    }
                 } else if crate::emit::shared_stack() {
                     // Statically-linked CRT recognized by symbol → bind to the
                     // native shim (only when transpiling; keeps decompile output

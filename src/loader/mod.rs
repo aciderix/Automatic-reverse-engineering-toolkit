@@ -259,6 +259,39 @@ impl Program {
         self.imports.get(&addr).map(|s| s.as_str())
     }
 
+    /// Imported function name reached through an *import thunk* at `addr` — a
+    /// one-instruction trampoline `jmp dword/qword ptr [IAT_slot]` the linker
+    /// emits when an import is referenced by its plain (non-`__imp_`) name. A
+    /// `call <thunk>` is therefore really a call to the import: resolving it here
+    /// binds it directly to the shim, so the binding lands at the *real* call site
+    /// rather than inside the throwaway thunk (essential for setjmp/longjmp, which
+    /// must be expanded in the caller's own frame).
+    pub fn import_thunk(&self, addr: u64) -> Option<&str> {
+        use iced_x86::{Decoder, DecoderOptions, Mnemonic, OpKind};
+        if self.imports.is_empty() {
+            return None;
+        }
+        let code = self.code_at(addr, 8)?;
+        let bits = self.bitness.bits() as u32;
+        let mut dec = Decoder::with_ip(bits, code, addr, DecoderOptions::NONE);
+        let insn = dec.decode();
+        if insn.mnemonic() != Mnemonic::Jmp || insn.op0_kind() != OpKind::Memory {
+            return None;
+        }
+        // Absolute IAT slot the jmp dereferences: `[abs32]` (32-bit) or rip-relative
+        // (64-bit). Both surface through the memory-displacement absolute address.
+        let slot = if insn.is_ip_rel_memory_operand() {
+            insn.ip_rel_memory_address()
+        } else if insn.memory_base() == iced_x86::Register::None
+            && insn.memory_index() == iced_x86::Register::None
+        {
+            insn.memory_displacement64()
+        } else {
+            return None; // indexed/based: a jump table, not an import thunk
+        };
+        self.imports.get(&slot).map(|s| s.as_str())
+    }
+
     /// Recognize a *statically-linked* C-runtime function by its symbol, so a
     /// call to it can be bound to the native HLE shim instead of lifting the
     /// CRT's own (often indirect-call-heavy) implementation. Returns the symbol
