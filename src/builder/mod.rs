@@ -367,7 +367,7 @@ fn emit_dispatch(internal: &[u64], host: &[(u64, String)]) -> String {
 \x20       if (aret_tab[m].va == va) return aret_tab[m].fn(esp, a, c, d);\n\
 \x20       if (aret_tab[m].va < va) lo = m + 1; else hi = m - 1;\n\
 \x20   }\n\
-\x20   { char msg[64]; snprintf(msg, sizeof msg, \"indirect call to unrecovered 0x%x\", va); aret_unimpl(msg); }\n\
+\x20   { char msg[64]; snprintf(msg, sizeof msg, \"indirect call to unrecovered function 0x%x\", va); aret_unmodelled(msg); }\n\
 \x20   return 0;\n\
 }\n",
     );
@@ -600,13 +600,15 @@ pub fn transpile(
         std::fs::write(out_dir.join(name), body)
             .with_context(|| format!("failed to write {}", name))
     };
-    // Weak stubs: one per unimplemented import, plus one per referenced-but-
-    // unrecovered function address — so the program links even though the static
-    // recovery is incomplete, and reports the gaps at runtime.
+    // Weak stubs: one per unimplemented import (warns, returns 0 — a known
+    // function with no shim yet), plus one per referenced-but-unrecovered
+    // function address (aborts via aret_unmodelled — unknown code, must not be
+    // faked). The program links even though static recovery is incomplete, and
+    // the gaps fail loud at runtime instead of returning a wrong result.
     let mut stubs = emit_import_stubs(prog);
     for &addr in &undef_subs {
         stubs.push_str(&format!(
-            "__attribute__((weak)) uint64_t sub_{addr:x}(uint64_t e,uint64_t a,uint64_t c,uint64_t d){{ (void)e;(void)a;(void)c;(void)d; aret_unimpl(\"sub_{addr:x} (unrecovered)\"); return 0; }}\n"
+            "__attribute__((weak)) uint64_t sub_{addr:x}(uint64_t e,uint64_t a,uint64_t c,uint64_t d){{ (void)e;(void)a;(void)c;(void)d; aret_unmodelled(\"sub_{addr:x} (unrecovered function)\"); return 0; }}\n"
         ));
     }
     // Indirect-call dispatch table: internal entries (translated) + host-backed
