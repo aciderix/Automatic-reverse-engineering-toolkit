@@ -531,3 +531,25 @@ solidité, pas seulement « observé comme marchant ».** Fixture+test
 `jmp_mem_tailcall` (`jmp *0x402000` → `JT=42`) ; **84 tests** ; diff **268/268**.
 *Reste* (niveaux 2/3, si besoin) : indirections CRT structurelles, puis indirects
 dynamiques (`call eax`, tables, points-to) — non requis pour Lua.
+
+### Test de binaires variés → trou de solidité comblé (imports non implémentés) ✅ FAIT
+Passé au crible `--strict` un corpus mingw réel (full CRT) : `floatmath` (libm),
+`qsort_cb` (callback qsort), `structs` (malloc/listes). **Découverte majeure** :
+`qsort_cb` était annoncé **SOUND mais imprimait son tableau NON trié** — `qsort`
+est un import sans shim → stub faible (warn + return 0, no-op) → sortie fausse
+présentée comme correcte. Le verdict **ignorait les imports non implémentés**.
+Fix : le verdict compte désormais les imports **appelés** sans shim réel. L'ensemble
+des shims implémentés est **parsé depuis les sources runtime embarquées**, y compris
+les shims **générés par macro** (`MATH1(pow,…)` → `aret_pow`) en découvrant toute
+macro qui colle `aret_##<param>` (auto-maintenu, pas de liste à la main qui dérive) ;
+les intrinsèques setjmp/longjmp sont exclus. Gaps comblés : **qsort/bsearch** (un
+**trampoline host→guest** qui dispatche le comparateur transpilé via `aret_call` sur
+une frame cdecl scratch) + **wcslen** 16-bit. Résultat : le corpus C (qsort_cb,
+floatmath, structs) est **SOUND et correct** (`qsort_cb` trie `1,2,3,5,7,9`, passe
+`--strict`) ; Lua symbolé est honnêtement **INCOMPLETE** (12 imports os/io non
+implémentés avec sites d'appel, hors chemin de base) au lieu de faussement SOUND.
+Fixture+test `qsort_callback_into_transpiled_comparator` ; **85 tests** ; diff
+**268/268**. *Leçon* : tester des binaires variés est le bon moteur pour durcir la
+garantie — chaque nouveau programme révèle un gap mesurable. *Reste mesuré* (Lua) :
+difftime/freopen/gmtime/localtime/mktime/rename/setvbuf… (lib `os`/`io`).
+*Pas de C++ (vtables) : pas de `g++` mingw ici — à tester ailleurs (niveau 3).*
