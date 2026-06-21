@@ -239,9 +239,24 @@ Chantiers longs (le « mur » des jeux). Documentés, pas prioritaires.
   `localeconv`. *Vérifié* : fixture `dispatch_loop` (`INTERP: 11`) ; **78 tests** ;
   diff 268/268. **Lua 5.4.7 (PE Windows 612 Ko, 987 fns) → ELF Linux natif** :
   `print(6*7)`=42, `fib(20)`=6765, boucles (5050), tables, `ipairs` (385),
-  concaténation, méthodes string, récursion — **tout correct**. Reste : formatage
-  **flottant** (`%.2f`, `1/3`) produit des octets faux (passage de `double`
-  variadiques par la pile partagée) — bug suivant, isolé.
+  concaténation, méthodes string, récursion — **tout correct**. Reste :
+  **arithmétique flottante** du VM fausse (`2^10==1024`→false, `7/2`→0). Diagnostic :
+  `x87_states` **abandonne** pour `luaV_execute` (122 ops x87 → `asm` no-op, 0
+  modélisée) → toute l'arith flottante du VM est morte. Cause : `frndint`
+  (arrondi-entier) absent de `x87_delta` → x87 désactivé pour toute la (grosse)
+  fonction. *Prochain* : ajouter `frndint` (+ ops manquantes) à `x87_delta`/
+  `lift_x87` (honorer le mode d'arrondi), revérifier que `luaV_execute` se
+  modélise. Tâche x87-complétude ciblée. Imports manquants annexes : `_onexit`.
+- **2026-06-21 — Phase 5g (partiel) : `frndint` + `localeconv` modélisés.** Ajout
+  `frndint` à `x87_delta`/`lift_x87` (helpers `__x87_rint`/`__x87_trunc`, honore le
+  mode d'arrondi via `truncate_active`) + shim `localeconv`. **Mais `luaV_execute`
+  abandonne encore** : cause exacte trouvée — **join x87 ambigu** au bloc
+  `0x42427b` (profondeur de pile x87 = 1 sur un chemin, 0 sur l'autre). Sur une
+  fonction de 4000+ instructions, un seul join divergent désactive *toute*
+  l'arithmétique flottante. **Prochain (profond)** : réconcilier les profondeurs
+  x87 aux joins (au lieu d'abandonner toute la fonction) — p.ex. autoriser une
+  divergence quand un chemin a un `st(0)` non consommé, ou analyser par région.
+  78 tests verts ; diff 268/268 (aucune régression).
 - **2026-06-21 — Phase 5d EN COURS (corruption GC, à investiguer).** Lua : après
   `pushcclosure`, crash dans le **GC** mark : `reallymarkobject` ←
   `propagatemark` ← `propagateall` ← `atomic` ← `entergen` (entrée GC

@@ -1959,7 +1959,7 @@ pub(crate) fn x87_delta(ins: &Instruction) -> Option<i32> {
         Fst | Fist => 0,
         Fadd | Fsub | Fsubr | Fmul | Fdiv | Fdivr => 0,
         Fiadd | Fisub | Fisubr | Fimul | Fidiv | Fidivr => 0,
-        Fabs | Fchs | Fsqrt | Fxch => 0,
+        Fabs | Fchs | Fsqrt | Fxch | Frndint => 0,
         Fcomi | Fucomi => 0,
         // Status-word compares (32-bit float idiom) + status-word store.
         Fcom | Fucom | Ficom => 0,
@@ -2080,6 +2080,13 @@ fn x87_try(insn: &Insn, sp: i32, trunc: bool) -> Option<Vec<Stmt>> {
         Fabs => vec![Stmt::Set { dst: fpr(st0)?, expr: x87call("__x87_abs", vec![Expr::Read(fpr(st0)?)]) }],
         Fchs => vec![Stmt::Set { dst: fpr(st0)?, expr: x87call("__x87_neg", vec![Expr::Read(fpr(st0)?)]) }],
         Fsqrt => vec![Stmt::Set { dst: fpr(st0)?, expr: x87call("__x87_sqrt", vec![Expr::Read(fpr(st0)?)]) }],
+        // Round st0 to an integer per the current rounding mode. We only model the
+        // two modes we can prove: truncation (the `(int)x` idiom set a truncating
+        // control word) or the default round-to-nearest-even.
+        Frndint => {
+            let h = if trunc { "__x87_trunc" } else { "__x87_rint" };
+            vec![Stmt::Set { dst: fpr(st0)?, expr: x87call(h, vec![Expr::Read(fpr(st0)?)]) }]
+        }
 
         // --- exchange st0, st(i) (default st1) ----------------------------
         Fxch => {

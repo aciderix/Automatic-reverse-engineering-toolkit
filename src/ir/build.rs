@@ -412,10 +412,18 @@ fn x87_depth_pass(
             let delta = x87_delta(ins).ok_or(X87Bail)?;
             // float→int store (`fist`/`fistp`, but not the always-truncating
             // `fisttp`) is only sound when the rounding mode is truncation.
-            let needs_trunc = matches!(ins.mnemonic(), Mnemonic::Fist | Mnemonic::Fistp);
-            if needs_trunc && !truncate_active(&blk.insns, k) {
+            let is_fist = matches!(ins.mnemonic(), Mnemonic::Fist | Mnemonic::Fistp);
+            if is_fist && !truncate_active(&blk.insns, k) {
                 return Err(X87Bail);
             }
+            // `frndint` honours the rounding mode: truncate when the truncating
+            // control word is active, else round-to-nearest. It never bails — both
+            // modes are modelled — and the stored flag selects the helper.
+            let needs_trunc = if matches!(ins.mnemonic(), Mnemonic::Frndint) {
+                truncate_active(&blk.insns, k)
+            } else {
+                is_fist
+            };
             if !(0..=8).contains(&sp) {
                 return Err(X87Bail);
             }

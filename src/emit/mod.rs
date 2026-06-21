@@ -223,6 +223,8 @@ pub(crate) const FLOAT_HELPERS: &str = concat!(
     "static inline long double __x87_abs(long double a){return a<0?-a:a;}\n",
     "static inline long double __x87_neg(long double a){return -a;}\n",
     "static inline long double __x87_sqrt(long double a){return __builtin_sqrtl(a);}\n",
+    "static inline long double __x87_rint(long double a){return __builtin_rintl(a);}\n",
+    "static inline long double __x87_trunc(long double a){return __builtin_truncl(a);}\n",
     "static inline long double __x87_one(void){return 1.0L;}\n",
     "static inline long double __x87_zero(void){return 0.0L;}\n",
     "static inline uint64_t __x87_lt(long double a,long double b){return a<b;}\n",
