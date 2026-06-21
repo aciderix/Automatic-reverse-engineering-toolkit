@@ -444,3 +444,24 @@ Chantiers longs (le « mur » des jeux). Documentés, pas prioritaires.
   **268/268** (aucune régression — confirmé que la garde protège le corpus). *Reste*
   : recall strippé encore partiel (762/987 — feuilles `8b 44 24`, pointeurs non
   alignés), un appel indirect non résolu (`0x418643`) ; puis volet 3b (FLIRT MSVC).
+- **2026-06-21 — Phase 3 suite : faux-splits, DB FLIRT enrichie, désambiguïsation.**
+  Trois correctifs après l'address-taken : (1) **faux-splits** — l'address-taken
+  pouvait semer l'intérieur d'une fonction (cibles de `case` d'un jump-table en
+  `.rdata`, qui commencent par `mov reg,[esp+disp]`) → fonction tronquée →
+  miscompilée (Lua strippé : « too many registers », son propre code-gen). Fix :
+  motif feuille réservé aux candidats venant d'un **immédiat** (vrai callback par
+  valeur, ex. `_getS`), pas des mots de **données** ; drain **ascendant +
+  incrémental** (le parent absorbe son intérieur) ; exclusion des cibles de
+  jump-table résolues. Faux-splits Lua strippé : **21 → 0**, miscompile disparue.
+  (2) **DB FLIRT 24 → 74** : fusion des signatures `--mode gensig` d'un binaire
+  symbolé (libm `pow/exp/sin/cos/log/fmod/strtod` + CRT). Un strippé reconnaît
+  enfin sa libm/CRT statique → liaison host au lieu de lifter un corps x87 dense.
+  (3) **Match ambigu → `None`** : `sprintf`/`fprintf` mingw ont une signature
+  **identique** (seul le `call __mingw_v{s,f}printf` wildcardé diffère) →
+  l'ancien `match_at` prenait le premier (`fprintf`) → `sprintf` strippé lié à
+  `aret_fprintf` → buffer passé comme `FILE*` → glibc abort. Désormais deux noms
+  différents à égalité ⇒ aucune liaison (principe sacré). Bilan strippé : Lua
+  passe de **314 fns/crash immédiat** à **949 fns**, démarre, imprime (`42`),
+  calcule ; reste un segfault en aval (queue longue de recall ~38 fns + libm
+  `sprintf` traduit). Symbolé : **987, parfait, inchangé**. **82 tests** (lib
+  48→49, +unit `ambiguous_match`), diff **268/268** à chaque étape.
