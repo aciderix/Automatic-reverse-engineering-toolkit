@@ -416,6 +416,37 @@ uint32_t aret_fgets(uint32_t esp) {
     return r ? (uint32_t)(uintptr_t)buf : 0;
 }
 
+/* Character input + stream state, used by Lua's lexer to read a script file or
+ * stdin. For a real host FILE* (e.g. an fopen'd script) forward directly; for a
+ * synthetic _iob stream read the underlying fd. EOF is -1. */
+uint32_t aret_getc(uint32_t esp) {
+    uint32_t file = arg(esp, 0);
+    int fd = iob_fd(file);
+    if (fd >= 0) { unsigned char c; return read(fd, &c, 1) == 1 ? c : 0xFFFFFFFFu; }
+    return file ? (uint32_t)getc((FILE *)(uintptr_t)file) : 0xFFFFFFFFu;
+}
+uint32_t aret_fgetc(uint32_t esp) { return aret_getc(esp); }
+uint32_t aret_ungetc(uint32_t esp) {
+    uint32_t file = arg(esp, 1);
+    if (iob_fd(file) >= 0) return arg(esp, 0); /* (no pushback on the raw fd path) */
+    return file ? (uint32_t)ungetc((int)arg(esp, 0), (FILE *)(uintptr_t)file) : 0xFFFFFFFFu;
+}
+uint32_t aret_feof(uint32_t esp) {
+    uint32_t file = arg(esp, 0);
+    if (iob_fd(file) >= 0) return 0;            /* raw fd: EOF surfaces via getc==-1 */
+    return file ? (uint32_t)feof((FILE *)(uintptr_t)file) : 1;
+}
+uint32_t aret_ferror(uint32_t esp) {
+    uint32_t file = arg(esp, 0);
+    if (iob_fd(file) >= 0) return 0;
+    return file ? (uint32_t)ferror((FILE *)(uintptr_t)file) : 0;
+}
+uint32_t aret_clearerr(uint32_t esp) {
+    uint32_t file = arg(esp, 0);
+    if (file && iob_fd(file) < 0) clearerr((FILE *)(uintptr_t)file);
+    return 0;
+}
+
 uint32_t aret_fflush(uint32_t esp) {
     uint32_t file = arg(esp, 0);
     if (!file) { fflush(NULL); return 0; }      /* flush every host stream */
