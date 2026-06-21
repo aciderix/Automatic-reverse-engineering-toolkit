@@ -382,6 +382,7 @@ fn is_fp_returning_lib(name: &str) -> bool {
             | "fabs" | "copysign" | "fmin" | "fmax" | "fdim" | "remainder"
             | "nextafter" | "scalbn" | "scalbln" | "tgamma" | "lgamma"
             | "erf" | "erfc" | "fma" | "drem" | "significand" | "logb"
+            | "strtod" | "atof" | "strtold"
     )
 }
 

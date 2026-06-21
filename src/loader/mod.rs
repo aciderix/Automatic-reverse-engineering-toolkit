@@ -75,6 +75,8 @@ const CRT_FUNCS: &[&str] = &[
     "pow", "exp", "exp2", "expm1", "log", "log10", "log2", "log1p",
     "sin", "cos", "tan", "asin", "acos", "atan", "atan2",
     "sinh", "cosh", "tanh", "fmod", "hypot", "cbrt",
+    // string→double (David Gay's bignum strtod doesn't lift; use the host).
+    "strtod", "atof",
 ];
 
 /// How many leading bytes to match a FLIRT signature against.

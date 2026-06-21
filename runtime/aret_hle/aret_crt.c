@@ -29,6 +29,7 @@
 #include <time.h>
 #include <locale.h>
 #include <math.h>
+#include <errno.h>
 
 /* Read cdecl argument `i` (a 32-bit word) from the modelled stack. */
 static inline uint32_t a32(uint32_t esp, int i) {
@@ -93,6 +94,22 @@ uint32_t aret_strtoul(uint32_t esp) {
     if (AU(1)) *(uint32_t *)AP(1) = (uint32_t)(uintptr_t)end;
     return (uint32_t)v;
 }
+/* strtod/atof: David Gay's bignum strtod in the binary is huge and doesn't lift
+ * cleanly; forward to the host. The double result is returned in st(0) via the
+ * x87 fp channel (the caller recovers it after an fp-returning call). */
+extern long double __aret_x87_ret;
+uint32_t aret_strtod(uint32_t esp) {
+    char *end; double v = strtod(ACS(0), &end);
+    if (AU(1)) *(uint32_t *)AP(1) = (uint32_t)(uintptr_t)end;
+    __aret_x87_ret = v;
+    return 0;
+}
+uint32_t aret_atof(uint32_t esp) { __aret_x87_ret = atof(ACS(0)); return 0; }
+
+/* msvcrt `_errno()` returns `int *` to the (thread-local) errno; our libc shims
+ * set the host errno, and this hands back the same location so callers that
+ * check it (e.g. strtod overflow → ERANGE) read a consistent value. */
+uint32_t aret_errno(uint32_t esp) { (void)esp; return RP(&errno); }
 
 /* ------------------------------------------------------------------ */
 /* <stdio.h> — buffered string/char I/O not already in aret_hle.c     */

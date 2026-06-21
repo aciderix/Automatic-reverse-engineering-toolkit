@@ -268,6 +268,19 @@ Chantiers longs (le « mur » des jeux). Documentés, pas prioritaires.
   `1/3`→0.333…, `math.sqrt(2)`→1.414, `math.sin(0)`→0, `math.pi`→3.14159 — **OK**.
   78 tests ; diff 268/268. *Reste* : littéraux flottants (`1.5*2.5`) **crashent**
   (parsing `strtod`/lexer) et `2^10`→0.0 (chemin `OP_POW`) — bugs suivants isolés.
+- **2026-06-21 — Phase 5h FAITE → 🎉🎉 LUA ENTIÈREMENT FONCTIONNEL (flottants
+  inclus).** Les deux derniers bugs étaient des **fonctions libm non calculées** :
+  leur corps x87 dense ne se modélise pas (lifté en `asm` no-op → renvoie 0). Les
+  marquer fp-returning corrigeait la profondeur mais pas le **calcul**. Solution :
+  **binder les libm au host** (comme printf/malloc via `crt_symbol`/`CRT_FUNCS`) :
+  (1) transcendantes `pow`/`exp`/`log`/`sin`/`cos`/`tan`/`fmod`/`hypot`/… →
+  shims host (lisent les `double` cdecl, renvoient par le canal fp `__aret_x87_ret`).
+  (2) `strtod`/`atof` (bignum de David Gay, crashait en `__lshift_D2A`) → host.
+  (3) shim `_errno`. **Lua 5.4.7 (PE Windows → ELF natif) : TOUT marche** —
+  `2^10`=1024, `1/3`=0.333, `1.5*2.5`=3.75, `0.1+0.2`=0.3, `string.format("%.3f")`,
+  `table.sort`, `math.sin/cos/exp/sqrt/pi`, récursion, tables, chaînes. **78 tests ;
+  diff 268/268.** Principe clé : **brancher le vrai runtime** plutôt que lifter du
+  code libm/bignum complexe — exactement la vision UBT (réutiliser les briques).
 - **2026-06-21 — Phase 5d EN COURS (corruption GC, à investiguer).** Lua : après
   `pushcclosure`, crash dans le **GC** mark : `reallymarkobject` ←
   `propagatemark` ← `propagateall` ← `atomic` ← `entergen` (entrée GC
