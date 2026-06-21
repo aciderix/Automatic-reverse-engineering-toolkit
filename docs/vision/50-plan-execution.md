@@ -553,3 +553,31 @@ Fixture+test `qsort_callback_into_transpiled_comparator` ; **85 tests** ; diff
 garantie — chaque nouveau programme révèle un gap mesurable. *Reste mesuré* (Lua) :
 difftime/freopen/gmtime/localtime/mktime/rename/setvbuf… (lib `os`/`io`).
 *Pas de C++ (vtables) : pas de `g++` mingw ici — à tester ailleurs (niveau 3).*
+
+### Poursuite Lua SOUND → 2 angles morts du verdict révélés (honnêteté) ✅ FAIT
+Décision (je suis décisionnaire) : **consolider Lua → SOUND** plutôt que C++ (niveau 3
+bloqué : pas de `g++` mingw ici). En implémentant les imports `os`/`io` manquants, la
+poursuite a révélé que **le verdict lui-même avait 2 angles morts** — précisément ce
+que les tests doivent sortir :
+1. **`has_opaque_asm` ne comptait que `Stmt::Asm`**, pas la forme **appel `asm:`**
+   (instruction non modélisée sans valeur, ex. `fstp [mem]` → `0 /*asm:…*/`). Une
+   fonction qui no-op'ait silencieusement une telle instruction était comptée comme
+   lifted. Corrigé (les deux formes comptent). **Vérité révélée** : les binaires full-CRT
+   ont des internes CRT statiques non modélisés (Lua **31** partial, corpus C 14-22) —
+   ils tournent car hors chemin exécuté, mais **pas prouvés SOUND**. Les freestanding
+   (`-nostdlib`) restent **réellement SOUND**.
+2. **`call_returns_fp` ne gérait que les appels directs** → un import fp-returning appelé
+   via l'IAT (`call [imm32]`, `FlowControl::IndirectCall`, ex. `difftime` → `double`)
+   n'était pas reconnu → le `fstp` du caller sous-débordait le modèle x87, le store était
+   **perdu → valeur fausse silencieuse**. Reconnaissance des imports fp-returning
+   (IAT-indirect + thunk) ; `prog` câblé dans l'analyse x87. **os.difftime** corrigé
+   (60.0/750.0, était un dénormal) ; −1 partial.
++ shims `os`/`io` Lua : gmtime/localtime/mktime/strftime (**marshalling `struct tm`**,
+layout Windows 9 ints), difftime, rename, freopen, tmpfile, tmpnam, setvbuf, system →
+os.date/os.time/os.difftime/io fonctionnent. **85 tests** ; diff **268/268**
+(changement de classification seul, lifting inchangé). **Leçon clé** : pousser vers
+« 100 % SOUND » est le meilleur révélateur des angles morts de la métrique elle-même —
+le verdict est maintenant beaucoup plus digne de confiance. *Reste pour Lua SOUND* :
+modéliser les ~31 internes CRT statiques (x87/SSE dans printf/locale), OU les reconnaître
+host-backed (FLIRT élargi). *Cohérence à finir* : la forme `asm:` no-op encore au runtime
+au lieu d'`abort` (Stmt::Asm, lui, abort) — à uniformiser.
