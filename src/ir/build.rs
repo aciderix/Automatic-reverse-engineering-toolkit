@@ -294,12 +294,42 @@ thread_local! {
     /// modelled as x87-neutral, i.e. the prior behavior — no differential change).
     static FP_RETURNING: std::cell::RefCell<std::collections::HashSet<u64>> =
         std::cell::RefCell::new(std::collections::HashSet::new());
+
+    /// Entry addresses of functions that never return (they end every path in a
+    /// longjmp/throw/exit — e.g. Lua's `luaG_*error`, `luaD_throw`, libc `abort`/
+    /// `exit`). A `call` to one of these does not fall through, so the x87 depth
+    /// pass must not propagate across the (spurious) fall-through edge.
+    static NORETURN: std::cell::RefCell<std::collections::HashSet<u64>> =
+        std::cell::RefCell::new(std::collections::HashSet::new());
 }
 
 /// Install the set of fp-returning function entry addresses for x87 depth
 /// tracking on this thread (computed by `compute_fp_returning`).
 pub fn set_fp_returning(set: std::collections::HashSet<u64>) {
     FP_RETURNING.with(|c| *c.borrow_mut() = set);
+}
+
+/// Install the set of noreturn function entry addresses for this thread.
+pub fn set_noreturn(set: std::collections::HashSet<u64>) {
+    NORETURN.with(|c| *c.borrow_mut() = set);
+}
+
+/// A function is noreturn if no recovered block ends in a `ret` — every path
+/// leaves via a tail jump, a call to another noreturn function, or a non-
+/// returning intrinsic (longjmp/throw/exit). Conservative: a function with any
+/// `ret` is treated as returning.
+pub fn compute_noreturn(funcs: &[&Function]) -> std::collections::HashSet<u64> {
+    funcs
+        .iter()
+        .filter(|f| {
+            !f.blocks.is_empty()
+                && !f
+                    .blocks
+                    .values()
+                    .any(|b| matches!(b.terminator, crate::disasm::Flow::Return))
+        })
+        .map(|f| f.entry)
+        .collect()
 }
 
 /// Does the instruction call a function known to return an fp value in `st(0)`?
@@ -496,6 +526,19 @@ fn x87_depth_pass(
         // Terminal depth at a `ret`: an fp-returning function leaves st(0) here.
         if matches!(blk.terminator, crate::disasm::Flow::Return) {
             ret_depths.push(sp);
+        }
+        // A `call` to a noreturn function (a Lua `luaG_*error`/`luaD_throw`,
+        // `abort`, `exit`, …) does not fall through: the bytes after it are
+        // reached only via other edges. Treating the fall-through as a successor
+        // injects a spurious — and wrong-depth — x87 edge. Drop it.
+        let noreturn_tail = blk
+            .insns
+            .last()
+            .filter(|i| matches!(i.flow, crate::disasm::Flow::Call))
+            .and_then(|i| i.target)
+            .is_some_and(|t| NORETURN.with(|c| c.borrow().contains(&t)));
+        if noreturn_tail {
+            continue;
         }
         for &s in &blk.successors {
             if let Some(&si) = bidx.get(&s) {

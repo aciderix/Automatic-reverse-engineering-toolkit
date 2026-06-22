@@ -617,6 +617,7 @@ pub fn transpile(
     // call to e.g. `double lua_version(...)` underflows the modelled x87 stack and
     // the whole function's float ops degrade to opaque asm (a real-program bug:
     // Lua's version check then always takes its error path).
+    ir::build::set_noreturn(ir::build::compute_noreturn(funcs));
     ir::build::set_fp_returning(ir::build::compute_fp_returning(prog, funcs));
 
     std::fs::create_dir_all(out_dir)
