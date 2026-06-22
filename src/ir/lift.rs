@@ -807,7 +807,10 @@ pub fn lift(insn: &Insn, bits: u32) -> Vec<Stmt> {
             let addr = if let Some(d) = frame_disp(ins, 1) {
                 Expr::Addr(Location::Frame(d))
             } else {
-                some_or_asm!(mem_addr(ins)).0
+                // `lea` computes the effective address only — it never adds the
+                // segment base — so a segment override (e.g. the `cs:` multi-byte
+                // NOP `lea esi,cs:[esi]`) is irrelevant; use the raw address.
+                some_or_asm!(mem_addr_raw(ins)).0
             };
             some_or_asm!(write_op0(ins, addr, bits))
         }
