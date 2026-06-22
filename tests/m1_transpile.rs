@@ -798,3 +798,23 @@ fn adjacent_jump_tables_are_bounded() {
     let out = transpile_and_run("two_switch.exe");
     assert!(out.contains("t=3293"), "two-switch result wrong:\n{out}");
 }
+
+#[test]
+fn signed_compare_of_memory_operand() {
+    if !has_m32() {
+        eprintln!("skipping signed-compare test: `cc -m32` unavailable");
+        return;
+    }
+    // Recursive fib at -O0 keeps the base-case test `cmp [n],1; jle` on a memory
+    // operand. The result `(uint32)0 - 1 == 0xFFFFFFFF` was sign-tested at 64-bit
+    // width, where it reads as *positive*, so the sign flag (and `jle`) took the
+    // wrong edge: fib(0) recursed into fib(-1)/fib(-2) and fib(5) returned -4.
+    // Sign/overflow flags now read bit w-1 of the result, so a w-bit compare is
+    // correct whatever C width the operand has. (Register operands masked to
+    // uint64 hid the bug — which is why the differential corpus never caught it.)
+    let out = transpile_and_run("recursion.exe");
+    assert!(
+        out.contains("fib5=5 fib10=55 fact5=120"),
+        "signed compare of a memory operand is wrong:\n{out}"
+    );
+}

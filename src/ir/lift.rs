@@ -521,6 +521,16 @@ fn sign_neg(x: &Expr) -> Expr {
     Expr::Binary(BinOp::Slt, Box::new(x.clone()), Box::new(konst(0)))
 }
 
+/// Bit `w-1` of `x` as a 0/1 value — the sign flag of a `w`-bit result. Width-
+/// aware on purpose: a 64-bit `Slt(r,0)` reads the wrong sign when `r` is a
+/// narrower C value. E.g. a 32-bit `cmp [mem],1` where `[mem]==0` computes the
+/// result as a `uint32_t` (`0u - 1 == 0xFFFFFFFF`), which a 64-bit signed test
+/// sees as *positive* — so `jle`/`jl`/`js` took the wrong edge. Reading bit
+/// `w-1` directly is correct whatever C width the operand happens to have.
+fn sign_bit(x: &Expr, w: u32) -> Expr {
+    bin(BinOp::And, bin(BinOp::Shr, x.clone(), konst((w - 1) as i128)), konst(1))
+}
+
 fn set_flag(k: FlagKind, e: Expr) -> Stmt {
     Stmt::Set {
         dst: Location::Flag(k),
@@ -640,24 +650,26 @@ fn asm_fallback(insn: &Insn) -> Vec<Stmt> {
     out
 }
 
-/// Flags for a subtraction `a - b` with result `r` (covers `cmp`, `sub`, `neg`).
-fn sub_flags(a: &Expr, b: &Expr, r: &Expr) -> Vec<Stmt> {
+/// Flags for a `w`-bit subtraction `a - b` with result `r` (covers `cmp`, `sub`,
+/// `neg`). Sign/overflow are read from bit `w-1` so they are correct whatever C
+/// width `r` is computed in (see `sign_bit`).
+fn sub_flags(a: &Expr, b: &Expr, r: &Expr, w: u32) -> Vec<Stmt> {
     let of = Expr::Binary(
         BinOp::And,
         Box::new(Expr::Binary(
             BinOp::Ne,
-            Box::new(sign_neg(a)),
-            Box::new(sign_neg(b)),
+            Box::new(sign_bit(a, w)),
+            Box::new(sign_bit(b, w)),
         )),
         Box::new(Expr::Binary(
             BinOp::Ne,
-            Box::new(sign_neg(r)),
-            Box::new(sign_neg(a)),
+            Box::new(sign_bit(r, w)),
+            Box::new(sign_bit(a, w)),
         )),
     );
     vec![
         set_flag(FlagKind::Zf, Expr::Binary(BinOp::Eq, Box::new(a.clone()), Box::new(b.clone()))),
-        set_flag(FlagKind::Sf, sign_neg(r)),
+        set_flag(FlagKind::Sf, sign_bit(r, w)),
         set_flag(FlagKind::Cf, Expr::Binary(BinOp::Ult, Box::new(a.clone()), Box::new(b.clone()))),
         set_flag(FlagKind::Of, of),
     ]
@@ -692,11 +704,12 @@ fn add_flags(a: &Expr, b: &Expr, r: &Expr, w: u32) -> Vec<Stmt> {
     ]
 }
 
-/// Flags for a logical result `r` (covers `test`, `and`, `or`, `xor`): CF=OF=0.
-fn logic_flags(r: &Expr) -> Vec<Stmt> {
+/// Flags for a `w`-bit logical result `r` (covers `test`, `and`, `or`, `xor`):
+/// CF=OF=0; SF is bit `w-1` (width-aware, see `sign_bit`).
+fn logic_flags(r: &Expr, w: u32) -> Vec<Stmt> {
     vec![
         set_flag(FlagKind::Zf, Expr::Binary(BinOp::Eq, Box::new(r.clone()), Box::new(konst(0)))),
-        set_flag(FlagKind::Sf, sign_neg(r)),
+        set_flag(FlagKind::Sf, sign_bit(r, w)),
         set_flag(FlagKind::Cf, konst(0)),
         set_flag(FlagKind::Of, konst(0)),
     ]
@@ -827,10 +840,11 @@ pub fn lift(insn: &Insn, bits: u32) -> Vec<Stmt> {
                 _ => unreachable!(),
             };
             let r = bin(op, a.clone(), b.clone());
+            let w = op0_width(ins, bits);
             let mut out = match flags {
-                Some(true) => sub_flags(&a, &b, &r),  // sub
-                Some(false) => logic_flags(&r),       // and/or/xor
-                None => add_flags(&a, &b, &r, op0_width(ins, bits)),
+                Some(true) => sub_flags(&a, &b, &r, w),  // sub
+                Some(false) => logic_flags(&r, w),       // and/or/xor
+                None => add_flags(&a, &b, &r, w),
             };
             out.extend(some_or_asm!(write_op0(ins, r, bits)));
             out
@@ -850,7 +864,7 @@ pub fn lift(insn: &Insn, bits: u32) -> Vec<Stmt> {
             let bc = bin(BinOp::Add, b, Expr::Read(cf.clone()));
             let r = bin(BinOp::Sub, a.clone(), bc.clone());
             let mut out = vec![Stmt::Set { dst: cf, expr: read_flag(FlagKind::Cf) }];
-            out.extend(sub_flags(&a, &bc, &r));
+            out.extend(sub_flags(&a, &bc, &r, op0_width(ins, bits)));
             out.extend(some_or_asm!(write_op0(ins, r, bits)));
             out
         }
@@ -1267,13 +1281,13 @@ pub fn lift(insn: &Insn, bits: u32) -> Vec<Stmt> {
             let a = some_or_asm!(op_value(ins, 0));
             let b = some_or_asm!(op_value(ins, 1));
             let r = bin(BinOp::Sub, a.clone(), b.clone());
-            sub_flags(&a, &b, &r)
+            sub_flags(&a, &b, &r, op0_width(ins, bits))
         }
         Mnemonic::Test => {
             let a = some_or_asm!(op_value(ins, 0));
             let b = some_or_asm!(op_value(ins, 1));
             let r = bin(BinOp::And, a, b);
-            logic_flags(&r)
+            logic_flags(&r, op0_width(ins, bits))
         }
 
         Mnemonic::Inc | Mnemonic::Dec => {
@@ -1286,7 +1300,7 @@ pub fn lift(insn: &Insn, bits: u32) -> Vec<Stmt> {
             let r = bin(op, a.clone(), konst(1));
             let mut out = vec![
                 set_flag(FlagKind::Zf, bin(BinOp::Eq, r.clone(), konst(0))),
-                set_flag(FlagKind::Sf, sign_neg(&r)),
+                set_flag(FlagKind::Sf, sign_bit(&r, op0_width(ins, bits))),
             ];
             out.extend(some_or_asm!(write_op0(ins, r, bits)));
             out
@@ -1294,7 +1308,7 @@ pub fn lift(insn: &Insn, bits: u32) -> Vec<Stmt> {
         Mnemonic::Neg => {
             let a = some_or_asm!(op_value(ins, 0));
             let r = bin(BinOp::Sub, konst(0), a.clone());
-            let mut out = sub_flags(&konst(0), &a, &r);
+            let mut out = sub_flags(&konst(0), &a, &r, op0_width(ins, bits));
             out.extend(some_or_asm!(write_op0(ins, r, bits)));
             out
         }
@@ -1739,7 +1753,7 @@ pub fn lift(insn: &Insn, bits: u32) -> Vec<Stmt> {
             let mut out = vec![Stmt::Set { dst: t.clone(), expr: some_or_asm!(op_value(ins, 0)) }];
             let eq = bin(BinOp::Eq, acc.clone(), d.clone());
             let r = bin(BinOp::Sub, acc.clone(), d.clone());
-            out.extend(sub_flags(&acc, &d, &r));
+            out.extend(sub_flags(&acc, &d, &r, w));
             let dst_new = Expr::Select { cond: Box::new(eq.clone()), then_: Box::new(s), else_: Box::new(d.clone()) };
             out.extend(some_or_asm!(write_op0(ins, dst_new, bits)));
             let eax_new = Expr::Select { cond: Box::new(eq), then_: Box::new(acc), else_: Box::new(d) };

@@ -755,3 +755,21 @@ flottante), à faire en session dédiée, une fonction à la fois, difftest à c
   appelés). Plus aucune fonction *atteignable* n'est partial → la prochaine étape pour SOUND
   est le **pruning par accessibilité (Phase 2)** : prouver ces 17 inatteignables depuis main
   et les exclure du verdict (ou ne pas les émettre).
+
+### Drapeaux de signe/débordement *width-aware* (compare signée d'opérande mémoire) ✅ FAIT
+- **2026-06-22 — Résultat faux silencieux trouvé en testant des binaires variés (récursion).**
+  `fib(20)` à -O0 rendait **-5778** au lieu de 6765 ; `fib(0)` partait en récursion
+  `fib(-1)/fib(-2)`. Cause : le test de cas de base `cmp [n],1; jle` sur un **opérande
+  mémoire**. `op_value` charge la mémoire typée `uint32_t` ; pour `[n]==0`, le résultat
+  `(uint32)0 - 1 == 0xFFFFFFFF` était testé par `sign_neg = Slt(r,0)` en **64 bits**, où
+  0xFFFFFFFF est **positif** → SF faux → `jle` prenait la mauvaise arête. Les opérandes
+  **registre** (masqués en uint64, `0u64-1 == -1`) cachaient le bug — d'où difftest vert.
+- **Fix** : `sign_bit(x, w) = (x >> (w-1)) & 1` (nouveau), correct quelle que soit la largeur
+  C de l'opérande. `sub_flags`/`logic_flags` prennent `w` et calculent SF/OF via `sign_bit` ;
+  `inc`/`dec`/`neg`/`cmp`/`test`/`sub`/`sbb`/`cmpxchg` passent `op0_width`. (`add_flags` était
+  déjà width-aware.)
+- **Vérifié** : `fib5=5 fib10=55 fact5=120`, `varied fib=6765`. Lua toujours OK (tri, `%a`,
+  `-5//2=-3`, `floor(-2.5)=-3`). **difftest 268/268**, suite verte. Test
+  +`signed_compare_of_memory_operand` (fixture `recursion.c/.exe`).
+- *Reste à -O0* : un switch via `jmp [table]` non résolu (saut indirect vers 0x401672, milieu
+  de fonction) → abort sûr. À diagnostiquer (idiome de table de saut -O0 différent).
