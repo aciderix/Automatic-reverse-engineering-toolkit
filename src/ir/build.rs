@@ -474,10 +474,29 @@ fn x87_depth_pass(
     let mut fp_calls: HashMap<u64, u32> = HashMap::new();
     let mut ret_depths: Vec<i32> = Vec::new();
 
+    // Flat, address-ordered instruction stream + the set of join addresses (block
+    // starts reached by more than one edge). `rounding_mode_active` walks this
+    // backward across straight-line fallthrough predecessors — the CW-building
+    // `or`/`mov` idiom is often split off into its own block by an unrelated
+    // leader, so a block-local scan would miss it. Crossing a join (or a branch)
+    // would be unsound (another path could set a different control word), so the
+    // walk stops there and falls back to `Nearest`.
+    let mut flat: Vec<&crate::disasm::Insn> = func.blocks.values().flat_map(|b| b.insns.iter()).collect();
+    flat.sort_by_key(|i| i.address);
+    let pos: HashMap<u64, usize> = flat.iter().enumerate().map(|(i, ins)| (ins.address, i)).collect();
+    let mut pred_count: HashMap<u64, u32> = HashMap::new();
+    for b in func.blocks.values() {
+        for &s in &b.successors {
+            *pred_count.entry(s).or_default() += 1;
+        }
+    }
+    let joins: std::collections::HashSet<u64> =
+        pred_count.into_iter().filter(|&(_, c)| c > 1).map(|(a, _)| a).collect();
+
     while let Some(bi) = work.pop() {
         let blk = &func.blocks[&order[bi]];
         let mut sp = entry_sp[bi];
-        for (k, insn) in blk.insns.iter().enumerate() {
+        for insn in blk.insns.iter() {
             let ins = &insn.raw;
             // A call to an fp-returning function leaves its result in st(0); the
             // x87 ABI keeps the stack otherwise empty across calls, so this single
@@ -504,7 +523,7 @@ fn x87_depth_pass(
             // active (floor/ceil/truncate/nearest). `frndint` honours all four;
             // `fist`/`fistp` (but not the always-truncating `fisttp`) are only
             // sound under truncation.
-            let mode = rounding_mode_active(&blk.insns, k);
+            let mode = rounding_mode_active(&flat, pos[&insn.address], &joins);
             let is_fist = matches!(ins.mnemonic(), Mnemonic::Fist | Mnemonic::Fistp);
             if is_fist && mode != crate::ir::lift::RoundMode::Trunc {
                 return Err(X87Bail);
@@ -549,13 +568,24 @@ fn x87_depth_pass(
     Ok(X87Info { ops: out, fp_calls, ret_depths })
 }
 
-/// The x87 rounding mode proven active at instruction `idx`, from the control
-/// word the surrounding code installs before an `fldcw`: the `(int)x` / `floor`
-/// / `ceil` idiom does `fnstcw; or RC-bits; fldcw; frndint|fist`. The RC bits
-/// (10–11 of the control word, i.e. 0xc00, or 0x0c in the high byte) select the
-/// mode: 00 nearest, 01 down(floor), 10 up(ceil), 11 truncate. Defaults to
-/// `Nearest` when no such setup precedes (the hardware default).
-fn rounding_mode_active(insns: &[crate::disasm::Insn], idx: usize) -> crate::ir::lift::RoundMode {
+/// The x87 rounding mode proven active at the op at flat index `idx`, from the
+/// control word the surrounding code installs before an `fldcw`: the `(int)x` /
+/// `floor` / `ceil` idiom does `fnstcw; or RC-bits; mov [X]; fldcw [X];
+/// frndint|fist`. The RC bits (10–11 of the control word, i.e. 0xc00, or 0x0c in
+/// the high byte) select the mode: 00 nearest, 01 down(floor), 10 up(ceil), 11
+/// truncate.
+///
+/// `flat` is the function's instruction stream in address order; `joins` is the
+/// set of block-start addresses with more than one predecessor. The scan walks
+/// backward only over straight-line fallthrough code: it stops at the first
+/// branch (the prior instruction does not fall through) or join (another path
+/// could install a different control word), returning `Nearest` — the sound
+/// default, which makes a dependent `fist` bail rather than guess.
+fn rounding_mode_active(
+    flat: &[&crate::disasm::Insn],
+    idx: usize,
+    joins: &std::collections::HashSet<u64>,
+) -> crate::ir::lift::RoundMode {
     use crate::ir::lift::RoundMode;
     use iced_x86::{Mnemonic, OpKind};
     // RC field of an `or imm, (ah|cw)` that installs a rounding mode.
@@ -581,35 +611,57 @@ fn rounding_mode_active(insns: &[crate::disasm::Insn], idx: usize) -> crate::ir:
         })
     };
     let mem_slot = |ins: &iced_x86::Instruction| (ins.memory_base(), ins.memory_displacement64());
+    // The straight-line predecessor window [lo, idx]: extend back while each step
+    // is a real fallthrough (prior insn falls through, target is not a join). The
+    // CW idiom is frequently split across blocks by an unrelated leader, so this
+    // window — not the basic block — is the correct scope.
+    let mut lo = idx;
+    while lo > 0 {
+        if joins.contains(&flat[lo].address) {
+            break; // another edge reaches here → control word not provable
+        }
+        match flat[lo - 1].flow {
+            crate::disasm::Flow::Fallthrough
+            | crate::disasm::Flow::Call
+            | crate::disasm::Flow::CondJump => lo -= 1,
+            _ => break, // jump/return/indirect: prior insn does not fall through
+        }
+    }
     // 1. The nearest preceding `fldcw [X]` — the control word this op uses.
     let mut fldcw_at = None;
-    for j in (0..idx).rev() {
-        if insns[j].raw.mnemonic() == Mnemonic::Fldcw {
+    for j in (lo..idx).rev() {
+        if flat[j].raw.mnemonic() == Mnemonic::Fldcw {
             fldcw_at = Some(j);
             break;
         }
     }
     let Some(fj) = fldcw_at else { return RoundMode::Nearest };
-    let slot = mem_slot(&insns[fj].raw);
-    // 2. The store `mov [X], reg` that built that control word (may be far back if
-    //    the slot is reused), then the `or` a few instructions before it. Matching
-    //    the *slot* is essential: a function that does both floor (`or 0x4`→slotA)
-    //    and ceil (`or 0x8`→slotB) must not cross the two up.
-    for j in (0..fj).rev() {
-        let m = &insns[j].raw;
-        if m.mnemonic() == Mnemonic::Mov
-            && m.op0_kind() == OpKind::Memory
-            && mem_slot(m) == slot
-        {
-            for k in (j.saturating_sub(6)..j).rev() {
-                if let Some(mode) = rc_of(&insns[k].raw) {
-                    return mode;
-                }
-            }
-            return RoundMode::Nearest;
+    let slot = mem_slot(&flat[fj].raw);
+    // 2. Classify the value the `fldcw [X]` loads by inspecting *every* store
+    //    `mov [X], reg` in the function, each followed back to the `or` that built
+    //    the control word. The control-word slot is typically set up once before a
+    //    loop and the `fldcw`/op sit inside it (so the store is in a dominating
+    //    block, across a join), but it is loop-invariant: if every writer installs
+    //    the same rounding mode, the load provably yields that mode on every path.
+    //    A writer we cannot classify, or two that disagree, is unprovable → the
+    //    sound `Nearest` (which makes a dependent `fist` bail rather than guess).
+    //    Matching the *slot* keeps a function's floor (`or 0x4`→slotA) and ceil
+    //    (`or 0x8`→slotB) apart.
+    let mut agreed: Option<RoundMode> = None;
+    for j in 0..flat.len() {
+        let m = &flat[j].raw;
+        if m.mnemonic() != Mnemonic::Mov || m.op0_kind() != OpKind::Memory || mem_slot(m) != slot {
+            continue;
+        }
+        let built = (j.saturating_sub(6)..j).rev().find_map(|k| rc_of(&flat[k].raw));
+        match (built, agreed) {
+            (None, _) => return RoundMode::Nearest, // a writer we can't prove
+            (Some(md), None) => agreed = Some(md),
+            (Some(md), Some(prev)) if md != prev => return RoundMode::Nearest, // disagree
+            _ => {}
         }
     }
-    RoundMode::Nearest
+    agreed.unwrap_or(RoundMode::Nearest)
 }
 
 /// Fold a rip-relative load of read-only data into a literal. Without this,

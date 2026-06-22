@@ -696,3 +696,21 @@ fn x87_frndint_honours_rounding_mode() {
         "x87 frndint rounding mode not honoured:\n{out}"
     );
 }
+
+#[test]
+fn x87_fist_truncate_with_hoisted_control_word() {
+    if !has_m32() {
+        eprintln!("skipping fist-trunc test: `cc -m32` unavailable (install gcc-multilib)");
+        return;
+    }
+    // An optimised `(long)x` cast inside a loop installs the truncate control word
+    // (`or ah,0xc; mov [X]; fldcw [X]; fist`) in a block that *dominates* the loop,
+    // while the `fldcw [X]; fist` sit in the loop body — separated by the loop
+    // header (a join). A block-local rounding scan can't see the writer, so the
+    // `fist` could not be proven truncating and the whole function bailed to asm
+    // (it would abort at runtime). `rounding_mode_active` now proves the control
+    // word loop-invariant by checking every writer of slot X agrees, so the cast
+    // is modelled: sum of trunc(2.9*i) for i=1..5 = 2+5+8+11+14 = 40.
+    let out = transpile_and_run("truncloop.exe");
+    assert!(out.contains("sum=40"), "hoisted-CW truncating fist not modelled:\n{out}");
+}

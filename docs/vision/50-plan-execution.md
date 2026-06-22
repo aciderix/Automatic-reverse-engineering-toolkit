@@ -679,3 +679,27 @@ flottante), à faire en session dédiée, une fonction à la fois, difftest à c
   Lua `5.5//2=2.0`, `7.0//2.0=3.0`, `math.floor(2.75)=2`, `math.ceil(2.75)=3`,
   `math.floor(-2.5)=-3`. Régression : **difftest 268/268**, suite complète verte.
   Test ajouté : `x87_frndint_honours_rounding_mode` (+ fixture `rounding.c`/`.exe`).
+
+### `rounding_mode_active` voit au-delà du bloc (CW invariant de boucle) ✅ FAIT — Lua 19 → 18 partial
+- **2026-06-22 — `lua_number2strx` (`string.format("%a")`, 0x41b7a8) bailait alors
+  que son `fist` EST en mode troncature.** Diagnostic (instrumentation par-bail) :
+  le `fist @0x41b94d` rendait `mode=Nearest`. Cause : le control word troncature
+  (`or ah,0xc; mov [esp+0x2a]; …`) est installé **avant** une boucle (bloc 0x41b8fe),
+  mais le `fldcw [esp+0x2a]; fist` sont **dans** le corps de boucle (entête 0x41b930,
+  cible d'un `ja 41b930` en arrière → **join à 2 prédécesseurs**). L'ancien scan,
+  **local au bloc**, ne voyait pas le `mov` qui construit le CW → `Nearest` → bail.
+- **Fix (sain)** : `rounding_mode_active` prend désormais le flux d'instructions
+  **de toute la fonction** (trié par adresse) + l'ensemble des **joins**. (1) Il trouve
+  le `fldcw [X]` qui alimente l'op en remontant la **fenêtre straight-line** (s'arrête
+  au 1er branchement/join → identifie X de façon sûre). (2) Il prouve la **valeur**
+  de X en inspectant **tous** les `mov [X]` de la fonction : le slot CW est typiquement
+  posé une fois avant la boucle et **invariant de boucle** ; si tous les writers
+  installent le **même** mode, le `fldcw` charge prouvablement ce mode sur **tout**
+  chemin. Un writer non-classifiable OU deux writers en désaccord ⇒ `Nearest`
+  (bail sûr — `fist` reste asm, abort runtime si atteint).
+- **Vérifié** : `string.format("%a", 1.5/0.1/255)` → `0x1.8p+0 0x1.999999999999ap-4
+  0x1.fep+7` (correct). **difftest 268/268**, suite verte. Test +`x87_fist_truncate_with_hoisted_control_word`
+  (fixture `truncloop.c/.exe` : `(long)(x*i)` en boucle, CW hoisté → `sum=40`).
+- **Reste 18 partial** : 17 internes libm morts (fxam/transcendantes/load-constantes,
+  jamais appelés) + `intarith` (0x413d54, sous-débordement x87 réel dans l'idiome de
+  comparaison NaN — la prochaine cible Voie 1).
