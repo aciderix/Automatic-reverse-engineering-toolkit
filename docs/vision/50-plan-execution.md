@@ -718,12 +718,16 @@ flottante), à faire en session dédiée, une fonction à la fois, difftest à c
 - **Vérifié** : `wcall.exe` → `r=4294967296 m=12884901888` (retour 64-bit + décalage var
   via appel interne). **difftest 268/268**, suite verte. Test +`wide_64bit_return_and_shift_on_32bit`
   (fixture `wide_shift.c/.exe`).
-- ⚠️ **GAP PRÉ-EXISTANT IDENTIFIÉ (pas une régression — présent avant cette session)** :
-  Lua tronque encore ses entiers 64-bit à 32 bits de façon **généralisée**
-  (`math.maxinteger=2147483647`, `1<<32=0`, `0xFFFFFFFF*0xFFFFFFFF=1`, littéral
-  `0x100000000=0`). Les cas isolés (wcall/wide) sont corrects → le bug réside à une
-  **frontière récurrente de la VM Lua** non couverte (probable : copie de TValue 8 octets
-  / chargement de constante / spill où la moitié haute est perdue). Sondage : la
-  multiplication 64-bit de la VM perd la moitié haute alors que `bigmul` isolé est exact.
-  **Prochaine investigation majeure** (à isoler une frontière à la fois, difftest 64-bit
-  à étendre car il ne compare que les 32 bits bas — angle mort qui a masqué ces bugs).
+- ✅ **FAUSSE ALERTE LEVÉE — aucun bug Lua** : en sondant Lua j'ai d'abord cru à une
+  troncature 64-bit généralisée (`math.maxinteger=2147483647`, `1<<32=0`,
+  `0xFFFFFFFF*0xFFFFFFFF=1`, `4294967296` lu en float). **Vérification décisive** :
+  `string.packsize("j") = 4` → **ce binaire Lua est compilé avec `lua_Integer` 32-bit**
+  (LUA_32BITS). Donc `maxinteger=INT32_MAX`, `1<<32=0` (décalage 32-bit), le produit qui
+  wrappe à 2^32, et le littéral hors plage qui retombe en float sont **le comportement
+  EXACT du binaire d'origine**. Le transpileur reproduit fidèlement la sémantique
+  entière 32-bit du programme — `intarith` (sub_413d54) fait bien une addition/mul 32-bit
+  (`v26 & 0xffffffff + uint32`), ce qui est correct ici. **Rien à corriger côté Lua.**
+  Les corrections paire-retour/décalage ci-dessus restent valables pour du **vrai code
+  `long long`** (vérifié par `wcall`/`wide`, qui utilisent réellement des entiers 64-bit).
+  Leçon : toujours vérifier la *config du binaire cible* (`packsize`) avant de présumer
+  un bug de transpilation.
