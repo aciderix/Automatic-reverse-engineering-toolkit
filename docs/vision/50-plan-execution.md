@@ -611,3 +611,29 @@ Philosophie : **d'abord la sûreté (rien de faux en silence), puis la complétu
      dédié, ≠ macro `MATH1` (qui lit des `double`). Gain modeste (~4-6).
   3. **Élimination de code mort** (ne pas lifter une fonction sans site d'appel) —
      réduirait les 27 mortes, mais conservatisme requis (appels indirects).
+
+### Réduction partial : 2 angles morts du lifter x87 corrigés (31 → 20) ✅ FAIT
+En poursuivant Voie 1 (joins x87), deux bugs *simples* du lifter ont été trouvés
+et corrigés AVANT le vrai travail de joins — gros gain à faible risque :
+- **`is_x87` ne listait pas `Fabs`** (mais avait `Fchs`). `fabs` (d9 e1) prend st(0)
+  implicitement (pas d'opérande st explicite côté iced), donc il passait à travers
+  → la passe de profondeur le **sautait** → jamais modélisé → no-op silencieux
+  (valeur absolue perdue). `x87_delta`/`x87_try` le géraient déjà ; seul le portier
+  était faux. Fix : ajouter `Fabs`. **math.abs(-1.5)=1.5** correct (était faux).
+  partial 31→30. Fixture+test `x87_fabs_is_modelled`.
+- **`lea` bailait sur préfixe de segment** (`mem_addr` refuse tout segment), or
+  `lea` ne calcule que l'adresse effective (jamais la base de segment) → le NOP
+  multi-octets `cs:` (`2e 8d b4 26… = lea esi,cs:[esi]`, padding d'alignement)
+  tombait en asm, rendant **toute sa fonction partial** (et risque d'abort sur un
+  NOP). Fix : `lea` utilise `mem_addr_raw` (ignore le segment, *sound* par sémantique
+  x86). **partial 30→20** (10 fonctions n'étaient partial QUE pour ce NOP → désormais
+  propres) ; plus aucun `lea` non modélisé.
+Les deux : diff **268/268**, 86 tests, Lua entièrement fonctionnel. **Bilan partial
+Lua : 31 → 20.** *Reste précis* : (a) **fonctions Lua VIVANTES** (`forprep`,
+`intarith`, `lua_number2strx`) bailent sur **joins x87 ambigus** (toutes leurs ops
+sont modélisables → c'est la profondeur au join qui diverge) — **le vrai travail
+Voie 1**, à faire prudemment (correctness x87 critique, difftest à chaque pas) ;
+(b) **internes libm MORTS** bailent sur `fxam` (classification, absent de
+`x87_delta`), transcendantes (`fyl2x`/`f2xm1`/`fscale`/`fsin`/`fcos`/`fptan`) et
+chargements de constantes (`fldpi`/`fldl2e`/`fldln2`…) — modéliser ces dernières est
+sûr mais à précision 80-bit, valeur faible (code mort).
