@@ -544,6 +544,31 @@ fn resolve_abs_jump_table(prog: &Program, global: &BTreeMap<u64, Insn>, jmp: &In
             let bound = jump_index_bound(global, jmp, r.memory_index().full_register());
             return read_jump_table(prog, table, ptr as u64, bound);
         }
+        // The -O0 computed-address idiom: the table address is built in steps
+        // (`shl idx,2; add idx,table; mov tgt,[idx]; jmp tgt`) instead of one
+        // base+index load. The reaching def is `mov tgt, [base]` (a plain deref);
+        // trace `base` back to the `add base, table` that set the table address.
+        if r.mnemonic() == Mnemonic::Mov
+            && r.op1_kind() == OpKind::Memory
+            && r.memory_index() == Register::None
+            && r.memory_base() != Register::None
+            && r.memory_displacement64() == 0
+        {
+            let base = r.memory_base().full_register();
+            for (_, ins2) in global.range(..ins.address).rev().take(6) {
+                let a = &ins2.raw;
+                if a.op0_kind() != OpKind::Register || a.op0_register().full_register() != base {
+                    continue;
+                }
+                if a.mnemonic() == Mnemonic::Add
+                    && matches!(a.op1_kind(), OpKind::Immediate8 | OpKind::Immediate8to32
+                        | OpKind::Immediate16 | OpKind::Immediate32)
+                {
+                    return read_jump_table(prog, a.immediate(1), ptr as u64, None);
+                }
+                break; // base last set by something other than `add base, table`
+            }
+        }
         return None; // tgt last written by something other than a table load
     }
     None

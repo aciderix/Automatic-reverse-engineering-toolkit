@@ -773,3 +773,14 @@ flottante), à faire en session dédiée, une fonction à la fois, difftest à c
   +`signed_compare_of_memory_operand` (fixture `recursion.c/.exe`).
 - *Reste à -O0* : un switch via `jmp [table]` non résolu (saut indirect vers 0x401672, milieu
   de fonction) → abort sûr. À diagnostiquer (idiome de table de saut -O0 différent).
+
+### Table de saut -O0 « adresse calculée » résolue ✅ FAIT
+- **2026-06-22 — Le `switch` à -O0 abortait** (saut indirect non résolu). À -O0 GCC ne fait
+  pas un `mov tgt, [table+idx*4]` unique mais calcule l'adresse en étapes :
+  `mov idx,[mem]; shl idx,2; add idx,table; mov tgt,[idx]; jmp tgt`. `resolve_abs_jump_table`
+  n'attrapait que la forme base+index. Étendu : si la def atteignante est `mov tgt,[base]`
+  (déréférencement simple), remonter à `add base, table` pour la base de table. La table se
+  termine naturellement au 1er mot non-code (ici une chaîne `"fib=%d"`).
+- **Vérifié** : `varied.exe` -O0..-O3 = sortie native identique (`fib=6765 pop=24
+  mix=327750336 vowels=8 ops=13921 poly=37.8750`). **difftest 268/268**, suite verte.
+  Test +`computed_goto_switch_at_o0` (fixture `varied_o0.c/.exe`).

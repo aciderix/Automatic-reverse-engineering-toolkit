@@ -818,3 +818,21 @@ fn signed_compare_of_memory_operand() {
         "signed compare of a memory operand is wrong:\n{out}"
     );
 }
+
+#[test]
+fn computed_goto_switch_at_o0() {
+    if !has_m32() {
+        eprintln!("skipping -O0 switch test: `cc -m32` unavailable");
+        return;
+    }
+    // A varied -O0 program. Its `switch` compiles to the computed-address idiom
+    // `shl idx,2; add idx,table; mov tgt,[idx]; jmp tgt` (not a single base+index
+    // load), which the jump-table resolver must trace through the `add idx,table`
+    // to find the table — else `jmp tgt` is an unresolved indirect jump and the
+    // dispatch aborts. Also exercises -O0 memory-operand signed compares (fib),
+    // 64-bit mixing, and float, all of which must match the native run.
+    let out = transpile_and_run("varied_o0.exe");
+    for expect in ["fib=6765 pop=24", "mix=327750336 vowels=8", "ops=13921", "poly=37.8750"] {
+        assert!(out.contains(expect), "missing `{expect}` in -O0 varied output:\n{out}");
+    }
+}
