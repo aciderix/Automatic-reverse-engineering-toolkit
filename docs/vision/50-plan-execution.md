@@ -731,3 +731,27 @@ flottante), à faire en session dédiée, une fonction à la fois, difftest à c
   `long long`** (vérifié par `wcall`/`wide`, qui utilisent réellement des entiers 64-bit).
   Leçon : toujours vérifier la *config du binaire cible* (`packsize`) avant de présumer
   un bug de transpilation.
+
+### Borne de table de saut → frontières de fonctions correctes ✅ FAIT — Lua 18 → 17 partial
+- **2026-06-22 — `intarith` (sub_413d54) absorbait `numarith` (sub_413e0e).** En instrumentant
+  son bail x87 (`fstp` à profondeur -1 @0x413e7b) j'ai trouvé que **0x413e7b appartient à
+  `numarith`**, une fonction *distincte* (0x413e0e). `intarith` a un switch entier de **14
+  cas** (`cmp edx,0xd; ja; jmp [edx*4+0x4356c0]`) mais en récupérait **27** : `read_jump_table`
+  lisait jusqu'au 1er mot non-exécutable, donc la table entière (14) débordait dans la table
+  flottante adjacente (13 entrées, toutes exécutables) → 14+13=27, fusionnant les deux
+  fonctions et faisant bailler la passe x87 (un chemin entier-profondeur-0 atteint du code
+  flottant-profondeur-2).
+- **Fix** : `resolve_jump_table`/`resolve_abs_jump_table` lisent la borne `cmp idx, N; ja
+  default` (via `jump_index_bound`, nouvelle) qui précède le saut → table plafonnée à N+1
+  entrées. Sans elle, deux switches adjacents se fusionnent.
+- **Vérifié** : `intarith` a maintenant 14 cas (était 27) et est **entièrement lifté**
+  (partial 18→17). Fixture `two_switch.exe` (2 switches denses 12+11, tables adjacentes en
+  .rdata) : opA récupère **12 cas** (était 23 sans borne), résultat `t=3293` correct.
+  **difftest 268/268**, suite verte. Test +`adjacent_jump_tables_are_bounded`.
+  *Note* : le débordement corrompt la *récupération* (CFG/structure), pas la sortie runtime
+  des indices in-range (le `ja` borne le dispatch à l'exécution) — d'où l'assertion sur le
+  nombre de cas récupérés plutôt que sur la sortie.
+- **Reste 17 partial** : 17 internes libm morts (fxam/transcendantes/load-constantes, jamais
+  appelés). Plus aucune fonction *atteignable* n'est partial → la prochaine étape pour SOUND
+  est le **pruning par accessibilité (Phase 2)** : prouver ces 17 inatteignables depuis main
+  et les exclure du verdict (ou ne pas les émettre).

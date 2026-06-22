@@ -76,6 +76,41 @@ fn transpile_and_run(fixture_name: &str) -> String {
     transpile_and_run_env(fixture_name, &[])
 }
 
+/// Transpile `fixture` into a fresh out-dir and return the concatenated generated
+/// C (the `chunk_*.c` files) so a test can inspect the recovered structure.
+fn transpile_to_c(fixture_name: &str) -> String {
+    let fixture = format!(
+        "{}/tests/m1/fixtures/{}",
+        env!("CARGO_MANIFEST_DIR"),
+        fixture_name
+    );
+    let out_dir = std::env::temp_dir().join(format!(
+        "aretc_{}_{}",
+        fixture_name.replace('.', "_"),
+        std::process::id()
+    ));
+    let aret = env!("CARGO_BIN_EXE_aret");
+    let output = Command::new(aret)
+        .args(["--mode", "transpile"])
+        .arg("--out-dir")
+        .arg(&out_dir)
+        .arg(&fixture)
+        .output()
+        .expect("failed to run aret");
+    assert!(output.status.success(), "aret transpile failed");
+    let mut c = String::new();
+    if let Ok(entries) = std::fs::read_dir(&out_dir) {
+        for e in entries.flatten() {
+            let p = e.path();
+            if p.file_name().and_then(|n| n.to_str()).is_some_and(|n| n.starts_with("chunk_")) {
+                c.push_str(&std::fs::read_to_string(&p).unwrap_or_default());
+            }
+        }
+    }
+    let _ = std::fs::remove_dir_all(&out_dir);
+    c
+}
+
 #[test]
 fn m1_direct_imports_stack_args() {
     if !has_m32() {
@@ -733,4 +768,33 @@ fn wide_64bit_return_and_shift_on_32bit() {
         out.contains("r=4294967296 m=12884901888"),
         "64-bit return / shift on 32-bit not exact:\n{out}"
     );
+}
+
+#[test]
+fn adjacent_jump_tables_are_bounded() {
+    if !has_m32() {
+        eprintln!("skipping jump-table-bound test: `cc -m32` unavailable");
+        return;
+    }
+    // Two dense switches (12 and 11 cases) whose jump tables gcc lays out back to
+    // back in .rdata. Reading a table until the first non-code word over-reads the
+    // first table straight into the second (all targets executable), merging the
+    // two functions and corrupting both CFGs (this is what made Lua's intarith
+    // absorb numarith and fall to asm). The `cmp idx, N; ja` bound must cap each
+    // table, so no recovered function has more cases than its switch really has.
+    let c = transpile_to_c("two_switch.exe");
+    // opA (sub_40150e) has a 12-case switch bounded by `cmp eax,0xb; ja`. Before
+    // the bound was honoured its table over-read into opB's, recovering 23 cases.
+    let op_a = c
+        .split("uint64_t sub_")
+        .find(|f| f.starts_with("40150e("))
+        .expect("opA (sub_40150e) not found in recovered output");
+    let cases = op_a.matches("case ").count();
+    assert!(
+        cases <= 12,
+        "opA's jump table over-read into opB's: {cases} cases recovered (real switch has 12)"
+    );
+    // And it still produces the right answer.
+    let out = transpile_and_run("two_switch.exe");
+    assert!(out.contains("t=3293"), "two-switch result wrong:\n{out}");
 }

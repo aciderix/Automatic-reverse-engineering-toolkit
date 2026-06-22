@@ -398,7 +398,7 @@ fn global_decode(
             .iter()
             .filter(|(addr, insn)| insn.flow == Flow::Indirect && !jump_tables.contains_key(addr))
             .filter_map(|(addr, insn)| {
-                resolve_jump_table(prog, insn)
+                resolve_jump_table(prog, &global, insn)
                     .or_else(|| resolve_pie_jump_table(prog, &global, insn))
                     .or_else(|| resolve_abs_jump_table(prog, &global, insn))
                     .map(|t| (*addr, t))
@@ -427,7 +427,7 @@ fn global_decode(
 /// Recognise a jump-table dispatch `jmp [table + idx*ptr]` and read its target
 /// list from the binary. Conservative: pointer-sized entries, an absolute (or
 /// rip-relative) table base, entries kept while they point into executable code.
-fn resolve_jump_table(prog: &Program, insn: &Insn) -> Option<Vec<u64>> {
+fn resolve_jump_table(prog: &Program, global: &BTreeMap<u64, Insn>, insn: &Insn) -> Option<Vec<u64>> {
     use iced_x86::{OpKind, Register};
     let ins = &insn.raw;
     if ins.op_kind(0) != OpKind::Memory || ins.memory_index() == Register::None {
@@ -447,7 +447,32 @@ fn resolve_jump_table(prog: &Program, insn: &Insn) -> Option<Vec<u64>> {
         return None;
     };
 
-    read_jump_table(prog, table, ptr as u64)
+    // Cap the table at the `cmp idx, N; ja default` range check that guards the
+    // jump (valid indices 0..=N ⇒ N+1 entries). Without it, a table immediately
+    // followed by another (a second switch, sharing executable case targets)
+    // over-reads into it — merging two functions and corrupting both CFGs.
+    let bound = jump_index_bound(global, insn, ins.memory_index().full_register());
+    read_jump_table(prog, table, ptr as u64, bound)
+}
+
+/// The `cmp idx, N; ja/jae default` bound on a switch index, scanned just before
+/// the indirect jump: returns `N+1` (the entry count) if found. Matches the index
+/// register family (`cmp edx,N` guards `jmp [edx*4+t]`); a `ja` (unsigned above)
+/// means indices `> N` are out of range, so the table has `N+1` slots.
+fn jump_index_bound(global: &BTreeMap<u64, Insn>, jmp: &Insn, idx: iced_x86::Register) -> Option<u64> {
+    use iced_x86::{Mnemonic, OpKind};
+    for (_, ins) in global.range(..jmp.address).rev().take(8) {
+        let r = &ins.raw;
+        if r.mnemonic() == Mnemonic::Cmp
+            && r.op0_kind() == OpKind::Register
+            && r.op0_register().full_register() == idx
+            && matches!(r.op1_kind(), OpKind::Immediate8 | OpKind::Immediate8to16
+                | OpKind::Immediate8to32 | OpKind::Immediate16 | OpKind::Immediate32)
+        {
+            return Some(r.immediate(1).wrapping_add(1));
+        }
+    }
+    None
 }
 
 /// Read a pointer-sized table of absolute code addresses at `table`, in index
@@ -456,10 +481,11 @@ fn resolve_jump_table(prog: &Program, insn: &Insn) -> Option<Vec<u64>> {
 /// labels share a body — would shift every later case onto the wrong block).
 /// Stops at the first non-code word (table end); needs >= 2 distinct targets to
 /// count as a real dispatch table.
-fn read_jump_table(prog: &Program, table: u64, ptr: u64) -> Option<Vec<u64>> {
+fn read_jump_table(prog: &Program, table: u64, ptr: u64, bound: Option<u64>) -> Option<Vec<u64>> {
     let mut targets = Vec::new();
     let mut distinct = BTreeSet::new();
-    for i in 0..1024u64 {
+    let limit = bound.unwrap_or(1024).min(1024);
+    for i in 0..limit {
         let ea = table + i * ptr;
         let entry = match if ptr == 8 { prog.read_u64(ea) } else { prog.read_u32(ea).map(|v| v as u64) } {
             Some(e) => e,
@@ -515,7 +541,8 @@ fn resolve_abs_jump_table(prog: &Program, global: &BTreeMap<u64, Insn>, jmp: &In
             } else {
                 return None; // based + indexed: not a static table
             };
-            return read_jump_table(prog, table, ptr as u64);
+            let bound = jump_index_bound(global, jmp, r.memory_index().full_register());
+            return read_jump_table(prog, table, ptr as u64, bound);
         }
         return None; // tgt last written by something other than a table load
     }
@@ -653,7 +680,7 @@ fn drain(
             let flow = insn.flow;
             let target = insn.target;
             let jt = if flow == Flow::Indirect {
-                resolve_jump_table(prog, &insn)
+                resolve_jump_table(prog, global, &insn)
                     .or_else(|| resolve_pie_jump_table(prog, global, &insn))
                     .or_else(|| resolve_abs_jump_table(prog, global, &insn))
             } else {
