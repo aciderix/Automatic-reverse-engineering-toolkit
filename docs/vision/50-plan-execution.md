@@ -637,3 +637,23 @@ Voie 1**, à faire prudemment (correctness x87 critique, difftest à chaque pas)
 `x87_delta`), transcendantes (`fyl2x`/`f2xm1`/`fscale`/`fsin`/`fcos`/`fptan`) et
 chargements de constantes (`fldpi`/`fldl2e`/`fldln2`…) — modéliser ces dernières est
 sûr mais à précision 80-bit, valeur faible (code mort).
+
+### Diagnostic précis des 3 partial vivantes (corrige l'hypothèse « joins ») 🔬
+Instrumentation des points de bail x87 sur `forprep`/`intarith`/`lua_number2strx` :
+**ce ne sont PAS des joins ambigus** (aucun conflit de profondeur au join détecté).
+Causes réelles :
+- **`forprep` (0x42151a)** et **`intarith` (0x413d54)** : **sous-débordement** (`fstp`
+  à profondeur 0 → -1). Un bloc est entré à la **mauvaise profondeur** : dans l'idiome
+  de comparaison NaN `fldz; fld x; fucomi st,st(1); fstp st(1)`, le `fstp st(1)`
+  **conserve** une valeur (copie st0→st1 puis pop ⇒ st0=x garde l'opérande), mais la
+  propagation avant assigne `entry_sp=0` à un bloc en aval (0x42159e) qui a en fait
+  une valeur vivante (devrait être 1) → `fstp` suivant sous-déborde → bail → toutes
+  les ops x87 de la fonction en asm. Le delta de `fstp st(1)` (-1) est correct ; c'est
+  la **profondeur d'entrée d'un bloc** qui est fausse (à creuser : ordre de
+  propagation / prédécesseur mal compté dans la chaîne `0x421570→0x421578→0x42176e`).
+- **`lua_number2strx` (0x41b7a8)** : `fist` **sans mode troncature prouvé**
+  (`truncate_active` ne reconnaît pas le `fldcw` de cette fonction) → bail sûr.
+*Conclusion* : le vrai travail restant est une **passe de profondeur x87 plus robuste**
+(suivi correct des valeurs conservées par `fstp st(i)`/`fxch` dans les idiomes de
+comparaison à branche NaN), pas une réconciliation de joins. Délicat (correctness
+flottante), à faire en session dédiée, une fonction à la fois, difftest à chaque pas.
