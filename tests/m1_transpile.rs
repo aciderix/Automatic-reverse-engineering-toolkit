@@ -714,3 +714,23 @@ fn x87_fist_truncate_with_hoisted_control_word() {
     let out = transpile_and_run("truncloop.exe");
     assert!(out.contains("sum=40"), "hoisted-CW truncating fist not modelled:\n{out}");
 }
+
+#[test]
+fn wide_64bit_return_and_shift_on_32bit() {
+    if !has_m32() {
+        eprintln!("skipping wide-64 test: `cc -m32` unavailable (install gcc-multilib)");
+        return;
+    }
+    // Two 32-bit-ABI bugs, both silent wrong results:
+    //  * a `long long` is returned in the edx:eax pair; modelling the return as
+    //    eax alone dropped the high half (and dead-code-eliminated the shld/cdq
+    //    that built it). `shift(1, 32)` then returned 0 instead of 4294967296.
+    //  * `shl eax, cl` masks the count to 5 bits (x86), so `shl eax, 32` is a
+    //    no-op; lifting it as a full `1 << 32` corrupted 64-bit shifts.
+    // The matching caller-side edx:eax split and the count mask make both exact.
+    let out = transpile_and_run("wide_shift.exe");
+    assert!(
+        out.contains("r=4294967296 m=12884901888"),
+        "64-bit return / shift on 32-bit not exact:\n{out}"
+    );
+}

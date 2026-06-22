@@ -136,7 +136,26 @@ pub fn build_ir(prog: &Program, func: &Function) -> IrFunction {
                         stmts.push(crate::ir::lift::x87_ret_store(Expr::Read(slot)));
                     }
                 }
-                stmts.push(Stmt::Return(Some(Expr::Read(Location::Reg(RegId(0))))));
+                // A 64-bit value is returned in the edx:eax pair on 32-bit cdecl
+                // (e.g. a `long long` built by `shld`/`cdq`). Returning eax alone
+                // silently drops the high half (dead-code elimination then deletes
+                // the edx computation). Combine `(edx << 32) | (eax & 0xffffffff)`;
+                // the matching caller-side split is in `lift`'s `call`. A 32-bit
+                // function leaves edx as scratch, but its callers read only eax, so
+                // including it is ABI-safe. (64-bit targets already hold the full
+                // result in rax.)
+                let eax = Expr::Read(Location::Reg(RegId(0)));
+                let ret_val = if bits == 32 {
+                    let edx = Expr::Read(Location::Reg(RegId(2)));
+                    Expr::Binary(
+                        BinOp::Or,
+                        Box::new(Expr::Binary(BinOp::Shl, Box::new(edx), Box::new(Expr::konst(32, 64)))),
+                        Box::new(Expr::Binary(BinOp::And, Box::new(eax), Box::new(Expr::konst(0xffff_ffff, 64)))),
+                    )
+                } else {
+                    eax
+                };
+                stmts.push(Stmt::Return(Some(ret_val)));
             }
             Flow::Indirect => {
                 let last = blk.insns.last().unwrap();

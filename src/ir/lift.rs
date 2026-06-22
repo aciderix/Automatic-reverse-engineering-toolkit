@@ -1573,8 +1573,13 @@ pub fn lift(insn: &Insn, bits: u32) -> Vec<Stmt> {
             let w = op0_width(ins, bits);
             let a = some_or_asm!(op_value(ins, 0));
             let b = some_or_asm!(op_value(ins, 1));
-            let r = bin(BinOp::Shl, a.clone(), b.clone());
-            let c = bin(BinOp::And, b, konst((w - 1) as i128));
+            // x86 masks the shift count to 5 bits (6 with a 64-bit operand): `shl
+            // eax, 32` shifts by 0, not 32. Shifting by the raw count instead lets a
+            // 64-bit-on-32-bit shift produce e.g. `1 << 32` and silently corrupt the
+            // result. The result must use this masked count, not the raw operand.
+            let cmask = if w == 64 { 63 } else { 31 };
+            let c = bin(BinOp::And, b, konst(cmask));
+            let r = bin(BinOp::Shl, a.clone(), c.clone());
             let cf = Expr::Select {
                 cond: Box::new(bin(BinOp::Eq, c.clone(), konst(0))),
                 then_: Box::new(read_flag(FlagKind::Cf)),
@@ -1596,9 +1601,11 @@ pub fn lift(insn: &Insn, bits: u32) -> Vec<Stmt> {
             } else {
                 BinOp::Sar
             };
-            let r = bin(op, a.clone(), b.clone());
+            // Count masked to 5 bits (6 with a 64-bit operand), as x86 requires.
+            let cmask = if w == 64 { 63 } else { 31 };
+            let c = bin(BinOp::And, b, konst(cmask));
+            let r = bin(op, a.clone(), c.clone());
             // CF = bit (c-1) of the source (the last bit shifted out the bottom).
-            let c = bin(BinOp::And, b, konst((w - 1) as i128));
             let cf = Expr::Select {
                 cond: Box::new(bin(BinOp::Eq, c.clone(), konst(0))),
                 then_: Box::new(read_flag(FlagKind::Cf)),
@@ -1804,6 +1811,26 @@ pub fn lift(insn: &Insn, bits: u32) -> Vec<Stmt> {
             // undefined afterwards. Modelling this lets later reads of the
             // result use the call, and prevents stale reads of clobbered regs.
             let mut out = vec![Stmt::Set { dst: Location::Reg(RegId(0)), expr: call }];
+            // 32-bit cdecl returns a 64-bit value in the edx:eax pair: split the
+            // result so a caller that needs the high half (a `long long` result)
+            // reads it from edx, while eax holds the low half. The callee combines
+            // them in `ir::build`'s `Return`. (A 32-bit-returning callee leaves a
+            // scratch high half here, but such a caller reads only eax.)
+            if bits == 32 {
+                let ret = Expr::Read(Location::Reg(RegId(0)));
+                // edx FIRST (reads the full call result), then mask eax — otherwise
+                // edx would read the already-truncated eax and be a constant 0.
+                out.push(Stmt::Set {
+                    dst: Location::Reg(RegId(2)),
+                    expr: Expr::Binary(BinOp::Shr, Box::new(ret.clone()), Box::new(Expr::konst(32, 64))),
+                });
+                out.push(Stmt::Set {
+                    dst: Location::Reg(RegId(0)),
+                    expr: Expr::Binary(BinOp::And, Box::new(ret), Box::new(Expr::konst(0xffff_ffff, 64))),
+                });
+                out.push(Stmt::Set { dst: Location::Reg(RegId(1)), expr: Expr::Undef }); // ecx scratch
+                return out;
+            }
             let clobbers: &[u16] = if bits == 64 {
                 &[1, 2, 6, 7, 8, 9, 10, 11] // rcx,rdx,rsi,rdi,r8-r11 (SysV caller-saved)
             } else {

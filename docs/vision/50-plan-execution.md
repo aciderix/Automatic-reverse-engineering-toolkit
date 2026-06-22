@@ -703,3 +703,27 @@ flottante), à faire en session dédiée, une fonction à la fois, difftest à c
 - **Reste 18 partial** : 17 internes libm morts (fxam/transcendantes/load-constantes,
   jamais appelés) + `intarith` (0x413d54, sous-débordement x87 réel dans l'idiome de
   comparaison NaN — la prochaine cible Voie 1).
+
+### 64-bit sur cible 32-bit : paire edx:eax + masque de comptage de décalage ✅ FAIT
+- **2026-06-22 — Deux résultats faux silencieux (principe sacré) découverts en sondant
+  Lua (`1<<62=0`).** (1) **Retour 64-bit perdu** : un `long long` se retourne dans la
+  **paire edx:eax** en cdecl 32-bit ; modéliser le retour comme `eax` seul jette la
+  moitié haute (et le DCE supprime alors le `shld`/`cdq` qui la construit). `shift(1,32)`
+  rendait `0` au lieu de `4294967296`. (2) **Comptage de décalage non masqué** : x86
+  masque le comptage à 5 bits (6 si opérande 64-bit) — `shl eax,32` est un no-op — mais
+  le lifter décalait par le comptage brut, produisant `1<<32` en arithmétique 64-bit.
+- **Fix** : `ir::build` `Return` combine `(edx<<32)|(eax&0xffffffff)` en 32-bit ; `lift`
+  `call` **scinde** le résultat 64-bit en edx:eax (edx D'ABORD, puis masquer eax — sinon
+  edx lirait le eax déjà tronqué = 0) ; `Shl`/`Shr`/`Sar` décalent par le comptage masqué.
+- **Vérifié** : `wcall.exe` → `r=4294967296 m=12884901888` (retour 64-bit + décalage var
+  via appel interne). **difftest 268/268**, suite verte. Test +`wide_64bit_return_and_shift_on_32bit`
+  (fixture `wide_shift.c/.exe`).
+- ⚠️ **GAP PRÉ-EXISTANT IDENTIFIÉ (pas une régression — présent avant cette session)** :
+  Lua tronque encore ses entiers 64-bit à 32 bits de façon **généralisée**
+  (`math.maxinteger=2147483647`, `1<<32=0`, `0xFFFFFFFF*0xFFFFFFFF=1`, littéral
+  `0x100000000=0`). Les cas isolés (wcall/wide) sont corrects → le bug réside à une
+  **frontière récurrente de la VM Lua** non couverte (probable : copie de TValue 8 octets
+  / chargement de constante / spill où la moitié haute est perdue). Sondage : la
+  multiplication 64-bit de la VM perd la moitié haute alors que `bigmul` isolé est exact.
+  **Prochaine investigation majeure** (à isoler une frontière à la fois, difftest 64-bit
+  à étendre car il ne compare que les 32 bits bas — angle mort qui a masqué ces bugs).
