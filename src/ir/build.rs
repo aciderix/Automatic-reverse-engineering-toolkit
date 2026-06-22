@@ -66,7 +66,7 @@ pub fn build_ir(prog: &Program, func: &Function) -> IrFunction {
         };
         for insn in &blk.insns[..body_len] {
             let mut s = match x87.as_ref().and_then(|m| m.get(&insn.address)) {
-                Some(&(sp_in, trunc)) => crate::ir::lift::lift_x87(insn, sp_in, trunc),
+                Some(&(sp_in, mode)) => crate::ir::lift::lift_x87(insn, sp_in, mode),
                 None => lift(insn, bits),
             };
             fold_ro_loads(&mut s, insn, prog);
@@ -371,7 +371,7 @@ struct X87Bail;
 /// per-fp-call `address -> depth the result lands at`, and the terminal depth at
 /// each reached `ret`.
 struct X87Info {
-    ops: HashMap<u64, (u32, bool)>,
+    ops: HashMap<u64, (u32, crate::ir::lift::RoundMode)>,
     fp_calls: HashMap<u64, u32>,
     ret_depths: Vec<i32>,
 }
@@ -380,7 +380,7 @@ struct X87Info {
 /// `FP_RETURNING` set models fp-returning calls as a push). Returns the per-op
 /// depth map and the fp-call sites, or `None` to disable x87 modelling for the
 /// whole function.
-fn x87_states(prog: &Program, func: &Function) -> Option<(HashMap<u64, (u32, bool)>, HashMap<u64, u32>)> {
+fn x87_states(prog: &Program, func: &Function) -> Option<(HashMap<u64, (u32, crate::ir::lift::RoundMode)>, HashMap<u64, u32>)> {
     FP_RETURNING.with(|c| {
         x87_depth_pass(prog, func, &c.borrow())
             .ok()
@@ -470,7 +470,7 @@ fn x87_depth_pass(
     let entry_i = *bidx.get(&func.entry).unwrap_or(&0);
     entry_sp[entry_i] = 0;
     let mut work = vec![entry_i];
-    let mut out: HashMap<u64, (u32, bool)> = HashMap::new();
+    let mut out: HashMap<u64, (u32, crate::ir::lift::RoundMode)> = HashMap::new();
     let mut fp_calls: HashMap<u64, u32> = HashMap::new();
     let mut ret_depths: Vec<i32> = Vec::new();
 
@@ -500,24 +500,19 @@ fn x87_depth_pass(
             }
             // unmodelled FPU op → bail whole function
             let delta = x87_delta(ins).ok_or(X87Bail)?;
-            // float→int store (`fist`/`fistp`, but not the always-truncating
-            // `fisttp`) is only sound when the rounding mode is truncation.
+            // The rounding mode the surrounding control-word setup proves is
+            // active (floor/ceil/truncate/nearest). `frndint` honours all four;
+            // `fist`/`fistp` (but not the always-truncating `fisttp`) are only
+            // sound under truncation.
+            let mode = rounding_mode_active(&blk.insns, k);
             let is_fist = matches!(ins.mnemonic(), Mnemonic::Fist | Mnemonic::Fistp);
-            if is_fist && !truncate_active(&blk.insns, k) {
+            if is_fist && mode != crate::ir::lift::RoundMode::Trunc {
                 return Err(X87Bail);
             }
-            // `frndint` honours the rounding mode: truncate when the truncating
-            // control word is active, else round-to-nearest. It never bails — both
-            // modes are modelled — and the stored flag selects the helper.
-            let needs_trunc = if matches!(ins.mnemonic(), Mnemonic::Frndint) {
-                truncate_active(&blk.insns, k)
-            } else {
-                is_fist
-            };
             if !(0..=8).contains(&sp) {
                 return Err(X87Bail);
             }
-            out.insert(insn.address, (sp as u32, needs_trunc));
+            out.insert(insn.address, (sp as u32, mode));
             sp += delta;
             if !(0..=8).contains(&sp) {
                 return Err(X87Bail);
@@ -554,37 +549,67 @@ fn x87_depth_pass(
     Ok(X87Info { ops: out, fp_calls, ret_depths })
 }
 
-/// Is the x87 rounding mode proven to be truncation at instruction `idx` of
-/// `insns`? Recognises the canonical `(int)x` idiom: an `or` that sets the
-/// control word's RC=11 (truncate) bits, followed by `fldcw`, before this store.
-fn truncate_active(insns: &[crate::disasm::Insn], idx: usize) -> bool {
+/// The x87 rounding mode proven active at instruction `idx`, from the control
+/// word the surrounding code installs before an `fldcw`: the `(int)x` / `floor`
+/// / `ceil` idiom does `fnstcw; or RC-bits; fldcw; frndint|fist`. The RC bits
+/// (10–11 of the control word, i.e. 0xc00, or 0x0c in the high byte) select the
+/// mode: 00 nearest, 01 down(floor), 10 up(ceil), 11 truncate. Defaults to
+/// `Nearest` when no such setup precedes (the hardware default).
+fn rounding_mode_active(insns: &[crate::disasm::Insn], idx: usize) -> crate::ir::lift::RoundMode {
+    use crate::ir::lift::RoundMode;
     use iced_x86::{Mnemonic, OpKind};
-    let lo = idx.saturating_sub(24);
-    let mut saw_fldcw = false;
-    for j in (lo..idx).rev() {
-        let ins = &insns[j].raw;
-        match ins.mnemonic() {
-            Mnemonic::Fldcw => saw_fldcw = true,
-            Mnemonic::Or if saw_fldcw => {
-                // Immediate operand setting RC=truncate (control-word bits 0xc00).
-                if matches!(ins.op_kind(1), OpKind::Immediate8 | OpKind::Immediate8to16
-                    | OpKind::Immediate8to32 | OpKind::Immediate16 | OpKind::Immediate32)
-                {
-                    let imm = ins.immediate(1);
-                    let hi_byte = matches!(
-                        ins.op_register(0),
-                        iced_x86::Register::AH | iced_x86::Register::BH
-                            | iced_x86::Register::CH | iced_x86::Register::DH
-                    );
-                    if (imm & 0xc00) == 0xc00 || (hi_byte && (imm & 0x0c) == 0x0c) {
-                        return true;
-                    }
-                }
-            }
-            _ => {}
+    // RC field of an `or imm, (ah|cw)` that installs a rounding mode.
+    let rc_of = |ins: &iced_x86::Instruction| -> Option<RoundMode> {
+        if ins.mnemonic() != Mnemonic::Or
+            || !matches!(ins.op_kind(1), OpKind::Immediate8 | OpKind::Immediate8to16
+                | OpKind::Immediate8to32 | OpKind::Immediate16 | OpKind::Immediate32)
+        {
+            return None;
+        }
+        let imm = ins.immediate(1);
+        let hi_byte = matches!(
+            ins.op_register(0),
+            iced_x86::Register::AH | iced_x86::Register::BH
+                | iced_x86::Register::CH | iced_x86::Register::DH
+        );
+        let rc = if hi_byte { (imm >> 2) & 0x3 } else { (imm >> 10) & 0x3 };
+        Some(match rc {
+            0b01 => RoundMode::Down,
+            0b10 => RoundMode::Up,
+            0b11 => RoundMode::Trunc,
+            _ => RoundMode::Nearest,
+        })
+    };
+    let mem_slot = |ins: &iced_x86::Instruction| (ins.memory_base(), ins.memory_displacement64());
+    // 1. The nearest preceding `fldcw [X]` — the control word this op uses.
+    let mut fldcw_at = None;
+    for j in (0..idx).rev() {
+        if insns[j].raw.mnemonic() == Mnemonic::Fldcw {
+            fldcw_at = Some(j);
+            break;
         }
     }
-    false
+    let Some(fj) = fldcw_at else { return RoundMode::Nearest };
+    let slot = mem_slot(&insns[fj].raw);
+    // 2. The store `mov [X], reg` that built that control word (may be far back if
+    //    the slot is reused), then the `or` a few instructions before it. Matching
+    //    the *slot* is essential: a function that does both floor (`or 0x4`→slotA)
+    //    and ceil (`or 0x8`→slotB) must not cross the two up.
+    for j in (0..fj).rev() {
+        let m = &insns[j].raw;
+        if m.mnemonic() == Mnemonic::Mov
+            && m.op0_kind() == OpKind::Memory
+            && mem_slot(m) == slot
+        {
+            for k in (j.saturating_sub(6)..j).rev() {
+                if let Some(mode) = rc_of(&insns[k].raw) {
+                    return mode;
+                }
+            }
+            return RoundMode::Nearest;
+        }
+    }
+    RoundMode::Nearest
 }
 
 /// Fold a rip-relative load of read-only data into a literal. Without this,

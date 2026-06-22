@@ -676,3 +676,23 @@ fn x87_fabs_is_modelled() {
     let out = transpile_and_run("fabsfix.exe");
     assert!(out.contains("ABS=3.50"), "x87 fabs not modelled:\n{out}");
 }
+
+#[test]
+fn x87_frndint_honours_rounding_mode() {
+    if !has_m32() {
+        eprintln!("skipping rounding test: `cc -m32` unavailable (install gcc-multilib)");
+        return;
+    }
+    // `frndint` rounds st(0) per the x87 control-word RC field (bits 10-11):
+    // floor sets RC=01 (down), ceil sets RC=10 (up). The lifter previously only
+    // distinguished truncate (RC=11) from round-to-nearest, so floor/ceil both
+    // collapsed to nearest: floor(2.75) wrongly gave 3.0, floor(5.5/2)=2.0
+    // happened to be right by luck but floor(-2.5) gave -3.0 (nearest-even) only
+    // by coincidence. `rounding_mode_active` now links each `fldcw [X]` back to
+    // the `or`-immediate that built control word [X], so every mode is honoured.
+    let out = transpile_and_run("rounding.exe");
+    assert!(
+        out.contains("floor=2.0 ceil=3.0 fdiv=2.0 nfloor=-3.0"),
+        "x87 frndint rounding mode not honoured:\n{out}"
+    );
+}

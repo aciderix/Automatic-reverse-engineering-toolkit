@@ -1997,15 +1997,26 @@ fn x87_arith(op: &str, rev: bool, dst: Expr, src: Expr) -> Expr {
     x87call(&format!("__x87_{}", op), vec![a, b])
 }
 
-/// Lift one x87 FPU instruction given the statically-tracked stack depth
-/// `sp_in` (number of live values *before* it) and whether the current rounding
-/// mode is truncation (`trunc`, required for `fistp`/`fist`). Falls back to a
-/// sound `Asm` for anything outside the proven-bit-exact subset.
-pub(crate) fn lift_x87(insn: &Insn, sp_in: u32, trunc: bool) -> Vec<Stmt> {
-    x87_try(insn, sp_in as i32, trunc).unwrap_or_else(|| asm_fallback(insn))
+/// The x87 rounding mode the depth analysis proved is active at an instruction,
+/// from the control-word (RC bits) the surrounding code installed. `frndint`
+/// honours all four; `fist`/`fistp` require `Trunc` (else the store bails).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum RoundMode {
+    Nearest,
+    Down,  // -inf: floor
+    Up,    // +inf: ceil
+    Trunc, // toward zero
 }
 
-fn x87_try(insn: &Insn, sp: i32, trunc: bool) -> Option<Vec<Stmt>> {
+/// Lift one x87 FPU instruction given the statically-tracked stack depth
+/// `sp_in` (number of live values *before* it) and the proven rounding `mode`
+/// (for `frndint`/`fist`). Falls back to a sound `Asm` for anything outside the
+/// proven-bit-exact subset.
+pub(crate) fn lift_x87(insn: &Insn, sp_in: u32, mode: RoundMode) -> Vec<Stmt> {
+    x87_try(insn, sp_in as i32, mode).unwrap_or_else(|| asm_fallback(insn))
+}
+
+fn x87_try(insn: &Insn, sp: i32, mode: RoundMode) -> Option<Vec<Stmt>> {
     use Mnemonic::*;
     let ins = &insn.raw;
     let mn = ins.mnemonic();
@@ -2041,9 +2052,9 @@ fn x87_try(insn: &Insn, sp: i32, trunc: bool) -> Option<Vec<Stmt>> {
                         (Fst | Fstp, MemorySize::Float64) => "__x87_st64",
                         (Fst | Fstp, MemorySize::Float80) => "__x87_st80",
                         // Integer stores truncate; only emitted when proven so.
-                        (Fist | Fistp, MemorySize::Int16) if trunc => "__x87_ist16",
-                        (Fist | Fistp, MemorySize::Int32) if trunc => "__x87_ist32",
-                        (Fist | Fistp, MemorySize::Int64) if trunc => "__x87_ist64",
+                        (Fist | Fistp, MemorySize::Int16) if mode == RoundMode::Trunc => "__x87_ist16",
+                        (Fist | Fistp, MemorySize::Int32) if mode == RoundMode::Trunc => "__x87_ist32",
+                        (Fist | Fistp, MemorySize::Int64) if mode == RoundMode::Trunc => "__x87_ist64",
                         (Fisttp, MemorySize::Int16) => "__x87_ist16",
                         (Fisttp, MemorySize::Int32) => "__x87_ist32",
                         (Fisttp, MemorySize::Int64) => "__x87_ist64",
@@ -2099,11 +2110,16 @@ fn x87_try(insn: &Insn, sp: i32, trunc: bool) -> Option<Vec<Stmt>> {
         Fabs => vec![Stmt::Set { dst: fpr(st0)?, expr: x87call("__x87_abs", vec![Expr::Read(fpr(st0)?)]) }],
         Fchs => vec![Stmt::Set { dst: fpr(st0)?, expr: x87call("__x87_neg", vec![Expr::Read(fpr(st0)?)]) }],
         Fsqrt => vec![Stmt::Set { dst: fpr(st0)?, expr: x87call("__x87_sqrt", vec![Expr::Read(fpr(st0)?)]) }],
-        // Round st0 to an integer per the current rounding mode. We only model the
-        // two modes we can prove: truncation (the `(int)x` idiom set a truncating
-        // control word) or the default round-to-nearest-even.
+        // Round st0 to an integer per the proven rounding mode: floor (-inf),
+        // ceil (+inf), truncate (toward zero), or round-to-nearest-even. The
+        // surrounding control-word setup (`floor`/`ceil`/`(int)x`) selects it.
         Frndint => {
-            let h = if trunc { "__x87_trunc" } else { "__x87_rint" };
+            let h = match mode {
+                RoundMode::Down => "__x87_floor",
+                RoundMode::Up => "__x87_ceil",
+                RoundMode::Trunc => "__x87_trunc",
+                RoundMode::Nearest => "__x87_rint",
+            };
             vec![Stmt::Set { dst: fpr(st0)?, expr: x87call(h, vec![Expr::Read(fpr(st0)?)]) }]
         }
         // Partial remainder st0 = st0 - st1*trunc(st0/st1). The hardware reduces by

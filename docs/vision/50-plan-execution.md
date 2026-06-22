@@ -657,3 +657,25 @@ Causes réelles :
 (suivi correct des valeurs conservées par `fstp st(i)`/`fxch` dans les idiomes de
 comparaison à branche NaN), pas une réconciliation de joins. Délicat (correctness
 flottante), à faire en session dédiée, une fonction à la fois, difftest à chaque pas.
+
+### `frndint` honore les 4 modes d'arrondi (résultat faux silencieux corrigé) ✅ FAIT
+- **2026-06-22 — Bug de résultat faux silencieux (PAS une partial) : `5.5//2` rendait
+  `3.0` au lieu de `2.0`, `floor(2.75)` rendait `3.0`.** L'idiome `floor`/`ceil` de la
+  CRT règle le champ **RC** du control word x87 (bits 10-11 : `00` nearest, `01` down,
+  `10` up, `11` truncate) via `or $imm,%ah; mov [X],ax; fldcw [X]; frndint`. Le lifter
+  ne distinguait que **troncature vs nearest** (`truncate_active`), donc floor (RC=01)
+  et ceil (RC=10) tombaient tous deux sur round-to-nearest → arithmétique fausse mais
+  présentée comme correcte (**viole le principe sacré**). 
+- **Fix** : `enum RoundMode { Nearest, Down, Up, Trunc }` (lift.rs) ; helpers
+  `__x87_floor`/`__x87_ceil` (`__builtin_floorl`/`ceill`) en plus de `__x87_rint`/
+  `__x87_trunc` ; `lift_x87`/`x87_try` prennent un `RoundMode` ; bras `Frndint` honore
+  les 4 modes ; `Fist/Fistp` exige `RoundMode::Trunc`. La carte des ops devient
+  `(profondeur, RoundMode)`. `truncate_active` remplacé par **`rounding_mode_active`** :
+  trouve le `fldcw [X]` précédent le plus proche, **capture le slot mémoire X**, puis
+  remonte au `mov [X], reg` qui l'a construit et au `or`-immédiat ~6 instr. avant —
+  **liaison par slot CW** (essentiel : une fonction faisant floor `or 0x4`→slotA *et*
+  ceil `or 0x8`→slotB ne doit pas croiser les deux).
+- **Vérifié** : fixture `rounding.exe` → `floor=2.0 ceil=3.0 fdiv=2.0 nfloor=-3.0` ;
+  Lua `5.5//2=2.0`, `7.0//2.0=3.0`, `math.floor(2.75)=2`, `math.ceil(2.75)=3`,
+  `math.floor(-2.5)=-3`. Régression : **difftest 268/268**, suite complète verte.
+  Test ajouté : `x87_frndint_honours_rounding_mode` (+ fixture `rounding.c`/`.exe`).
