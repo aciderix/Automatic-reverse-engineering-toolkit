@@ -663,3 +663,16 @@ fn qsort_callback_into_transpiled_comparator() {
         "qsort callback not dispatched into the transpiled comparator:\n{out}"
     );
 }
+
+#[test]
+fn x87_fabs_is_modelled() {
+    if !has_m32() {
+        eprintln!("skipping fabs test: `cc -m32` unavailable (install gcc-multilib)");
+        return;
+    }
+    // The x87 `fabs` instruction (d9 e1) has no explicit st operand, so it was
+    // missing from is_x87 and skipped by the depth pass — left as a no-op,
+    // silently dropping the abs. It must now be modelled: fabs(-3.5) = 3.50.
+    let out = transpile_and_run("fabsfix.exe");
+    assert!(out.contains("ABS=3.50"), "x87 fabs not modelled:\n{out}");
+}

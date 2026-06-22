@@ -1947,7 +1947,7 @@ pub(crate) fn is_x87(ins: &Instruction) -> bool {
     use Mnemonic::*;
     if matches!(
         m,
-        Fadd | Faddp | Fiadd | Fbld | Fbstp | Fchs | Fnclex | Fclex | Fcom | Fcomp | Fcompp
+        Fabs | Fadd | Faddp | Fiadd | Fbld | Fbstp | Fchs | Fnclex | Fclex | Fcom | Fcomp | Fcompp
             | Fcomi | Fcomip | Fcos | Fdecstp | Fdiv | Fdivp | Fidiv | Fdivr | Fdivrp | Fidivr
             | Ffree | Ffreep | Ficom | Ficomp | Fild | Fincstp | Finit | Fninit | Fist | Fistp
             | Fisttp | Fisub | Fisubr | Fimul | Fld | Fld1 | Fldcw | Fldenv | Fldl2e | Fldl2t
