@@ -25,7 +25,8 @@
    jour le journal §4**.
 3. **Jamais casser la régression** : `cargo test --release` (70 tests) doit rester
    vert ; pour tout changement de lift/structure, lancer aussi `bench/difftest.sh`
-   (différentiel -O0→-O3) et viser **aucune régression**.
+   (différentiel **décompile**, -O0→-O3) **et** `bench/difftest_transpile.sh`
+   (différentiel **transpile** = le vrai produit) et viser **aucune régression**.
 4. Commits petits et fréquents. Pousser souvent.
 
 ### Commandes clés
@@ -34,7 +35,8 @@ cargo build --release
 cargo test --release                 # 70 tests (défaut)
 cargo test --release --features unpack
 bash bench/regression.sh             # porte unifiée (build+tests+niveaux)
-bash bench/difftest.sh               # différentiel lift (-O0→-O3)
+bash bench/difftest.sh               # différentiel décompile (Pipeline A, -O0→-O3)
+bash bench/difftest_transpile.sh     # différentiel transpile (Pipeline B = produit réel)
 # transpile : aret --mode transpile [--backend llvm|--target wasm] [--entry main] [--snapshot|--iat-symbols] --run --out-dir OUT prog.exe
 # repro Bug #2 : /tmp/mq_unpack/MightyQuest_unpacked.exe (sub_493440) + iat_symbols_full.json
 ```
@@ -784,3 +786,25 @@ flottante), à faire en session dédiée, une fonction à la fois, difftest à c
 - **Vérifié** : `varied.exe` -O0..-O3 = sortie native identique (`fib=6765 pop=24
   mix=327750336 vowels=8 ops=13921 poly=37.8750`). **difftest 268/268**, suite verte.
   Test +`computed_goto_switch_at_o0` (fixture `varied_o0.c/.exe`).
+
+### Différentiel du pipeline *transpile* — passer du réactif au proactif ✅ FAIT
+- **2026-06-22 — Constat stratégique** (suite à une parenthèse de réflexion) : tous les
+  bugs « modélisé-mais-faux » trouvés cette session (drapeaux de signe, masque de décalage…)
+  l'ont été **réactivement**, en testant des binaires à la main. Le `difftest.sh` ne les
+  attrapait pas car il n'exerce que `--mode emit` (**Pipeline A / décompile**), où un argument
+  est un **paramètre uint64 sign-extended** ; or le produit réel est le **transpileur
+  (Pipeline B)**, où un argument est un **chargement mémoire uint32 zero-extended**. Sémantiques
+  différentes → le bug de signe ne se voyait que côté transpile.
+- **Fix structurel** : `bench/difftest_transpile.sh` + `bench/gen_transpile_driver.py`. Le
+  générateur assemble les 57 fonctions buildables du corpus (exclut `__int128`/SIMD que le
+  i686-mingw ne compile pas) en **un seul programme** qui les appelle sur une grille d'entrées
+  (incluant des **négatifs** — suffisant pour le signe, sans UB d'overflow), replie tout en un
+  checksum. On transpile le PE, on exécute, on compare au **natif `-m32`** (même ABI 32-bit :
+  long/pointeur 4 octets, flottants x87). Vérité-terrain stable (aucun UB) car valeurs dans la
+  plage sûre du corpus.
+- **Validé qu'il a des dents** : au commit *avant* le fix de signe (`fc681b1`), le checksum
+  transpile **diverge** (`6c313d50…` ≠ réf) → ce banc **aurait attrapé** le résultat faux
+  silencieux. Au HEAD : **4/4 niveaux -O0..-O3 identiques** (réf `4b0121f1…`).
+- **Désormais** : tout changement de lift/structure doit passer `difftest.sh` (décompile) **et**
+  `difftest_transpile.sh` (transpile). Prochaine amélioration possible : étendre la grille aux
+  frontières non-UB (comparaisons/bitops avec INT_MIN, sûres) et au full-64 pour plus de couverture.
