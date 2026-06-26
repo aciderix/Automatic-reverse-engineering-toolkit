@@ -910,3 +910,32 @@ flottante), à faire en session dédiée, une fonction à la fois, difftest à c
   données argv** annoté « session dédiée » : il faut tracer pourquoi `argv[0]`/le pointeur argv
   vaut 0 ici (mauvais setup au démarrage CRT, ou store/lift d'un global argv) — à faire en suivant
   l'origine du pointeur, une étape à la fois, sans supposition. Lua et le corpus **inchangés**.
+
+### Cause racine du crash argv = `_initterm` no-op → CRT init sautée ✅ FAIT (général)
+- **2026-06-26 — Diagnostic complet (faits, gdb + objdump + C généré)** : `sub_440514` est le
+  `_main` de BusyBox ; il reçoit `argv = _argv` (global `0x493eb8`) et lit `argv[0]`. Au runtime
+  `_argc (0x493ebc) = 0` et `argv = [NULL]` → crash. Remontée de la chaîne CRT : `_argc`/`_argv`
+  sont peuplés par `__getmainargs`, appelé par **`_pre_cpp_init` (0x401110)**, lui-même invoqué
+  **non pas directement** mais via la table d'initialiseurs `_initterm(__xc_a..__xc_z)` (vérifié :
+  `0x498004 = 0x401110 = _pre_cpp_init`, `0x498010 = 0x401010 = _pre_c_init`). Or `__initterm` est
+  un thunk d'import → **ARET le shimait en NO-OP** (décision Phase 5ter « CRT remplacé en bloc »).
+  Résultat : **`_pre_c_init`/`_pre_cpp_init` ne tournent jamais → argv jamais construit → `_main`
+  plante sur `argv[0]`**.
+- **Le no-op violait le principe sacré** : sauter silencieusement l'initialisation du programme
+  (argv vide) = comportement faux présenté comme correct. Le shim `_initterm` n'était sound que
+  pour les binaires où la table ne contient que du glue MSVC interne ; pour une CRT mingw statique,
+  elle contient le **propre code d'init du programme** (qui appelle le shim `__getmainargs`).
+- **Correctif (général, `runtime/aret_hle/aret_hle.c`)** : `aret_initterm`/`aret_initterm_e`
+  **parcourent réellement la table** `[first, last)` et **dispatchent chaque pointeur** non nul via
+  `aret_call` sur la pile machine vive — exactement comme le vrai `_initterm`. Une entrée qui
+  résout vers du code non récupéré **abort bruyamment dans aret_call** (sound), jamais un saut
+  silencieux. (`_e` propage un retour non nul = échec d'init.) Les VAs de la table sont 32-bit
+  (binaire `-m32`).
+- **Effet mesuré** : BusyBox **route enfin ses applets** — `busybox true` → exit 0,
+  `busybox uname -a` → `Windows_NT 148.0 0 i386 MS/Windows`. (Reste des bugs **plus profonds**,
+  distincts : `echo` segfault, `pwd` `free(): invalid pointer` — + imports non implémentés
+  `_fullpath`/`_chdir`/`_getcwd`/`GetEnvironmentVariableW` qui renvoient 0.)
+- **Non-régression** : difftest 268/268, transpile-diff 4/4 (`H=4b0121f1…`), `cargo test` 49/49 +
+  bancs verts. Lua inchangé (atteint son `main` via auto-main, ne dépend pas de cette table).
+  *Bénéfice général* : tout binaire Windows à CRT statique exécute désormais ses constructeurs/
+  initialiseurs C/C++ (argv, fmode, ctors globaux), au lieu de les sauter.

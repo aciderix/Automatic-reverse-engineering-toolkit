@@ -741,13 +741,37 @@ uint32_t aret_getmainargs(uint32_t esp) {
     return 0;
 }
 
-/* _initterm walks a table of CRT/global constructor pointers. Under our HLE the
- * C runtime is replaced wholesale (stdio via aret_iob, locale, etc.), so running
- * the original initializers reaches MSVC-internal setup we do not model. Bind it
- * (and its `_e` variant) to a no-op — the sanitized name `aret_initterm` is what
- * the generator references, and these strong defs override its weak stub. */
-uint32_t aret_initterm(uint32_t esp) { (void)esp; return 0; }
-uint32_t aret_initterm_e(uint32_t esp) { (void)esp; return 0; }
+/* _initterm(first, last) walks a table of CRT/C++ initializer pointers in
+ * [first, last) and calls each non-null one. These initializers are part of the
+ * translated program (e.g. mingw's `_pre_c_init`/`_pre_cpp_init`, which call
+ * `__setargv`/`__getmainargs` to populate argc/argv) — NOT MSVC-internal glue —
+ * so they MUST run: a blanket no-op silently skips program initialization
+ * (argv left empty → a main() that reads argv[0] crashes), i.e. wrong behaviour
+ * presented as correct. We dispatch each entry through aret_call on the live
+ * machine stack, exactly as the real _initterm would. An entry that resolves to
+ * unrecovered/unmodelled code aborts loudly inside aret_call (sound), never a
+ * silent skip. The table holds 32-bit guest function VAs (the binary is -m32). */
+uint32_t aret_initterm(uint32_t esp) {
+    uint32_t first = arg(esp, 0), last = arg(esp, 1);
+    for (uint32_t p = first; p + 4 <= last; p += 4) {
+        uint32_t fn = *(const uint32_t *)(uintptr_t)p;
+        if (fn) aret_call(fn, esp, 0, 0, 0);
+    }
+    return 0;
+}
+/* _initterm_e: like _initterm but each initializer returns an int; a non-zero
+ * return is an init failure that stops the walk and is propagated to the caller. */
+uint32_t aret_initterm_e(uint32_t esp) {
+    uint32_t first = arg(esp, 0), last = arg(esp, 1);
+    for (uint32_t p = first; p + 4 <= last; p += 4) {
+        uint32_t fn = *(const uint32_t *)(uintptr_t)p;
+        if (fn) {
+            uint32_t r = (uint32_t)aret_call(fn, esp, 0, 0, 0);
+            if (r) return r;
+        }
+    }
+    return 0;
+}
 
 /* ------------------------------------------------------------------ */
 /* Synthetic TEB / PEB (Windows process environment, x86)             */
