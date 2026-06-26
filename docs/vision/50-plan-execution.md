@@ -884,3 +884,29 @@ flottante), à faire en session dédiée, une fonction à la fois, difftest à c
   (appels internes / pipeline décompile non touchés).
 - **Non-régression** : difftest 268/268, transpile-diff 4/4 (`H=4b0121f1…`), `cargo test`
   49/49 + tous bancs verts. Lua inchangé.
+
+### BusyBox re-testé sur build neuf (master) → crash `0x1`-deref localisé précisément 🔬
+- **2026-06-26 — Setup re-établi** : le binaire BusyBox de la session précédente vivait dans le
+  scratchpad (effacé à la compression). **Reconstruit depuis les sources** (rmyorston/busybox-w32
+  master, `mingw32_defconfig`, `i686-w64-mingw32-gcc 13`) → `busybox.exe` **PE32 i386 634 Ko**.
+  C'est une version **différente** de celle d'avant (donc comportement non identique au journal
+  ci-dessus — à ne pas confondre).
+- **Transpilation OK** : `aret --mode transpile` → **2218 fonctions** (2008 lifted, 83 partial,
+  127 host-backed), binaire natif `out/app` produit, verdict INCOMPLETE (166 imports Win32 non
+  implémentés — AccessCheck, CreateProcessA, DeviceIoControl… normal, hors chemin de base).
+- **Crash immédiat sur tout applet** (`true`/`echo`/`pwd`) : **SIGSEGV**, pas un abort (donc faute
+  mémoire réelle, pas une instruction non modélisée). **Localisé factuellement** (gdb + objdump +
+  C généré) :
+  - Frame : `main → … → sub_440514+…` (PE `0x440514`, parse du préfixe applet `:/1`/`:/2` de
+    l'argv). Instruction fautive native `movzbl (%eax),%eax` = PE `cmpb $0x3a,0x1(%eax)`
+    (`argv0[1]==':'`), `eax = *ebx = 0` → déréférence l'adresse `1`. **C'est exactement le
+    `[…]==0x1` resté ouvert** dans la section « Automatisation BusyBox » ci-dessus.
+  - Chaîne de données (C généré, `chunk_5.c`/`chunk_0.c`) : l'appelant écrit les args sur la pile
+    partagée puis `sub_440514(esp, …)` ; à l'intérieur `v10 = [esp+0x18]` (= 2e arg, un pointeur
+    type `argv`), `v18 = *v10` revient **0**, et `[v18+1]` faute. Donc `argv[0] == NULL` (ou le
+    pointeur `argv` global `*0x493eb8` pointe sur 0) au moment du parse de préfixe applet.
+- **Verdict** : ce crash est un **bug distinct du stdcall** (le fix stdcall de ce jour est correct
+  et prouvé sans régression — il ne prétendait pas régler ça). C'est bien le **bug d'init/flux de
+  données argv** annoté « session dédiée » : il faut tracer pourquoi `argv[0]`/le pointeur argv
+  vaut 0 ici (mauvais setup au démarrage CRT, ou store/lift d'un global argv) — à faire en suivant
+  l'origine du pointeur, une étape à la fois, sans supposition. Lua et le corpus **inchangés**.
