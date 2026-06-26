@@ -808,3 +808,31 @@ flottante), à faire en session dédiée, une fonction à la fois, difftest à c
 - **Désormais** : tout changement de lift/structure doit passer `difftest.sh` (décompile) **et**
   `difftest_transpile.sh` (transpile). Prochaine amélioration possible : étendre la grille aux
   frontières non-UB (comparaisons/bitops avec INT_MIN, sûres) et au full-64 pour plus de couverture.
+
+### Automatisation des patches BusyBox (méga-script → code ARET) ⏳ EN COURS
+- **2026-06-22 — Contexte** : un utilisateur a fait tourner BusyBox-w32 transpilé via un
+  méga-script de patches manuels (post-processing). Objectif : porter ces patches DANS ARET
+  pour qu'aucun script externe ne soit nécessaire. Lecture critique d'abord : plusieurs
+  « patches » n'étaient que des contournements d'**un seul** vrai bug (esp+4 des appels
+  indirects) — une fois ce bug corrigé proprement, les rustines (write fd=1, isatty=1, stub
+  crypto) deviennent inutiles.
+- **Fait, général et sans régression** (Lua OK, difftest 268/268, transpile-diff 4/4) :
+  - **Obj 4 (fninit)** : `finit`/`fninit` modélisés (reset pile FPU), plus de bail au startup.
+  - **Obj 3 (argv/envp)** : `__getmainargs` rend les vrais argc/argv/environ (publiés par
+    aret_main) au lieu d'un faux `{1,"program"}`. `__p___initenv`/`__p__environ` → vrai environ.
+  - **Obj 1 (appels indirects IAT, esp+4)** : `__aret_patch_iat` écrit dans chaque slot
+    d'import-fonction sa propre VA ; `emit_dispatch` enregistre chaque slot comme trampoline
+    `esp+4` vers le shim (l'appel indirect a poussé une adresse retour, esp-=4, mais le shim
+    lit ses args en [esp+0]). (Obj 2 / -no-pie : déjà dans le build ARET.)
+  - **Shims CRT/IO** : `_write/_read/_close/_isatty/_setmode/_fileno/__p__iob` (forward host ;
+    `__p__iob` initialise les FILE `_iob` : `_file=fd`, `_IONBF`), `vsnprintf/vsprintf/putenv/
+    tzset`, console Win32 `SetErrorMode/GetConsoleMode/GetConsoleScreenBufferInfo` (échec si
+    non-tty = comportement correct en pipe), `_open_osfhandle/_get_osfhandle` (identité).
+  - **Récupération** : `looks_like_func_start` accepte le prologue garde-init `mov eax,[moffs32];
+    test eax,eax` (initialiseur `_initterm` adressé seulement dans une table de pointeurs).
+- **BusyBox va maintenant loin** : startup CRT → routage argv → écriture via IAT indirecte →
+  init crypto → détection console → IO bas niveau. **Reste un crash** : déréférencement d'un
+  pointeur de chaîne `0x1` dans une structure interne busybox (`mov (eax),eax` sur
+  `[base+0x18]==0x1`) — problème d'**initialisation de données** (relocation/global) ou subtilité
+  de lift, à débugger en session dédiée (busybox est invoqué sous le nom `busybox` pour le
+  routage multi-call). Lua et le corpus ne sont pas affectés.
