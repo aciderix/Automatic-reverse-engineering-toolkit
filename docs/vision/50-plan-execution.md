@@ -836,3 +836,30 @@ flottante), à faire en session dédiée, une fonction à la fois, difftest à c
   `[base+0x18]==0x1`) — problème d'**initialisation de données** (relocation/global) ou subtilité
   de lift, à débugger en session dédiée (busybox est invoqué sous le nom `busybox` pour le
   routage multi-call). Lua et le corpus ne sont pas affectés.
+
+### FLIRT évalué empiriquement → cosmétique pour nos cibles (à ne pas re-creuser) ⚠️ MESURÉ
+- **2026-06-26 — Question stratégique** : peut-on éviter le travail « un par un » via FLIRT
+  (reconnaissance de fonctions de biblio par empreinte, déjà dans `src/flirt.rs`) ?
+  **Mesure faite** :
+  - **Sensible à la version du compilateur.** Référence MinGW locale vs binaire : Lua → **86**
+    fonctions de biblio reconnues (sin/cos/exp/log/pow, tout le moteur strtod `*_D2A`,
+    `__mingw_pformat`, internes libm) ; BusyBox (autre version MinGW) → **6** seulement.
+  - **Les 16 `partial` de Lua = code MORT.** Identifiés par nom (`sqrt`, `ldexp`, `exp2l`,
+    `__cosl_internal`, `__sinl_internal`, `__strtodg`, `__gdtoa`, `__mingw_pformat`, bignum
+    `*_D2A`…). Vérifié que `tonumber`, `string.format("%g/%e/%.20f")`, `math.sqrt`, `2^0.5`,
+    `tonumber("1e300")` **marchent tous sans jamais les toucher** (Lua passe par les imports
+    msvcrt host-backed). Les vider via FLIRT serait **purement cosmétique** (verdict
+    INCOMPLETE→SOUND, comportement identique) — beaucoup de shims pour zéro correction.
+- **Conclusion** : FLIRT **n'est pas le raccourci** pour « gérer n'importe quel binaire ».
+  - Reconnaît seulement du **code de bibliothèque** (jamais le code *propre* du programme,
+    qui domine — ex. les applets/getopt de BusyBox où vivent les crashes).
+  - Exige des empreintes de la **bonne version** (sinon ~0 match).
+  - Pour nos cibles : Lua = cosmétique (code mort), BusyBox = version + hors-sujet.
+  - Vraie valeur *future* (confort, pas débloquant) : (a) rendre le verdict SOUND *exact* en
+    ignorant le code de biblio mort ; (b) filet de sécurité contre une mauvaise traduction de
+    code de biblio complexe ; (c) si un jour on veut large couverture → **importer des bases
+    `.pat` publiques** (les « décennies de travail » d'IDA/Ghidra) plutôt que régénérer.
+- **Le levier réel reste le LIFTER** (clobber, signes, tables de pointeurs, esp+4…) : pas de
+  raccourci, mais automatique et général — chaque fix profite à *tout* binaire. Aucun outil
+  mûr (Wine = exécute, ne traduit pas ; Ghidra = décompile, non re-exécutable ; FLIRT =
+  reconnaît, ne traduit pas) ne remplace ce cœur en sortie *native exécutable*.
