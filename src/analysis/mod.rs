@@ -346,21 +346,40 @@ fn global_decode(
             let mut cands: BTreeSet<u64> = BTreeSet::new();
             for sec in &prog.sections {
                 let d = &sec.data;
-                let mut off = 0usize;
-                while off + ptr <= d.len() {
-                    let v = match ptr {
-                        8 => u64::from_le_bytes(d[off..off + 8].try_into().unwrap()),
-                        _ => {
-                            u32::from_le_bytes([d[off], d[off + 1], d[off + 2], d[off + 3]]) as u64
-                        }
-                    };
-                    // Data words: strict (a jump table's case-target run must
-                    // not look like a sequence of functions).
-                    if in_exec(v) && !global.contains_key(&v) && looks_like_func_start(prog, v, false)
-                    {
-                        cands.insert(v);
+                let nwords = d.len() / ptr;
+                let word = |w: usize| -> u64 {
+                    let o = w * ptr;
+                    match ptr {
+                        8 => u64::from_le_bytes(d[o..o + 8].try_into().unwrap()),
+                        _ => u32::from_le_bytes([d[o], d[o + 1], d[o + 2], d[o + 3]]) as u64,
                     }
-                    off += ptr;
+                };
+                // A run of >= 3 consecutive code pointers is a function-pointer
+                // table (vtable, applet/callback array, _initterm list): random
+                // data almost never has three consecutive valid code addresses, so
+                // accept *every* entry as an entry — including tiny callbacks
+                // (`xor eax,eax; ret`) whose prologue `looks_like_func_start` would
+                // reject. A lone code pointer still needs the prologue gate (a jump
+                // table's case-target run is excluded later via `jt_targets`).
+                let mut w = 0usize;
+                while w < nwords {
+                    if in_exec(word(w)) {
+                        let start = w;
+                        while w < nwords && in_exec(word(w)) {
+                            w += 1;
+                        }
+                        let in_table = w - start >= 3;
+                        for k in start..w {
+                            let v = word(k);
+                            if !global.contains_key(&v)
+                                && (in_table || looks_like_func_start(prog, v, false))
+                            {
+                                cands.insert(v);
+                            }
+                        }
+                    } else {
+                        w += 1;
+                    }
                 }
             }
             for insn in global.values() {
