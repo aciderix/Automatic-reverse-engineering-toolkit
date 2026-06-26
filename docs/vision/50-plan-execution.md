@@ -939,3 +939,30 @@ flottante), à faire en session dédiée, une fonction à la fois, difftest à c
   bancs verts. Lua inchangé (atteint son `main` via auto-main, ne dépend pas de cette table).
   *Bénéfice général* : tout binaire Windows à CRT statique exécute désormais ses constructeurs/
   initialiseurs C/C++ (argv, fmode, ctors globaux), au lieu de les sauter.
+
+### ABI `__stdcall` des imports : modéliser le dépilage `@N` (echo marche) ✅ FAIT (général)
+- **2026-06-26 — Diagnostic (faits, gdb + C généré)** : `busybox echo` plantait car l'écriture
+  stdout échouait. Chaîne : `echo_main` → `full_write` → `safe_write` → `winansi_write` → `_write`.
+  Au shim `_write`, **`fd=0` au lieu de 1** (`write(0,…)` → -1 → `bb_perror_msg` → crash). Cause :
+  juste avant `_write`, `winansi_write` appelle `SetLastError@4` (`call *[IAT]`), un import **stdcall
+  qui dépile son arg** (`ret 4`). En *accumulate-outgoing-args*, `esp` est **invariant** dans le
+  corps ; le compilateur compense le dépilage par un `push`/`sub esp,4`. ARET modélisait l'appel
+  d'import comme **esp-neutre** (le shim lit les args mais ne dépile pas) → après la compensation,
+  `esp` finissait **4 trop bas** → le `fd` spillé était rechargé du **mauvais slot** (`[esp+0xc]`
+  décalé) → `fd=0`.
+- **Pourquoi pas le fix `sub esp` précédent** : ici la compensation est un **`push`** (1 octet),
+  pas un `sub esp,N` — non capté. Et les noms d'import PE des API Win32 sont **non décorés**
+  (`SetLastError`, pas `SetLastError@4`), donc le compte de dépilage n'est pas lisible au site.
+- **Correctif (général)** : `src/ir/stdcall_pops.rs` — table `nom → @N` des API stdcall Win32
+  (kernel32/user32/advapi32/ws2_32). Le `@N` est une **propriété fixe de chaque API** (ABI Windows,
+  identique dans tout binaire), encodée une fois (154 entrées, extraites des décorations
+  `__imp__X@N` de l'import-lib mingw ; purement additif, réutilisable). Dans `build_ir`, après un
+  appel d'import dont on connaît `@N`, on **émet `esp += N`** (modélise le `ret N` du callee) →
+  l'invariant esp tient, la compensation du compilateur s'applique normalement. Imports d'arité
+  **inconnue** : repli sur le saut du `sub esp,N` (ancien fix, désormais réservé à ce cas).
+- **Effet mesuré** : `busybox echo hello world` → `hello world`, `echo -n abc` → `abc` (sans LF),
+  `echo -e 'a\tb'` → `a<TAB>b` — **tous corrects**. `true`/`false`/`uname -a` toujours OK.
+- **Non-régression** : difftest 268/268, transpile-diff 4/4 (`H=4b0121f1…`), `cargo test` 49/49 +
+  bancs verts. *Reste* (couche suivante, distincte) : `pwd`/`ls`/`expr`/`seq` **abort** (rc=134) —
+  imports non implémentés (`_fullpath`/`_getcwd`/`GetEnvironmentVariableW`) qui renvoient 0, ou une
+  instruction non modélisée atteinte (`aret_unmodelled`). À traiter applet par applet.

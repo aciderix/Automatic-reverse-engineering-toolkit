@@ -64,28 +64,47 @@ pub fn build_ir(prog: &Program, func: &Function) -> IrFunction {
         } else {
             blk.insns.len()
         };
-        // True when the previous body instruction was a call ARET binds to a host
-        // shim — used to recognize the stdcall over-pop compensation below.
-        let mut prev_import_call = false;
+        // True when the previous body instruction was an import call whose stdcall
+        // pop count is *unknown* — used for the over-pop compensation fallback below.
+        let mut prev_unknown_import = false;
         for insn in &blk.insns[..body_len] {
-            // stdcall over-pop compensation. A 32-bit __stdcall callee pops its own
-            // arguments with `ret N`; under accumulate-outgoing-args the caller then
-            // emits `sub esp, N` to undo that pop (net esp unchanged across the call).
-            // ARET's import shims read arguments off the modelled stack but never pop
-            // them, so the call already leaves esp net-correct — applying the `sub`
-            // would drive esp N too low and corrupt every later stack-relative access.
-            // Drop the `sub esp, N` that immediately follows such a call.
-            if prev_import_call && is_esp_sub_imm(insn) {
-                prev_import_call = false;
+            // stdcall over-pop compensation (fallback for imports of unknown arity).
+            // A 32-bit __stdcall callee pops its own arguments with `ret N`; under
+            // accumulate-outgoing-args the caller then emits `sub esp, N` to undo that
+            // pop (net esp unchanged across the call). ARET's import shims read
+            // arguments off the modelled stack but never pop them, so applying the
+            // `sub` would drive esp N too low. For imports whose `@N` we know we model
+            // the pop directly (below); for the rest, drop the compensating `sub`.
+            if prev_unknown_import && is_esp_sub_imm(insn) {
+                prev_unknown_import = false;
                 continue;
             }
-            prev_import_call = is_import_call(prog, insn);
+            prev_unknown_import = false;
             let mut s = match x87.as_ref().and_then(|m| m.get(&insn.address)) {
                 Some(&(sp_in, mode)) => crate::ir::lift::lift_x87(insn, sp_in, mode),
                 None => lift(insn, bits),
             };
             fold_ro_loads(&mut s, insn, prog);
             stmts.extend(s);
+            // stdcall import ABI: a __stdcall callee pops its own arguments. ARET's
+            // shim does not, so model the pop by raising esp by `@N` after the call —
+            // keeping the accumulate-outgoing-args invariant that esp is constant
+            // across the body (the compiler's own compensation then applies normally).
+            // Imports whose `@N` we don't know fall back to the `sub esp` skip above.
+            match import_call_raw_name(prog, insn) {
+                Some(name) => match crate::ir::stdcall_pops::stdcall_pop_bytes(&name) {
+                    Some(n) if n > 0 => stmts.push(Stmt::Set {
+                        dst: Location::Reg(RegId(4)),
+                        expr: Expr::Binary(
+                            BinOp::Add,
+                            Box::new(Expr::Read(Location::Reg(RegId(4)))),
+                            Box::new(Expr::Const(n as i128, Ty::int(32))),
+                        ),
+                    }),
+                    _ => prev_unknown_import = true,
+                },
+                None => {}
+            }
             // A call to a fp-returning function leaves its result in st(0): recover
             // it from the fp return channel into the slot the depth analysis says
             // it lands in, so subsequent x87 ops read the real value (not undef).
@@ -1002,20 +1021,20 @@ fn resolve_call(prog: &Program, addr: u64) -> CallBinding {
     CallBinding::Internal
 }
 
-/// Is `insn` a call ARET binds to a host shim (a direct import/thunk/CRT/glue
-/// call, or an indirect `call [abs]` straight through a fixed IAT slot)? Such a
-/// call's real-machine callee may pop its own arguments (stdcall) while the ARET
-/// shim does not — the signal used to drop the compiler's `sub esp, N` over-pop
-/// compensation that immediately follows.
-fn is_import_call(prog: &Program, insn: &crate::disasm::Insn) -> bool {
+/// The raw PE import name a call instruction targets, if it is a genuine import
+/// call — a direct `call <import>` / `call <thunk>` or an indirect `call [abs]`
+/// straight through a fixed IAT slot. Returns `None` for internal/CRT/glue calls.
+/// Used to look up the import's `__stdcall` `@N` pop count (and, when unknown, to
+/// fall back to dropping the compiler's `sub esp, N` over-pop compensation).
+fn import_call_raw_name(prog: &Program, insn: &crate::disasm::Insn) -> Option<String> {
     use iced_x86::{Mnemonic, OpKind, Register};
     if insn.raw.mnemonic() != Mnemonic::Call {
-        return false;
+        return None;
     }
-    // Direct call to a host-shim-backed target (import, thunk, CRT, startup glue).
+    // Direct call to an import (or to a thunk that tail-jumps through the IAT).
     if let Some(t) = insn.target {
-        if matches!(resolve_call(prog, t), CallBinding::Shim { .. }) {
-            return true;
+        if let Some(name) = prog.import_name(t).or_else(|| prog.import_thunk(t)) {
+            return Some(name.to_string());
         }
     }
     // Indirect `call [abs]` through a fixed IAT slot (no base/index register).
@@ -1023,11 +1042,11 @@ fn is_import_call(prog: &Program, insn: &crate::disasm::Insn) -> bool {
         && insn.raw.memory_base() == Register::None
         && insn.raw.memory_index() == Register::None
     {
-        if prog.import_name(insn.raw.memory_displacement64()).is_some() {
-            return true;
+        if let Some(name) = prog.import_name(insn.raw.memory_displacement64()) {
+            return Some(name.to_string());
         }
     }
-    false
+    None
 }
 
 /// Is `insn` a `sub esp, imm` (subtract an immediate from the stack pointer)?

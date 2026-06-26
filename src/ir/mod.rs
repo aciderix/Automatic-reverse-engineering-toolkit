@@ -13,6 +13,8 @@ pub mod types;
 pub mod lift;
 /// IR CFG builder + pretty-printer.
 pub mod build;
+/// `__stdcall` Win32 import stack-pop counts (callee-pops-args ABI).
+pub mod stdcall_pops;
 
 use crate::disasm::Insn;
 use crate::loader::Program;
