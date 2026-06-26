@@ -634,6 +634,10 @@ pub fn transpile(
     // Lua's version check then always takes its error path).
     ir::build::set_noreturn(ir::build::compute_noreturn(funcs));
     ir::build::set_fp_returning(ir::build::compute_fp_returning(prog, funcs));
+    // Per-callee ecx clobber masks: a direct call to a function that provably
+    // preserves ecx must not discard the caller's live ecx (GCC -O2 relies on
+    // this for static functions; blanket clobbering corrupts e.g. BusyBox).
+    ir::build::set_call_clobbers(ir::build::compute_call_clobbers(funcs));
 
     std::fs::create_dir_all(out_dir)
         .with_context(|| format!("failed to create {}", out_dir.display()))?;

@@ -320,6 +320,97 @@ thread_local! {
     /// pass must not propagate across the (spurious) fall-through edge.
     static NORETURN: std::cell::RefCell<std::collections::HashSet<u64>> =
         std::cell::RefCell::new(std::collections::HashSet::new());
+
+    /// Per-function clobber mask over the caller-saved scratch registers ecx
+    /// (bit 0) and edx (bit 1): which of them a call to that function may leave
+    /// changed. A function absent from the map clobbers both (the safe default).
+    static CALL_CLOBBERS: std::cell::RefCell<HashMap<u64, u8>> =
+        std::cell::RefCell::new(HashMap::new());
+}
+
+/// Install the per-function ecx/edx clobber masks for this thread.
+pub fn set_call_clobbers(m: HashMap<u64, u8>) {
+    CALL_CLOBBERS.with(|c| *c.borrow_mut() = m);
+}
+
+/// The ecx/edx clobber mask of a *direct* call target: which scratch registers
+/// the callee may change. `None` (→ caller clobbers both) for an unknown target.
+/// A register not in the mask is provably preserved across the call, so the
+/// caller may keep it live — GCC `-O2` relies on this for static functions, and a
+/// blanket cdecl clobber would discard a live ecx/edx and corrupt the program.
+pub(crate) fn call_clobber_mask(target: u64) -> Option<u8> {
+    CALL_CLOBBERS.with(|c| c.borrow().get(&target).copied())
+}
+
+/// Fixpoint over the call graph: a function clobbers ecx/edx if it (or any
+/// function it can reach) writes that register, OR it makes an indirect/import
+/// call (an opaque callee — assume it clobbers both). Sound by over-approximation:
+/// a register left out of the mask is genuinely preserved.
+pub fn compute_call_clobbers(funcs: &[&Function]) -> HashMap<u64, u8> {
+    use iced_x86::{FlowControl, InstructionInfoFactory, Register};
+    let entries: std::collections::HashSet<u64> = funcs.iter().map(|f| f.entry).collect();
+    let mut factory = InstructionInfoFactory::new();
+    // Per function: (regs it writes directly, opaque?, direct internal callees).
+    let mut local: HashMap<u64, (u8, bool, Vec<u64>)> = HashMap::new();
+    for f in funcs {
+        let mut mask = 0u8;
+        let mut opaque = false;
+        let mut callees = Vec::new();
+        for b in f.blocks.values() {
+            for insn in &b.insns {
+                let ins = &insn.raw;
+                for ur in factory.info(ins).used_registers() {
+                    if matches!(
+                        ur.access(),
+                        iced_x86::OpAccess::Write
+                            | iced_x86::OpAccess::CondWrite
+                            | iced_x86::OpAccess::ReadWrite
+                            | iced_x86::OpAccess::ReadCondWrite
+                    ) {
+                        match ur.register().full_register() {
+                            Register::RCX => mask |= 1,
+                            Register::RDX => mask |= 2,
+                            _ => {}
+                        }
+                    }
+                }
+                match ins.flow_control() {
+                    FlowControl::Call => {
+                        let t = ins.near_branch_target();
+                        if entries.contains(&t) {
+                            callees.push(t);
+                        } else {
+                            opaque = true; // import / unrecovered direct call
+                        }
+                    }
+                    FlowControl::IndirectCall => opaque = true,
+                    _ => {}
+                }
+            }
+        }
+        local.insert(f.entry, (mask, opaque, callees));
+    }
+    let mut clob: HashMap<u64, u8> = local
+        .iter()
+        .map(|(&e, (m, o, _))| (e, m | if *o { 0b11 } else { 0 }))
+        .collect();
+    loop {
+        let mut changed = false;
+        for (&e, (_, _, callees)) in &local {
+            let mut m = clob[&e];
+            for c in callees {
+                m |= clob.get(c).copied().unwrap_or(0b11); // external callee → both
+            }
+            if m != clob[&e] {
+                clob.insert(e, m);
+                changed = true;
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+    clob
 }
 
 /// Install the set of fp-returning function entry addresses for x87 depth

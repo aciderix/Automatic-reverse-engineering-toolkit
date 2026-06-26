@@ -1842,7 +1842,17 @@ pub fn lift(insn: &Insn, bits: u32) -> Vec<Stmt> {
                     dst: Location::Reg(RegId(0)),
                     expr: Expr::Binary(BinOp::And, Box::new(ret), Box::new(Expr::konst(0xffff_ffff, 64))),
                 });
-                out.push(Stmt::Set { dst: Location::Reg(RegId(1)), expr: Expr::Undef }); // ecx scratch
+                // ecx is caller-saved, but only clobber it if the callee may write
+                // it: a function GCC proved preserves ecx (it never touches it) lets
+                // the caller keep a live value across the call (see compute_call_
+                // clobbers). edx needs no such guard — the edx:eax return split above
+                // restores a preserved edx automatically (the callee returns it in
+                // the high half). Unknown target → clobber (the safe default).
+                let preserves_ecx =
+                    matches!(insn.target.and_then(crate::ir::build::call_clobber_mask), Some(m) if m & 1 == 0);
+                if !preserves_ecx {
+                    out.push(Stmt::Set { dst: Location::Reg(RegId(1)), expr: Expr::Undef }); // ecx scratch
+                }
                 return out;
             }
             let clobbers: &[u16] = if bits == 64 {
