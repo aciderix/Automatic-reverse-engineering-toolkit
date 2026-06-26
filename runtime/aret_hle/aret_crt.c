@@ -50,6 +50,43 @@ static inline uint32_t a32(uint32_t esp, int i) {
 size_t aret_vformat(char *out, size_t cap, const char *fmt, const uint32_t *a);
 
 /* ------------------------------------------------------------------ */
+/* <direct.h> / <unistd.h> — working directory & path resolution      */
+/* ------------------------------------------------------------------ */
+/* Guest pointers are flat native addresses (the binary is -m32), so the host
+ * calls write straight into the guest's buffers. The guest frees results with
+ * the msvcrt `free` import (-> aret_free -> host free), so a host-allocated
+ * return (NULL-buffer form) is freed consistently. */
+
+/* char *_getcwd(char *buf, int size): fill buf with the cwd; if buf is NULL,
+ * msvcrt allocates — emulate with glibc's getcwd(NULL, 0). */
+uint32_t aret_getcwd(uint32_t esp) {
+    char *buf = AS(0);
+    int size = AI(1);
+    if (!buf) return RP(getcwd(NULL, 0));
+    return RP(getcwd(buf, (size_t)size));
+}
+/* int _chdir(const char *path): 0 on success, -1 on error. */
+uint32_t aret_chdir(uint32_t esp) { return (uint32_t)chdir(ACS(0)); }
+/* char *_fullpath(char *abs, const char *rel, size_t len): resolve rel to an
+ * absolute path in abs. realpath is the POSIX equivalent but requires the path
+ * to exist; on failure fall back to a best-effort absolute join so callers that
+ * only need a normalized name still proceed. */
+uint32_t aret_fullpath(uint32_t esp) {
+    char *abs = AS(0);
+    const char *rel = ACS(1);
+    if (!abs || !rel) return 0;
+    if (realpath(rel, abs)) return RP(abs);
+    if (rel[0] == '/' || rel[0] == '\\') {
+        strncpy(abs, rel, AU(2) ? AU(2) - 1 : 259);
+    } else {
+        char cwd[4096];
+        if (!getcwd(cwd, sizeof cwd)) return 0;
+        snprintf(abs, AU(2) ? AU(2) : 260, "%s/%s", cwd, rel);
+    }
+    return RP(abs);
+}
+
+/* ------------------------------------------------------------------ */
 /* <string.h> — the subset not already in aret_hle.c                  */
 /* ------------------------------------------------------------------ */
 

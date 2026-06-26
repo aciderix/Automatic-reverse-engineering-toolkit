@@ -966,3 +966,15 @@ flottante), à faire en session dédiée, une fonction à la fois, difftest à c
   bancs verts. *Reste* (couche suivante, distincte) : `pwd`/`ls`/`expr`/`seq` **abort** (rc=134) —
   imports non implémentés (`_fullpath`/`_getcwd`/`GetEnvironmentVariableW`) qui renvoient 0, ou une
   instruction non modélisée atteinte (`aret_unmodelled`). À traiter applet par applet.
+
+### Shims POSIX `_getcwd`/`_chdir`/`_fullpath` (pwd marche) ✅ FAIT
+- **2026-06-26** — `pwd` abortait sur `free(): invalid pointer` : `xrealloc_getcwd_or_warn` appelait
+  l'import `_getcwd` (stub → 0), laissant un buffer mal initialisé ensuite `free`é. Implémenté
+  `aret_getcwd`/`aret_chdir`/`aret_fullpath` (`aret_crt.c`) en forward host (getcwd/chdir/realpath).
+  Les pointeurs invités sont des adresses natives plates (`-m32`) → le host écrit directement
+  dedans ; le `free` invité passe par l'import msvcrt (→ host free) donc un retour alloué côté host
+  (forme buffer NULL) est libéré de façon cohérente. **`busybox pwd` → exit 0** (imprime le cwd).
+  echo/uname/true inchangés. Non-régression : transpile-diff 4/4, `cargo test` 49/49.
+- *Reste* : `expr` (sortie applet brouillée « : pr  syntax error » + heap), `ls` (rc=134),
+  `seq` (l'analyse de profondeur x87 **abandonne** sur sa fonction → `fld1` non modélisé atteint :
+  c'est le chantier « robustesse passe x87 », délicat, à part).
