@@ -213,6 +213,51 @@ uint32_t aret_vfprintf(uint32_t esp) {
     return (uint32_t)o;
 }
 
+/* msvcrt low-level (POSIX-style) I/O on integer fds — forwarded to the host. The
+ * guest's fds are plain Unix fds (0/1/2 for the std streams, others from open).
+ * `__p__iob` exposes the synthetic _iob array so `_fileno(stdout)` resolves to 1.
+ * Returning 0 from `_write` (the weak stub) made BusyBox spin forever retrying a
+ * "short" write — so these must be real. */
+/* msvcrt FILE (32-bit): { char* _ptr; int _cnt; char* _base; int _flag; int _file;
+ * ... }. Statically-linked CRT stdio reads `_file` (the fd, at offset 16) and the
+ * `_flag` (offset 12); an all-zero _iob makes it treat the stream as buffered with
+ * a null _base and crash on flush. Initialise each entry: fd in _file, _IONBF so
+ * the CRT writes straight through `_write` (we never allocate a buffer). */
+uint32_t aret_p__iob(uint32_t esp) {
+    (void)esp;
+    static int inited = 0;
+    if (!inited) {
+        for (int i = 0; i < 3; i++) {
+            uint8_t *f = aret_iob + (size_t)i * ARET_FILE_SIZE;
+            *(int32_t *)(f + 12) = 0x40 | 0x02; /* _flag: _IONBF | _IOWRT */
+            *(int32_t *)(f + 16) = i;           /* _file = fd            */
+        }
+        inited = 1;
+    }
+    return (uint32_t)(uintptr_t)aret_iob;
+}
+uint32_t aret_fileno(uint32_t esp) {
+    int fd = iob_fd(arg(esp, 0));
+    return fd >= 0 ? (uint32_t)fd : (uint32_t)fileno((FILE *)(uintptr_t)arg(esp, 0));
+}
+uint32_t aret_write(uint32_t esp) {
+    ssize_t r = write((int)arg(esp, 0), (const void *)(uintptr_t)arg(esp, 1), (size_t)arg(esp, 2));
+    return (uint32_t)(r < 0 ? -1 : r);
+}
+uint32_t aret_read(uint32_t esp) {
+    ssize_t r = read((int)arg(esp, 0), (void *)(uintptr_t)arg(esp, 1), (size_t)arg(esp, 2));
+    return (uint32_t)(r < 0 ? -1 : r);
+}
+uint32_t aret_close(uint32_t esp) {
+    int fd = (int)arg(esp, 0);
+    if (fd <= 2) return 0; /* never close the std streams */
+    return (uint32_t)close(fd);
+}
+uint32_t aret_isatty(uint32_t esp) { return (uint32_t)isatty((int)arg(esp, 0)); }
+/* _setmode(fd, mode): text/binary distinction is meaningless on Linux. Report the
+ * previous mode as binary (O_BINARY = 0x8000 in msvcrt) so callers see success. */
+uint32_t aret_setmode(uint32_t esp) { (void)esp; return 0x8000; }
+
 uint32_t aret_fprintf(uint32_t esp) {
     uint32_t file = arg(esp, 0);
     const char *fmt = (const char *)(uintptr_t)arg(esp, 1);
@@ -646,6 +691,17 @@ uint32_t aret_GetCommandLineA(uint32_t esp) { (void)esp; return (uint32_t)(uintp
 static int aret_fmode = 0, aret_commode = 0;
 uint32_t aret_p__fmode(uint32_t esp) { (void)esp; return (uint32_t)(uintptr_t)&aret_fmode; }
 uint32_t aret_p__commode(uint32_t esp) { (void)esp; return (uint32_t)(uintptr_t)&aret_commode; }
+/* __p___initenv / __p__environ: msvcrt exposes the initial/current environment
+ * as `char**`; these return its address (`char***`). Point at the real environ
+ * so getenv/environ walks the process's actual variables. Returning 0 (the weak
+ * stub) makes the CRT null-deref the env and bail before main runs. */
+uint32_t aret_p___initenv(uint32_t esp) {
+    (void)esp; extern char **environ; static char **initenv; initenv = environ;
+    return (uint32_t)(uintptr_t)&initenv;
+}
+uint32_t aret_p__environ(uint32_t esp) {
+    (void)esp; extern char **environ; return (uint32_t)(uintptr_t)&environ;
+}
 /* aret_errno / aret_onexit live in aret_crt.c (the canonical sanitized names). */
 uint32_t aret_set_app_type(uint32_t esp) { (void)esp; return 0; }
 uint32_t aret_setusermatherr(uint32_t esp) { (void)esp; return 0; }

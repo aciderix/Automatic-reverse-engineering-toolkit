@@ -259,3 +259,34 @@ uint32_t aret_SetConsoleCtrlHandler(uint32_t esp) { (void)esp; return 1; }
 uint32_t aret_FlushFileBuffers(uint32_t esp)    { (void)esp; return 1; }
 uint32_t aret_SetHandleCount(uint32_t esp)      { return WU(0); }
 uint32_t aret_GetFileType(uint32_t esp)         { (void)esp; return 2; } /* FILE_TYPE_CHAR */
+
+/* Console probes. When stdout is a real terminal these would succeed; when it is
+ * a pipe/file they fail on Windows too. Reporting failure (0) makes a console
+ * program treat output as non-interactive — the correct, side-effect-free choice
+ * (plain output, no cursor/colour control). aret_GetStdHandle returns the fd
+ * itself (0/1/2) as the HANDLE, so a console HANDLE is just its fd. */
+static int aret_handle_fd(uint32_t h) { return (h <= 2u) ? (int)h : -1; }
+/* msvcrt's OS-handle <-> CRT-fd bridge. On Linux a handle and an fd are the same
+ * integer, so both are the identity — but they must exist: the weak stub returned
+ * -1, and BusyBox added a length to that, dereferenced ~0x1, and crashed. */
+uint32_t aret_open_osfhandle(uint32_t esp) { return WU(0); }
+uint32_t aret_get_osfhandle(uint32_t esp) { return WU(0); }
+uint32_t aret_SetErrorMode(uint32_t esp)                 { (void)esp; return 0; }
+uint32_t aret_GetConsoleMode(uint32_t esp) {
+    int fd = aret_handle_fd(WU(0));
+    if (fd < 0 || !isatty(fd)) return 0;            /* not a console */
+    if (WU(1)) *(uint32_t *)(uintptr_t)WU(1) = 0x3; /* ENABLE_PROCESSED|LINE_INPUT */
+    return 1;
+}
+uint32_t aret_GetConsoleScreenBufferInfo(uint32_t esp) {
+    int fd = aret_handle_fd(WU(0));
+    if (fd < 0 || !isatty(fd)) return 0;            /* not a console */
+    int16_t *p = (int16_t *)(uintptr_t)WU(1);
+    if (!p) return 0;
+    p[0] = 80; p[1] = 25;                /* dwSize           */
+    p[2] = 0;  p[3] = 0;                 /* dwCursorPosition */
+    p[4] = 7;                            /* wAttributes      */
+    p[5] = 0; p[6] = 0; p[7] = 79; p[8] = 24; /* srWindow    */
+    p[9] = 80; p[10] = 25;              /* dwMaximumWindowSize */
+    return 1;
+}

@@ -254,6 +254,11 @@ fn looks_like_func_start(prog: &Program, addr: u64, allow_leaf: bool) -> bool {
         || (b0 == 0x8b && b1 == 0xff)         // mov edi, edi (hot-patch pad)
         || (b0 == 0x89 && b1 == 0xff)
         || (b0 == 0xff && b1 == 0x25)         // jmp [mem] (import thunk)
+        // Run-once init guard `mov eax,[moffs32]; test eax,eax` — the prologue of
+        // a `_initterm`/local-static initializer (address-taken in a CRT
+        // initializer table). The 7-byte signature is specific enough not to
+        // seed interior bytes.
+        || (b0 == 0xa1 && code.get(5) == Some(&0x85) && code.get(6) == Some(&0xc0))
         // mov reg, [esp+disp] (modrm rm=100=SIB, mod≠11; SIB=24 → base=esp).
         || (allow_leaf && b0 == 0x8b && (b1 & 0x07) == 0x04 && (b1 & 0xc0) != 0xc0 && b2 == 0x24)
 }
