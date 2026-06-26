@@ -863,3 +863,24 @@ flottante), à faire en session dédiée, une fonction à la fois, difftest à c
   raccourci, mais automatique et général — chaque fix profite à *tout* binaire. Aucun outil
   mûr (Wine = exécute, ne traduit pas ; Ghidra = décompile, non re-exécutable ; FLIRT =
   reconnaît, ne traduit pas) ne remplace ce cœur en sortie *native exécutable*.
+
+### stdcall : compensation du sur-dépilage `ret N` (général, sans régression) ✅ FAIT
+- **2026-06-26 — Bug** : une fonction `__stdcall` 32 bits dépile elle-même ses arguments
+  (`ret N`). Sous *accumulate-outgoing-args* (GCC/MSVC -O2, args écrits par `mov [esp+k]` sans
+  bouger esp), le compilateur émet juste après l'appel un `sub esp, N` pour **annuler** ce
+  sur-dépilage — net : esp inchangé de part et d'autre de l'appel. Les shims d'import d'ARET
+  lisent les args sur la pile modélisée mais **ne dépilent jamais** : l'appel laisse donc esp
+  déjà net-correct, et appliquer le `sub esp, N` le descend de N trop bas → **corruption de
+  tous les accès pile suivants** (setup d'arguments de l'appel d'après). Bug **général** des
+  binaires Windows qui appellent des API stdcall à -O2 (constaté sur BusyBox :
+  `mov [esp+8],0 ; mov [esp+4],0 ; mov [esp],0x47d008 ; call ds:0x49664c ; sub esp,0xc`).
+- **Correctif** (`src/ir/build.rs`) : dans la boucle `build_ir`, on **ignore** un `sub esp, imm`
+  qui suit *immédiatement* un appel lié à un shim hôte (`is_import_call` : appel direct
+  import/thunk/CRT/glue résolu par `resolve_call`, **ou** `call [abs]` indirect via slot IAT
+  fixe). Garde esp net-correct. Les noms d'import PE étant **non décorés** (pas de `@N`), le
+  `sub esp, N` du compilateur **est** la source autoritative du compte de dépilage stdcall, et
+  il n'apparaît qu'après un appel stdcall (le cdecl nettoie par `add esp` côté appelant — pas
+  de faux positif). Gating étroit sur « appel d'import » = sûr pour le corpus existant
+  (appels internes / pipeline décompile non touchés).
+- **Non-régression** : difftest 268/268, transpile-diff 4/4 (`H=4b0121f1…`), `cargo test`
+  49/49 + tous bancs verts. Lua inchangé.

@@ -64,7 +64,22 @@ pub fn build_ir(prog: &Program, func: &Function) -> IrFunction {
         } else {
             blk.insns.len()
         };
+        // True when the previous body instruction was a call ARET binds to a host
+        // shim — used to recognize the stdcall over-pop compensation below.
+        let mut prev_import_call = false;
         for insn in &blk.insns[..body_len] {
+            // stdcall over-pop compensation. A 32-bit __stdcall callee pops its own
+            // arguments with `ret N`; under accumulate-outgoing-args the caller then
+            // emits `sub esp, N` to undo that pop (net esp unchanged across the call).
+            // ARET's import shims read arguments off the modelled stack but never pop
+            // them, so the call already leaves esp net-correct — applying the `sub`
+            // would drive esp N too low and corrupt every later stack-relative access.
+            // Drop the `sub esp, N` that immediately follows such a call.
+            if prev_import_call && is_esp_sub_imm(insn) {
+                prev_import_call = false;
+                continue;
+            }
+            prev_import_call = is_import_call(prog, insn);
             let mut s = match x87.as_ref().and_then(|m| m.get(&insn.address)) {
                 Some(&(sp_in, mode)) => crate::ir::lift::lift_x87(insn, sp_in, mode),
                 None => lift(insn, bits),
@@ -985,6 +1000,50 @@ fn resolve_call(prog: &Program, addr: u64) -> CallBinding {
         }
     }
     CallBinding::Internal
+}
+
+/// Is `insn` a call ARET binds to a host shim (a direct import/thunk/CRT/glue
+/// call, or an indirect `call [abs]` straight through a fixed IAT slot)? Such a
+/// call's real-machine callee may pop its own arguments (stdcall) while the ARET
+/// shim does not — the signal used to drop the compiler's `sub esp, N` over-pop
+/// compensation that immediately follows.
+fn is_import_call(prog: &Program, insn: &crate::disasm::Insn) -> bool {
+    use iced_x86::{Mnemonic, OpKind, Register};
+    if insn.raw.mnemonic() != Mnemonic::Call {
+        return false;
+    }
+    // Direct call to a host-shim-backed target (import, thunk, CRT, startup glue).
+    if let Some(t) = insn.target {
+        if matches!(resolve_call(prog, t), CallBinding::Shim { .. }) {
+            return true;
+        }
+    }
+    // Indirect `call [abs]` through a fixed IAT slot (no base/index register).
+    if insn.raw.op0_kind() == OpKind::Memory
+        && insn.raw.memory_base() == Register::None
+        && insn.raw.memory_index() == Register::None
+    {
+        if prog.import_name(insn.raw.memory_displacement64()).is_some() {
+            return true;
+        }
+    }
+    false
+}
+
+/// Is `insn` a `sub esp, imm` (subtract an immediate from the stack pointer)?
+fn is_esp_sub_imm(insn: &crate::disasm::Insn) -> bool {
+    use iced_x86::{Mnemonic, OpKind, Register};
+    insn.raw.mnemonic() == Mnemonic::Sub
+        && insn.raw.op0_kind() == OpKind::Register
+        && insn.raw.op0_register() == Register::ESP
+        && matches!(
+            insn.raw.op1_kind(),
+            OpKind::Immediate8
+                | OpKind::Immediate8to16
+                | OpKind::Immediate8to32
+                | OpKind::Immediate16
+                | OpKind::Immediate32
+        )
 }
 
 /// The host shim a direct call to `addr` binds to, if any — i.e. the function at
