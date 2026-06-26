@@ -669,13 +669,19 @@ uint32_t aret_strncmp(uint32_t esp) {
                                       (const char *)(uintptr_t)arg(esp, 1), arg(esp, 2));
 }
 
-/* __getmainargs(int* argc, char*** argv, char*** env, int wild, _startupinfo*) */
-static char *aret_argv0[] = { (char *)"program", 0 };
+/* __getmainargs(int* argc, char*** argv, char*** env, int wild, _startupinfo*)
+ * Hand the program its REAL argc/argv/environ (published by aret_main). The
+ * binary is built -m32, so those pointers are already 32-bit and the guest can
+ * dereference them directly. A fixed fake argv (the old behaviour) starved
+ * argv-routing programs like BusyBox of their command line. */
 uint32_t aret_getmainargs(uint32_t esp) {
+    extern int aret_real_argc;
+    extern char **aret_real_argv;
+    extern char **environ;
     uint32_t pargc = arg(esp, 0), pargv = arg(esp, 1), penv = arg(esp, 2);
-    if (pargc) *(int32_t *)(uintptr_t)pargc = 1;
-    if (pargv) *(uint32_t *)(uintptr_t)pargv = (uint32_t)(uintptr_t)aret_argv0;
-    if (penv) *(uint32_t *)(uintptr_t)penv = 0;
+    if (pargc) *(int32_t *)(uintptr_t)pargc = aret_real_argc;
+    if (pargv) *(uint32_t *)(uintptr_t)pargv = (uint32_t)(uintptr_t)aret_real_argv;
+    if (penv) *(uint32_t *)(uintptr_t)penv = (uint32_t)(uintptr_t)environ;
     return 0;
 }
 

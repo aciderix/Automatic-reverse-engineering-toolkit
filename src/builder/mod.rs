@@ -335,7 +335,7 @@ fn emit_import_stubs(prog: &Program) -> String {
 /// `sub_<va>`; a **host-backed** VA (libm/CRT/glue we did not translate)
 /// dispatches through a thin adapter onto its native shim — so no indirect path
 /// can ever reach a pruned (un-emitted) body.
-fn emit_dispatch(internal: &[u64], host: &[(u64, String)]) -> String {
+fn emit_dispatch(internal: &[u64], host: &[(u64, String)], iat: &[(u64, String)]) -> String {
     use std::collections::BTreeSet;
     use std::fmt::Write as _;
     let mut s = String::new();
@@ -348,7 +348,7 @@ fn emit_dispatch(internal: &[u64], host: &[(u64, String)]) -> String {
     // Shim prototypes (deduped) + a per-VA adapter that hands the shim the machine
     // stack pointer (it reads its cdecl args off it, as at a direct call site).
     let mut seen = BTreeSet::new();
-    for (_, name) in host {
+    for (_, name) in host.iter().chain(iat.iter()) {
         if seen.insert(name.as_str()) {
             let _ = writeln!(s, "uint32_t {name}(uint32_t);");
         }
@@ -359,12 +359,23 @@ fn emit_dispatch(internal: &[u64], host: &[(u64, String)]) -> String {
             "static uint64_t aret_disp_{va:x}(uint64_t esp,uint64_t a,uint64_t c,uint64_t d){{(void)a;(void)c;(void)d;return {name}((uint32_t)esp);}}"
         );
     }
+    // Indirect call straight through an IAT slot: the slot holds its own VA (set by
+    // __aret_patch_iat), so a `call [slot]` dispatches here. The indirect call
+    // pushed a return address (esp -= 4 in the lifted call), but an import shim
+    // reads its cdecl args at [esp+0] — so undo that push with `esp + 4`.
+    for (va, name) in iat {
+        let _ = writeln!(
+            s,
+            "static uint64_t aret_iatdisp_{va:x}(uint64_t esp,uint64_t a,uint64_t c,uint64_t d){{(void)a;(void)c;(void)d;return {name}((uint32_t)esp + 4);}}"
+        );
+    }
     s.push_str("struct aret_e { uint32_t va; aret_fn fn; };\n");
     s.push_str("static const struct aret_e aret_tab[] = {\n");
-    // Merge both kinds, sorted by VA (binary search requires it).
+    // Merge all kinds, sorted by VA (binary search requires it).
     let mut all: Vec<(u64, String)> =
         internal.iter().map(|&va| (va, format!("sub_{va:x}"))).collect();
     all.extend(host.iter().map(|(va, _)| (*va, format!("aret_disp_{va:x}"))));
+    all.extend(iat.iter().map(|(va, _)| (*va, format!("aret_iatdisp_{va:x}"))));
     all.sort_by_key(|(va, _)| *va);
     all.dedup_by_key(|(va, _)| *va);
     for (va, callee) in &all {
@@ -399,9 +410,13 @@ fn emit_iat_patch(prog: &Program) -> String {
     s.push_str("void __aret_patch_iat(void) {\n");
     for (va, name) in &prog.imports {
         let esc = name.replace('\\', "\\\\").replace('"', "\\\"");
+        // A data import → point its slot at the synthetic data object. A function
+        // import → store the slot's own VA, so a `call [slot]` (or a call through a
+        // function pointer the program copied out of the slot) dispatches via
+        // aret_call to the slot's `esp+4` trampoline (see emit_dispatch).
         let _ = writeln!(
             s,
-            "    {{ uint32_t p = aret_data_import(\"{esc}\"); if (p) *(uint32_t *)(uintptr_t)0x{va:x}u = p; }}"
+            "    {{ uint32_t p = aret_data_import(\"{esc}\"); *(uint32_t *)(uintptr_t)0x{va:x}u = p ? p : 0x{va:x}u; }}"
         );
     }
     s.push_str("}\n");
@@ -711,10 +726,16 @@ pub fn transpile(
         "#include <stdint.h>\n\n\
          /* One shared machine stack for all transpiled functions (UBT M3). */\n\
          static uint8_t aret_stack[1u << 20];\n\n\
+         /* The process's real args, published for the CRT's `__getmainargs` shim so\n\
+         the Windows program sees its actual argc/argv/environ (a multi-call binary\n\
+         like BusyBox dispatches on argv[0], so it must be invoked under that name). */\n\
+         int aret_real_argc = 0;\n\
+         char **aret_real_argv = 0;\n\n\
          void __aret_map_memory(void);\n\
          void __aret_patch_iat(void);\n\
          uint64_t sub_{entry:x}(uint64_t __esp, uint64_t a, uint64_t c, uint64_t d);\n\n\
          int main(int argc, char **argv) {{\n\
+         \x20   aret_real_argc = argc; aret_real_argv = argv;\n\
          {map_call}    uint8_t *top = aret_stack + sizeof(aret_stack) - 64;\n\
          \x20   /* Lay a cdecl frame so an entry at `main` reads argc/argv from the\n\
          \x20      shared machine stack at [esp+4]/[esp+8]; harmless for a no-arg\n\
@@ -753,7 +774,15 @@ pub fn transpile(
     write("aret_crt.c", CRT_C)?;
     write("aret_win32.c", WIN32_C)?;
     write("aret_stubs.c", &stubs)?;
-    write("aret_dispatch.c", &emit_dispatch(&internal_entries, &host_funcs))?;
+    // Every IAT slot, as a VA -> import-shim trampoline, so an indirect call
+    // through the slot (a function pointer the program copied out of it) resolves
+    // to the shim instead of aborting in aret_call.
+    let iat_slots: Vec<(u64, String)> = prog
+        .imports
+        .iter()
+        .map(|(&va, name)| (va, ir::build::sanitize_import(name)))
+        .collect();
+    write("aret_dispatch.c", &emit_dispatch(&internal_entries, &host_funcs, &iat_slots))?;
     write("aret_iat.c", &emit_iat_patch(prog))?;
     write("aret_main.c", &main_c)?;
     // Program: one LLVM IR module, or chunked C translation units.

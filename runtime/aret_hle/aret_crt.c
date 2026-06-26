@@ -84,6 +84,10 @@ uint32_t aret_labs(uint32_t esp)   { return (uint32_t)labs(AI(0)); }
 uint32_t aret_rand(uint32_t esp)   { (void)esp; return (uint32_t)rand(); }
 uint32_t aret_srand(uint32_t esp)  { srand(AU(0)); return 0; }
 uint32_t aret_getenv(uint32_t esp) { return RP(getenv(ACS(0))); }
+/* Windows `_putenv` copies the "NAME=value" string; libc `putenv` stores the
+ * pointer, so strdup to match (and avoid a dangling guest-stack pointer). */
+uint32_t aret_putenv(uint32_t esp) { const char *s = ACS(0); return (uint32_t)putenv(s ? strdup(s) : (char *)""); }
+uint32_t aret_tzset(uint32_t esp)  { (void)esp; tzset(); return 0; }
 uint32_t aret_strtol(uint32_t esp) {
     char *end; long v = strtol(ACS(0), &end, AI(2));
     if (AU(1)) *(uint32_t *)AP(1) = (uint32_t)(uintptr_t)end;
@@ -135,6 +139,28 @@ uint32_t aret_snprintf(uint32_t esp) {
     return (uint32_t)n;
 }
 /* snprintf and _snprintf both sanitize to aret_snprintf. */
+
+/* The `v*` variants take an explicit va_list as the final argument. On 32-bit
+ * cdecl a va_list is just a pointer into the caller's stack at the first
+ * variadic word, so `aret_vformat` reads from there directly. */
+uint32_t aret_vsnprintf(uint32_t esp) {
+    char *dst = AS(0);
+    size_t cap = AU(1);
+    const char *fmt = ACS(2);
+    const uint32_t *va = (const uint32_t *)(uintptr_t)AU(3);
+    char tmp[8192], *out = (cap && cap <= sizeof tmp) ? dst : tmp;
+    size_t room = (cap && cap <= sizeof tmp) ? cap : sizeof tmp;
+    size_t n = aret_vformat(out, room, fmt, va);
+    if (out != dst && cap) { size_t c = n < cap - 1 ? n : cap - 1; memcpy(dst, tmp, c); dst[c] = 0; }
+    return (uint32_t)n;
+}
+uint32_t aret_vsprintf(uint32_t esp) {
+    char *dst = AS(0);
+    const char *fmt = ACS(1);
+    const uint32_t *va = (const uint32_t *)(uintptr_t)AU(2);
+    size_t n = aret_vformat(dst, (size_t)1 << 30, fmt, va);
+    return (uint32_t)n;
+}
 
 /* aret_fflush lives in aret_hle.c (next to the synthetic _iob machinery): a
  * flush of a stdin/out/err stream must NOT be passed to the host fflush as a
