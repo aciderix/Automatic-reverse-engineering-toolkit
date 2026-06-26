@@ -2026,6 +2026,10 @@ pub(crate) fn x87_delta(ins: &Instruction) -> Option<i32> {
         Fcomp | Fucomp | Ficomp => -1,
         Fcompp | Fucompp => -2,
         Fnstsw | Fstsw => 0,
+        // `finit`/`fninit` empty the x87 stack; the depth pass resets sp to 0 for
+        // them (a plain delta can't express that), but they are *modelled* here so
+        // a CRT-startup `fninit` does not bail the whole function to asm.
+        Finit | Fninit => 0,
         Fldcw | Fnstcw | Fstcw | Fnclex | Fclex | Fnop | Wait => 0,
         _ => return None,
     })
@@ -2255,8 +2259,8 @@ fn x87_try(insn: &Insn, sp: i32, mode: RoundMode) -> Option<Vec<Stmt>> {
             _ => return None,
         },
 
-        // --- control word / wait: no effect on the value stack ------------
-        Fldcw | Fnstcw | Fstcw | Fnclex | Fclex | Fnop | Wait => vec![Stmt::Nop],
+        // --- control word / wait / FPU reset: no value the model tracks ----
+        Fldcw | Fnstcw | Fstcw | Fnclex | Fclex | Fnop | Wait | Finit | Fninit => vec![Stmt::Nop],
 
         _ => return None,
     })

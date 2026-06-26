@@ -551,7 +551,13 @@ fn x87_depth_pass(
                 return Err(X87Bail);
             }
             out.insert(insn.address, (sp as u32, mode));
-            sp += delta;
+            // `finit`/`fninit` empty the FPU stack — reset the modelled depth to 0
+            // (the CRT startup runs one before any user FP code).
+            if matches!(ins.mnemonic(), Mnemonic::Finit | Mnemonic::Fninit) {
+                sp = 0;
+            } else {
+                sp += delta;
+            }
             if !(0..=8).contains(&sp) {
                 return Err(X87Bail);
             }
