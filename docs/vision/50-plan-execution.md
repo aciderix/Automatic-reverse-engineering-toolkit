@@ -1277,3 +1277,17 @@ flottante), à faire en session dédiée, une fonction à la fois, difftest à c
 - **Vérifié** : fixture `read_abs_path.exe` (lit un vrai `/tmp/…` créé par le test → `ABSREAD=HELLO_ABS`)
   + test. **Lua toujours 35/35.** Régression : transpile-diff **4/4**, difftest **268/268**,
   `cargo test` **98/0**.
+
+### 🎯 `LoadLibraryExA` → fausse handle non-NULL → busybox `cat` MARCHE ✅ FAIT
+- **2026-06-27 — Suite du diagnostic cat** : après le fix de chemin, `cat` crashait dans
+  `concat_path_file("kernel32.dll", NULL)` — pas dans la lecture du fichier ! La glue **delay-load** de
+  msvcrt sonde `kernel32.dll` via **`LoadLibraryExA`** (variante *Ex*, **non shimée** → stub renvoie 0).
+  Sur ce NULL, busybox tente une recherche disque et construit un chemin avec un nom NULL → `memcpy`
+  depuis NULL. (`LoadLibraryA` renvoyait déjà une fausse handle ; seul `LoadLibraryExA` manquait.)
+- **Fix** : `aret_LoadLibraryExA`/`ExW` renvoient une fausse handle non-NULL (`0x10000000`, comme
+  `LoadLibraryA`). Les vrais symboles sont déjà interceptés comme imports/shims, donc la handle n'a
+  pas besoin d'être réelle.
+- **Effet** : **`busybox cat /tmp/in.txt` fonctionne** (`hello world hello`) — rejoint
+  echo/true/false/basename/pwd. (grep/cut sortent vide, sort/uniq bouclent — bugs distincts à part.)
+- **Vérifié** : Lua toujours **35/35**, régression transpile-diff **4/4**, difftest **268/268**,
+  `cargo test` **98/0**.

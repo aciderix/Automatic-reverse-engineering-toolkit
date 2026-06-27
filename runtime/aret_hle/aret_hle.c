@@ -720,6 +720,12 @@ uint32_t aret_GetModuleHandleA(uint32_t esp) { (void)esp; return 0x00400000u; }
 uint32_t aret_GetModuleHandleW(uint32_t esp) { (void)esp; return 0x00400000u; }
 uint32_t aret_GetProcAddress(uint32_t esp) { (void)esp; return 0; }
 uint32_t aret_LoadLibraryA(uint32_t esp) { (void)esp; return 0x10000000u; }
+/* LoadLibraryExA(name, hFile, flags): like LoadLibraryA, return a non-NULL fake
+ * handle. The msvcrt delay-load glue probes for kernel32.dll/etc.; a NULL here
+ * makes it fall back to a disk search that builds a path from a NULL name and
+ * crashes. The actual symbols are already intercepted as imports/shims. */
+uint32_t aret_LoadLibraryExA(uint32_t esp) { (void)esp; return 0x10000000u; }
+uint32_t aret_LoadLibraryExW(uint32_t esp) { (void)esp; return 0x10000000u; }
 uint32_t aret_FreeLibrary(uint32_t esp) { (void)esp; return 1; }
 uint32_t aret_SetUnhandledExceptionFilter(uint32_t esp) { (void)esp; return 0; }
 uint32_t aret_VirtualProtect(uint32_t esp) { (void)esp; return 1; }
