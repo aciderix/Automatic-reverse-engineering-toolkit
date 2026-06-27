@@ -16,6 +16,39 @@
 
 ---
 
+## 0. Stratégie de couverture — 2 axes + oracles différentiels
+
+« Universel » se décompose en **deux axes indépendants** ; un binaire peut casser
+sur l'un sans toucher l'autre, et on ne peut pas substituer l'un à l'autre :
+
+| Axe | Quoi | Où vit le bug | Oracle automatisé |
+|-----|------|---------------|-------------------|
+| **1. Justesse de traduction CPU** | chaque instruction x86 → C correcte | le **lifter** (`ir/lift.rs`) | **Unicorn** (`src/cpudiff.rs`) |
+| **2. Couverture des API OS** | les appels Win32/CRT que le programme fait | le **HLE** / Winelib | **Wine** (à venir) |
+
+**Accélérateur = automatiser l'oracle** (au lieu de débugger un programme à la
+main avec gdb) :
+
+- **Axe 1 — `src/cpudiff.rs`** (`cargo test --features unpack cpudiff`) : lifte
+  chaque instruction d'un corpus, l'exécute sur **des milliers d'états aléatoires**
+  via un interpréteur IR **et** via Unicorn, diffe registres + flags. L'interp
+  renvoie `None` pour ce qu'il ne modélise pas → **case sautée, jamais de faux
+  positif**. Trouve les bugs lifter **en lot**, avant qu'un programme ne les
+  exhibe par un crash. (A déjà trouvé : retenue width-aware, shift ZF à count=0.)
+- **Axe 2 — différentiel Wine** (à construire) : un **corpus de binaires** exécuté
+  sous Wine (vérité terrain Win32) **vs** ARET, diff stdout/exit. Donne le **%
+  de programmes qui matchent** = métrique chiffrée de l'avancée globale, et tire
+  la couverture API. À amorcer **quand l'axe 1 est blindé**.
+
+Ces oracles **renforcent** le principe sacré : une divergence = bug prouvé ; une
+correspondance = correction prouvée ; les chemins non modélisés restent `Asm`/abort.
+
+**Démonstrateurs de référence** : **Lua 5.4** (PE 650 Ko → ELF natif, **35/35** sur
+une batterie de 14 sous-systèmes) pour l'axe 1 ; **busybox** (echo/true/false/
+basename/pwd/cat) pour l'axe 2.
+
+---
+
 ## 1. Méthode de travail (à respecter)
 
 1. **Une tâche à la fois**, méthodique. Pas de big-bang.
@@ -23,17 +56,20 @@
    possible (mieux qu'un gros binaire), (c) implémenter, (d) **vérifier** (tests +
    régression + différentiel si lifter), (e) **commit** descriptif, (f) **mettre à
    jour le journal §4**.
-3. **Jamais casser la régression** : `cargo test --release` (70 tests) doit rester
-   vert ; pour tout changement de lift/structure, lancer aussi `bench/difftest.sh`
+3. **Jamais casser la régression** : `cargo test --release` doit rester vert ;
+   pour tout changement de lift/structure, lancer aussi `bench/difftest.sh`
    (différentiel **décompile**, -O0→-O3) **et** `bench/difftest_transpile.sh`
    (différentiel **transpile** = le vrai produit) et viser **aucune régression**.
+   Pour un changement du **lifter**, lancer en plus le **différentiel Unicorn**
+   `cargo test --features unpack cpudiff` (axe 1, §0).
 4. Commits petits et fréquents. Pousser souvent.
 
 ### Commandes clés
 ```
 cargo build --release
-cargo test --release                 # 70 tests (défaut)
-cargo test --release --features unpack
+cargo test --release                 # suite par défaut
+cargo test --release --features unpack          # + unpacker
+cargo test --release --features unpack cpudiff  # différentiel lifter ↔ Unicorn (axe 1)
 bash bench/regression.sh             # porte unifiée (build+tests+niveaux)
 bash bench/difftest.sh               # différentiel décompile (Pipeline A, -O0→-O3)
 bash bench/difftest_transpile.sh     # différentiel transpile (Pipeline B = produit réel)
