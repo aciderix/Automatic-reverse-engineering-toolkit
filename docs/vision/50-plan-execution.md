@@ -1112,3 +1112,17 @@ flottante), à faire en session dédiée, une fonction à la fois, difftest à c
   régression : difftest 268/268, transpile-diff 4/4, `cargo test` 5/5, **busybox 6/6**. *Reste Lua* :
   le **formatage flottant** (`2^10`, `math.sqrt`) bute sur `fld qword [ecx]` non modélisé (= la
   **robustesse passe x87**, maintenant abordable avec ce **filet Lua quasi-opérationnel**).
+
+### 🎯 FILET LUA OPÉRATIONNEL + prochaine cible x87 (luaH_newkey)
+- **2026-06-27 — Bilan** : 2 bugs **généraux** corrigés ce tour (tail-call import esp+4 ; retenue
+  `add` 32-bit à immédiat signé). **Lua reconstruit (mingw-13) tourne** : démarrage, `print`,
+  arithmétique entière, `table.sort`. Le **filet de régression Lua est désormais utilisable** pour
+  attaquer l'x87 en sûreté (en plus de difftest/transpile-diff/busybox).
+- **Prochaine cible (x87, localisée)** : `print(2.5)`/`2^10` → `luaH_newkey` (sub_417190) **abandonne
+  son analyse de profondeur x87** sur l'**idiome de normalisation de clé flottante** (`luaV_flttointeger` :
+  `n == floor(n)` via `fldl/fucomip/fstp` dans du code très branchy). **Tous les ops sont dans
+  `x87_delta`** → c'est un **bail de profondeur/join** (même famille que Lua `forprep`/`intarith` et
+  busybox `seq`/`__strtodg`). C'est LE chantier « robustesse passe x87 » (réconciliation des
+  profondeurs aux joins / suivi des valeurs conservées par `fstp st(i)` dans l'idiome NaN) — délicat
+  (correctness x87 critique), à faire **une fonction à la fois avec difftest + le filet Lua à chaque
+  pas**. Débloque d'un coup : Lua flottant, `seq`, et les partials libm.
