@@ -771,6 +771,26 @@ fn wide_64bit_return_and_shift_on_32bit() {
 }
 
 #[test]
+fn wide_add_adc_carry_on_32bit() {
+    if !has_m32() {
+        eprintln!("skipping wide-carry test: `cc -m32` unavailable (install gcc-multilib)");
+        return;
+    }
+    // 64-bit `(key-1) < alimit` built from `add $-1; adc $-1; cmp; sbb` (Lua's
+    // luaH_getint array bound). The 32-bit add's carry-out was lifted from a
+    // sign-extended immediate (0xffffffff -> 0xffff_ffff_ffff_ffff), so it came
+    // out 0 instead of 1 and (2-1) became 0xffffffff00000001 -> the bound test
+    // returned the wrong answer. That made Lua's registry[2] (the globals table)
+    // miss the array part, so `_G` read back nil ("attempt to index a nil value").
+    // The fix computes the carry from operands masked to the operation width.
+    let out = transpile_and_run("wide_carry.exe");
+    assert!(
+        out.contains("CARRY: 1 1 0 0"),
+        "64-bit add/adc carry on 32-bit not exact (the _G=nil bug):\n{out}"
+    );
+}
+
+#[test]
 fn adjacent_jump_tables_are_bounded() {
     if !has_m32() {
         eprintln!("skipping jump-table-bound test: `cc -m32` unavailable");
