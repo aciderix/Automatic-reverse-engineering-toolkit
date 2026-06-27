@@ -153,7 +153,29 @@ pub fn build_ir(prog: &Program, func: &Function) -> IrFunction {
                             _ => None,
                         };
                         match ct {
-                            Some(ct) => stmts.push(Stmt::Return(Some(tail_call(ct, bits)))),
+                            Some(ct) => {
+                                let mut call = tail_call(ct, bits);
+                                // A tail `jmp import` (a thin wrapper like Lua's
+                                // l_alloc -> realloc) does NOT push a return address:
+                                // the caller's return address is still at [esp+0], so
+                                // the import's arguments start at [esp+4]. Hand the
+                                // shim esp+4. (A regular `call import` pushes the
+                                // retaddr, so name_calls_in_expr passes plain esp.)
+                                // Without this the shim reads the retaddr as arg0 and
+                                // every argument is shifted by one slot.
+                                if bits == 32 {
+                                    if let Expr::Call { target: CallTarget::Direct(t), args, .. } = &mut call {
+                                        if matches!(resolve_call(prog, *t), CallBinding::Shim { thread_esp: true, .. }) {
+                                            *args = vec![Expr::Binary(
+                                                BinOp::Add,
+                                                Box::new(Expr::Read(Location::Reg(RegId(4)))),
+                                                Box::new(Expr::konst(4, 32)),
+                                            )];
+                                        }
+                                    }
+                                }
+                                stmts.push(Stmt::Return(Some(call)));
+                            }
                             None => stmts.push(Stmt::Asm(last.text.clone())),
                         }
                     }

@@ -1066,3 +1066,33 @@ flottante), à faire en session dédiée, une fonction à la fois, difftest à c
   correction de ce bug `lua_newstate`, soit une **fixture minimale** reproduisant l'idiome de
   comparaison NaN x87 (`fldz; fld x; fucomi; fstp st(1)`) — approche ciblée recommandée pour la
   prochaine session.
+- **2026-06-27 — Diagnostic approfondi (watchpoint matériel, confirmé PRÉ-EXISTANT** : ARET au
+  commit pré-session `c016432` échoue à l'identique → **pas une régression de cette session ;
+  l'équivalence corpus transpile-diff 4/4 tenue partout le confirme aussi).** Mécanisme exact :
+  1. `lua_newstate` stocke **correctement** `g->frealloc = 0x41eb50` (l_alloc).
+  2. Puis **`stack_init` (sub_415380)** corrompt cette valeur : sa boucle `setnilvalue`
+     (`movb $0,(slot+8)`) écrit des octets nil **par-dessus `g->frealloc`** → octet de poids faible
+     mis à 0 → `0x41eb50` → `0x41eb00`. Plus tard `luaM_malloc_` appelle `0x41eb00` (non récupéré)
+     dans le chemin dtoa (`__pow5mult_D2A`) → abort.
+  3. Cause racine : l'**allocation de pile** dans `stack_init` (via `luaM_malloc_`→`l_alloc`→
+     `realloc`) **renvoie un pointeur qui chevauche le bloc global_State** (`0x860d210` = bloc+0x70,
+     alors que le bloc LG est à `0x860d1a0`). Les shims `aret_malloc/realloc/free` sont **corrects**
+     (simple forward host) → le `malloc` hôte renvoie une vraie adresse fraîche, mais **le lift
+     mal-propage la valeur de retour** (pointeur) entre `aret_realloc` et l'usage dans `stack_init`,
+     produisant une adresse relative au bloc.
+- **CAUSE RACINE TROUVÉE ET CORRIGÉE ✅ (général)** : `l_alloc` est un **wrapper mince** qui
+  **tail-jumpe** vers l'import `realloc` (`jmp realloc`). Un `jmp import` (≠ `call import`) **ne
+  pousse PAS d'adresse de retour** : l'adresse de retour de l'appelant reste en `[esp+0]`, donc les
+  arguments de l'import commencent à `[esp+4]`. Or ARET passait au shim `esp` (comme pour un
+  `call`, où le `call` pousse le retaddr et les args sont en `[esp+0]`) → le shim lisait le
+  **retaddr comme arg0** et **tous les arguments décalés d'un slot**. Pour `l_alloc`→`realloc` :
+  `realloc(retaddr_garbage, ptr_au_lieu_de_size)` → pointeur de pile qui chevauche `global_State`
+  → `setnilvalue` écrase `g->frealloc`.
+- **Correctif (`src/ir/build.rs`, Flow::Jump)** : un tail-call (`return f(args)`) vers un import
+  `thread_esp` 32-bit reçoit désormais **`esp+4`** (saute le retaddr toujours sur la pile), au lieu
+  du `esp` ajouté par `name_calls_in_expr` pour les `call`. **Bug général** : tout wrapper mince qui
+  `jmp` vers un import cdecl/stdcall (très courant) était cassé.
+- **Effet** : **Lua démarre et affiche sa bannière** (`Lua 5.4.7 Copyright…`) — la corruption mémoire
+  a disparu. Non-régression : difftest 268/268, transpile-diff 4/4, `cargo test` 5/5, **busybox 6/6
+  applets** OK. *Reste Lua* : « attempt to index a nil value » (erreur **bien plus tardive**,
+  distincte — lib/global manquant) → Lua tourne maintenant assez loin pour servir bientôt de filet.
