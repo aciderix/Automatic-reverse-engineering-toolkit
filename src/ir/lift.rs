@@ -654,6 +654,14 @@ fn asm_fallback(insn: &Insn) -> Vec<Stmt> {
 /// `neg`). Sign/overflow are read from bit `w-1` so they are correct whatever C
 /// width `r` is computed in (see `sign_bit`).
 fn sub_flags(a: &Expr, b: &Expr, r: &Expr, w: u32) -> Vec<Stmt> {
+    sub_flags_cin(a, b, &konst(0), r, w)
+}
+
+/// As `sub_flags`, with an explicit borrow-in `cin` (0/1) for `sbb`. The borrow
+/// is `a_w < b_w + cin` at full precision — folding the borrow into `b` and then
+/// masking would drop it when `b` is at the width maximum. `b` is the *original*
+/// operand (so ZF/CF/OF read its true value/sign, not `(b+cin)`'s).
+fn sub_flags_cin(a: &Expr, b: &Expr, cin: &Expr, r: &Expr, w: u32) -> Vec<Stmt> {
     let of = Expr::Binary(
         BinOp::And,
         Box::new(Expr::Binary(
@@ -667,21 +675,16 @@ fn sub_flags(a: &Expr, b: &Expr, r: &Expr, w: u32) -> Vec<Stmt> {
             Box::new(sign_bit(a, w)),
         )),
     );
-    // ZF (a==b) and CF (a <u b) are *not* invariant under how the operands are
-    // extended into the i128 the C masks pointers/values to: a `cmp r/m32, imm8`
-    // sign-extends the immediate to the operand width, so a 32-bit `0xffffffc1`
-    // becomes `0xffffffffffffffc1`, while the register is zero-extended. Comparing
-    // those raw makes CF wrong (the high-word `sbb` of a 64-bit signed compare then
-    // mis-sets SF/OF — Lua's `>>` via luaV_shiftl(x, -n) returned 0). Mask both to
-    // `w` bits first. (SF/OF already read only the `w`-bit sign via `sign_bit`.)
     let am = if w >= 64 { a.clone() } else { bin(BinOp::And, a.clone(), konst(mask(w))) };
-    let bm = if w >= 64 { b.clone() } else { bin(BinOp::And, b.clone(), konst(mask(w))) };
-    vec![
-        set_flag(FlagKind::Zf, Expr::Binary(BinOp::Eq, Box::new(am.clone()), Box::new(bm.clone()))),
+    let bm0 = if w >= 64 { b.clone() } else { bin(BinOp::And, b.clone(), konst(mask(w))) };
+    let bm = bin(BinOp::Add, bm0, cin.clone()); // b_w + borrow-in
+    let rw = if w >= 64 { r.clone() } else { bin(BinOp::And, r.clone(), konst(mask(w))) };
+    return vec![
+        set_flag(FlagKind::Zf, Expr::Binary(BinOp::Eq, Box::new(rw), Box::new(konst(0)))),
         set_flag(FlagKind::Sf, sign_bit(r, w)),
         set_flag(FlagKind::Cf, Expr::Binary(BinOp::Ult, Box::new(am), Box::new(bm))),
         set_flag(FlagKind::Of, of),
-    ]
+    ];
 }
 
 /// Flags for an addition `a + b` of width `w` bits, with result `r` (the raw,
@@ -689,6 +692,16 @@ fn sub_flags(a: &Expr, b: &Expr, r: &Expr, w: u32) -> Vec<Stmt> {
 /// bit `w` of the sum — *not* `r < a`, which is always false when a `w<64` sum is
 /// computed in 64-bit and never wraps. Sign/zero/overflow use the `w`-bit result.
 fn add_flags(a: &Expr, b: &Expr, r: &Expr, w: u32) -> Vec<Stmt> {
+    add_flags_cin(a, b, &konst(0), r, w)
+}
+
+/// As `add_flags`, with an explicit carry-in `cin` (0/1) for `adc`. The carry-out
+/// must be computed from the *w-bit* operands **plus** the carry-in, all at full
+/// precision — folding the carry-in into `b` and then masking (`(b+cin) & mask`)
+/// drops it when `b` is at the width maximum (e.g. `adc r, -1` with CF=1), which
+/// also corrupts 64-bit arithmetic built from 32-bit `add`/`adc` pairs. `b` here
+/// is the *original* operand (so OF reads its true sign, not `(b+cin)`'s).
+fn add_flags_cin(a: &Expr, b: &Expr, cin: &Expr, r: &Expr, w: u32) -> Vec<Stmt> {
     let m = if w >= 64 {
         r.clone()
     } else {
@@ -696,16 +709,16 @@ fn add_flags(a: &Expr, b: &Expr, r: &Expr, w: u32) -> Vec<Stmt> {
     };
     let signw = |x: &Expr| bin(BinOp::And, bin(BinOp::Shr, x.clone(), konst((w - 1) as i128)), konst(1));
     let cf = if w >= 64 {
-        bin(BinOp::Ult, r.clone(), a.clone()) // 64-bit: wraparound check
+        // 64-bit: r = a + b + cin wraps below a, or equals a exactly with a carry.
+        bin(BinOp::Or, bin(BinOp::Ult, r.clone(), a.clone()),
+            bin(BinOp::And, bin(BinOp::Eq, r.clone(), a.clone()), cin.clone()))
     } else {
-        // Carry-out is bit `w` of the sum of the *w-bit* operands. A sign-extended
-        // immediate (e.g. `add r32, 0xffffffff` -> b = 0xffff_ffff_ffff_ffff) would
-        // otherwise pollute the high bits and zero the real carry — breaking 64-bit
-        // arithmetic built from `add`/`adc` pairs (a real Lua bug: luaH_getint's
-        // `(key-1) < alimit` array bound). Mask both operands to `w` first.
+        // Carry-out = bit `w` of (a_w + b_w + cin). Mask operands to `w` first (a
+        // sign-extended immediate would otherwise pollute the high bits).
         let am = bin(BinOp::And, a.clone(), konst(mask(w)));
         let bm = bin(BinOp::And, b.clone(), konst(mask(w)));
-        bin(BinOp::And, bin(BinOp::Shr, bin(BinOp::Add, am, bm), konst(w as i128)), konst(1))
+        let sum = bin(BinOp::Add, bin(BinOp::Add, am, bm), cin.clone());
+        bin(BinOp::And, bin(BinOp::Shr, sum, konst(w as i128)), konst(1))
     };
     let of = bin(
         BinOp::And,
@@ -877,10 +890,12 @@ pub fn lift(insn: &Insn, bits: u32) -> Vec<Stmt> {
             // dst write, SSA would otherwise resolve the dst's carry-in to this
             // instruction's own carry-out.
             let cf = Location::Temp((insn.address as u32).wrapping_mul(2));
-            let bc = bin(BinOp::Add, b, Expr::Read(cf.clone()));
-            let r = bin(BinOp::Sub, a.clone(), bc.clone());
+            let cin = Expr::Read(cf.clone());
+            let bc = bin(BinOp::Add, b.clone(), cin.clone());
+            let r = bin(BinOp::Sub, a.clone(), bc);
             let mut out = vec![Stmt::Set { dst: cf, expr: read_flag(FlagKind::Cf) }];
-            out.extend(sub_flags(&a, &bc, &r, op0_width(ins, bits)));
+            // Borrow-in handled at full precision (original `b`, separate `cin`).
+            out.extend(sub_flags_cin(&a, &b, &cin, &r, op0_width(ins, bits)));
             out.extend(some_or_asm!(write_op0(ins, r, bits)));
             out
         }
@@ -888,10 +903,12 @@ pub fn lift(insn: &Insn, bits: u32) -> Vec<Stmt> {
             let a = some_or_asm!(op_value(ins, 0));
             let b = some_or_asm!(op_value(ins, 1));
             let cf = Location::Temp((insn.address as u32).wrapping_mul(2));
-            let bc = bin(BinOp::Add, b, Expr::Read(cf.clone()));
-            let r = bin(BinOp::Add, a.clone(), bc.clone());
+            let cin = Expr::Read(cf.clone());
+            let bc = bin(BinOp::Add, b.clone(), cin.clone());
+            let r = bin(BinOp::Add, a.clone(), bc);
             let mut out = vec![Stmt::Set { dst: cf, expr: read_flag(FlagKind::Cf) }];
-            out.extend(add_flags(&a, &bc, &r, op0_width(ins, bits)));
+            // Carry-in handled at full precision (original `b`, separate `cin`).
+            out.extend(add_flags_cin(&a, &b, &cin, &r, op0_width(ins, bits)));
             out.extend(some_or_asm!(write_op0(ins, r, bits)));
             out
         }
@@ -1307,16 +1324,24 @@ pub fn lift(insn: &Insn, bits: u32) -> Vec<Stmt> {
         }
 
         Mnemonic::Inc | Mnemonic::Dec => {
+            let w = op0_width(ins, bits);
             let a = some_or_asm!(op_value(ins, 0));
-            let op = if ins.mnemonic() == Mnemonic::Inc {
-                BinOp::Add
-            } else {
-                BinOp::Sub
-            };
+            let is_inc = ins.mnemonic() == Mnemonic::Inc;
+            let op = if is_inc { BinOp::Add } else { BinOp::Sub };
             let r = bin(op, a.clone(), konst(1));
+            // ZF/SF read the w-bit result (inc of 0xff is 0 in 8 bits, not 0x100).
+            // inc/dec leave CF untouched but *do* set OF: inc overflows only at
+            // +max_signed (sign 0->1), dec only at min_signed (sign 1->0).
+            let m = bin(BinOp::And, r.clone(), konst(mask(w)));
+            let of = if is_inc {
+                bin(BinOp::And, bin(BinOp::Eq, sign_bit(&a, w), konst(0)), bin(BinOp::Eq, sign_bit(&m, w), konst(1)))
+            } else {
+                bin(BinOp::And, bin(BinOp::Eq, sign_bit(&a, w), konst(1)), bin(BinOp::Eq, sign_bit(&m, w), konst(0)))
+            };
             let mut out = vec![
-                set_flag(FlagKind::Zf, bin(BinOp::Eq, r.clone(), konst(0))),
-                set_flag(FlagKind::Sf, sign_bit(&r, op0_width(ins, bits))),
+                set_flag(FlagKind::Zf, bin(BinOp::Eq, m.clone(), konst(0))),
+                set_flag(FlagKind::Sf, sign_bit(&m, w)),
+                set_flag(FlagKind::Of, of),
             ];
             out.extend(some_or_asm!(write_op0(ins, r, bits)));
             out
@@ -1687,16 +1712,22 @@ pub fn lift(insn: &Insn, bits: u32) -> Vec<Stmt> {
             let c = bin(BinOp::And, some_or_asm!(op_value(ins, 1)), konst((w - 1) as i128));
             let wc = bin(BinOp::And, bin(BinOp::Sub, konst(w as i128), c.clone()), konst((w - 1) as i128));
             let val = if ins.mnemonic() == Mnemonic::Rol {
-                bin(BinOp::Or, bin(BinOp::Shl, x.clone(), c), bin(BinOp::Shr, x, wc))
+                bin(BinOp::Or, bin(BinOp::Shl, x.clone(), c.clone()), bin(BinOp::Shr, x, wc))
             } else {
-                bin(BinOp::Or, bin(BinOp::Shr, x.clone(), c), bin(BinOp::Shl, x, wc))
+                bin(BinOp::Or, bin(BinOp::Shr, x.clone(), c.clone()), bin(BinOp::Shl, x, wc))
             };
             let val = bin(BinOp::And, val, konst(mask(w)));
-            // CF = LSB (rol) / MSB (ror) of the rotated result.
-            let cf = if ins.mnemonic() == Mnemonic::Rol {
+            // CF = LSB (rol) / MSB (ror) of the rotated result — but a zero count
+            // leaves flags unchanged (x86), so preserve old CF then.
+            let cf_bit = if ins.mnemonic() == Mnemonic::Rol {
                 bin(BinOp::And, val.clone(), konst(1))
             } else {
                 bin(BinOp::And, bin(BinOp::Shr, val.clone(), konst((w - 1) as i128)), konst(1))
+            };
+            let cf = Expr::Select {
+                cond: Box::new(bin(BinOp::Eq, c.clone(), konst(0))),
+                then_: Box::new(read_flag(FlagKind::Cf)),
+                else_: Box::new(cf_bit),
             };
             let mut out = vec![set_flag(FlagKind::Cf, cf)];
             out.extend(some_or_asm!(write_op0(ins, val, bits)));

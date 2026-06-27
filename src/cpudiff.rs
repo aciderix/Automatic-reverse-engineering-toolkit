@@ -122,6 +122,20 @@ impl<'a> Interp<'a> {
                     UnOp::SignExtend | UnOp::ZeroExtend | UnOp::Truncate => return None,
                 }
             }
+            // Arithmetic right shift is width-dependent: sign-extend from the
+            // operand width before shifting. Mirror the C backend's `signed_cast`,
+            // which infers the width from an `And(x, mask)` wrapper (the lifter
+            // masks register operands to their width), defaulting to 64.
+            Expr::Binary(BinOp::Sar, a, b) => {
+                let w = signed_width(a);
+                let mut av = self.eval(a)?;
+                let cv = self.eval(b)?;
+                if w < 64 && (av >> (w - 1)) & 1 == 1 {
+                    av |= !((1u64 << w) - 1);
+                }
+                let sh = if cv >= 64 { 63 } else { cv };
+                ((av as i64) >> sh) as u64
+            }
             Expr::Binary(op, a, b) => {
                 let x = self.eval(a)?;
                 let y = self.eval(b)?;
@@ -242,26 +256,21 @@ fn decode(bytes: &[u8]) -> crate::disasm::Insn {
     }
 }
 
-/// Does any statement contain a `Sar` (arithmetic right shift)? Such results are
-/// width-dependent and the bare-u64 interpreter cannot reproduce them faithfully,
-/// so their register value is not scored (flags still are).
-fn stmts_contain_sar(stmts: &[Stmt]) -> bool {
-    fn ex(e: &Expr) -> bool {
-        match e {
-            Expr::Binary(BinOp::Sar, _, _) => true,
-            Expr::Binary(_, a, b) => ex(a) || ex(b),
-            Expr::Unary(_, x) | Expr::Cast { expr: x, .. } => ex(x),
-            Expr::Select { cond, then_, else_ } => ex(cond) || ex(then_) || ex(else_),
-            Expr::Load { addr, .. } => ex(addr),
-            _ => false,
+/// The width (in bits) to sign-extend from for an arithmetic shift / signed
+/// compare, inferred from an `And(x, mask)` wrapper exactly as the C backend's
+/// `signed_cast` does (0xff→8, 0xffff→16, 0xffffffff→32), else the full 64.
+fn signed_width(e: &Expr) -> u32 {
+    if let Expr::Binary(BinOp::And, _, m) = e {
+        if let Expr::Const(c, _) = m.as_ref() {
+            return match *c {
+                0xff => 8,
+                0xffff => 16,
+                0xffffffff => 32,
+                _ => 64,
+            };
         }
     }
-    stmts.iter().any(|s| match s {
-        Stmt::Set { expr, .. } => ex(expr),
-        Stmt::Store { addr, value, .. } => ex(addr) || ex(value),
-        Stmt::CallStmt(e) => ex(e),
-        _ => false,
-    })
+    64
 }
 
 /// Which of CF/ZF/SF/OF the lifted statements assign (only those are compared).
@@ -290,12 +299,6 @@ fn diff_one(bytes: &[u8], iters: u32, seed: &mut u64) -> Result<Vec<Mismatch>, S
         return Ok(Vec::new());
     }
     let cmp_flags = flags_written(&stmts);
-    // The interpreter works in 64-bit and cannot faithfully reproduce an
-    // *arithmetic* right shift at the operand width (a 32-bit value sign-extends
-    // from bit 31, not bit 63 — the C backend gets this right via Ty tracking,
-    // but the bare-u64 interpreter would not). So when the lift uses `Sar`, do
-    // not score the register *value* (flags are width-explicit and still scored).
-    let has_sar = stmts_contain_sar(&stmts);
 
     let mut uc: *mut uc_engine = std::ptr::null_mut();
     unsafe {
@@ -374,9 +377,6 @@ fn diff_one(bytes: &[u8], iters: u32, seed: &mut u64) -> Result<Vec<Mismatch>, S
         // ---- compare GP regs (32-bit) ----
         const NAMES: [&str; 8] = ["eax", "ecx", "edx", "ebx", "esp", "ebp", "esi", "edi"];
         for r in 0..8 {
-            if has_sar {
-                break;
-            }
             let lifted = interp.regs[r] as u32;
             if lifted != uc_regs[r] {
                 out.push(Mismatch {
@@ -458,9 +458,64 @@ fn corpus() -> Vec<Vec<u8>> {
         // 16-bit (66 prefix) and 8-bit widths
         vec![0x66, 0x01, 0xc8], // add ax, cx
         vec![0x66, 0x29, 0xc8], // sub ax, cx
+        vec![0x66, 0x39, 0xc8], // cmp ax, cx
+        vec![0x66, 0x83, 0xe8, 0xc1], // sub ax, -63
+        vec![0x66, 0xc1, 0xf8, 0x03], // sar ax, 3
+        vec![0x66, 0xd3, 0xe0], // shl ax, cl
         vec![0x00, 0xc8], // add al, cl
         vec![0x28, 0xc8], // sub al, cl
         vec![0x38, 0xc8], // cmp al, cl
+        vec![0x10, 0xc8], // adc al, cl
+        vec![0x18, 0xc8], // sbb al, cl
+        vec![0xc0, 0xf8, 0x02], // sar al, 2
+        vec![0xfe, 0xc0], // inc al
+        vec![0xfe, 0xc8], // dec al
+        vec![0xf6, 0xd8], // neg al
+        vec![0x66, 0x11, 0xc8], // adc cx, cx (16-bit carry-in)
+        vec![0x66, 0x19, 0xc8], // sbb cx, cx
+        // add with imm32
+        vec![0x05, 0xc1, 0xff, 0xff, 0xff], // add eax, 0xffffffc1
+        vec![0x2d, 0x39, 0x30, 0x00, 0x00], // sub eax, 0x3039
+        // imul (2-operand and 3-operand), 1-operand mul/imul (edx:eax)
+        vec![0x0f, 0xaf, 0xc1], // imul eax, ecx
+        vec![0x6b, 0xc1, 0x07], // imul eax, ecx, 7
+        vec![0xf7, 0xe1], // mul ecx   (edx:eax = eax*ecx)
+        vec![0xf7, 0xe9], // imul ecx
+        // rotates (set CF/OF)
+        vec![0xd3, 0xc0], // rol eax, cl
+        vec![0xd3, 0xc8], // ror eax, cl
+        vec![0xc1, 0xc0, 0x05], // rol eax, 5
+        vec![0xc1, 0xc8, 0x05], // ror eax, 5
+        // bit test / set / reset / complement (CF = old bit)
+        vec![0x0f, 0xa3, 0xc8], // bt  eax, ecx
+        vec![0x0f, 0xab, 0xc8], // bts eax, ecx
+        vec![0x0f, 0xb3, 0xc8], // btr eax, ecx
+        vec![0x0f, 0xbb, 0xc8], // btc eax, ecx
+        vec![0x0f, 0xba, 0xe0, 0x05], // bt eax, 5
+        // moves with extension
+        vec![0x0f, 0xb6, 0xc1], // movzx eax, cl
+        vec![0x0f, 0xb7, 0xc1], // movzx eax, cx
+        vec![0x0f, 0xbe, 0xc1], // movsx eax, cl
+        vec![0x0f, 0xbf, 0xc1], // movsx eax, cx
+        // the rest of the cmovcc family (flag-condition consumers)
+        vec![0x0f, 0x40, 0xc1], // cmovo
+        vec![0x0f, 0x41, 0xc1], // cmovno
+        vec![0x0f, 0x42, 0xc1], // cmovb
+        vec![0x0f, 0x43, 0xc1], // cmovae
+        vec![0x0f, 0x45, 0xc1], // cmovne
+        vec![0x0f, 0x48, 0xc1], // cmovs
+        vec![0x0f, 0x49, 0xc1], // cmovns
+        vec![0x0f, 0x4a, 0xc1], // cmovp
+        vec![0x0f, 0x4b, 0xc1], // cmovnp
+        vec![0x0f, 0x4d, 0xc1], // cmovge
+        vec![0x0f, 0x4e, 0xc1], // cmovle
+        vec![0x0f, 0x4f, 0xc1], // cmovg
+        // the rest of the setcc family
+        vec![0x0f, 0x92, 0xc0], // setb al
+        vec![0x0f, 0x95, 0xc0], // setne al
+        vec![0x0f, 0x98, 0xc0], // sets al
+        vec![0x0f, 0x9d, 0xc0], // setge al
+        vec![0x0f, 0x9f, 0xc0], // setg al
     ]
 }
 

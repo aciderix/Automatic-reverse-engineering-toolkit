@@ -1353,3 +1353,23 @@ flottante), à faire en session dédiée, une fonction à la fois, difftest à c
   difftest **268/268**, `cargo test` **98/0**, Lua **35/35**.
 - **Ceci est l'accélérateur demandé** : on passe de « débugger un programme à la main » à « une machine
   trouve les bugs lifter en lot, je corrige le général ». Même qualité, mêmes standards, bien plus vite.
+
+### 🎯 Corpus différentiel élargi → 4 bugs de flags trouvés et corrigés ✅ FAIT
+- **2026-06-27 — Axe 1, corpus complet** : `src/cpudiff.rs` étendu (~75 instructions : arith/logique
+  reg+imm sign-étendu, shifts, **rotates**, **imul/mul**, **bt/bts/btr/btc**, **movzx/movsx**, toute la
+  famille **cmovcc/setcc**, largeurs 8/16/32). Interp rendu **fidèle pour `Sar`** (extension de signe à
+  la largeur inférée de l'`And(x, mask)`, comme le `signed_cast` du backend C) → plus de faux positif,
+  comparaison valeur réactivée.
+- **4 bugs réels trouvés et corrigés** (tous généraux, invisibles à difftest/Lua) :
+  1. **`inc`/`dec` ZF sur résultat non masqué** (`inc al` de 0xff → 0 sur 8 bits) **+ OF manquant**
+     (inc/dec posent OF). Corrigé : ZF sur résultat masqué, OF ajouté, CF préservé.
+  2. **`rol`/`ror` CF non préservé à count=0** (x86 laisse les flags inchangés). Corrigé.
+  3. **`adc`/`sbb` retenue d'entrée perdue au masquage** : `bc = b + cin` puis `bc & mask` **droppe la
+     retenue** quand `b` est au max (ex. `adc r, -1` avec CF=1) — **affecte aussi le 32-bit** (paires
+     add/adc de l'arithmétique 64-bit). `add_flags`/`sub_flags` refactorés en `*_cin` : retenue traitée
+     à pleine précision (`(a_w + b_w + cin) >> w`), `b` original pour OF.
+- **Vérifié** : `cargo test --features unpack cpudiff` **vert** (corpus complet) ; régression
+  transpile-diff **4/4**, difftest **268/268**, `cargo test` **98/0**, Lua **35/35**.
+- **Bilan axe 1** : le harness différentiel a maintenant trouvé **6 bugs de lifter** au total
+  (retenue width-aware, shift ZF count=0, shl ZF non masqué, inc/dec ZF+OF, rol/ror CF count=0,
+  adc/sbb retenue) — tous **généraux**, tous corrigés. Socle de justesse nettement durci.
