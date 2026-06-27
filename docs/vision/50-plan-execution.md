@@ -1151,3 +1151,25 @@ flottante), à faire en session dédiée, une fonction à la fois, difftest à c
   `fld dword [0x440d20]`, une **autre** fonction de formatage de flottants). **Prochaine cible** :
   ce `fld [0x440d20]` (constante flottante chargée dans la conversion nombre→chaîne, frappé même par
   `print(42)` via le chemin commun).
+
+### 🎯 `compute_noreturn` : un tail-jmp a un *successeur* (arête inter-fonction) — faux positifs corrigés ✅ FAIT
+- **2026-06-27 — Bug trouvé via le filet Lua** : `print(2.5)` abandonnait sur `fld [0x440d20]` dans
+  `_luaopen_package`. Cause : le bloc `... call _lua_setfield ; fld [const] ...` voyait son **bloc de
+  chute (le `fld`) supprimé** parce que `_lua_setfield` était **faussement marqué noreturn**.
+  `_lua_setfield` n'a **aucun `ret`** : il retourne par des **tail-jmp** `jmp 0x4027e0`. Ma première
+  réécriture testait `Flow::Jump if b.successors.is_empty()` pour détecter un tail-jmp — **mais le CFG
+  enregistre la cible inter-fonction comme *successeur*** (`block [Jump] -> [0x4027e0]`), donc
+  `successors` n'est **pas** vide → on tombait dans `_ => {}` → `may_return` jamais posé → marqué
+  noreturn à tort.
+- **Fix général** : pour `Flow::Jump | CondJump | Indirect`, « may_return » si un successeur n'est
+  **pas un bloc interne** de la fonction (`!f.blocks.contains_key(&s)`) et n'est pas lui-même noreturn
+  — c'est une cible de tail-call qui rend la main. Successeurs vides (saut calculé non résolu) ⇒
+  may_return aussi. Détection robuste, indépendante de la façon dont le CFG peuple `successors`.
+- **Impact mesuré (Lua)** : ensemble noreturn **86 → 22 fonctions** (les ~64 fonctions tail-call
+  étaient toutes des faux positifs). La passe x87 ne supprime plus leurs chutes vivantes.
+  **Monotone & sûr** : le nouveau `may_return` est un sur-ensemble de l'ancien ⇒ l'ensemble noreturn
+  ne fait que **rétrécir** ⇒ on ne peut que **récupérer** du code, jamais en casser.
+- **Lua** : `print(42)` **OK** (banner + nombre) ; `t.lua` imprime `hello 42` puis avance jusqu'au
+  **prochain** bail x87 `fld qword [ebp+8]` (chemin de **formatage de flottants**, `print("fp:", 2^10…)`).
+- **Régression** : transpile-diff **4/4**, difftest **268/268**, `cargo test` **93/0**, busybox
+  (echo/true/false/basename) OK. **Prochaine cible** : `fld qword [ebp+8]` (conversion double→chaîne).

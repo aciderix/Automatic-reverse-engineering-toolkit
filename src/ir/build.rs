@@ -515,17 +515,25 @@ pub fn compute_noreturn(funcs: &[&Function]) -> std::collections::HashSet<u64> {
                 match b.terminator {
                     // A `ret` returns to the caller.
                     Flow::Return => may_return = true,
-                    // A tail jump with no *internal* successor leaves the function;
-                    // control returns through the target unless it is noreturn.
-                    Flow::Jump if b.successors.is_empty() => {
-                        let t = b.insns.last().and_then(|i| i.target);
-                        if !t.is_some_and(|t| noreturn.contains(&t)) {
+                    // A jump or branch whose target leaves this function is a tail
+                    // call: control returns through that target unless it is itself
+                    // noreturn. The target may be recorded as a (cross-function)
+                    // successor edge *or* left implicit — so check the recovered
+                    // successors for any address that is not one of this function's
+                    // own blocks, and fall back to the last instruction's target.
+                    // A jump/branch with no recovered successor at all (computed or
+                    // unresolved) could go anywhere — assume it can return.
+                    Flow::Jump | Flow::CondJump | Flow::Indirect => {
+                        if b.successors.is_empty() {
                             may_return = true;
+                        } else {
+                            for &s in &b.successors {
+                                if !f.blocks.contains_key(&s) && !noreturn.contains(&s) {
+                                    may_return = true;
+                                }
+                            }
                         }
                     }
-                    // An unresolved indirect tail (no recovered successors) could go
-                    // anywhere — assume it can return.
-                    Flow::Indirect if b.successors.is_empty() => may_return = true,
                     _ => {}
                 }
                 if may_return {
