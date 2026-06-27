@@ -1373,3 +1373,24 @@ flottante), à faire en session dédiée, une fonction à la fois, difftest à c
 - **Bilan axe 1** : le harness différentiel a maintenant trouvé **6 bugs de lifter** au total
   (retenue width-aware, shift ZF count=0, shl ZF non masqué, inc/dec ZF+OF, rol/ror CF count=0,
   adc/sbb retenue) — tous **généraux**, tous corrigés. Socle de justesse nettement durci.
+
+### 🎯 Corpus axe 1 quasi complet (sous-ensemble entier) — opérandes mémoire + divers ✅ FAIT
+- **2026-06-27 — Couverture mémoire** : `src/cpudiff.rs` étendu d'une **page scratch partagée**
+  interp↔Unicorn. Pour une instruction à opérande mémoire, on force le registre de **base** vers la
+  page, on remplit la page de bytes aléatoires (mêmes deux côtés), on évalue `Load`/`Store` dans
+  l'interp, et on **compare aussi la mémoire** après (valide les stores / read-modify-write). Corpus
+  porté à **~120 encodages** : reg+imm+**mémoire** (lecture / RMW / store, base+disp, 8/16/32-bit),
+  rotates, bt/bts/btr/btc, movzx/movsx (reg+mem), lea, xchg, bswap, bsf/bsr, cdq/cwde, toute la
+  famille cmovcc/setcc. **0 nouveau bug** sur le chemin mémoire → le lift des opérandes mémoire (calcul
+  d'adresse, largeurs de load/store, RMW) est **correct**.
+- **Périmètre honnête (ce que l'axe 1 NE couvre PAS — gaps identifiés)** :
+  1. **Flottant (x87/SSE)** : l'interp ne modélise pas les helpers `__x87_*`/`__fp_*` → cases sautées.
+     Demanderait un **différentiel FP séparé** (Unicorn sait émuler le x87). Sous-chantier distinct.
+  2. **`div`/`idiv`** : scorer fidèlement demande à l'interp de modéliser le dividende 64-bit edx:eax,
+     l'extension de signe du diviseur (idiv) et le trap #DE comme Unicorn le remonte. Retirés du corpus
+     (le lift de la division est exercé bout-en-bout par `//`/`%` de Lua, qui passent 35/35).
+  3. **Pipeline aval** (SSA / optimiseur / structureur / backend C) : couvert par difftest (268/268) et
+     transpile-diff (4/4), pas par ce harness per-instruction. **Couverture complémentaire.**
+- **Bilan** : la justesse du *lift entier* est désormais **très solide** (validée contre Unicorn sur un
+  corpus large, des milliers d'états). Combinée à difftest/transpile-diff (pipeline) + Lua 35/35, l'axe
+  « traduction CPU » est aussi blindé qu'on peut l'être sans preuve formelle. **Prêt pour l'axe 2 (Wine).**

@@ -42,6 +42,7 @@ extern "C" {
     fn uc_close(uc: *mut uc_engine) -> c_int;
     fn uc_mem_map(uc: *mut uc_engine, address: u64, size: usize, perms: u32) -> c_int;
     fn uc_mem_write(uc: *mut uc_engine, address: u64, bytes: *const c_void, size: usize) -> c_int;
+    fn uc_mem_read(uc: *mut uc_engine, address: u64, bytes: *mut c_void, size: usize) -> c_int;
     fn uc_reg_write(uc: *mut uc_engine, regid: c_int, value: *const c_void) -> c_int;
     fn uc_reg_read(uc: *mut uc_engine, regid: c_int, value: *mut c_void) -> c_int;
     fn uc_emu_start(uc: *mut uc_engine, begin: u64, until: u64, timeout: u64, count: usize)
@@ -62,6 +63,9 @@ const UC_GP: [c_int; 8] = [
 
 const CODE_ADDR: u64 = 0x1000;
 const STACK_ADDR: u64 = 0x20_0000; // a valid ESP so stack-touching ops don't fault
+const DATA_ADDR: u64 = 0x30_0000; // a scratch data page for memory operands
+const DATA_SIZE: usize = 0x1000;
+const DATA_PTR: u64 = DATA_ADDR + 0x80; // memory-operand base (room for small ±disp)
 
 // EFLAGS bit positions for the flags we model.
 fn flag_bit(f: FlagKind) -> u32 {
@@ -84,26 +88,59 @@ struct CpuState {
 
 // ---- IR interpreter (integer subset) --------------------------------------
 
-struct Interp<'a> {
+struct Interp {
     regs: [u64; 8],
     flags: HashMap<FlagKind, u64>,
     temps: HashMap<u32, u64>,
-    _life: std::marker::PhantomData<&'a ()>,
+    mem: Vec<u8>, // mirror of the scratch data page [DATA_ADDR, DATA_ADDR+DATA_SIZE)
 }
 
-impl<'a> Interp<'a> {
-    fn new(s: &CpuState) -> Self {
+/// Byte width of an integer Ty (1/2/4/8), or `None` for non-integer.
+fn ty_bytes(t: &Ty) -> Option<usize> {
+    match t {
+        Ty::Int { bits, .. } => Some((*bits as usize).div_ceil(8)),
+        Ty::Bool => Some(1),
+        _ => None,
+    }
+}
+
+impl Interp {
+    fn new(s: &CpuState, mem: Vec<u8>) -> Self {
         Interp {
             regs: s.regs,
             flags: s.flags.clone(),
             temps: HashMap::new(),
-            _life: std::marker::PhantomData,
+            mem,
         }
     }
 
+    /// Read `n` little-endian bytes from the scratch page, or `None` if out of it.
+    fn mem_read(&self, addr: u64, n: usize) -> Option<u64> {
+        let off = addr.checked_sub(DATA_ADDR)? as usize;
+        if off + n > self.mem.len() {
+            return None;
+        }
+        let mut v = 0u64;
+        for i in 0..n {
+            v |= (self.mem[off + i] as u64) << (8 * i);
+        }
+        Some(v)
+    }
+
+    fn mem_write(&mut self, addr: u64, n: usize, val: u64) -> Option<()> {
+        let off = addr.checked_sub(DATA_ADDR)? as usize;
+        if off + n > self.mem.len() {
+            return None;
+        }
+        for i in 0..n {
+            self.mem[off + i] = (val >> (8 * i)) as u8;
+        }
+        Some(())
+    }
+
     /// Evaluate an expression to a 64-bit value, or `None` if it uses something
-    /// the integer interpreter does not model (memory load, width-bearing
-    /// sign/zero-extension or truncate, a call, an SSA node, …).
+    /// the integer interpreter does not model (width-bearing sign/zero-extension
+    /// or truncate, a call, an SSA node, an out-of-page load, …).
     fn eval(&self, e: &Expr) -> Option<u64> {
         Some(match e {
             Expr::Const(v, _) => *v as u64,
@@ -113,6 +150,10 @@ impl<'a> Interp<'a> {
                 Location::Temp(t) => self.temps.get(t).copied().unwrap_or(0),
                 _ => return None,
             },
+            Expr::Load { addr, ty } => {
+                let a = self.eval(addr)?;
+                self.mem_read(a, ty_bytes(ty)?)?
+            }
             Expr::Unary(op, x) => {
                 let a = self.eval(x)?;
                 match op {
@@ -175,8 +216,13 @@ impl<'a> Interp<'a> {
                 }
                 Some(())
             }
+            Stmt::Store { addr, value, ty } => {
+                let a = self.eval(addr)?;
+                let v = self.eval(value)?;
+                self.mem_write(a, ty_bytes(ty)?, v)
+            }
             Stmt::Nop => Some(()),
-            // A store, branch, call, asm, … — not part of a single-instruction
+            // A branch, call, asm, … — not part of a single-instruction
             // arithmetic test; bail so the case is skipped rather than mis-scored.
             _ => None,
         }
@@ -299,6 +345,11 @@ fn diff_one(bytes: &[u8], iters: u32, seed: &mut u64) -> Result<Vec<Mismatch>, S
         return Ok(Vec::new());
     }
     let cmp_flags = flags_written(&stmts);
+    // If the instruction has a memory operand, point its base register at the
+    // scratch page so loads/stores land in mapped memory. (Index-register forms
+    // can wander out of the page; those loads return None and the case is
+    // skipped — never a false positive.)
+    let mem_base = gp_index(insn.raw.memory_base());
 
     let mut uc: *mut uc_engine = std::ptr::null_mut();
     unsafe {
@@ -307,6 +358,7 @@ fn diff_one(bytes: &[u8], iters: u32, seed: &mut u64) -> Result<Vec<Mismatch>, S
         }
         uc_mem_map(uc, CODE_ADDR, 0x1000, UC_PROT_ALL);
         uc_mem_map(uc, STACK_ADDR & !0xfff, 0x4000, UC_PROT_ALL);
+        uc_mem_map(uc, DATA_ADDR, DATA_SIZE, UC_PROT_ALL);
         uc_mem_write(uc, CODE_ADDR, bytes.as_ptr() as *const c_void, bytes.len());
     }
 
@@ -326,12 +378,23 @@ fn diff_one(bytes: &[u8], iters: u32, seed: &mut u64) -> Result<Vec<Mismatch>, S
             st.regs[r] = (next() as u32) as u64;
         }
         st.regs[4] = STACK_ADDR; // ESP must stay valid
+        if let Some(b) = mem_base {
+            st.regs[b] = DATA_PTR; // memory-operand base lands in the scratch page
+        }
         for f in [FlagKind::Cf, FlagKind::Zf, FlagKind::Sf, FlagKind::Of, FlagKind::Pf, FlagKind::Af] {
             st.flags.insert(f, next() & 1);
         }
+        // Fresh random contents for the scratch page, mirrored into both engines.
+        let mut page = vec![0u8; DATA_SIZE];
+        for b in page.iter_mut() {
+            *b = next() as u8;
+        }
+        unsafe {
+            uc_mem_write(uc, DATA_ADDR, page.as_ptr() as *const c_void, DATA_SIZE);
+        }
 
         // ---- interpret the lifted IR ----
-        let mut interp = Interp::new(&st);
+        let mut interp = Interp::new(&st, page.clone());
         let mut modelled = true;
         for s in &stmts {
             if interp.exec(s).is_none() {
@@ -402,12 +465,45 @@ fn diff_one(bytes: &[u8], iters: u32, seed: &mut u64) -> Result<Vec<Mismatch>, S
                 });
             }
         }
+        // ---- compare the scratch page (for memory stores) ----
+        if mem_base.is_some() {
+            let mut uc_page = vec![0u8; DATA_SIZE];
+            unsafe {
+                uc_mem_read(uc, DATA_ADDR, uc_page.as_mut_ptr() as *mut c_void, DATA_SIZE);
+            }
+            if uc_page != interp.mem {
+                let i = (0..DATA_SIZE).find(|&i| uc_page[i] != interp.mem[i]).unwrap();
+                out.push(Mismatch {
+                    asm: asm.clone(),
+                    bytes: bytes.to_vec(),
+                    field: format!("mem[{i}]"),
+                    lifted: interp.mem[i] as u64,
+                    oracle: uc_page[i] as u64,
+                });
+            }
+        }
         if out.len() > 20 {
             break; // enough evidence
         }
     }
     unsafe { uc_close(uc); }
     Ok(out)
+}
+
+/// The RegId index (0=rax..7=rdi) of an iced GP register, else None.
+fn gp_index(r: iced_x86::Register) -> Option<usize> {
+    use iced_x86::Register::*;
+    Some(match r.full_register() {
+        RAX => 0,
+        RCX => 1,
+        RDX => 2,
+        RBX => 3,
+        RSP => 4,
+        RBP => 5,
+        RSI => 6,
+        RDI => 7,
+        _ => return Option::None,
+    })
 }
 
 /// The curated instruction corpus: integer arithmetic / logic / shift / cmov /
@@ -516,6 +612,46 @@ fn corpus() -> Vec<Vec<u8>> {
         vec![0x0f, 0x98, 0xc0], // sets al
         vec![0x0f, 0x9d, 0xc0], // setge al
         vec![0x0f, 0x9f, 0xc0], // setg al
+        // ---- memory operands ([edi] base, read / read-modify-write / store) ----
+        vec![0x03, 0x0f], // add ecx, [edi]
+        vec![0x01, 0x0f], // add [edi], ecx   (read-modify-write + store)
+        vec![0x2b, 0x0f], // sub ecx, [edi]
+        vec![0x29, 0x0f], // sub [edi], ecx
+        vec![0x13, 0x0f], // adc ecx, [edi]
+        vec![0x1b, 0x0f], // sbb ecx, [edi]
+        vec![0x3b, 0x0f], // cmp ecx, [edi]
+        vec![0x23, 0x0f], // and ecx, [edi]
+        vec![0x0b, 0x0f], // or  ecx, [edi]
+        vec![0x33, 0x0f], // xor ecx, [edi]
+        vec![0x85, 0x0f], // test [edi], ecx
+        vec![0x8b, 0x0f], // mov ecx, [edi]
+        vec![0x89, 0x0f], // mov [edi], ecx
+        vec![0x03, 0x4f, 0x04], // add ecx, [edi+4]
+        vec![0x01, 0x4f, 0xfc], // add [edi-4], ecx
+        vec![0xff, 0x07], // inc dword [edi]
+        vec![0xff, 0x0f], // dec dword [edi]
+        vec![0xf7, 0x1f], // neg dword [edi]
+        vec![0xd3, 0x27], // shl dword [edi], cl
+        vec![0xd3, 0x2f], // shr dword [edi], cl
+        vec![0x66, 0x03, 0x0f], // add cx, [edi]   (16-bit load)
+        vec![0x02, 0x0f], // add cl, [edi]   (8-bit load)
+        vec![0x00, 0x0f], // add [edi], cl   (8-bit store)
+        vec![0x0f, 0xbe, 0x0f], // movsx ecx, byte [edi]
+        vec![0x0f, 0xb6, 0x0f], // movzx ecx, byte [edi]
+        // ---- misc: lea, xchg, bswap, bit-scan, div/idiv ----
+        vec![0x8d, 0x4f, 0x10], // lea ecx, [edi+0x10]
+        vec![0x8d, 0x0c, 0x9f], // lea ecx, [edi+ebx*4]
+        vec![0x91], // xchg eax, ecx
+        vec![0x0f, 0xc8], // bswap eax
+        vec![0x0f, 0xbc, 0xc8], // bsf ecx, eax
+        vec![0x0f, 0xbd, 0xc8], // bsr ecx, eax
+        vec![0x99], // cdq
+        vec![0x98], // cwde
+        // NB: div/idiv are intentionally absent — faithfully scoring them needs the
+        // interpreter to model the 64-bit edx:eax dividend, divisor sign-extension
+        // (idiv), and the x86 #DE overflow trap the way Unicorn surfaces it. That,
+        // like the x87/SSE float path, is a known gap of the integer interpreter
+        // (the lifter's division is exercised end-to-end by Lua's `//`/`%`).
     ]
 }
 
