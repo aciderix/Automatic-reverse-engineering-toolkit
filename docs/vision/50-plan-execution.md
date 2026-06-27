@@ -1016,3 +1016,34 @@ flottante), à faire en session dédiée, une fonction à la fois, difftest à c
   ne peut former de Branch → asm → abort. **Piste recommandée** (cf. leçon Lua) : **host-backer
   strtod/strtodg** plutôt que lifter le bignum — mais exige de reconnaître l'entrée strtod de
   busybox (FLIRT faible ici). Chantier à part.
+
+### Table de saut dense ≠ table de pointeurs de fonctions ✅ FAIT (général)
+- **2026-06-26** — En creusant `seq` : son `__strtodg` (0x405330) était **scindé** parce que le
+  scan address-taken prenait la **table de saut** dense `jmp *0x47c14c(,%ecx,4)` (en `.rdata`) pour
+  une table de pointeurs de fonctions. Le cas `default` `0x405388` y apparaît **~20×** → récupéré
+  comme fausse fonction → `__strtodg` coupé en deux → le `ja 0x405388` intra-fonction ne formait
+  plus de Branch → abort.
+- **Correctif (`analysis`)** : une vraie table de pointeurs (vtable, tableau d'applets) a des
+  entrées **distinctes** ; une table de saut **répète** ses cibles. Une valeur répétée **≥3×** dans
+  un run est donc un cas de switch (corps intérieur, pas un prologue) → exigée de passer la garde
+  de prologue au lieu d'être acceptée pour sa seule présence. Appliqué **par valeur** (pas par run)
+  pour ne pas jeter une table qui a une entrée aliasée. **−7 fausses entrées**, `__strtodg`
+  re-fusionné. difftest 268/268, transpile-diff 4/4, 11/11 applets OK.
+- **Reste pour `seq`** : `__strtodg` lift maintenant plus loin mais son **analyse de profondeur x87
+  abandonne** (idiome de comparaison bignum — `fcomip`/`fildll`/joins) → `fild qword` non modélisé
+  atteint → abort. C'est la **robustesse passe x87** (chantier délicat déjà identifié pour Lua
+  `intarith`/`forprep`), OU host-back strtod (reconnaissance requise). À part.
+
+### État des 3 cibles demandées (expr / host-back strtod / passe noreturn) — évaluation honnête
+- **`expr`** : abort dans `bb_verror_msg` sur `free()` d'un pointeur invalide ; le message d'erreur
+  est **brouillé** (« : pr » au lieu de « expr: »). Cause : `vasprintf` **propre à busybox** (lifté,
+  pas un shim) produit un buffer/longueur faux — soupçon **gestion de `va_list`** à travers
+  plusieurs appels (le format sort du garbage). Chantier ABI va_list, profond et risqué.
+- **Host-back strtod (`seq`)** : exige de **reconnaître** l'entrée strtod de busybox (statiquement
+  liée, pas un import) — FLIRT faible sur ce binaire. Mécanisme de reconnaissance à concevoir.
+- **Passe noreturn générale** : analysée comme **marginale** par rapport au fix table-de-pointeurs
+  déjà livré — les fonctions atteintes uniquement par table sont déjà récupérées (forced) ; les
+  cibles d'appel direct sont déjà des frontières ; une absorption post-noreturn est inoffensive au
+  runtime (l'appel noreturn ne revient pas, le code absorbé n'est jamais atteint). Bénéfice résiduel
+  faible (rares callbacks hors-table) pour un risque réel (mal classer noreturn = tronquer une
+  fonction qui revient = sortie fausse). À ne faire qu'avec un filet de régression Lua.
