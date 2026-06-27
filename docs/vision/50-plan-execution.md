@@ -978,3 +978,26 @@ flottante), à faire en session dédiée, une fonction à la fois, difftest à c
 - *Reste* : `expr` (sortie applet brouillée « : pr  syntax error » + heap), `ls` (rc=134),
   `seq` (l'analyse de profondeur x87 **abandonne** sur sa fonction → `fld1` non modélisé atteint :
   c'est le chantier « robustesse passe x87 », délicat, à part).
+
+### Fonction absorbée après un appel *noreturn* → récupération via table de pointeurs ✅ FAIT
+- **2026-06-26 — `basename` abortait** : appel indirect vers `0x40ef04` (`basename_main`) **non
+  récupéré**. Cause (faits, dispatch + objdump) : la fonction précédente `baseNUM_main` finit par
+  `call fflush_stdout_and_exit_SUCCESS` (**noreturn** : → `xfunc_die` → `exit`, sans `ret`). Le
+  balayage linéaire, ignorant que l'appel ne revient pas, **continue** sur le `nop` de padding puis
+  le prologue de `basename_main` → l'**absorbe**. `0x40ef04` se retrouve donc *déjà décodé* dans
+  `global` → le scan de table de pointeurs (Pass 2b) le **saute** (garde `!global.contains_key`,
+  anti-scission) → jamais une entrée → l'appel indirect de la table d'applets `applet_main` plante.
+- **Correctif (`src/analysis/mod.rs`)** : dans Pass 2b, une **table de pointeurs confirmée** (≥3
+  pointeurs de code consécutifs) dont une entrée est *déjà décodée* mais a la **forme d'un début
+  de fonction** (`looks_like_func_start`) et n'est **pas** une cible de jump-table est **forcée**
+  comme entrée — la table est autoritative (chaque entrée est un vrai début de fonction). Devenue
+  frontière, le prédécesseur sur-absorbant est **re-scindé** au bon endroit. `looks_like_func_start`
+  exclut les corps de `case` de jump-table (intérieurs) ; les cibles de jump-table sont filtrées.
+- **Pourquoi ciblé/sûr** : seules les fonctions atteintes **uniquement** par table de pointeurs
+  sont vulnérables (les cibles d'appel direct sont déjà des entrées/frontières). Le combo
+  « run ≥3 + forme de début + pas jump-table » rend un faux positif très improbable.
+- **Effet** : `0x40ef04` récupéré, **+6 fonctions** (2091→2097), `basename` + `tr` marchent
+  (**11 applets** au total). difftest 268/268, transpile-diff 4/4, `cargo test` 49/49. *Note* :
+  la cause profonde reste l'absence d'**analyse noreturn** (le balayage déborde tout appel
+  `*_and_die`/exit) ; ici on la rattrape via la table. Une vraie passe noreturn serait plus
+  générale (corrigerait aussi les absorptions hors-table) — chantier futur.

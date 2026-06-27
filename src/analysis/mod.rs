@@ -344,6 +344,11 @@ fn global_decode(
             let jt_targets: BTreeSet<u64> =
                 jump_tables.values().flat_map(|v| v.iter().copied()).collect();
             let mut cands: BTreeSet<u64> = BTreeSet::new();
+            // Entries forced from a confirmed function-pointer table even though the
+            // linear sweep already decoded them (it absorbed them into a preceding
+            // function by falling through a *noreturn* call). See the `forced`
+            // commit below.
+            let mut forced: BTreeSet<u64> = BTreeSet::new();
             for sec in &prog.sections {
                 let d = &sec.data;
                 let nwords = d.len() / ptr;
@@ -375,6 +380,21 @@ fn global_decode(
                                 && (in_table || looks_like_func_start(prog, v, false))
                             {
                                 cands.insert(v);
+                            } else if in_table
+                                && global.contains_key(&v)
+                                && looks_like_func_start(prog, v, false)
+                            {
+                                // Already decoded, but a confirmed function-pointer
+                                // table (>= 3 consecutive code pointers) says `v` is a
+                                // genuine function start. The linear sweep absorbed it
+                                // into the preceding function by falling through a
+                                // *noreturn* call (e.g. `*_and_die`/exit), so `v` is
+                                // not yet an entry and the indirect call to it aborts.
+                                // Force it as an entry to split at the true boundary;
+                                // `looks_like_func_start` excludes interior jump-table
+                                // case bodies, and jump-table targets are filtered on
+                                // commit below.
+                                forced.insert(v);
                             }
                         }
                     } else {
@@ -403,6 +423,19 @@ fn global_decode(
                     progressed = true;
                     let mut q: VecDeque<u64> = VecDeque::from([c]);
                     drain(prog, disasm, &mut global, &mut entries, &mut jump_tables, &mut q);
+                }
+            }
+            // Forced table entries are already decoded (no drain needed); adding them
+            // to `entries` makes them boundaries so the over-absorbing predecessor is
+            // re-split there. They are confirmed function starts, not prologue-scan
+            // guesses, so they are *not* added to `prologue_only` (never dropped on a
+            // fall-through edge).
+            for c in forced {
+                if jt_targets.contains(&c) {
+                    continue;
+                }
+                if entries.insert(c) {
+                    progressed = true;
                 }
             }
             if !progressed {
