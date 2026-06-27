@@ -1173,3 +1173,23 @@ flottante), à faire en session dédiée, une fonction à la fois, difftest à c
   **prochain** bail x87 `fld qword [ebp+8]` (chemin de **formatage de flottants**, `print("fp:", 2^10…)`).
 - **Régression** : transpile-diff **4/4**, difftest **268/268**, `cargo test` **93/0**, busybox
   (echo/true/false/basename) OK. **Prochaine cible** : `fld qword [ebp+8]` (conversion double→chaîne).
+
+### 🎯 x87 `fxam` modélisé → Lua flottant COMPLET (sqrt, formatage) ✅ FAIT
+- **2026-06-27 — `t.lua` passe en entier** : `hello 42 / fp: 1024.0 3.5 2 1.4142135623731 / sum 5050 /
+  fmt 3.142 0.1 / sort 1,2,3`. Cause racine du dernier bail : l'instruction **`fxam`** (classification
+  IEEE de st(0) → codes condition C3/C2/C1/C0, lus par `fnstsw ax`) était **absente de `x87_delta`**
+  → la passe de profondeur abandonnait **toute** la fonction `_sqrt` en asm opaque → abort runtime sur
+  le premier op x87 (le `fld [ebp+8]`). C'est l'idiome que le `__sqrt`/`fpclassify` de mingw utilise
+  pour traiter NaN/Inf/zéro/négatif.
+- **Fix général** (3 points, sans rustine) : (1) `x87_delta(Fxam) = 0` ; (2) `lift_x87` émet
+  `fsw() = __x87_fxam(st0)` — exactement comme l'idiome `fcom`/`ftst` qui pose déjà les bits C0/C2/C3
+  aux positions matérielles (8/10/14) ; (3) helper runtime `__x87_fxam` qui encode la classe via
+  `__builtin_isnan/isinf/isnormal/signbitl` aux mêmes positions, plus C1=signe (bit 9). `fnstsw` lit
+  déjà `fsw()` → tout le pattern `fnstsw ax; and ax,0x4500; cmp/test` fonctionne.
+- **Note diagnostic** : les runs `--out-dir /dev/null` court-circuitent l'abaissement des fonctions
+  (d'où « pas de bail loggé » trompeur au début) — toujours diagnostiquer l'x87 avec un vrai
+  `--out-dir`.
+- **Filet** : nouvelle fixture `x87_fxam.exe` (asm inline `fxam; fnstsw`) + test
+  `x87_fxam_classifies_into_status_word` (NaN=256, Inf=1280, normal=1024, zéro=16384 ; valeurs
+  vérifiées contre un build hôte `-m32`). Régression : transpile-diff **4/4**, difftest **268/268**,
+  `cargo test` **94/0**, busybox OK. **Lua = filet de régression pleinement opérationnel**.

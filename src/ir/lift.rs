@@ -2044,6 +2044,8 @@ pub(crate) fn x87_delta(ins: &Instruction) -> Option<i32> {
         Fcomp | Fucomp | Ficomp => -1,
         Fcompp | Fucompp => -2,
         Fnstsw | Fstsw => 0,
+        // `fxam` classifies st(0) into the FPU condition codes (no stack change).
+        Fxam => 0,
         // `finit`/`fninit` empty the x87 stack; the depth pass resets sp to 0 for
         // them (a plain delta can't express that), but they are *modelled* here so
         // a CRT-startup `fninit` does not bail the whole function to asm.
@@ -2263,6 +2265,15 @@ fn x87_try(insn: &Insn, sp: i32, mode: RoundMode) -> Option<Vec<Stmt>> {
             );
             vec![Stmt::Set { dst: fsw(), expr: word }]
         }
+        // --- classify st(0) into the condition codes (fxam) ----------------
+        // `fxam` sets C3/C2/C1/C0 in the status word to the IEEE class of st(0)
+        // (NaN/Inf/zero/normal/denormal) and C1 to its sign, leaving the stack
+        // unchanged. A following `fnstsw ax; and ax,0x4500; cmp/test` reads them
+        // (e.g. `__sqrt`'s NaN/negative special-casing). The helper encodes the
+        // bits at their hardware positions (C0=bit8, C2=bit10, C1=bit9, C3=bit14),
+        // matching the `fcom` idiom above so `fnstsw` reads them consistently.
+        Fxam => vec![Stmt::Set { dst: fsw(), expr: x87call("__x87_fxam", vec![Expr::Read(fpr(st0)?)]) }],
+
         // Store the FPU status word to AX (or memory).
         Fnstsw | Fstsw => match ins.op_kind(0) {
             OpKind::Register => {

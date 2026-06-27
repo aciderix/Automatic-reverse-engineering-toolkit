@@ -233,6 +233,11 @@ pub(crate) const FLOAT_HELPERS: &str = concat!(
     "static inline uint64_t __x87_lt(long double a,long double b){return a<b;}\n",
     "static inline uint64_t __x87_eq(long double a,long double b){return a==b;}\n",
     "static inline uint64_t __x87_un(long double a,long double b){return a!=a||b!=b;}\n",
+    // `fxam`: classify st(0) into the FPU condition codes. C3/C2/C0 encode the
+    // IEEE class (NaN=C0, Inf=C2|C0, zero=C3, normal=C2, denormal=C3|C2) and C1
+    // is the sign. Bits at hardware positions (C0=8, C1=9, C2=10, C3=14) so a
+    // later `fnstsw ax` reads them like the `fcom` idiom does.
+    "static inline uint64_t __x87_fxam(long double x){uint64_t s=0;if(__builtin_signbitl(x))s|=(1u<<9);if(__builtin_isnan(x))s|=(1u<<8);else if(__builtin_isinf(x))s|=(1u<<10)|(1u<<8);else if(x==0.0L)s|=(1u<<14);else if(__builtin_isnormal(x))s|=(1u<<10);else s|=(1u<<14)|(1u<<10);return s;}\n",
     // fp return channel: the x87 ABI returns floats in st(0). A fp-returning
     // function stores its st(0) here at `ret`; a caller reads it back after the
     // call. Backed by one shared global (defined in aret_hle.c) so the value

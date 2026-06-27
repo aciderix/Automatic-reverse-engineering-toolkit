@@ -713,6 +713,25 @@ fn x87_fabs_is_modelled() {
 }
 
 #[test]
+fn x87_fxam_classifies_into_status_word() {
+    if !has_m32() {
+        eprintln!("skipping fxam test: `cc -m32` unavailable (install gcc-multilib)");
+        return;
+    }
+    // The x87 `fxam` instruction classifies st(0) (NaN/Inf/zero/normal/denormal)
+    // into the FPU condition codes C3/C2/C0, read back by `fnstsw ax`. It was
+    // unmodelled, so the depth pass bailed the whole function to opaque asm —
+    // which aborted at runtime (mingw's __sqrt/fpclassify use this idiom, so
+    // math.sqrt etc. crashed). Now modelled via __x87_fxam: the mask sw & 0x4500
+    // must yield NaN=256, +Inf=1280, normal=1024, zero=16384.
+    let out = transpile_and_run("x87_fxam.exe");
+    assert!(
+        out.contains("NAN=256 INF=1280 ONE=1024 ZERO=16384"),
+        "x87 fxam not modelled:\n{out}"
+    );
+}
+
+#[test]
 fn x87_frndint_honours_rounding_mode() {
     if !has_m32() {
         eprintln!("skipping rounding test: `cc -m32` unavailable (install gcc-multilib)");
