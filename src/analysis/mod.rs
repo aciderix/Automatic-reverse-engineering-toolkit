@@ -374,13 +374,26 @@ fn global_decode(
                             w += 1;
                         }
                         let in_table = w - start >= 3;
+                        // A *jump table* (dense `switch`) is also a run of consecutive
+                        // code pointers, but a given target repeats — many indices map
+                        // to the same case, especially the `default`. A genuine
+                        // function-pointer table (vtable, applet/callback array) holds
+                        // distinct entries. So a value repeating >= 3x within the run is
+                        // a switch case, not a function: its target is an interior case
+                        // body (not a prologue), so require the per-entry prologue gate
+                        // for it instead of accepting it just for being in the run.
+                        let mut counts: HashMap<u64, u32> = HashMap::new();
+                        for k in start..w {
+                            *counts.entry(word(k)).or_insert(0) += 1;
+                        }
                         for k in start..w {
                             let v = word(k);
+                            let trusted = in_table && counts[&v] < 3;
                             if !global.contains_key(&v)
-                                && (in_table || looks_like_func_start(prog, v, false))
+                                && (trusted || looks_like_func_start(prog, v, false))
                             {
                                 cands.insert(v);
-                            } else if in_table
+                            } else if trusted
                                 && global.contains_key(&v)
                                 && looks_like_func_start(prog, v, false)
                             {
