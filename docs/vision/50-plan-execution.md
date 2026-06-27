@@ -1047,3 +1047,22 @@ flottante), à faire en session dédiée, une fonction à la fois, difftest à c
   runtime (l'appel noreturn ne revient pas, le code absorbé n'est jamais atteint). Bénéfice résiduel
   faible (rares callbacks hors-table) pour un risque réel (mal classer noreturn = tronquer une
   fonction qui revient = sortie fausse). À ne faire qu'avec un filet de régression Lua.
+
+### Filet de régression Lua : reconstruit, mais bug de lift `lua_newstate` (mingw-13) 🔬
+- **2026-06-27** — Pour attaquer la **robustesse x87** en toute sécurité (levier commun `seq` +
+  Lua `intarith`/`forprep`), reconstruit **Lua 5.4.7** depuis les sources (`i686-w64-mingw32-gcc 13`,
+  `-O2 -DLUA_USE_WINDOWS`) → `lua.exe` PE32 657 Ko. **Différent du Lua d'origine du journal** (autre
+  version mingw → autre codegen).
+- **Ce build abort au démarrage** (avant même `lua -v`) : `luaM_malloc_` appelle `g->frealloc` qui
+  vaut **`0x41eb00`** (`panic+0x30`) au lieu de **`0x41eb50`** (`l_alloc`, décalage 0x50). Vérifié :
+  `l_alloc` est **bien récupéré** (0x41eb50, pas de scission), son adresse est **bien passée**
+  (`movl $0x41eb50,(%esp)` dans `luaL_newstate`). Donc **`lua_newstate` (0x4155a0) stocke une valeur
+  fausse pour `g->frealloc`** → bug de **lift** (corruption de valeur), pas de récupération. **Pas une
+  régression de cette session** : les 8 commits gardent l'équivalence corpus (transpile-diff 4/4) à
+  chaque pas, et ne touchent pas les sémantiques de stockage de valeur. C'est un comportement de lift
+  pré-existant exposé par le codegen mingw-13, à débugger en session dédiée (tracer le store
+  `g->frealloc = f` dans `lua_newstate`).
+- **Conséquence** : le filet Lua n'est pas encore opérationnel ; la robustesse x87 attend soit la
+  correction de ce bug `lua_newstate`, soit une **fixture minimale** reproduisant l'idiome de
+  comparaison NaN x87 (`fldz; fld x; fucomi; fstp st(1)`) — approche ciblée recommandée pour la
+  prochaine session.
