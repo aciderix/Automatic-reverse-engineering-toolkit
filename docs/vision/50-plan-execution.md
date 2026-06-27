@@ -1219,3 +1219,23 @@ flottante), à faire en session dédiée, une fonction à la fois, difftest à c
   *correctement en isolation* peut **désamorcer le bail** de fonctions entières dont la sémantique
   combinée est fausse → le filet (2ᵉ fixture) l'a attrapé **avant commit**, l'abort sûr a servi de
   recul propre. Pas de monotonie globale prouvée, mais **toute incohérence reste bruyante**.
+
+### 🎯 Shims I/O fichier (`GetFileAttributesA`/`_open`/`_lseek`) — débloque 9+ applets busybox ✅ FAIT
+- **2026-06-27 — Levier mesuré par sondage** : un sondage large des applets busybox a révélé qu'un
+  **seul** import manquant — `GetFileAttributesA` — bloquait **cat, wc, head, tail, sort, uniq, grep,
+  cut, dirname** (tous les applets lisant un fichier). Puis le suivant : `_open` (I/O bas niveau
+  msvcrt). Ajouté `aret_GetFileAttributesA` (stat → masque d'attributs Win32 / INVALID),
+  `aret_open` (oflag msvcrt → flags POSIX : O_CREAT=0x100, O_TRUNC=0x200, O_APPEND=0x8, O_EXCL=0x400),
+  `aret_lseek`. (`_read`/`_close` existaient déjà via `aret_read`/`aret_close` + strip du tiret.)
+- **Bug d'override trouvé (mécanisme, général)** : `aret_open` ne remplaçait pas son stub faible.
+  Cause : je l'avais placé **avant** la définition de `translate_path`/`make_parents` (fonctions
+  `static` définies plus bas dans `aret_hle.c`) → déclaration implicite + types conflictuels → le
+  symbole fort n'était pas émis proprement → le stub faible gagnait (warning silencieux sous `-w`).
+  **Fix** : placer les shims qui utilisent `translate_path` **après** sa définition (zone des shims
+  fichier). Leçon générale : un shim qui appelle un helper `static` du runtime doit être défini après lui.
+- **Vérifié** : fixture `file_io.exe` (fopen/fputs/fread/remove → `_open`/`_read`/`_write`/`_close`) +
+  test `file_io_roundtrip_through_crt` (`FILEIO n=12 a=line1 b=line2`, réf. build hôte `-m32`).
+  Régression : transpile-diff **4/4**, difftest **268/268**, `cargo test` **96/0**.
+- **Reste busybox** : les applets fichier avancent au-delà de `_open` mais butent sur un **segfault
+  aval** (`sub_4104d0`, hors shim) + `GetEnvironmentVariableW` non implémenté — chantiers distincts.
+  L'infrastructure I/O fichier est en place et **prouvée** par la fixture.

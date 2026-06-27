@@ -67,6 +67,7 @@ uint32_t aret_CreateFileA(uint32_t esp);  /* (name, access, share, sec, disp, fl
 uint32_t aret_CloseHandle(uint32_t esp);  /* (HANDLE) -> BOOL */
 uint32_t aret_DeleteFileA(uint32_t esp);  /* (name) -> BOOL */
 uint32_t aret_SetFilePointer(uint32_t esp); /* (h, dist, *high, method) -> DWORD */
+uint32_t aret_GetFileAttributesA(uint32_t esp); /* (name) -> DWORD attrs / INVALID */
 
 /* Diagnostic for an intercepted import that has no shim yet: the builder emits a
  * weak stub per unresolved import that calls this (warns once, then returns 0),

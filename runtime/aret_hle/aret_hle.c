@@ -253,6 +253,11 @@ uint32_t aret_close(uint32_t esp) {
     if (fd <= 2) return 0; /* never close the std streams */
     return (uint32_t)close(fd);
 }
+/* _lseek(fd, offset, origin) -> new offset. origin 0/1/2 == SEEK_SET/CUR/END. */
+uint32_t aret_lseek(uint32_t esp) {
+    off_t r = lseek((int)arg(esp, 0), (int32_t)arg(esp, 1), (int)arg(esp, 2));
+    return (uint32_t)r;
+}
 uint32_t aret_isatty(uint32_t esp) { return (uint32_t)isatty((int)arg(esp, 0)); }
 /* _setmode(fd, mode): text/binary distinction is meaningless on Linux. Report the
  * previous mode as binary (O_BINARY = 0x8000 in msvcrt) so callers see success. */
@@ -579,6 +584,46 @@ uint32_t aret_DeleteFileA(uint32_t esp) {
     char path[1024];
     translate_path((const char *)(uintptr_t)arg(esp, 0), path, sizeof path);
     return unlink(path) == 0 ? 1 : 0;
+}
+
+/* GetFileAttributesA(name) -> DWORD. Win32 file-existence/type probe (mingw's
+ * stat/access, and busybox's path handling, lean on it). stat() the translated
+ * path and map the mode to the Win32 attribute bitmask, or return
+ * INVALID_FILE_ATTRIBUTES (0xFFFFFFFF) when the path does not exist. */
+uint32_t aret_GetFileAttributesA(uint32_t esp) {
+    char path[1024];
+    translate_path((const char *)(uintptr_t)arg(esp, 0), path, sizeof path);
+    struct stat st;
+    if (stat(path, &st) != 0) return 0xFFFFFFFFu; /* INVALID_FILE_ATTRIBUTES */
+    uint32_t attr = 0;
+    if (S_ISDIR(st.st_mode)) attr |= 0x10u;        /* FILE_ATTRIBUTE_DIRECTORY */
+    if (!(st.st_mode & S_IWUSR)) attr |= 0x01u;    /* FILE_ATTRIBUTE_READONLY */
+    if (attr == 0) attr = 0x80u;                   /* FILE_ATTRIBUTE_NORMAL */
+    return attr;
+}
+
+/* _open(name, oflag, [pmode]) -> fd. msvcrt oflag bits differ from POSIX, so
+ * translate them rather than pass through: O_RDONLY=0/O_WRONLY=1/O_RDWR=2 match,
+ * but O_APPEND=0x8, O_CREAT=0x100, O_TRUNC=0x200, O_EXCL=0x400 do not (O_TEXT/
+ * O_BINARY are no-ops on Linux). Placed here (after translate_path/make_parents
+ * are defined) so it can use them. */
+uint32_t aret_open(uint32_t esp) {
+    char path[1024];
+    translate_path((const char *)(uintptr_t)arg(esp, 0), path, sizeof path);
+    uint32_t mo = arg(esp, 1);
+    int fl;
+    switch (mo & 0x3u) {
+        case 1: fl = O_WRONLY; break;
+        case 2: fl = O_RDWR; break;
+        default: fl = O_RDONLY; break;
+    }
+    if (mo & 0x008u) fl |= O_APPEND;
+    if (mo & 0x100u) fl |= O_CREAT;
+    if (mo & 0x200u) fl |= O_TRUNC;
+    if (mo & 0x400u) fl |= O_EXCL;
+    if (fl & O_CREAT) make_parents(path);
+    int fd = open(path, fl, 0666);
+    return (uint32_t)(fd < 0 ? (uint32_t)-1 : (uint32_t)fd);
 }
 
 uint32_t aret_SetFilePointer(uint32_t esp) {

@@ -205,6 +205,21 @@ fn m4_heap_and_string_runtime() {
 }
 
 #[test]
+fn file_io_roundtrip_through_crt() {
+    if !has_m32() {
+        eprintln!("skipping file-io test: `cc -m32` unavailable (install gcc-multilib)");
+        return;
+    }
+    // fopen/fputs/fclose then fopen/fread/fclose/remove. mingw's stdio bottoms out
+    // in the low-level msvcrt I/O imports (_open/_read/_write/_close), so this
+    // exercises the GetFileAttributesA / _open / _lseek HLE shims. The shim must be
+    // defined *after* translate_path/make_parents in aret_hle.c (else _open hits an
+    // implicit declaration and the weak unimplemented stub wins).
+    let out = transpile_and_run("file_io.exe");
+    assert!(out.contains("FILEIO n=12 a=line1 b=line2"), "file io wrong:\n{out}");
+}
+
+#[test]
 fn indirect_call_dispatch_through_function_pointer() {
     if !has_m32() {
         eprintln!("skipping fnptr test: `cc -m32` unavailable (install gcc-multilib)");
