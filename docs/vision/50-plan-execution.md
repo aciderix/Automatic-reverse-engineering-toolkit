@@ -1095,4 +1095,11 @@ flottante), à faire en session dédiée, une fonction à la fois, difftest à c
 - **Effet** : **Lua démarre et affiche sa bannière** (`Lua 5.4.7 Copyright…`) — la corruption mémoire
   a disparu. Non-régression : difftest 268/268, transpile-diff 4/4, `cargo test` 5/5, **busybox 6/6
   applets** OK. *Reste Lua* : « attempt to index a nil value » (erreur **bien plus tardive**,
-  distincte — lib/global manquant) → Lua tourne maintenant assez loin pour servir bientôt de filet.
+  distincte) → Lua tourne maintenant assez loin pour servir bientôt de filet.
+- **Prochain bug Lua localisé** (backtrace) : `luaopen_base` → `luaL_setfuncs` → `lua_setfield`
+  sur la **table globale `_G` qui est nil**. `lua_pushglobaltable` lit `registry[LUA_RIDX_GLOBALS]` :
+  la **table des globaux n'est pas stockée dans le registre** à l'init d'état (`init_registry`/
+  `f_luaopen`). Aucun import manquant en cause (les 4 non-implémentés — FormatMessageA/LoadLibraryExA/
+  popen/pclose — ne sont pas appelés au démarrage). → bug de lift dans l'init du registre (store de
+  la table globale), à tracer comme le frealloc (watchpoint sur le slot registre). Distinct du
+  tail-call ci-dessus.
