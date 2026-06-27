@@ -1588,11 +1588,17 @@ pub fn lift(insn: &Insn, bits: u32) -> Vec<Stmt> {
             };
             let shifted = bin(BinOp::And, shifted, konst(mask(w)));
             let val = Expr::Select {
-                cond: Box::new(bin(BinOp::Eq, c, konst(0))),
+                cond: Box::new(bin(BinOp::Eq, c.clone(), konst(0))),
                 then_: Box::new(bin(BinOp::And, dst, konst(mask(w)))),
                 else_: Box::new(shifted),
             };
-            let mut out = vec![set_flag(FlagKind::Zf, bin(BinOp::Eq, val.clone(), konst(0)))];
+            // ZF unchanged on a zero count (x86 leaves flags untouched then).
+            let zf = Expr::Select {
+                cond: Box::new(bin(BinOp::Eq, c, konst(0))),
+                then_: Box::new(read_flag(FlagKind::Zf)),
+                else_: Box::new(bin(BinOp::Eq, val.clone(), konst(0))),
+            };
+            let mut out = vec![set_flag(FlagKind::Zf, zf)];
             out.extend(some_or_asm!(write_op0(ins, val, bits)));
             out
         }
@@ -1613,10 +1619,22 @@ pub fn lift(insn: &Insn, bits: u32) -> Vec<Stmt> {
             let cf = Expr::Select {
                 cond: Box::new(bin(BinOp::Eq, c.clone(), konst(0))),
                 then_: Box::new(read_flag(FlagKind::Cf)),
-                else_: Box::new(bin(BinOp::And, bin(BinOp::Shr, a, bin(BinOp::Sub, konst(w as i128), c)), konst(1))),
+                else_: Box::new(bin(BinOp::And, bin(BinOp::Shr, a, bin(BinOp::Sub, konst(w as i128), c.clone())), konst(1))),
+            };
+            // x86 leaves *all* flags unchanged when the masked count is 0, so ZF
+            // (like CF above) must be preserved in that case — else a `shl r, cl`
+            // with cl==0 (the count is often a runtime value, e.g. Lua's
+            // luaV_shiftl) wrongly clears/sets ZF and a later branch misfires.
+            // ZF reads the *w-bit* result: `shl` can push bits above the operand
+            // width (e.g. `0x80000000 << 1` = 0 in 32 bits but 0x100000000 raw),
+            // and the register write is masked, so ZF must mask too.
+            let zf = Expr::Select {
+                cond: Box::new(bin(BinOp::Eq, c.clone(), konst(0))),
+                then_: Box::new(read_flag(FlagKind::Zf)),
+                else_: Box::new(bin(BinOp::Eq, bin(BinOp::And, r.clone(), konst(mask(w))), konst(0))),
             };
             let mut out = vec![
-                set_flag(FlagKind::Zf, bin(BinOp::Eq, r.clone(), konst(0))),
+                set_flag(FlagKind::Zf, zf),
                 set_flag(FlagKind::Cf, cf),
             ];
             out.extend(some_or_asm!(write_op0(ins, r, bits)));
@@ -1639,10 +1657,16 @@ pub fn lift(insn: &Insn, bits: u32) -> Vec<Stmt> {
             let cf = Expr::Select {
                 cond: Box::new(bin(BinOp::Eq, c.clone(), konst(0))),
                 then_: Box::new(read_flag(FlagKind::Cf)),
-                else_: Box::new(bin(BinOp::And, bin(BinOp::Shr, a, bin(BinOp::Sub, c, konst(1))), konst(1))),
+                else_: Box::new(bin(BinOp::And, bin(BinOp::Shr, a, bin(BinOp::Sub, c.clone(), konst(1))), konst(1))),
+            };
+            // ZF unchanged on a zero count (see Shl).
+            let zf = Expr::Select {
+                cond: Box::new(bin(BinOp::Eq, c.clone(), konst(0))),
+                then_: Box::new(read_flag(FlagKind::Zf)),
+                else_: Box::new(bin(BinOp::Eq, r.clone(), konst(0))),
             };
             let mut out = vec![
-                set_flag(FlagKind::Zf, bin(BinOp::Eq, r.clone(), konst(0))),
+                set_flag(FlagKind::Zf, zf),
                 set_flag(FlagKind::Cf, cf),
             ];
             out.extend(some_or_asm!(write_op0(ins, r, bits)));

@@ -18,6 +18,8 @@ mod flirt;
 mod structure;
 mod types;
 #[cfg(feature = "unpack")]
+mod cpudiff;
+#[cfg(feature = "unpack")]
 mod unpack;
 mod verify;
 

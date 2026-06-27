@@ -1291,3 +1291,29 @@ flottante), à faire en session dédiée, une fonction à la fois, difftest à c
   echo/true/false/basename/pwd. (grep/cut sortent vide, sort/uniq bouclent — bugs distincts à part.)
 - **Vérifié** : Lua toujours **35/35**, régression transpile-diff **4/4**, difftest **268/268**,
   `cargo test` **98/0**.
+
+### 🎯 Harness différentiel lifter ↔ Unicorn (axe 1 automatisé) — 2 bugs de shift trouvés ✅ FAIT
+- **2026-06-27 — Accélérateur de découverte** : au lieu d'attendre qu'un programme (Lua, busybox)
+  exhibe une instruction mal liftée via un crash, on **valide le lifter directement contre Unicorn**.
+  Nouveau `src/cpudiff.rs` (gated `feature=unpack`, réutilise la libunicorn déjà liée) : pour un corpus
+  curé d'instructions entières (add/sub/adc/sbb/cmp/and/or/xor/test, immédiat sign-étendu, shl/shr/sar/
+  shld/shrd, inc/dec/neg/not, cmovcc/setcc, 8/16/32-bit), on tire **des milliers d'états aléatoires**
+  (registres + flags), on exécute chaque instruction **liftée (interpréteur IR) vs Unicorn**, et on
+  diffe registres + flags CF/ZF/SF/OF. L'interpréteur renvoie `None` pour tout ce qu'il ne modélise
+  pas (mémoire, sign-extension à largeur, calls, x87) → la case est **sautée, jamais de faux positif**.
+- **2 bugs réels trouvés du premier coup** (invisibles à difftest/Lua jusqu'ici) :
+  1. **ZF des décalages non préservé à count=0** : x86 laisse *tous* les flags inchangés quand le
+     compte masqué est 0 ; le lifter ne préservait que CF (via `Select(c==0,…)`), posant ZF
+     inconditionnellement. Un `shl r, cl` à `cl==0` (compte souvent runtime, cf. `luaV_shiftl`)
+     cassait ZF → branche suivante fausse. Corrigé sur les 4 handlers (shl/shr/sar/shld/shrd).
+  2. **ZF de `shl` sur résultat non masqué** : `0x80000000 << 1` = 0 sur 32 bits mais `0x100000000`
+     en brut ; l'écriture registre masquait, pas le calcul de ZF. Corrigé (masque `w` bits).
+- **Limite honnête de l'interpréteur** : il travaille en u64 sans suivi de largeur, donc ne peut pas
+  reproduire un `Sar` (décalage arithmétique : signe au bit 31, pas 63). Vérifié que le **backend C est
+  correct** (`x>>3` de -256 → -32 dans le binaire transpilé) ⇒ c'était un **faux positif de l'interp**,
+  pas un bug lifter. La comparaison *valeur* est donc sautée quand le lift contient un `Sar` (les flags
+  restent comparés). Améliorer = suivre les `Ty` dans l'interp (chantier futur).
+- **Vérifié** : `cargo test --features unpack cpudiff` **vert** ; régression transpile-diff **4/4**,
+  difftest **268/268**, `cargo test` **98/0**, Lua **35/35**.
+- **Ceci est l'accélérateur demandé** : on passe de « débugger un programme à la main » à « une machine
+  trouve les bugs lifter en lot, je corrige le général ». Même qualité, mêmes standards, bien plus vite.
