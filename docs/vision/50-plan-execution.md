@@ -1001,3 +1001,18 @@ flottante), à faire en session dédiée, une fonction à la fois, difftest à c
   la cause profonde reste l'absence d'**analyse noreturn** (le balayage déborde tout appel
   `*_and_die`/exit) ; ici on la rattrape via la table. Une vraie passe noreturn serait plus
   générale (corrigerait aussi les absorptions hors-table) — chantier futur.
+
+### x87 `ftst` modélisé ✅ FAIT — et blocage `seq` profond identifié
+- **2026-06-26** — `seq` abortait sur `fld1` car `seq_main` faisait **abandonner toute** l'analyse
+  x87 : `ftst` (compare st(0) à 0.0, met C0/C2/C3) était dans `is_x87` mais **absent** de
+  `x87_delta` ET du lift de comparaison → `x87_delta`→None → bail. Ajouté `Ftst` (delta 0) +
+  lift via le chemin C0/C2/C3 existant avec `b = __x87_zero`. **Fix général** (toute fonction à
+  `ftst`). difftest 268/268, transpile-diff 4/4.
+- **Reste pour `seq`** (blocage **distinct, profond**) : `seq` parse ses nombres via le `__strtodg`
+  **propre à busybox** (bignum de David Gay, statiquement lié). Son switch dense
+  `jmp *0x47c14c(,%ecx,4)` a son cas **default** (`0x405388`, atteint par `ja`) **mal récupéré
+  comme une fonction** (problème d'ordre de résolution table-de-saut / scan address-taken, pas
+  causé par le fix de récup ci-dessus — présent avant). Du coup le `ja 0x405388` intra-fonction
+  ne peut former de Branch → asm → abort. **Piste recommandée** (cf. leçon Lua) : **host-backer
+  strtod/strtodg** plutôt que lifter le bignum — mais exige de reconnaître l'entrée strtod de
+  busybox (FLIRT faible ici). Chantier à part.
