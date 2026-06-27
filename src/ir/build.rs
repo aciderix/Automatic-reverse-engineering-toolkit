@@ -477,25 +477,71 @@ pub fn set_fp_returning(set: std::collections::HashSet<u64>) {
 
 /// Install the set of noreturn function entry addresses for this thread.
 pub fn set_noreturn(set: std::collections::HashSet<u64>) {
+    if std::env::var_os("ARET_X87_DEBUG").is_some() {
+        eprintln!("[noreturn] {} fns proven non-returning", set.len());
+    }
     NORETURN.with(|c| *c.borrow_mut() = set);
 }
 
-/// A function is noreturn if no recovered block ends in a `ret` — every path
-/// leaves via a tail jump, a call to another noreturn function, or a non-
-/// returning intrinsic (longjmp/throw/exit). Conservative: a function with any
-/// `ret` is treated as returning.
+/// Diagnostic for an x87 depth-pass bail (set `ARET_X87_DEBUG=1`). Prints the
+/// function entry, the offending instruction VA, and the reason.
+fn x87dbg(entry: u64, addr: u64, reason: &str) {
+    if std::env::var_os("ARET_X87_DEBUG").is_some() {
+        eprintln!("[x87 bail] fn=0x{entry:x} @0x{addr:x}: {reason}");
+    }
+}
+
+/// Entry addresses of functions that never return to their caller. A function
+/// returns if it can reach its caller via a `ret`, a tail jump to a returning
+/// function, or an unresolved indirect terminator. Computed as a fixpoint so a
+/// chain of tail calls into a noreturn (e.g. `wrap: jmp exit_helper`) is caught.
+///
+/// Conservative for *soundness*: any uncertainty (a `ret`, a tail jump to a
+/// not-yet-proven-noreturn target, an unresolved indirect tail) makes the
+/// function "may return". A false *negative* (missing a real noreturn) only
+/// loses an x87/CFG optimisation; a false *positive* would wrongly drop a live
+/// edge and miscompile — so we never guess noreturn.
 pub fn compute_noreturn(funcs: &[&Function]) -> std::collections::HashSet<u64> {
-    funcs
-        .iter()
-        .filter(|f| {
-            !f.blocks.is_empty()
-                && !f
-                    .blocks
-                    .values()
-                    .any(|b| matches!(b.terminator, crate::disasm::Flow::Return))
-        })
-        .map(|f| f.entry)
-        .collect()
+    use crate::disasm::Flow;
+    let mut noreturn: std::collections::HashSet<u64> = std::collections::HashSet::new();
+    loop {
+        let mut changed = false;
+        for f in funcs {
+            if f.blocks.is_empty() || noreturn.contains(&f.entry) {
+                continue;
+            }
+            let mut may_return = false;
+            for b in f.blocks.values() {
+                match b.terminator {
+                    // A `ret` returns to the caller.
+                    Flow::Return => may_return = true,
+                    // A tail jump with no *internal* successor leaves the function;
+                    // control returns through the target unless it is noreturn.
+                    Flow::Jump if b.successors.is_empty() => {
+                        let t = b.insns.last().and_then(|i| i.target);
+                        if !t.is_some_and(|t| noreturn.contains(&t)) {
+                            may_return = true;
+                        }
+                    }
+                    // An unresolved indirect tail (no recovered successors) could go
+                    // anywhere — assume it can return.
+                    Flow::Indirect if b.successors.is_empty() => may_return = true,
+                    _ => {}
+                }
+                if may_return {
+                    break;
+                }
+            }
+            if !may_return {
+                noreturn.insert(f.entry);
+                changed = true;
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+    noreturn
 }
 
 /// Does the instruction call a function known to return an fp value in `st(0)`?
@@ -662,7 +708,23 @@ fn x87_depth_pass(
     while let Some(bi) = work.pop() {
         let blk = &func.blocks[&order[bi]];
         let mut sp = entry_sp[bi];
+        // Set once a `call` to a noreturn function is reached: control never
+        // returns, so the rest of the block (the linear sweep often leaves dead
+        // padding — a `nop` — after the call, so the call is *not* the block's
+        // last instruction) and the fall-through edge are unreachable. Stop the
+        // depth walk here and drop the successors, else a spurious wrong-depth
+        // fall-through edge poisons a real join (Lua's luaH_newkey: the NaN-check
+        // `fucomip` after `je` sees both depth 1 (real) and depth 0 (dead path)).
+        let mut noreturn_hit = false;
         for insn in blk.insns.iter() {
+            if matches!(insn.flow, crate::disasm::Flow::Call)
+                && insn
+                    .target
+                    .is_some_and(|t| NORETURN.with(|c| c.borrow().contains(&t)))
+            {
+                noreturn_hit = true;
+                break;
+            }
             let ins = &insn.raw;
             // A call to an fp-returning function leaves its result in st(0); the
             // x87 ABI keeps the stack otherwise empty across calls, so this single
@@ -671,11 +733,13 @@ fn x87_depth_pass(
             // fp return channel.
             if call_returns_fp(prog, ins, fp) {
                 if sp < 0 {
+                    x87dbg(func.entry, insn.address, "fp-call underflow (sp<0)");
                     return Err(X87Bail);
                 }
                 fp_calls.insert(insn.address, sp as u32);
                 sp += 1;
                 if !(0..=8).contains(&sp) {
+                    x87dbg(func.entry, insn.address, "fp-call sp out of range");
                     return Err(X87Bail);
                 }
                 continue;
@@ -684,7 +748,13 @@ fn x87_depth_pass(
                 continue;
             }
             // unmodelled FPU op → bail whole function
-            let delta = x87_delta(ins).ok_or(X87Bail)?;
+            let delta = match x87_delta(ins) {
+                Some(d) => d,
+                None => {
+                    x87dbg(func.entry, insn.address, "unmodelled x87 op");
+                    return Err(X87Bail);
+                }
+            };
             // The rounding mode the surrounding control-word setup proves is
             // active (floor/ceil/truncate/nearest). `frndint` honours all four;
             // `fist`/`fistp` (but not the always-truncating `fisttp`) are only
@@ -692,9 +762,11 @@ fn x87_depth_pass(
             let mode = rounding_mode_active(&flat, pos[&insn.address], &joins);
             let is_fist = matches!(ins.mnemonic(), Mnemonic::Fist | Mnemonic::Fistp);
             if is_fist && mode != crate::ir::lift::RoundMode::Trunc {
+                x87dbg(func.entry, insn.address, "fist without proven truncation");
                 return Err(X87Bail);
             }
             if !(0..=8).contains(&sp) {
+                x87dbg(func.entry, insn.address, "sp out of range (before op)");
                 return Err(X87Bail);
             }
             out.insert(insn.address, (sp as u32, mode));
@@ -706,6 +778,7 @@ fn x87_depth_pass(
                 sp += delta;
             }
             if !(0..=8).contains(&sp) {
+                x87dbg(func.entry, insn.address, "sp out of range (after op)");
                 return Err(X87Bail);
             }
         }
@@ -713,17 +786,8 @@ fn x87_depth_pass(
         if matches!(blk.terminator, crate::disasm::Flow::Return) {
             ret_depths.push(sp);
         }
-        // A `call` to a noreturn function (a Lua `luaG_*error`/`luaD_throw`,
-        // `abort`, `exit`, …) does not fall through: the bytes after it are
-        // reached only via other edges. Treating the fall-through as a successor
-        // injects a spurious — and wrong-depth — x87 edge. Drop it.
-        let noreturn_tail = blk
-            .insns
-            .last()
-            .filter(|i| matches!(i.flow, crate::disasm::Flow::Call))
-            .and_then(|i| i.target)
-            .is_some_and(|t| NORETURN.with(|c| c.borrow().contains(&t)));
-        if noreturn_tail {
+        // A block whose control reached a noreturn call has no live successors.
+        if noreturn_hit {
             continue;
         }
         for &s in &blk.successors {
@@ -732,6 +796,7 @@ fn x87_depth_pass(
                     entry_sp[si] = sp;
                     work.push(si);
                 } else if entry_sp[si] != sp {
+                    x87dbg(func.entry, order[si], &format!("ambiguous join depth ({} vs {})", entry_sp[si], sp));
                     return Err(X87Bail); // ambiguous stack depth at a join
                 }
             }

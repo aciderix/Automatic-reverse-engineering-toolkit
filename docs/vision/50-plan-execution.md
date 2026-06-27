@@ -1126,3 +1126,28 @@ flottante), à faire en session dédiée, une fonction à la fois, difftest à c
   profondeurs aux joins / suivi des valeurs conservées par `fstp st(i)` dans l'idiome NaN) — délicat
   (correctness x87 critique), à faire **une fonction à la fois avec difftest + le filet Lua à chaque
   pas**. Débloque d'un coup : Lua flottant, `seq`, et les partials libm.
+
+### 🎯 Cause racine x87 = chute *noreturn* fantôme + `compute_noreturn` rendu SOUND ✅ FAIT
+- **2026-06-27 — Diagnostic corrigé** : le bail `luaH_newkey` n'était PAS une réconciliation de
+  profondeur profonde mais une **chute fantôme depuis un appel *noreturn*** : la passe x87 ne coupait
+  l'arête de chute *que si l'appel noreturn était la **dernière** instruction du bloc*. Or la balayage
+  linéaire laisse souvent un `nop` de padding après l'appel → l'appel n'est pas le dernier insn → la
+  chute (profondeur 0, code mort) restait et empoisonnait le `fucomip` du chemin NaN (join 1 vs 0).
+  **Fix général** (`x87_depth_pass`) : dès qu'un `call` vers une fonction noreturn est atteint **où
+  que ce soit** dans le bloc, on stoppe le walk et on **droppe les successeurs**.
+- **Régression révélée puis corrigée (le vrai travail du tour)** : ce durcissement a fait chuter
+  transpile-diff 4/4 → 2/4. Cause : `compute_noreturn` marquait noreturn **toute** fonction sans
+  bloc `ret` — donc aussi les fonctions *tail-call* (`foo: jmp bar`, pas de `ret`) qui **retournent
+  pourtant via `bar`**. Dropper leurs successeurs = miscompilation. **`compute_noreturn` réécrit en
+  point-fixe SOUND** : une fonction « peut retourner » si un bloc finit en `ret`, **ou** en tail-jmp
+  sans successeur interne vers une cible *non* prouvée noreturn, **ou** en indirect non résolu. On ne
+  marque noreturn que si **aucun** bloc ne peut rendre la main. Faux négatif = on perd une optim ;
+  faux positif = miscompile → on ne devine **jamais** noreturn. Le point-fixe attrape les chaînes de
+  tail-calls vers un noreturn.
+- **Diagnostic permanent ajouté** (`x87dbg`, `ARET_X87_DEBUG=1`) : imprime `fn=… @… : raison` à
+  chaque bail x87 (générique, aucune adresse en dur) — c'est ce qui a permis de localiser la chute.
+- **Régression** : transpile-diff **4/4** (H=4b0121f182554d40), difftest **268/268**, `cargo test`
+  **93/0**. Lua : `luaH_newkey` ne bail plus (le bail flottant a avancé de `0x4174c8` →
+  `fld dword [0x440d20]`, une **autre** fonction de formatage de flottants). **Prochaine cible** :
+  ce `fld [0x440d20]` (constante flottante chargée dans la conversion nombre→chaîne, frappé même par
+  `print(42)` via le chemin commun).
