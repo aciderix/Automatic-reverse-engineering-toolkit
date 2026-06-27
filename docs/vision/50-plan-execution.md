@@ -1096,10 +1096,19 @@ flottante), à faire en session dédiée, une fonction à la fois, difftest à c
   a disparu. Non-régression : difftest 268/268, transpile-diff 4/4, `cargo test` 5/5, **busybox 6/6
   applets** OK. *Reste Lua* : « attempt to index a nil value » (erreur **bien plus tardive**,
   distincte) → Lua tourne maintenant assez loin pour servir bientôt de filet.
-- **Prochain bug Lua localisé** (backtrace) : `luaopen_base` → `luaL_setfuncs` → `lua_setfield`
-  sur la **table globale `_G` qui est nil**. `lua_pushglobaltable` lit `registry[LUA_RIDX_GLOBALS]` :
-  la **table des globaux n'est pas stockée dans le registre** à l'init d'état (`init_registry`/
-  `f_luaopen`). Aucun import manquant en cause (les 4 non-implémentés — FormatMessageA/LoadLibraryExA/
-  popen/pclose — ne sont pas appelés au démarrage). → bug de lift dans l'init du registre (store de
-  la table globale), à tracer comme le frealloc (watchpoint sur le slot registre). Distinct du
-  tail-call ci-dessus.
+- **Bug `_G` nil = retenue (carry) d'un `add` 32-bit à immédiat signé ✅ CORRIGÉ (général)** :
+  `luaopen_base` lisait `registry[LUA_RIDX_GLOBALS]` = nil. Trace (watchpoint) : la table globale
+  **EST bien stockée** par `init_registry` et **jamais écrasée** → le bug est dans la **lecture**
+  (`luaH_getint(registry, 2)`). Sa borne de tableau `(key-1) < alimit` est calculée en **64 bits**
+  via `add $-1,%ecx ; adc $-1,%ebx`. ARET **sign-étendait** l'immédiat 32-bit `0xffffffff` en
+  `0xffffffffffffffff` pour calculer la **retenue** du `add` bas → retenue=0 au lieu de 1 → l'`adc`
+  produisait `(key-1)` = `0xffffffff00000001` au lieu de `1` → `(key-1) < alimit` faux → `registry[2]`
+  ratait la partie tableau → nil. **Bug général** : toute arithmétique 64-bit construite par
+  `add`/`adc` (ou `sub`/`sbb`) avec immédiat négatif sur cible 32-bit.
+  **Correctif (`add_flags`, lift.rs)** : la retenue se calcule sur les opérandes **masqués à `w`
+  bits** (`((a&mask)+(b&mask))>>w`), au lieu de `r>>w` qui héritait des bits hauts de l'immédiat
+  sign-étendu.
+- **Effet** : **Lua exécute de vrais scripts** — `print`, `6*7=42`, `table.sort` → `1,2,3`. Non-
+  régression : difftest 268/268, transpile-diff 4/4, `cargo test` 5/5, **busybox 6/6**. *Reste Lua* :
+  le **formatage flottant** (`2^10`, `math.sqrt`) bute sur `fld qword [ecx]` non modélisé (= la
+  **robustesse passe x87**, maintenant abordable avec ce **filet Lua quasi-opérationnel**).

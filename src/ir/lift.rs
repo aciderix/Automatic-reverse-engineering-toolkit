@@ -689,7 +689,14 @@ fn add_flags(a: &Expr, b: &Expr, r: &Expr, w: u32) -> Vec<Stmt> {
     let cf = if w >= 64 {
         bin(BinOp::Ult, r.clone(), a.clone()) // 64-bit: wraparound check
     } else {
-        bin(BinOp::And, bin(BinOp::Shr, r.clone(), konst(w as i128)), konst(1))
+        // Carry-out is bit `w` of the sum of the *w-bit* operands. A sign-extended
+        // immediate (e.g. `add r32, 0xffffffff` -> b = 0xffff_ffff_ffff_ffff) would
+        // otherwise pollute the high bits and zero the real carry — breaking 64-bit
+        // arithmetic built from `add`/`adc` pairs (a real Lua bug: luaH_getint's
+        // `(key-1) < alimit` array bound). Mask both operands to `w` first.
+        let am = bin(BinOp::And, a.clone(), konst(mask(w)));
+        let bm = bin(BinOp::And, b.clone(), konst(mask(w)));
+        bin(BinOp::And, bin(BinOp::Shr, bin(BinOp::Add, am, bm), konst(w as i128)), konst(1))
     };
     let of = bin(
         BinOp::And,
