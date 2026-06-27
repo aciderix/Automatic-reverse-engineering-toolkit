@@ -2032,7 +2032,8 @@ pub(crate) fn x87_delta(ins: &Instruction) -> Option<i32> {
         Fprem | Fprem1 => 0,
         Fcomi | Fucomi => 0,
         // Status-word compares (32-bit float idiom) + status-word store.
-        Fcom | Fucom | Ficom => 0,
+        // `ftst` compares st(0) against an implicit 0.0 (no pop).
+        Fcom | Fucom | Ficom | Ftst => 0,
         Fcomp | Fucomp | Ficomp => -1,
         Fcompp | Fucompp => -2,
         Fnstsw | Fstsw => 0,
@@ -2233,9 +2234,11 @@ fn x87_try(insn: &Insn, sp: i32, mode: RoundMode) -> Option<Vec<Stmt>> {
         // copies them to AX and `sahf`/`test ah` derives the branch. Encode the
         // bits at their hardware positions (C0=bit8, C2=bit10, C3=bit14) so that
         // both `sahf` (CF=C0, ZF=C3, PF=C2) and `test ah, imm` read them right.
-        Fcom | Fcomp | Fcompp | Fucom | Fucomp | Fucompp | Ficom | Ficomp => {
+        Fcom | Fcomp | Fcompp | Fucom | Fucomp | Fucompp | Ficom | Ficomp | Ftst => {
             let a = Expr::Read(fpr(st0)?);
-            let b = if ins.op_count() == 0 {
+            let b = if ins.mnemonic() == Ftst {
+                x87call("__x87_zero", vec![]) // ftst: compare st(0) against 0.0
+            } else if ins.op_count() == 0 {
                 Expr::Read(fpr(st0 - 1)?) // st1
             } else {
                 x87_src(ins, ins.op_count() - 1, sp)?
