@@ -667,10 +667,19 @@ fn sub_flags(a: &Expr, b: &Expr, r: &Expr, w: u32) -> Vec<Stmt> {
             Box::new(sign_bit(a, w)),
         )),
     );
+    // ZF (a==b) and CF (a <u b) are *not* invariant under how the operands are
+    // extended into the i128 the C masks pointers/values to: a `cmp r/m32, imm8`
+    // sign-extends the immediate to the operand width, so a 32-bit `0xffffffc1`
+    // becomes `0xffffffffffffffc1`, while the register is zero-extended. Comparing
+    // those raw makes CF wrong (the high-word `sbb` of a 64-bit signed compare then
+    // mis-sets SF/OF — Lua's `>>` via luaV_shiftl(x, -n) returned 0). Mask both to
+    // `w` bits first. (SF/OF already read only the `w`-bit sign via `sign_bit`.)
+    let am = if w >= 64 { a.clone() } else { bin(BinOp::And, a.clone(), konst(mask(w))) };
+    let bm = if w >= 64 { b.clone() } else { bin(BinOp::And, b.clone(), konst(mask(w))) };
     vec![
-        set_flag(FlagKind::Zf, Expr::Binary(BinOp::Eq, Box::new(a.clone()), Box::new(b.clone()))),
+        set_flag(FlagKind::Zf, Expr::Binary(BinOp::Eq, Box::new(am.clone()), Box::new(bm.clone()))),
         set_flag(FlagKind::Sf, sign_bit(r, w)),
-        set_flag(FlagKind::Cf, Expr::Binary(BinOp::Ult, Box::new(a.clone()), Box::new(b.clone()))),
+        set_flag(FlagKind::Cf, Expr::Binary(BinOp::Ult, Box::new(am), Box::new(bm))),
         set_flag(FlagKind::Of, of),
     ]
 }

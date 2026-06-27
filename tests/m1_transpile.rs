@@ -205,6 +205,22 @@ fn m4_heap_and_string_runtime() {
 }
 
 #[test]
+fn sub_flags_mask_operands_for_wide_signed_compare() {
+    if !has_m32() {
+        eprintln!("skipping sub-flags test: `cc -m32` unavailable (install gcc-multilib)");
+        return;
+    }
+    // A 64-bit signed compare `n <= -64` lowers to `cmp lo,-63; sbb hi,-1; jl`.
+    // The `cmp r/m32, imm8` sign-extends the immediate to 32 bits (0xffffffc1),
+    // but ARET masks values into a 64-bit C int — so CF used the unmasked
+    // operands and came out wrong, the high-word sbb then mis-set SF/OF, and
+    // Lua's `256 >> 2` (via luaV_shiftl(x,-n)) returned 0 instead of 64.
+    // sub_flags now masks both operands to the op width before CF/ZF.
+    let out = transpile_and_run("sub_flags_wide_cmp.exe");
+    assert!(out.contains("r1=64 r2=1024 r3=0 r4=128"), "wide signed compare wrong:\n{out}");
+}
+
+#[test]
 fn file_io_roundtrip_through_crt() {
     if !has_m32() {
         eprintln!("skipping file-io test: `cc -m32` unavailable (install gcc-multilib)");

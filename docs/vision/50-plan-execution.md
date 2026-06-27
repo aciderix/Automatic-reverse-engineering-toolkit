@@ -1239,3 +1239,22 @@ flottante), à faire en session dédiée, une fonction à la fois, difftest à c
 - **Reste busybox** : les applets fichier avancent au-delà de `_open` mais butent sur un **segfault
   aval** (`sub_4104d0`, hors shim) + `GetEnvironmentVariableW` non implémenté — chantiers distincts.
   L'infrastructure I/O fichier est en place et **prouvée** par la fixture.
+
+### 🎯 `sub_flags` : masquer les opérandes pour CF/ZF (compare signée 64-bit) → Lua 35/35 ✅ FAIT
+- **2026-06-27 — Mesure concrète de l'avancée** : transpilé `lua.exe` → ELF natif Linux et passé une
+  **batterie de 14 domaines** (arith/bitwise, strings, tables, math, **I/O fichier**, OS, goto/repeat,
+  closures/varargs/multiret, **héritage POO/métatables**, **coroutines**, pcall/xpcall/error-objects,
+  **load+env sandboxé**, itérateurs, modules). Résultat **34/35** ; seul échec : `256 >> 2 = 0`.
+- **Cause racine (même famille que le bug retenue `add_flags`)** : `sub_flags` calculait **CF (`a <u b`)
+  et ZF (`a == b`) sur les opérandes NON masqués**. Or `cmp r/m32, imm8` **sign-étend** l'immédiat à la
+  largeur d'opérande (`0xffffffc1`), tandis que le registre est zero-étendu — dans l'i128 du modèle,
+  CF devenait `(u64)lo < (u64)0xffffffffffffffc1` au lieu de `(u32)lo < (u32)0xffffffc1`. CF faux → le
+  `sbb` du mot haut d'une compare signée 64-bit posait mal SF/OF → `jl`/`setl` inversé. Lua `>>` passe
+  par `luaV_shiftl(x, -n)` qui teste `n <= -64` ⟹ rendait 0 pour tout décalage.
+- **Fix général** : masquer `a` et `b` à `w` bits avant `Ult`/`Eq` (no-op pour w=64 ; SF/OF lisaient
+  déjà le signe `w`-bit). Touche **toute** compare/soustraction à immédiat signé sur cible 32-bit.
+- **Vérifié** : fixture `sub_flags_wide_cmp.exe` (réplique exacte de `luaV_shiftl` → `r1=64 r2=1024
+  r3=0 r4=128`) + test. **Lua passe 35/35.** Régression : transpile-diff **4/4**, difftest **268/268**,
+  `cargo test` **96/0** (→ 97 avec le nouveau test).
+- **Note d'avancée globale** : ce Lua 35/35 (interpréteur réel 650 Ko, PE Windows → ELF natif Linux,
+  **sans émulation**) est le démonstrateur de référence de l'axe « justesse de traduction CPU ».
