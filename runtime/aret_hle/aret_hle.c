@@ -389,10 +389,17 @@ static const char *aret_prefix(void) {
     return (p && *p) ? p : "aret_prefix";
 }
 
-/* Translate a Windows path to a native path under the ARET prefix:
- *   "C:\dir\file" -> "<prefix>/drive_c/dir/file"
- *   "\dir\file"   -> "<prefix>/dir/file"   (rooted, drive-less)
- *   "dir\file"    -> "dir/file"            (relative: passes through) */
+/* Translate a path to a native one. The recompiled program is a *native Linux
+ * tool*, so genuine Windows paths map under the ARET prefix while real Unix
+ * paths reach the real filesystem:
+ *   "C:\dir\file" -> "<prefix>/drive_c/dir/file"   (DOS drive)
+ *   "\dir\file"   -> "<prefix>/dir/file"            (Windows rooted, drive-less)
+ *   "/dir/file"   -> "/dir/file"                    (Unix absolute: real FS)
+ *   "dir\file"    -> "dir/file"                     (relative: passes through)
+ * The `/`-absolute passthrough is what lets `cat /tmp/x` read the real file
+ * (only `\`-rooted backslash paths, which a Unix tool never produces, are
+ * sandboxed). Relative paths still pass through, so write-then-read round-trips
+ * stay consistent. */
 static void translate_path(const char *win, char *out, size_t cap) {
     if (!win) { if (cap) out[0] = 0; return; }
     size_t o = 0;
@@ -401,7 +408,7 @@ static void translate_path(const char *win, char *out, size_t cap) {
         o = (size_t)snprintf(out, cap, "%s/drive_%c", aret_prefix(),
                              (char)tolower((unsigned char)win[0]));
         s = win + 2; /* keep the leading separator */
-    } else if (win[0] == '\\' || win[0] == '/') {
+    } else if (win[0] == '\\') {
         o = (size_t)snprintf(out, cap, "%s", aret_prefix());
         s = win;
     }

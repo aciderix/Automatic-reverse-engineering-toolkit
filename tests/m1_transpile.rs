@@ -205,6 +205,22 @@ fn m4_heap_and_string_runtime() {
 }
 
 #[test]
+fn reads_real_absolute_unix_path() {
+    if !has_m32() {
+        eprintln!("skipping abs-path test: `cc -m32` unavailable (install gcc-multilib)");
+        return;
+    }
+    // A native Linux tool must read real files by absolute Unix path. The path
+    // sandbox used to prepend the ARET prefix to "/"-rooted paths, so a
+    // pre-existing "/tmp/x" was never found. translate_path now passes
+    // "/"-absolute paths through to the real filesystem. Write the file on the
+    // host, then have the transpiled program read it back.
+    std::fs::write("/tmp/aret_abs_fixture.txt", "HELLO_ABS\n").expect("write fixture file");
+    let out = transpile_and_run("read_abs_path.exe");
+    assert!(out.contains("ABSREAD=HELLO_ABS"), "absolute-path read failed:\n{out}");
+}
+
+#[test]
 fn sub_flags_mask_operands_for_wide_signed_compare() {
     if !has_m32() {
         eprintln!("skipping sub-flags test: `cc -m32` unavailable (install gcc-multilib)");

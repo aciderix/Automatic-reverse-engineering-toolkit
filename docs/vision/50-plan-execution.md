@@ -1258,3 +1258,22 @@ flottante), à faire en session dédiée, une fonction à la fois, difftest à c
   `cargo test` **96/0** (→ 97 avec le nouveau test).
 - **Note d'avancée globale** : ce Lua 35/35 (interpréteur réel 650 Ko, PE Windows → ELF natif Linux,
   **sans émulation**) est le démonstrateur de référence de l'axe « justesse de traduction CPU ».
+
+### 🎯 `translate_path` : les chemins Unix absolus atteignent le vrai FS ✅ FAIT
+- **2026-06-27 — Diagnostic busybox `cat <fichier>`** : le segfault aval `sub_4104d0` n'était PAS un
+  bug de lift ni un layout `FILE` (cf. Gemini) — c'était le **sandbox de chemins**. `translate_path`
+  préfixait les chemins **`/`-enracinés** sous `aret_prefix/`, donc `/tmp/in.txt` → `aret_prefix/tmp/in.txt`
+  (inexistant) → `_open` échouait (fd=-1) → `cat` formatait son message d'erreur « cat: can't open … »
+  et **c'est le formateur d'erreur qui crashait** (la struct à `aret_stack+…` contenait « cat\0can't o… »,
+  champ `+0x18 = 1` lu comme `char*`). La fixture `file_io` passait car elle utilise un chemin **relatif**
+  (write-then-read cohérents sous le préfixe) ; `cat` lit un **vrai fichier pré-existant** → cassé.
+- **Fix général (objectif « outil natif »)** : un chemin **Unix absolu `/…` passe désormais tel quel au
+  vrai système de fichiers** ; seuls les vrais chemins Windows gardent le préfixe (`C:\…` → `<prefix>/drive_c/…`,
+  `\…` backslash-enraciné → `<prefix>/…`). Un outil Unix ne produit jamais de backslash-rooted, donc aucun
+  risque ; les relatifs passent toujours (round-trips cohérents).
+- **Effet mesuré** : `cat /tmp/in.txt` **ouvre maintenant le vrai fichier** (plus de « can't open »,
+  formateur d'erreur plus atteint). cat avance puis crashe ailleurs (`sub_418710`, `memcpy` depuis NULL
+  — chantier suivant) + `LoadLibraryExA` non implémenté.
+- **Vérifié** : fixture `read_abs_path.exe` (lit un vrai `/tmp/…` créé par le test → `ABSREAD=HELLO_ABS`)
+  + test. **Lua toujours 35/35.** Régression : transpile-diff **4/4**, difftest **268/268**,
+  `cargo test` **98/0**.
