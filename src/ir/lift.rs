@@ -2046,6 +2046,7 @@ pub(crate) fn x87_delta(ins: &Instruction) -> Option<i32> {
         Fnstsw | Fstsw => 0,
         // `fxam` classifies st(0) into the FPU condition codes (no stack change).
         Fxam => 0,
+        Fcmovb | Fcmovbe | Fcmove | Fcmovu | Fcmovnb | Fcmovnbe | Fcmovne | Fcmovnu => 0,
         // `finit`/`fninit` empty the x87 stack; the depth pass resets sp to 0 for
         // them (a plain delta can't express that), but they are *modelled* here so
         // a CRT-startup `fninit` does not bail the whole function to asm.
@@ -2273,6 +2274,28 @@ fn x87_try(insn: &Insn, sp: i32, mode: RoundMode) -> Option<Vec<Stmt>> {
         // bits at their hardware positions (C0=bit8, C2=bit10, C1=bit9, C3=bit14),
         // matching the `fcom` idiom above so `fnstsw` reads them consistently.
         Fxam => vec![Stmt::Set { dst: fsw(), expr: x87call("__x87_fxam", vec![Expr::Read(fpr(st0)?)]) }],
+        // --- conditional fp move (fcmovcc) --------------------------------
+        // `fcmovcc st(0), st(i)`: st(0) = cond ? st(i) : st(0). The condition reads
+        // the EFLAGS a preceding `fucomi`/`fcomi`/`cmp`/`test` set (CF/ZF/PF). iced's
+        // `condition_code()` does *not* cover the FCMOVcc family (it returns None →
+        // an always-true move), so map the mnemonic to its condition explicitly.
+        Fcmovb | Fcmovbe | Fcmove | Fcmovu | Fcmovnb | Fcmovnbe | Fcmovne | Fcmovnu => {
+            let ri = ins.op_register(1);
+            if !ri.is_st() { return None; }
+            let cc = match mn {
+                Fcmovb => ConditionCode::b,    // CF=1
+                Fcmovbe => ConditionCode::be,  // CF=1 | ZF=1
+                Fcmove => ConditionCode::e,    // ZF=1
+                Fcmovu => ConditionCode::p,    // PF=1 (unordered)
+                Fcmovnb => ConditionCode::ae,  // CF=0
+                Fcmovnbe => ConditionCode::a,  // CF=0 & ZF=0
+                Fcmovne => ConditionCode::ne,  // ZF=0
+                _ => ConditionCode::np,        // Fcmovnu: PF=0
+            };
+            let src = Expr::Read(fpr(sp - 1 - ri.number() as i32)?);
+            let cur = Expr::Read(fpr(st0)?);
+            vec![Stmt::Set { dst: fpr(st0)?, expr: Expr::Select { cond: Box::new(cc_to_cond(cc)), then_: Box::new(src), else_: Box::new(cur) } }]
+        }
 
         // Store the FPU status word to AX (or memory).
         Fnstsw | Fstsw => match ins.op_kind(0) {

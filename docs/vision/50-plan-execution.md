@@ -1193,3 +1193,29 @@ flottante), à faire en session dédiée, une fonction à la fois, difftest à c
   `x87_fxam_classifies_into_status_word` (NaN=256, Inf=1280, normal=1024, zéro=16384 ; valeurs
   vérifiées contre un build hôte `-m32`). Régression : transpile-diff **4/4**, difftest **268/268**,
   `cargo test` **94/0**, busybox OK. **Lua = filet de régression pleinement opérationnel**.
+
+### 🎯 x87 `fcmovcc` modélisé — et un faux positif `condition_code()` attrapé par la vérif ✅ FAIT
+- **2026-06-27 — Honnêteté de la vérif (principe sacré en action)** : en visant busybox `seq`, la
+  cause convergente (Lua libm + seq) est le **déplacement conditionnel x87 `fcmovcc`**
+  (`fcmove`/`fcmovne`/…). Première implé : `Select(cc_to_cond(ins.condition_code()), st(i), st0)`.
+  Un fixture `test al,al; fcmove` passait — **par chance**. Un 2ᵉ fixture (`fmax`/`fmin`,
+  idiome `fucomi; fxch; fcmove`) a donné **`fmax(3,7)=3`** (faux) et le `printf` flottant `-O2`
+  (dtoa mingw, qui exécute fcmov) **`7.0 → 7.000001`**. Avant modélisation, ces fonctions
+  **abandonnaient en abort** (sûr) ; les modéliser naïvement = **abort sûr → sortie fausse
+  silencieuse** = violation du principe. **Donc pas de commit tant que faux.**
+- **Forensics** : bissection — passage de 2 `double` ✓, `fucomi`+branche ✓, `fxch` seul ✓,
+  max via `fcom/fnstsw` ✓ ; seul `fucomi+fxch+fcmove` ✗. Dump C non optimisé : `v41 = (1 ? v29 : v28)`
+  → **la condition était la constante 1**. Cause racine : **iced `condition_code()` ne couvre PAS la
+  famille FCMOVcc** (renvoie `None` → `cc_to_cond(None)=konst(1)` → move inconditionnel).
+- **Fix général** : mapper explicitement le mnémonique → condition
+  (`Fcmovb→b, Fcmovbe→be, Fcmove→e, Fcmovu→p, Fcmovnb→ae, Fcmovnbe→a, Fcmovne→ne, Fcmovnu→np`) puis
+  `cc_to_cond`. Résultat : `fmax/fmin` corrects, **formatage `printf` flottant `-O2` correct**
+  (`7.0 7.000 7 7.000000e+00`), `seq` **avance au-delà du dtoa x87** (bute désormais sur un op non-x87
+  `movsd` chaîne — autre chantier). Lua inchangé (libm host-backed).
+- **Filet** : fixture `x87_fcmov.exe` + test `x87_fcmov_uses_the_real_condition` (colonnes `%d` =
+  valeur, `%f` = chemin dtoa ; réf. build hôte `-m32`). Régression : transpile-diff **4/4**, difftest
+  **268/268**, `cargo test` **95/0**.
+- **Leçon (réponse à la question « monotonie inter-procédurale » de ChatGPT)** : un op modélisé
+  *correctement en isolation* peut **désamorcer le bail** de fonctions entières dont la sémantique
+  combinée est fausse → le filet (2ᵉ fixture) l'a attrapé **avant commit**, l'abort sûr a servi de
+  recul propre. Pas de monotonie globale prouvée, mais **toute incohérence reste bruyante**.

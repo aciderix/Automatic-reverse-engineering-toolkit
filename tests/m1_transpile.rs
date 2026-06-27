@@ -732,6 +732,26 @@ fn x87_fxam_classifies_into_status_word() {
 }
 
 #[test]
+fn x87_fcmov_uses_the_real_condition() {
+    if !has_m32() {
+        eprintln!("skipping fcmov test: `cc -m32` unavailable (install gcc-multilib)");
+        return;
+    }
+    // The x87 conditional-move family (fcmovcc) selects st(0) from st(i) based on
+    // the EFLAGS a prior fucomi/cmp set. iced's `condition_code()` does not cover
+    // FCMOVcc (returns None), so a naive lift made the move unconditional — a
+    // double `a>b?a:b` then silently returned the wrong operand, and the float
+    // printf path (mingw dtoa, which runs fcmov) misformatted (7.0 -> 7.1). The
+    // mnemonic now maps to its real condition. The %d columns pin the value; the
+    // %f columns pin the dtoa path.
+    let out = transpile_and_run("x87_fcmov.exe");
+    assert!(
+        out.contains("F mx=7.0 mn=-2.5 | I mx7=1 mn=1"),
+        "x87 fcmov condition wrong:\n{out}"
+    );
+}
+
+#[test]
 fn x87_frndint_honours_rounding_mode() {
     if !has_m32() {
         eprintln!("skipping rounding test: `cc -m32` unavailable (install gcc-multilib)");
