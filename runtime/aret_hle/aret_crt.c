@@ -410,6 +410,15 @@ uint32_t aret_wcscmp(uint32_t esp) {
     while (*a && *a == *b) { a++; b++; }
     return (uint32_t)(int32_t)((int)*a - (int)*b);
 }
+uint32_t aret_wcsdup(uint32_t esp) {
+    const uint16_t *s = (const uint16_t *)(uintptr_t)a32(esp, 0);
+    uint32_t n = 0;
+    while (s[n]) n++;
+    uint16_t *d = (uint16_t *)malloc((size_t)(n + 1) * 2);
+    if (!d) return 0;
+    for (uint32_t i = 0; i <= n; i++) d[i] = s[i];
+    return (uint32_t)(uintptr_t)d;
+}
 
 /* ------------------------------------------------------------------ */
 /* <time.h> calendar — struct tm marshalling (host/guest ABI)         */

@@ -1631,3 +1631,19 @@ silencieux (à valider un jour) ; « **non lifté** » = `Asm`/abort = **sound**
 - **Vérifié** : `win32_mmap` (checksum d'un fichier mappé en lecture + écriture-au-travers relue) =
   **bit-identique à Wine** ; winediff **26/26**. Régression : cargo **98/0**, **difftest 268/268,
   transpile-diff 4/4 (hash inchangé)**, **wasm OK**, cpudiff OK.
+
+### Axe 2 (P1) : lot wide I/O + console ✅ FAIT
+- **2026-06-28 — Décision de principe : P1 (boucle synthétique vérifiée) plutôt que « stubber 76 d'un
+  coup pour voir si strings.exe tourne »** — ce dernier viole « pas de rustine par binaire » et « jamais
+  de sortie fausse présentée comme vraie » (tourner ≠ prouvé correct). Chaque shim est vérifié bit-à-bit
+  contre Wine *avant* d'être cru.
+- **Lot wide I/O + console** (+3 programmes). Inventaire → comblé :
+  - **`CreateFileW`/`GetFileAttributesW`/`DeleteFileW`** : helper `aret_w2n` (UTF-16→narrow) + cœurs
+    partagés `aret_open_named`/`aret_attr_named` refactorés depuis les variantes A.
+  - **`FindFirstFileW`/`FindNextFileW`** : `aret_find_t` gagne un flag `wide`, `aret_fill_find` écrit
+    `cFileName` en WCHAR (layout `WIN32_FIND_DATAW`) ; cœur `aret_find_first` partagé A/W. **`_wcsdup`**.
+  - **`GetConsoleCP`/`GetConsoleOutputCP`** : **0** sans console (sortie redirigée, comme sous le
+    harness), code page réel sinon — *valeur calquée sur Wine* (qui renvoie 0 en pipe). **`WriteConsoleW`**
+    échoue sur un handle redirigé (le programme bascule alors sur WriteFile) → pas de double sortie.
+- **Vérifié** : `win32_filew`/`win32_findw`/`console_cp` = **bit-identiques à Wine** ; winediff **29/29**.
+  Régression : cargo **98/0** (wasm OK), **difftest 268/268, transpile-diff 4/4 (hash inchangé)**.

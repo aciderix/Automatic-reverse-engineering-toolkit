@@ -307,6 +307,29 @@ static int aret_handle_fd(uint32_t h) { return (h <= 2u) ? (int)h : -1; }
 uint32_t aret_open_osfhandle(uint32_t esp) { return WU(0); }
 uint32_t aret_get_osfhandle(uint32_t esp) { return WU(0); }
 uint32_t aret_SetErrorMode(uint32_t esp)                 { (void)esp; return 0; }
+/* Console code pages: a process with no console (output redirected to a pipe/
+ * file, as under the differential harness) reports 0, like Windows/Wine; a real
+ * console reports a code page (the US OEM default). */
+uint32_t aret_GetConsoleCP(uint32_t esp) {
+    (void)esp;
+    return (isatty(0) || isatty(1) || isatty(2)) ? 437u : 0u;
+}
+uint32_t aret_GetConsoleOutputCP(uint32_t esp) { return aret_GetConsoleCP(esp); }
+/* WriteConsoleW writes only to a real console; on a redirected handle it fails
+ * (the caller then falls back to WriteFile) — match that so output isn't doubled. */
+uint32_t aret_WriteConsoleW(uint32_t esp) {
+    int fd = aret_handle_fd(WU(0));
+    if (fd < 0 || !isatty(fd)) return 0;
+    const uint16_t *s = (const uint16_t *)(uintptr_t)WU(1);
+    uint32_t n = WU(2);
+    char tmp[8192];
+    uint32_t i = 0;
+    for (; i < n && i < sizeof tmp; i++) tmp[i] = (char)(s[i] & 0xff);
+    ssize_t w = write(fd, tmp, i);
+    uint32_t *pw = (uint32_t *)(uintptr_t)WU(3);
+    if (pw) *pw = w > 0 ? (uint32_t)w : 0;
+    return w >= 0 ? 1 : 0;
+}
 uint32_t aret_GetConsoleMode(uint32_t esp) {
     int fd = aret_handle_fd(WU(0));
     if (fd < 0 || !isatty(fd)) return 0;            /* not a console */

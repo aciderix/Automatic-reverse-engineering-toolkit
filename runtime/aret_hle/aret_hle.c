@@ -569,13 +569,17 @@ uint32_t aret_setvbuf(uint32_t esp) { (void)esp; return 0; }
 #define GENERIC_READ_FLAG  0x80000000u
 #define GENERIC_WRITE_FLAG 0x40000000u
 
-uint32_t aret_CreateFileA(uint32_t esp) {
-    const char *name = (const char *)(uintptr_t)arg(esp, 0);
-    uint32_t access = arg(esp, 1);
-    uint32_t disposition = arg(esp, 4);
+/* Narrow a Windows wide string (UTF-16LE) to a byte string (ASCII/Latin-1 — the
+ * common case; covers the paths a CLI tool sees). */
+static void aret_w2n(const uint16_t *w, char *out, size_t cap) {
+    size_t i = 0;
+    if (w) for (; w[i] && i + 1 < cap; i++) out[i] = (char)(w[i] & 0xff);
+    out[i] = 0;
+}
+
+static uint32_t aret_open_named(const char *name, uint32_t access, uint32_t disposition) {
     char path[1024];
     translate_path(name, path, sizeof path);
-
     int rd = (access & GENERIC_READ_FLAG) != 0;
     int wr = (access & GENERIC_WRITE_FLAG) != 0;
     int flags = (rd && wr) ? O_RDWR : (wr ? O_WRONLY : O_RDONLY);
@@ -590,6 +594,14 @@ uint32_t aret_CreateFileA(uint32_t esp) {
     if (wr || disposition == 1 || disposition == 2 || disposition == 4) make_parents(path);
     int fd = open(path, flags, 0666);
     return fd < 0 ? ARET_INVALID_HANDLE : (uint32_t)fd;
+}
+uint32_t aret_CreateFileA(uint32_t esp) {
+    return aret_open_named((const char *)(uintptr_t)arg(esp, 0), arg(esp, 1), arg(esp, 4));
+}
+uint32_t aret_CreateFileW(uint32_t esp) {
+    char name[1024];
+    aret_w2n((const uint16_t *)(uintptr_t)arg(esp, 0), name, sizeof name);
+    return aret_open_named(name, arg(esp, 1), arg(esp, 4));
 }
 
 /* File mapping (CreateFileMapping/MapViewOfFile/UnmapViewOfFile) — bridged to
@@ -696,7 +708,7 @@ uint32_t aret_RemoveDirectoryA(uint32_t esp) {
 #define ARET_FFD_NAME_OFF 44u
 #define FILE_ATTRIBUTE_DIRECTORY_F 0x10u
 #define FILE_ATTRIBUTE_NORMAL_F 0x80u
-typedef struct { DIR *d; char dir[1024]; char pat[260]; } aret_find_t;
+typedef struct { DIR *d; char dir[1024]; char pat[260]; int wide; } aret_find_t;
 
 /* Case-insensitive wildcard match (Windows file matching is case-folding);
  * FNM_CASEFOLD is a GNU extension, so lowercase both sides and use plain fnmatch. */
@@ -722,36 +734,53 @@ static int aret_fill_find(aret_find_t *st, uint8_t *fd) {
             if (S_ISDIR(sb.st_mode)) attr = FILE_ATTRIBUTE_DIRECTORY_F;
             size = (uint64_t)sb.st_size;
         }
-        memset(fd, 0, 320);
+        /* WIN32_FIND_DATA{A,W} share their layout up to cFileName (offset 44);
+         * only the name's width differs (char[260] vs WCHAR[260]). */
+        memset(fd, 0, st->wide ? 592 : 320);
         *(uint32_t *)(fd + 0) = attr;
         *(uint32_t *)(fd + 28) = (uint32_t)(size >> 32);  /* nFileSizeHigh */
         *(uint32_t *)(fd + 32) = (uint32_t)size;          /* nFileSizeLow  */
-        snprintf((char *)(fd + ARET_FFD_NAME_OFF), 260, "%s", e->d_name);
+        if (st->wide) {
+            uint16_t *w = (uint16_t *)(fd + ARET_FFD_NAME_OFF);
+            int i = 0;
+            for (; e->d_name[i] && i < 259; i++) w[i] = (unsigned char)e->d_name[i];
+            w[i] = 0;
+        } else {
+            snprintf((char *)(fd + ARET_FFD_NAME_OFF), 260, "%s", e->d_name);
+        }
         return 1;
     }
     return 0;
 }
-uint32_t aret_FindFirstFileA(uint32_t esp) {
+static uint32_t aret_find_first(const char *name, uint8_t *fd, int wide) {
     char path[1024];
-    translate_path((const char *)(uintptr_t)arg(esp, 0), path, sizeof path);
+    translate_path(name, path, sizeof path);
     aret_find_t *st = (aret_find_t *)malloc(sizeof *st);
     if (!st) return ARET_INVALID_HANDLE;
+    st->wide = wide;
     /* split into directory + filename pattern at the last separator */
     char *slash = strrchr(path, '/');
     if (slash) { *slash = 0; snprintf(st->dir, sizeof st->dir, "%s", path); snprintf(st->pat, sizeof st->pat, "%s", slash + 1); }
     else { snprintf(st->dir, sizeof st->dir, "."); snprintf(st->pat, sizeof st->pat, "%s", path); }
     st->d = opendir(st->dir[0] ? st->dir : "/");
     if (!st->d) { free(st); return ARET_INVALID_HANDLE; }
-    if (!aret_fill_find(st, (uint8_t *)(uintptr_t)arg(esp, 1))) {
-        closedir(st->d); free(st); return ARET_INVALID_HANDLE;
-    }
+    if (!aret_fill_find(st, fd)) { closedir(st->d); free(st); return ARET_INVALID_HANDLE; }
     return (uint32_t)(uintptr_t)st;
+}
+uint32_t aret_FindFirstFileA(uint32_t esp) {
+    return aret_find_first((const char *)(uintptr_t)arg(esp, 0), (uint8_t *)(uintptr_t)arg(esp, 1), 0);
+}
+uint32_t aret_FindFirstFileW(uint32_t esp) {
+    char name[1024];
+    aret_w2n((const uint16_t *)(uintptr_t)arg(esp, 0), name, sizeof name);
+    return aret_find_first(name, (uint8_t *)(uintptr_t)arg(esp, 1), 1);
 }
 uint32_t aret_FindNextFileA(uint32_t esp) {
     aret_find_t *st = (aret_find_t *)(uintptr_t)arg(esp, 0);
     if (!st) return 0;
     return (uint32_t)aret_fill_find(st, (uint8_t *)(uintptr_t)arg(esp, 1));
 }
+uint32_t aret_FindNextFileW(uint32_t esp) { return aret_FindNextFileA(esp); }
 uint32_t aret_FindClose(uint32_t esp) {
     aret_find_t *st = (aret_find_t *)(uintptr_t)arg(esp, 0);
     if (!st) return 0;
@@ -763,9 +792,9 @@ uint32_t aret_FindClose(uint32_t esp) {
  * stat/access, and busybox's path handling, lean on it). stat() the translated
  * path and map the mode to the Win32 attribute bitmask, or return
  * INVALID_FILE_ATTRIBUTES (0xFFFFFFFF) when the path does not exist. */
-uint32_t aret_GetFileAttributesA(uint32_t esp) {
+static uint32_t aret_attr_named(const char *name) {
     char path[1024];
-    translate_path((const char *)(uintptr_t)arg(esp, 0), path, sizeof path);
+    translate_path(name, path, sizeof path);
     struct stat st;
     if (stat(path, &st) != 0) return 0xFFFFFFFFu; /* INVALID_FILE_ATTRIBUTES */
     uint32_t attr = 0;
@@ -773,6 +802,20 @@ uint32_t aret_GetFileAttributesA(uint32_t esp) {
     if (!(st.st_mode & S_IWUSR)) attr |= 0x01u;    /* FILE_ATTRIBUTE_READONLY */
     if (attr == 0) attr = 0x80u;                   /* FILE_ATTRIBUTE_NORMAL */
     return attr;
+}
+uint32_t aret_GetFileAttributesA(uint32_t esp) {
+    return aret_attr_named((const char *)(uintptr_t)arg(esp, 0));
+}
+uint32_t aret_GetFileAttributesW(uint32_t esp) {
+    char name[1024];
+    aret_w2n((const uint16_t *)(uintptr_t)arg(esp, 0), name, sizeof name);
+    return aret_attr_named(name);
+}
+uint32_t aret_DeleteFileW(uint32_t esp) {
+    char name[1024], path[1024];
+    aret_w2n((const uint16_t *)(uintptr_t)arg(esp, 0), name, sizeof name);
+    translate_path(name, path, sizeof path);
+    return unlink(path) == 0 ? 1 : 0;
 }
 
 /* _open(name, oflag, [pmode]) -> fd. msvcrt oflag bits differ from POSIX, so
