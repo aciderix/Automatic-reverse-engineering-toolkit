@@ -171,22 +171,39 @@ pub(crate) const FLOAT_HELPERS: &str = concat!(
     // Wide integer (64-bit 1-operand mul/div via 128-bit), byte swap, bit scan.
     // `__int128` only exists on 64-bit targets; on -m32 (where the transpiler's
     // stack model runs) use bit-exact software equivalents.
+    // x86 `div`/`idiv` raise #DE on a zero divisor *or* a quotient that overflows
+    // the destination; the hardware does NOT silently truncate. Trap so a
+    // transpiled binary crashes deterministically where the original would,
+    // never continuing with a wrong value. (`__builtin_trap` is a guaranteed
+    // abort with no library dependency; the exact signal is immaterial — we do
+    // not model Windows SEH for hardware exceptions anyway.)
+    "static inline void __ix_diverr(void){ __builtin_trap(); }\n",
+    // 32-bit forms: edx:eax / r/m32. `n` is the 64-bit dividend, `d` the divisor.
+    "static inline uint32_t __ix_udiv32(uint64_t n,uint32_t d){ if(!d)__ix_diverr(); uint64_t q=n/d; if(q>0xffffffffull)__ix_diverr(); return (uint32_t)q; }\n",
+    "static inline uint32_t __ix_umod32(uint64_t n,uint32_t d){ if(!d)__ix_diverr(); if(n/d>0xffffffffull)__ix_diverr(); return (uint32_t)(n%d); }\n",
+    "static inline int32_t __ix_idiv32(uint64_t n,uint32_t d){ if(!d)__ix_diverr(); int32_t dd=(int32_t)d; if(dd==-1&&n==0x8000000000000000ull)__ix_diverr(); int64_t q=(int64_t)n/dd; if(q>2147483647ll||q<-2147483648ll)__ix_diverr(); return (int32_t)q; }\n",
+    "static inline int32_t __ix_imod32(uint64_t n,uint32_t d){ if(!d)__ix_diverr(); int32_t dd=(int32_t)d; if(dd==-1&&n==0x8000000000000000ull)__ix_diverr(); int64_t q=(int64_t)n/dd; if(q>2147483647ll||q<-2147483648ll)__ix_diverr(); return (int32_t)((int64_t)n%dd); }\n",
     "#if defined(__SIZEOF_INT128__)\n",
     "typedef unsigned __int128 __u128;typedef __int128 __i128;\n",
     "static inline uint64_t __ix_mul64hi(uint64_t a,uint64_t b){return (uint64_t)(((__u128)a*b)>>64);}\n",
     "static inline uint64_t __ix_imul64hi(uint64_t a,uint64_t b){return (uint64_t)(((__i128)(int64_t)a*(int64_t)b)>>64);}\n",
-    "static inline uint64_t __ix_udiv(uint64_t hi,uint64_t lo,uint64_t d){return d?(uint64_t)((((__u128)hi<<64)|lo)/d):0;}\n",
-    "static inline uint64_t __ix_umod(uint64_t hi,uint64_t lo,uint64_t d){return d?(uint64_t)((((__u128)hi<<64)|lo)%d):0;}\n",
-    "static inline uint64_t __ix_idiv(uint64_t hi,uint64_t lo,uint64_t d){__i128 n=(__i128)(((__u128)hi<<64)|lo);return d?(uint64_t)(n/(__i128)(int64_t)d):0;}\n",
-    "static inline uint64_t __ix_imod(uint64_t hi,uint64_t lo,uint64_t d){__i128 n=(__i128)(((__u128)hi<<64)|lo);return d?(uint64_t)(n%(__i128)(int64_t)d):0;}\n",
+    "static inline uint64_t __ix_udiv(uint64_t hi,uint64_t lo,uint64_t d){if(!d)__ix_diverr();__u128 q=(((__u128)hi<<64)|lo)/d;if(q>(__u128)0xffffffffffffffffull)__ix_diverr();return (uint64_t)q;}\n",
+    "static inline uint64_t __ix_umod(uint64_t hi,uint64_t lo,uint64_t d){if(!d)__ix_diverr();__u128 n=((__u128)hi<<64)|lo;if(n/d>(__u128)0xffffffffffffffffull)__ix_diverr();return (uint64_t)(n%d);}\n",
+    "static inline uint64_t __ix_idiv(uint64_t hi,uint64_t lo,uint64_t d){if(!d)__ix_diverr();__i128 n=(__i128)(((__u128)hi<<64)|lo),q=n/(__i128)(int64_t)d;if(q>(__i128)0x7fffffffffffffffll||q<-(__i128)0x8000000000000000ull)__ix_diverr();return (uint64_t)q;}\n",
+    "static inline uint64_t __ix_imod(uint64_t hi,uint64_t lo,uint64_t d){if(!d)__ix_diverr();__i128 n=(__i128)(((__u128)hi<<64)|lo),q=n/(__i128)(int64_t)d;if(q>(__i128)0x7fffffffffffffffll||q<-(__i128)0x8000000000000000ull)__ix_diverr();return (uint64_t)(n%(__i128)(int64_t)d);}\n",
     "#else\n",
     "static inline uint64_t __ix_mul64hi(uint64_t a,uint64_t b){uint64_t al=(uint32_t)a,ah=a>>32,bl=(uint32_t)b,bh=b>>32;uint64_t ll=al*bl,lh=al*bh,hl=ah*bl,hh=ah*bh;uint64_t cr=(ll>>32)+(uint32_t)lh+(uint32_t)hl;return hh+(lh>>32)+(hl>>32)+(cr>>32);}\n",
     "static inline uint64_t __ix_imul64hi(uint64_t a,uint64_t b){uint64_t hi=__ix_mul64hi(a,b);if((int64_t)a<0)hi-=b;if((int64_t)b<0)hi-=a;return hi;}\n",
+    // NB: the -m32 software 128/64 division below traps on a zero divisor but does
+    // not yet detect 64-bit *quotient overflow* (would need `__ix_divmod128` to
+    // report a set quotient bit >= 64). Only reachable from a 64-bit-source `div`
+    // (absent from 32-bit PEs / the cpudiff corpus); left until 64-bit lifting is
+    // exercised so the check ships tested, not guessed.
     "static inline void __ix_divmod128(uint64_t hi,uint64_t lo,uint64_t d,uint64_t*qp,uint64_t*rp){uint64_t q=0,r=0;for(int i=127;i>=0;i--){r=(r<<1)|((i>=64?(hi>>(i-64)):(lo>>i))&1);if(d&&r>=d){r-=d;if(i<64)q|=(uint64_t)1<<i;}}*qp=q;*rp=r;}\n",
-    "static inline uint64_t __ix_udiv(uint64_t hi,uint64_t lo,uint64_t d){uint64_t q,r;if(!d)return 0;__ix_divmod128(hi,lo,d,&q,&r);return q;}\n",
-    "static inline uint64_t __ix_umod(uint64_t hi,uint64_t lo,uint64_t d){uint64_t q,r;if(!d)return 0;__ix_divmod128(hi,lo,d,&q,&r);return r;}\n",
-    "static inline uint64_t __ix_idiv(uint64_t hi,uint64_t lo,uint64_t d){if(!d)return 0;int neg=0;uint64_t nh=hi,nl=lo;if((int64_t)hi<0){neg^=1;nl=~lo+1;nh=~hi+(nl==0);}uint64_t dd=d;if((int64_t)d<0){neg^=1;dd=(uint64_t)(-(int64_t)d);}uint64_t q,r;__ix_divmod128(nh,nl,dd,&q,&r);return neg?(uint64_t)(-(int64_t)q):q;}\n",
-    "static inline uint64_t __ix_imod(uint64_t hi,uint64_t lo,uint64_t d){if(!d)return 0;int neg=(int64_t)hi<0;uint64_t nh=hi,nl=lo;if(neg){nl=~lo+1;nh=~hi+(nl==0);}uint64_t dd=(int64_t)d<0?(uint64_t)(-(int64_t)d):d;uint64_t q,r;__ix_divmod128(nh,nl,dd,&q,&r);return neg?(uint64_t)(-(int64_t)r):r;}\n",
+    "static inline uint64_t __ix_udiv(uint64_t hi,uint64_t lo,uint64_t d){uint64_t q,r;if(!d)__ix_diverr();__ix_divmod128(hi,lo,d,&q,&r);return q;}\n",
+    "static inline uint64_t __ix_umod(uint64_t hi,uint64_t lo,uint64_t d){uint64_t q,r;if(!d)__ix_diverr();__ix_divmod128(hi,lo,d,&q,&r);return r;}\n",
+    "static inline uint64_t __ix_idiv(uint64_t hi,uint64_t lo,uint64_t d){if(!d)__ix_diverr();int neg=0;uint64_t nh=hi,nl=lo;if((int64_t)hi<0){neg^=1;nl=~lo+1;nh=~hi+(nl==0);}uint64_t dd=d;if((int64_t)d<0){neg^=1;dd=(uint64_t)(-(int64_t)d);}uint64_t q,r;__ix_divmod128(nh,nl,dd,&q,&r);return neg?(uint64_t)(-(int64_t)q):q;}\n",
+    "static inline uint64_t __ix_imod(uint64_t hi,uint64_t lo,uint64_t d){if(!d)__ix_diverr();int neg=(int64_t)hi<0;uint64_t nh=hi,nl=lo;if(neg){nl=~lo+1;nh=~hi+(nl==0);}uint64_t dd=(int64_t)d<0?(uint64_t)(-(int64_t)d):d;uint64_t q,r;__ix_divmod128(nh,nl,dd,&q,&r);return neg?(uint64_t)(-(int64_t)r):r;}\n",
     "#endif\n",
     "static inline uint64_t __ix_bswap32(uint64_t x){return __builtin_bswap32((uint32_t)x);}\n",
     "static inline uint64_t __ix_bswap64(uint64_t x){return __builtin_bswap64(x);}\n",

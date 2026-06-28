@@ -215,14 +215,15 @@ impl Interp {
             }
             // SSE scalar float helpers (`__fp_*`): evaluate the bit-pattern
             // operands with host f64/f32 arithmetic, which on an x86-64 host is
-            // the same IEEE-754 hardware Unicorn's softfloat mirrors. Any other
-            // call (`__ps_*`, `__pi_*`, `__x87_*`, …) is unmodelled -> skip.
+            // the same IEEE-754 hardware Unicorn's softfloat mirrors; plus the
+            // 32-bit integer-division helpers. Any other call (`__ps_*`,
+            // `__pi_*`, `__x87_*`, …) is unmodelled -> skip.
             Expr::Call { target: CallTarget::Named(name), args, .. } => {
                 let mut vals = Vec::with_capacity(args.len());
                 for a in args {
                     vals.push(self.eval(a)?);
                 }
-                fp_call(name, &vals)?
+                helper_call(name, &vals)?
             }
             // Memory, addresses, other calls, SSA forms: not modelled -> skip.
             _ => return None,
@@ -306,17 +307,52 @@ fn bin(op: BinOp, a: u64, b: u64) -> Option<u64> {
     Some(r)
 }
 
-/// Evaluate one of the C backend's `__fp_*` scalar-float helpers on bit-pattern
-/// arguments, returning the bit pattern of the result (`None` for a helper this
-/// interpreter does not model — e.g. the packed `__ps_*` / integer-SIMD forms).
+/// Evaluate one of the C backend's runtime helpers on bit-pattern arguments,
+/// returning the bit pattern of the result (`None` for a helper this interpreter
+/// does not model — e.g. the packed `__ps_*` / integer-SIMD forms — or for a
+/// state where the helper *traps*, like an integer-division #DE).
 ///
-/// The arithmetic mirrors `runtime` C exactly (see `src/emit/mod.rs`): host
+/// The `__fp_*` arithmetic mirrors `runtime` C exactly (see `src/emit/mod.rs`): host
 /// f64/f32 operations on an x86-64 host are the same IEEE-754 SSE instructions
 /// Unicorn emulates, so results match bit-for-bit including NaN payloads and
 /// rounding. Float→int conversions reproduce x86 `cvtt` truncation toward zero
 /// with the "integer indefinite" (0x80000000 / 0x8000000000000000) the hardware
 /// yields on overflow/NaN — *not* Rust's saturating `as`.
-fn fp_call(name: &str, a: &[u64]) -> Option<u64> {
+fn helper_call(name: &str, a: &[u64]) -> Option<u64> {
+    // 32-bit integer-division helpers (the lifter routes div/idiv through these
+    // so the C reproduces #DE). Return None on any fault state — zero divisor,
+    // quotient overflow, INT64_MIN/-1 — because the helper *traps* there (no
+    // value), exactly the states where Unicorn faults and the harness skips.
+    match name {
+        "__ix_udiv32" => {
+            let d = a[1] & 0xffff_ffff;
+            if d == 0 {
+                return None;
+            }
+            let q = a[0] / d;
+            return if q > 0xffff_ffff { None } else { Some(q) };
+        }
+        "__ix_umod32" => {
+            let d = a[1] & 0xffff_ffff;
+            if d == 0 || a[0] / d > 0xffff_ffff {
+                return None;
+            }
+            return Some(a[0] % d);
+        }
+        "__ix_idiv32" | "__ix_imod32" => {
+            let dd = a[1] as u32 as i32 as i64;
+            if dd == 0 || (dd == -1 && a[0] == 0x8000_0000_0000_0000) {
+                return None;
+            }
+            let n = a[0] as i64;
+            let q = n / dd;
+            if q > i32::MAX as i64 || q < i32::MIN as i64 {
+                return None;
+            }
+            return Some((if name == "__ix_idiv32" { q } else { n % dd }) as u64);
+        }
+        _ => {}
+    }
     let g64 = f64::from_bits;
     let g32 = |b: u64| f32::from_bits(b as u32);
     let p64 = |d: f64| d.to_bits();

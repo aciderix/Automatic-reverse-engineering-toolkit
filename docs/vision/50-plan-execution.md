@@ -1427,3 +1427,34 @@ flottante), à faire en session dédiée, une fonction à la fois, difftest à c
   maintenant validés contre Unicorn. Reste hors-différentiel : **x87** (lift par helpers `__x87_*` +
   passe de profondeur de pile inter-instructions → mal adapté au harness per-instruction ; couvert
   bout-en-bout par Lua 35/35) et les ops **SIMD packed** `__ps_*`/`__pi_*`. **Prêt pour l'axe 2 (Wine).**
+
+### `div`/`idiv` : trap fidèle du #DE (plus de troncature silencieuse) ✅ FAIT
+- **2026-06-28 — Gap de fidélité révélé par le skip EIP du différentiel, corrigé sur le général.**
+  En expliquant *pourquoi* le harness saute les états fautants de `div`/`idiv` (cf. entrée
+  précédente : sur un #DE le matériel rembobine, EIP n'avance pas → état sauté), vérification du C
+  réellement émis : le chemin 32-bit faisait une division **64-bit** `(edx:eax)/diviseur` puis
+  **tronquait** à 32 bits. Conséquence : sur un **débordement de quotient** (ex. `edx:eax` grand /
+  petit diviseur → quotient > 2³²), l'original x86 **faute (#DE → crash)** mais le transpilé
+  **continuait en silence avec une valeur tronquée**. = une sortie produite là où l'original plante →
+  **viole le principe sacré**. (La division par zéro, elle, fautait déjà fidèlement : `n/0` en C → SIGFPE.)
+- **Fix général** (pas une rustine binaire) : le lift de `div`/`idiv` 32-bit passe par des helpers
+  `__ix_udiv32`/`__ix_umod32`/`__ix_idiv32`/`__ix_imod32` (`src/emit/mod.rs`) qui **reproduisent le #DE** —
+  `__ix_diverr()` (`__builtin_trap`, crash déterministe, zéro dépendance) sur diviseur nul **ou**
+  quotient hors de la largeur destination (et le cas `INT64_MIN/-1`). Le binaire transpilé plante
+  désormais **exactement où l'original plante**, jamais de valeur fausse en silence. Les helpers
+  64-bit (`__ix_udiv`/… via `__int128`/software) trappent aussi sur **diviseur nul** (ils
+  renvoyaient `0` en silence — même classe de bug) ; le contrôle de **débordement 64-bit** côté
+  software `-m32` reste à faire quand le lift 64-bit sera exercé (noté en commentaire — ne pas
+  livrer une logique de division non testée).
+- **L'oracle reste fidèle** : l'interp de `cpudiff` modélise ces helpers (`helper_call`) et renvoie
+  `None` sur tout état fautant (div0, overflow, `INT64_MIN/-1`) — exactement les états où Unicorn
+  faute et que le harness saute. Donc `div`/`idiv` restent **validés** (états valides comparés à
+  Unicorn, ~1000/~500 par 2000), et le skip est désormais **pleinement honnête** (il ne masque plus
+  une divergence produit↔matériel : sur ces états le produit *trappe* comme le matériel).
+- **Vérifié** : helper en isolation (division valide correcte `udiv=805309116`, `idiv=-3` ; overflow
+  et div0 → **crash**, pas de troncature) ; branche `__int128` compilée+exécutée en 64-bit
+  (`-Wall -Wextra`, divisions valides correctes) ; `cargo test` vert ; **cpudiff vert** ; **difftest
+  268/268** ; **transpile-diff 4/4, hash inchangé** (comportement des divisions valides identique).
+  LLVM auto-déclare les helpers (`declare i64 @__ix_udiv32(...)`), WASM utilise le backend C → tous
+  couverts. **Bilan** : la seule divergence que le skip EIP masquait est fermée ; `div`/`idiv` sont
+  sound (valeur juste, ou crash fidèle — jamais de faux silencieux).

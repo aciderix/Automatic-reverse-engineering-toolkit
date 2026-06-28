@@ -1466,13 +1466,22 @@ pub fn lift(insn: &Insn, bits: u32) -> Vec<Stmt> {
                     (bin(BinOp::And, p.clone(), konst(mask(32))), bin(BinOp::Shr, p, konst(32)))
                 }
                 Mnemonic::Div => {
+                    // Via helpers that reproduce the x86 #DE on a zero divisor or a
+                    // quotient that overflows eax (a 64/32 `/` in C would silently
+                    // truncate the wide quotient instead of faulting).
                     let d = bin(BinOp::Or, bin(BinOp::Shl, edx, konst(32)), eax);
-                    (bin(BinOp::UDiv, d.clone(), src.clone()), bin(BinOp::UMod, d, src))
+                    (
+                        fcall("__ix_udiv32", vec![d.clone(), src.clone()]),
+                        fcall("__ix_umod32", vec![d, src]),
+                    )
                 }
                 _ => {
                     // idiv: signed; dividend is the signed 64-bit edx:eax.
                     let d = bin(BinOp::Or, bin(BinOp::Shl, edx, konst(32)), eax);
-                    (bin(BinOp::SDiv, d.clone(), src.clone()), bin(BinOp::SMod, d, src))
+                    (
+                        fcall("__ix_idiv32", vec![d.clone(), src.clone()]),
+                        fcall("__ix_imod32", vec![d, src]),
+                    )
                 }
             };
             vec![
