@@ -994,6 +994,15 @@ uint32_t aret_InitializeCriticalSection(uint32_t esp) { (void)esp; return 0; }
  * contention, so initialisation always succeeds. Returns BOOL=TRUE; a FALSE
  * here makes the CRT treat init as failed and __fastfail (int 0x29). */
 uint32_t aret_InitializeCriticalSectionAndSpinCount(uint32_t esp) { (void)esp; return 1; }
+/* InitializeSListHead(PSLIST_HEADER): zero the lock-free list header so later
+ * SList queries see an empty list. The header is 8 bytes on x86 (a union with a
+ * 64-bit Alignment); zero 16 to be safe. A no-op stub left it uninitialised, so
+ * the first query dereferenced garbage. */
+uint32_t aret_InitializeSListHead(uint32_t esp) {
+    void *h = (void *)(uintptr_t)arg(esp, 0);
+    if (h) memset(h, 0, 16);
+    return 0;
+}
 uint32_t aret_InitializeCriticalSectionEx(uint32_t esp) { (void)esp; return 1; }
 uint32_t aret_DeleteCriticalSection(uint32_t esp) { (void)esp; return 0; }
 uint32_t aret_EnterCriticalSection(uint32_t esp) { (void)esp; return 0; }

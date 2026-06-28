@@ -1855,3 +1855,29 @@ silencieux (à valider un jour) ; « **non lifté** » = `Asm`/abort = **sound**
   → `sub_425e97`), + import `InitializeSListHead` (stub non-fatal). À analyser.
 - **Régression complète PASS** : difftest **268/268**, magicdiv 2³², SMT 11/11, recompilabilité 100%,
   **transpile-diff 4/4 (hash 4b0121f182554d40 inchangé)**, **winediff 33/33**, cargo (wasm) OK.
+
+### strings.exe — après _chkstk : import `InitializeSListHead` + blocage dans la machinerie C++/CRT thread-state
+- **2026-06-28** : `InitializeSListHead` implémenté (zéro le SLIST_HEADER de 16 octets ; le stub no-op
+  laissait le header non initialisé). + pop stdcall (1 arg).
+- **Blocage suivant** (segfault `sub_42697f`, deref `[v16+0x350]` avec `v16=1`) : `v16 = sub_42beb5()`
+  (= `__updatetlocinfo`, getter du locinfo par-thread) retourne **1** au lieu d'un pointeur locinfo.
+  La chaîne descend dans `sub_4296a0` = **machinerie `__crt_state_management` à dispatch indirect
+  CFG-gardé** (`call [0x445214]` = `__guard_check_icall_fptr`, puis `call esi` indirect vers un
+  pointeur de fonction issu de `sub_4292f2`). C'est le `_Init_thread_*`/thread-safe-init C++ du MSVCRT.
+  Diagnostic : à ce point, **une seule `TlsAlloc`** a tourné et **aucun `TlsSetValue`** — l'index TLS
+  locale `[0x456210]=1` n'est pas encore peuplé ; sur Windows réel `__updatetlocinfo` renverrait le
+  locinfo **global initial**, là où notre état rend 1. **Complétude HLE/CRT très spécifique** (C++
+  thread-state + dispatch indirect), pas un bug général de traduction — non poursuivi (principe).
+- **Bilan strings.exe** : de « crash sur la 1ʳᵉ instruction `cpuid` » à « traverse cpuid/xgetbv,
+  critical sections, `_initterm`, init du cookie de sécurité, **tout** le clonage/refcount de locale,
+  `_chkstk`/`_alloca`, FP env (`stmxcsr`) » — bute désormais dans la machinerie C++/CRT de thread-state.
+- **Régression complète PASS** (incl. winediff 33/33, transpile 4/4 hash inchangé).
+
+#### Récap des fixes GÉNÉRAUX de la session (tous commités/poussés, régression verte à chaque pas)
+1. `cpuid`/`xgetbv` (instructions). 2. Récupération : slots d'appel indirect absolu + tables de
+pointeurs NULL-tolérantes. 3. DCE des helpers purs (restaure la division magique) + harness magicdiv.
+4. Inline `_EH_prolog` (helper SEH à réécriture de frame). 5. Threading d'`ebp` (funclets EH sans
+frame). 6. **Cast des args libc en uint32_t** (memcpy 64-bit cassé sans prototype — bug majeur).
+7. `bt [mem],imm`. 8. `_chkstk`/`_alloca` (esp inter-frame). 9. `stmxcsr`/`ldmxcsr`. 10.
+`InitializeSListHead`. → Le transpileur est **généralement** plus correct (instructions, récupération,
+helpers ABI MSVC EH/alloca, appels libc), bénéfique à tout binaire PE.

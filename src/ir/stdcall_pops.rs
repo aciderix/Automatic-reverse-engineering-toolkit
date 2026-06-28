@@ -98,6 +98,7 @@ static TABLE: &[(&str, u32)] = &[
     ("GetVolumePathNamesForVolumeNameA", 16),
     ("InitializeCriticalSection", 4),
     ("InitializeCriticalSectionAndSpinCount", 8),
+    ("InitializeSListHead", 4),
     ("InitializeCriticalSectionEx", 12),
     ("IsDBCSLeadByteEx", 8),
     ("IsIconic", 4),
