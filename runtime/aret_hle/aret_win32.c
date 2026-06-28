@@ -121,6 +121,32 @@ uint32_t aret_ExpandEnvironmentStringsA(uint32_t esp) {
     if (dst && size >= need) memcpy(dst, out, need);
     return need;
 }
+/* GetFullPathNameA(name, len, buf, *filePart) -> length. Resolves against the
+ * cwd; sets *filePart to the last component within buf. The full prefix (cwd)
+ * differs by host, but callers use filePart and the basename, which are stable. */
+uint32_t aret_GetFullPathNameA(uint32_t esp) {
+    const char *name = WCS(0);
+    uint32_t buflen = WU(1);
+    char *buf = WS(2);
+    uint32_t *filepart = (uint32_t *)(uintptr_t)WU(3);
+    char tmp[4096];
+    if (name && (name[0] == '/' || name[0] == '\\' || (name[0] && name[1] == ':'))) {
+        snprintf(tmp, sizeof tmp, "%s", name);
+    } else {
+        char cwd[2048];
+        if (!getcwd(cwd, sizeof cwd)) return 0;
+        snprintf(tmp, sizeof tmp, "%s/%s", cwd, name ? name : "");
+    }
+    uint32_t len = (uint32_t)strlen(tmp);
+    if (!buf || buflen <= len) return len + 1; /* required size incl. NUL */
+    memcpy(buf, tmp, len + 1);
+    if (filepart) {
+        char *sep = NULL;
+        for (char *p = buf; *p; p++) if (*p == '/' || *p == '\\') sep = p;
+        *filepart = (uint32_t)(uintptr_t)(sep ? sep + 1 : buf);
+    }
+    return len;
+}
 uint32_t aret_GetCurrentDirectoryA(uint32_t esp) {
     uint32_t size = WU(0); char *buf = WS(1);
     char tmp[4096];

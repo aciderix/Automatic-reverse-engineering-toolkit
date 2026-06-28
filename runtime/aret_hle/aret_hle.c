@@ -850,6 +850,26 @@ uint32_t aret_SetFilePointer(uint32_t esp) {
     off_t r = lseek(fd, dist, whence);
     return (uint32_t)r;
 }
+/* SetFilePointerEx(h, liDistance[by value, lo@1 hi@2], *newPos, method) -> BOOL */
+uint32_t aret_SetFilePointerEx(uint32_t esp) {
+    int fd = (int)arg(esp, 0);
+    int64_t dist = (int64_t)(((uint64_t)arg(esp, 2) << 32) | arg(esp, 1));
+    uint32_t method = arg(esp, 4);
+    int whence = method == 1 ? SEEK_CUR : (method == 2 ? SEEK_END : SEEK_SET);
+    off_t r = lseek(fd, (off_t)dist, whence);
+    if (r < 0) return 0;
+    uint64_t *np = (uint64_t *)(uintptr_t)arg(esp, 3);
+    if (np) *np = (uint64_t)r;
+    return 1;
+}
+/* GetFileSizeEx(h, *LARGE_INTEGER) -> BOOL (handles are fds). */
+uint32_t aret_GetFileSizeEx(uint32_t esp) {
+    struct stat st;
+    if (fstat((int)arg(esp, 0), &st) != 0) return 0;
+    uint64_t *p = (uint64_t *)(uintptr_t)arg(esp, 1);
+    if (p) *p = (uint64_t)st.st_size;
+    return 1;
+}
 
 /* ------------------------------------------------------------------ */
 /* Diagnostics                                                        */

@@ -1675,3 +1675,15 @@ silencieux (à valider un jour) ; « **non lifté** » = `Asm`/abort = **sound**
 - **Vérifié** : `win32_proc` = **bit-identique à Wine** ; winediff **32/32**. Régression : cargo **98/0**
   (wasm OK), **difftest 268/268, transpile-diff 4/4 (hash inchangé)**. strings.exe : imports manquants
   encore en baisse.
+
+### Axe 2 (P1) : lot fichier/format kernel ✅ FAIT
+- **2026-06-28 — +1 programme `win32_fileops`.** Comblé : **`SetFilePointerEx`** (offset 64-bit par
+  valeur lo@1/hi@2 → lseek), **`GetFileSizeEx`** (fstat → LARGE_INTEGER), **`GetFullPathNameA`**
+  (résout contre le cwd, `*filePart` = dernier composant ; on teste le **basename**/filePart, stables,
+  pas le préfixe cwd qui diffère par hôte). `SetFilePointer`/`FlushFileBuffers` existaient déjà.
+- **`FormatMessageA` reporté** : sa gestion des inserts `%1` (tableau d'args) + le texte exact des
+  messages système (locale-dépendant, ≠ strerror POSIX) demandent un travail dédié ; on ne le bâcle
+  pas (principe). Noté au backlog. *(Mon test initial avait d'ailleurs un `va_list` malformé qui a fait
+  planter Wine — bug de test, pas de signal réel.)*
+- **Vérifié** : `win32_fileops` = **bit-identique à Wine** ; winediff **33/33**. Régression : cargo
+  **98/0** (wasm OK), **difftest 268/268, transpile-diff 4/4 (hash inchangé)**.
