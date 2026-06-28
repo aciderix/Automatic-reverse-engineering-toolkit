@@ -92,6 +92,7 @@ fn is_scalar_float(ins: &Instruction) -> bool {
             | Movaps | Movapd | Movups | Movupd
             | Movdqa | Movdqu | Paddd | Psubd | Psrldq
             | Pand | Pandn | Por | Pcmpeqd | Pcmpgtd | Pshufd
+            | Pcmpeqb | Pcmpgtb | Pcmpeqw | Pmovmskb | Pshuflw | Pshufhw
             | Paddw | Paddq | Pcmpgtw | Pmuludq | Psrlq | Psubusw
             | Punpcklwd | Punpckhwd | Punpckldq | Punpckhdq | Punpcklqdq | Punpckhqdq
             | Movhlps | Movlhps | Movhps | Movhpd | Movlps | Movlpd | Shufpd
@@ -1118,6 +1119,22 @@ pub fn lift(insn: &Insn, bits: u32) -> Vec<Stmt> {
             let h = if ins.mnemonic() == Mnemonic::Pcmpeqd { "__pi_eq32" } else { "__pi_gt32" };
             some_or_asm!(write_xmm128(ins, fcall(h, vec![alo, blo]), fcall(h, vec![ahi, bhi])))
         }
+        // Packed compare, byte/word lanes (SSE2 string scanners).
+        Mnemonic::Pcmpeqb | Mnemonic::Pcmpgtb | Mnemonic::Pcmpeqw => {
+            let (alo, ahi) = some_or_asm!(read_xmm128(ins, 0));
+            let (blo, bhi) = some_or_asm!(read_xmm128(ins, 1));
+            let h = match ins.mnemonic() {
+                Mnemonic::Pcmpeqb => "__pi_eq8",
+                Mnemonic::Pcmpgtb => "__pi_gt8",
+                _ => "__pi_eq16",
+            };
+            some_or_asm!(write_xmm128(ins, fcall(h, vec![alo, blo]), fcall(h, vec![ahi, bhi])))
+        }
+        // pmovmskb: high bit of each of the 16 bytes -> a 16-bit mask in a GP reg.
+        Mnemonic::Pmovmskb => {
+            let (lo, hi) = some_or_asm!(read_xmm128(ins, 1));
+            some_or_asm!(write_op0(ins, fcall("__pi_mskb", vec![lo, hi]), bits))
+        }
         // Lane-wise add: 16-bit (helper) and 64-bit (one per half).
         Mnemonic::Paddw => {
             let (alo, ahi) = some_or_asm!(read_xmm128(ins, 0));
@@ -1357,6 +1374,17 @@ pub fn lift(insn: &Insn, bits: u32) -> Vec<Stmt> {
             let nlo = fcall("__pi_shuf_lo", vec![lo.clone(), hi.clone(), imm.clone()]);
             let nhi = fcall("__pi_shuf_hi", vec![lo, hi, imm]);
             some_or_asm!(write_xmm128(ins, nlo, nhi))
+        }
+        // Shuffle the four 16-bit words in the low (pshuflw) or high (pshufhw)
+        // 64-bit half; the other half is copied unchanged.
+        Mnemonic::Pshuflw | Mnemonic::Pshufhw => {
+            let (lo, hi) = some_or_asm!(read_xmm128(ins, 1));
+            let imm = konst(ins.immediate(2) as i128);
+            if ins.mnemonic() == Mnemonic::Pshuflw {
+                some_or_asm!(write_xmm128(ins, fcall("__pi_shufw", vec![lo, imm]), hi))
+            } else {
+                some_or_asm!(write_xmm128(ins, lo, fcall("__pi_shufw", vec![hi, imm])))
+            }
         }
         Mnemonic::Addss => some_or_asm!(fbin("__fp_add32", ins, bits)),
         Mnemonic::Subss => some_or_asm!(fbin("__fp_sub32", ins, bits)),

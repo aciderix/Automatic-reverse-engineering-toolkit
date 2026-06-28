@@ -145,6 +145,10 @@ pub(crate) const FLOAT_HELPERS: &str = concat!(
     "static inline uint64_t __pi_eq32(uint64_t a,uint64_t b){uint32_t l=(uint32_t)a==(uint32_t)b?~0u:0,h=(uint32_t)(a>>32)==(uint32_t)(b>>32)?~0u:0;return (uint64_t)l|((uint64_t)h<<32);}\n",
     "static inline uint64_t __pi_gt32(uint64_t a,uint64_t b){uint32_t l=(int32_t)a>(int32_t)b?~0u:0,h=(int32_t)(a>>32)>(int32_t)(b>>32)?~0u:0;return (uint64_t)l|((uint64_t)h<<32);}\n",
     "static inline uint64_t __pi_shuf_lo(uint64_t lo,uint64_t hi,uint64_t m){uint64_t a=((m&3)<2?lo:hi)>>(((m&3)&1)*32),b=(((m>>2)&3)<2?lo:hi)>>((((m>>2)&3)&1)*32);return (a&0xffffffff)|((b&0xffffffff)<<32);}\n",
+    // pshuflw/pshufhw: shuffle the four 16-bit words within one 64-bit half per the
+    // immediate (2 bits select each source word) — used by the SSE2 broadcast
+    // idiom (`movd; pshuflw ...,0; pshufd ...,0`).
+    "static inline uint64_t __pi_shufw(uint64_t x,uint32_t imm){uint64_t r=0;for(int i=0;i<4;i++){uint16_t w=(uint16_t)(x>>(((imm>>(i*2))&3)*16));r|=(uint64_t)w<<(i*16);}return r;}\n",
     "static inline uint64_t __pi_shuf_hi(uint64_t lo,uint64_t hi,uint64_t m){uint64_t a=(((m>>4)&3)<2?lo:hi)>>((((m>>4)&3)&1)*32),b=(((m>>6)&3)<2?lo:hi)>>((((m>>6)&3)&1)*32);return (a&0xffffffff)|((b&0xffffffff)<<32);}\n",
     "static inline uint64_t __pi_add16(uint64_t a,uint64_t b){uint64_t r=0;for(int i=0;i<64;i+=16)r|=(uint64_t)(uint16_t)((a>>i)+(b>>i))<<i;return r;}\n",
     // Unpack-low helpers (apply to the high halves to get the unpack-high ops).
@@ -153,6 +157,14 @@ pub(crate) const FLOAT_HELPERS: &str = concat!(
     "static inline uint64_t __pi_unpckldq_lo(uint64_t d,uint64_t s){return (d&0xffffffff)|((s&0xffffffff)<<32);}\n",
     "static inline uint64_t __pi_unpckldq_hi(uint64_t d,uint64_t s){return (d>>32)|((s>>32)<<32);}\n",
     "static inline uint64_t __pi_gt16(uint64_t a,uint64_t b){uint64_t r=0;for(int i=0;i<64;i+=16)r|=(uint64_t)((int16_t)(a>>i)>(int16_t)(b>>i)?0xffffu:0)<<i;return r;}\n",
+    // Packed compare, byte/word granularity (one 64-bit half at a time), used by
+    // the SSE2 string scanners (strlen/memchr: `pcmpeqb` + `pmovmskb`).
+    "static inline uint64_t __pi_eq8(uint64_t a,uint64_t b){uint64_t r=0;for(int i=0;i<64;i+=8)r|=(uint64_t)((uint8_t)(a>>i)==(uint8_t)(b>>i)?0xffu:0)<<i;return r;}\n",
+    "static inline uint64_t __pi_eq16(uint64_t a,uint64_t b){uint64_t r=0;for(int i=0;i<64;i+=16)r|=(uint64_t)((uint16_t)(a>>i)==(uint16_t)(b>>i)?0xffffu:0)<<i;return r;}\n",
+    "static inline uint64_t __pi_gt8(uint64_t a,uint64_t b){uint64_t r=0;for(int i=0;i<64;i+=8)r|=(uint64_t)((int8_t)(a>>i)>(int8_t)(b>>i)?0xffu:0)<<i;return r;}\n",
+    // pmovmskb: the high bit of each of the 16 bytes -> a 16-bit mask (low half
+    // bytes 0..7, high half bytes 8..15).
+    "static inline uint32_t __pi_mskb(uint64_t lo,uint64_t hi){uint32_t m=0;for(int i=0;i<8;i++){m|=((uint32_t)((lo>>(i*8+7))&1))<<i;m|=((uint32_t)((hi>>(i*8+7))&1))<<(i+8);}return m;}\n",
     "static inline uint64_t __pi_muludq(uint64_t a,uint64_t b){return (uint64_t)(uint32_t)a*(uint32_t)b;}\n",
     "static inline uint64_t __pi_subus16(uint64_t a,uint64_t b){uint64_t r=0;for(int i=0;i<64;i+=16){uint16_t x=(uint16_t)(a>>i),y=(uint16_t)(b>>i);r|=(uint64_t)(uint16_t)(x>y?x-y:0)<<i;}return r;}\n",
     // Packed single-precision (4 floats per 128-bit reg, 2 per 64-bit half),
@@ -214,7 +226,14 @@ pub(crate) const FLOAT_HELPERS: &str = concat!(
     // features are what the transpiled binary actually runs on, so this is exact.
     "#ifndef __wasm__\n",
     "#include <cpuid.h>\n",
-    "static inline uint32_t __ix_cpuid(uint32_t leaf,uint32_t sub,uint32_t which){unsigned a=0,b=0,c=0,d=0;__get_cpuid_count(leaf,sub,&a,&b,&c,&d);return which==0?a:which==1?b:which==2?c:d;}\n",
+    // We mask off the SSE4.1/4.2 and AVX/AVX2/AVX-512 feature bits (plus the
+    // AVX-dependent FMA/F16C and OSXSAVE) so feature dispatchers (notably the CRT's
+    // `__isa_available`) pick the SSE2 code paths, which we lift exactly — the
+    // SSE4.2 string ops (`pcmpistri`/`pcmpestri`) and the VEX-encoded AVX ops
+    // (`vpxor`, `vmovdqu`, …) we do not model. Sound: a CPU with only SSE2 is a
+    // valid configuration and the SSE2 paths compute identically (just scalar/
+    // 16-byte instead of wider).
+    "static inline uint32_t __ix_cpuid(uint32_t leaf,uint32_t sub,uint32_t which){unsigned a=0,b=0,c=0,d=0;__get_cpuid_count(leaf,sub,&a,&b,&c,&d);if(leaf==1)c&=~((1u<<19)|(1u<<20)|(1u<<23)|(1u<<27)|(1u<<28)|(1u<<12)|(1u<<29));if(leaf==7&&sub==0)b&=~((1u<<5)|(1u<<16)|(1u<<17)|(1u<<21)|(1u<<28)|(1u<<30)|(1u<<31));return which==0?a:which==1?b:which==2?c:d;}\n",
     // xgetbv: read the extended control register (XCR0) -> edx:eax. The CRT reads
     // it (after cpuid reports OSXSAVE) to confirm OS-enabled AVX state; the binary
     // only reaches it when the host supports it, so the real instruction is safe.

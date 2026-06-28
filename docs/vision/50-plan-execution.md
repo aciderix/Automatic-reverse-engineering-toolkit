@@ -1903,3 +1903,23 @@ helpers ABI MSVC EH/alloca, appels libc), bénéfique à tout binaire PE.
   (ARET modélise `pxor` SSE mais pas la forme VEX 3-opérandes ; chantier AVX à part).
 - **Régression complète PASS** : difftest **268/268**, magicdiv 2³², SMT 11/11, recompilabilité 100%,
   **transpile-diff 4/4 (hash 4b0121f182554d40 inchangé)**, **winediff 33/33**, cargo (wasm) OK.
+
+### strings.exe — SORTIE CORRECTE ✅ (SSE2 string ops + masquage CPUID AVX/SSE4.2)
+- **2026-06-28 — strings.exe imprime `hello`/`world`/`tiny`, identique à Wine.** Après le fix
+  tail-jmp, le `main()` tourne et atteint les routines de chaîne SSE optimisées du CRT.
+- **Masquage CPUID (général, sain)** : `__ix_cpuid` masque désormais les bits **SSE4.1/SSE4.2 et
+  AVX/AVX2/AVX-512** (+ FMA/F16C/OSXSAVE). Les dispatchers de features (le `__isa_available` du CRT,
+  etc.) choisissent alors les chemins **SSE2**, que ARET lifte exactement — les ops SSE4.2
+  (`pcmpistri`) et VEX/AVX (`vpxor`, `vmovdqu`) ne sont pas modélisées. Sain : un CPU SSE2-seul est une
+  config valide, les chemins SSE2 calculent à l'identique. Général : bénéficie à tout binaire à
+  fallback SSE2.
+- **Ops SSE2 ajoutées** (révélées par les scanners de chaîne SSE2 du CRT) : `pcmpeqb`/`pcmpeqw`/
+  `pcmpgtb` (compare octets/words, helpers `__pi_eq8`/`eq16`/`gt8`), **`pmovmskb`** (masque de bits de
+  signe des 16 octets → registre GP, `__pi_mskb`), `pshuflw`/`pshufhw` (shuffle des words bas/haut,
+  `__pi_shufw` — idiome de broadcast memchr/memset).
+- **État** : la **sortie est correcte et bit-identique à Wine** pour l'extraction de chaînes. Reste un
+  **segfault dans le cleanup post-sortie** (`sub_42e9a7` ← `sub_421d8b`, après les écritures registry
+  EULA ; imports version/registry stubés → bannière `(null)`). Le cœur fonctionne ; le chemin de sortie
+  est à finir.
+- **Régression complète PASS** : difftest **268/268**, magicdiv 2³², SMT 11/11, recompilabilité 100%,
+  **transpile-diff 4/4 (hash 4b0121f182554d40 inchangé)**, **winediff 33/33**, **cpudiff OK**.
