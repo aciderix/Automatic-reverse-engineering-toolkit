@@ -1003,6 +1003,136 @@ uint32_t aret_InitializeSListHead(uint32_t esp) {
     if (h) memset(h, 0, 16);
     return 0;
 }
+
+/* ------------------------------------------------------------------ */
+/* Version info (VS_VERSIONINFO): a program reading its own version.   */
+/* We serve the PE's own RT_VERSION resource, located in the mapped    */
+/* image, and parse the VS_VERSIONINFO tree for VerQueryValue.         */
+/* ------------------------------------------------------------------ */
+extern uint32_t aret_image_lo, aret_image_hi;
+
+static uint16_t vi_w(const uint8_t *p, int o) { return (uint16_t)(p[o] | (p[o + 1] << 8)); }
+static int vi_pad4(int x) { return (x + 3) & ~3; }
+/* Bytes of the UTF-16 key (incl. NUL), measured from the node's szKey at +6. */
+static int vi_keybytes(const uint8_t *node) { int i = 6; while (node[i] || node[i + 1]) i += 2; return i + 2 - 6; }
+static int vi_value_off(const uint8_t *node) { return vi_pad4(6 + vi_keybytes(node)); }
+/* Value size in bytes: wValueLength is in WCHARs for text nodes (wType==1). */
+static int vi_value_bytes(const uint8_t *node) { int v = vi_w(node, 2); return vi_w(node, 4) == 1 ? v * 2 : v; }
+static int vi_children_off(const uint8_t *node) { return vi_pad4(vi_value_off(node) + vi_value_bytes(node)); }
+/* node key (UTF-16 at +6) == ANSI s ? Case-insensitive, as the real
+ * VerQueryValue: the language-codepage block key is stored lowercase
+ * ("040904b0") but callers build the query from `Translation` in uppercase. */
+static int vi_keyeq(const uint8_t *node, const char *s) {
+    int i = 6;
+    for (; *s; s++, i += 2) {
+        if (node[i + 1]) return 0;
+        char a = (char)node[i], b = *s;
+        if (a >= 'A' && a <= 'Z') a += 32;
+        if (b >= 'A' && b <= 'Z') b += 32;
+        if (a != b) return 0;
+    }
+    return node[i] == 0 && node[i + 1] == 0;
+}
+static const uint8_t *vi_child(const uint8_t *node, const char *key) {
+    int nlen = vi_w(node, 0);
+    const uint8_t *c = node + vi_children_off(node), *end = node + nlen;
+    while (c + 6 <= end) {
+        int clen = vi_w(c, 0);
+        if (clen < 6) break;
+        if (vi_keyeq(c, key)) return c;
+        c += vi_pad4(clen);
+    }
+    return NULL;
+}
+/* Locate VS_VERSIONINFO in the mapped image by the VS_FIXEDFILEINFO signature
+ * 0xFEEF04BD, which sits at offset 0x28 from the VS_VERSIONINFO start. */
+static const uint8_t *aret_find_versioninfo(void) {
+    if (!aret_image_lo || aret_image_hi <= aret_image_lo) return NULL;
+    const uint8_t *base = (const uint8_t *)(uintptr_t)aret_image_lo;
+    size_t n = aret_image_hi - aret_image_lo;
+    for (size_t i = 0x28; i + 4 <= n; i += 4) {
+        if (base[i] == 0xBD && base[i + 1] == 0x04 && base[i + 2] == 0xEF && base[i + 3] == 0xFE) {
+            const uint8_t *vi = base + i - 0x28;
+            if (vi_w(vi, 0) >= 0x28 && vi_keyeq(vi, "VS_VERSION_INFO")) return vi;
+        }
+    }
+    return NULL;
+}
+uint32_t aret_GetFileVersionInfoSizeA(uint32_t esp) {
+    if (arg(esp, 1)) *(uint32_t *)(uintptr_t)arg(esp, 1) = 0; /* lpdwHandle */
+    const uint8_t *vi = aret_find_versioninfo();
+    return vi ? vi_w(vi, 0) : 0;
+}
+/* The ANSI GetFileVersionInfoA returns a buffer whose StringFileInfo *string
+ * values* are ANSI (the W variant keeps them UTF-16). Narrow each in place: the
+ * value region is left the same size (wValueLength stays in WCHARs so the tree
+ * offsets are unchanged), only its first wValueLength bytes are rewritten as the
+ * low byte of each WCHAR — so a `printf("%s", value)` reads the real text. */
+static void vi_narrow_strings(uint8_t *vi) {
+    const uint8_t *sfi = vi_child(vi, "StringFileInfo");
+    if (!sfi) return;
+    int sfilen = vi_w(sfi, 0);
+    const uint8_t *lang = sfi + vi_children_off(sfi);
+    while (lang + 6 < sfi + sfilen) {
+        int langlen = vi_w(lang, 0);
+        if (langlen < 6) break;
+        const uint8_t *str = lang + vi_children_off(lang);
+        while (str + 6 < lang + langlen) {
+            int strlen_ = vi_w(str, 0);
+            if (strlen_ < 6) break;
+            int vlen = vi_w(str, 2); /* WCHARs */
+            if (vi_w(str, 4) == 1 && vlen > 0) {
+                uint8_t *val = (uint8_t *)str + vi_value_off(str);
+                for (int j = 0; j < vlen; j++) val[j] = val[j * 2];
+            }
+            str += vi_pad4(strlen_);
+        }
+        lang += vi_pad4(langlen);
+    }
+}
+uint32_t aret_GetFileVersionInfoA(uint32_t esp) {
+    const uint8_t *vi = aret_find_versioninfo();
+    void *data = (void *)(uintptr_t)arg(esp, 3);
+    uint32_t len = arg(esp, 2);
+    if (!vi || !data) return 0;
+    uint32_t n = vi_w(vi, 0);
+    if (n > len) n = len;
+    memcpy(data, vi, n);
+    vi_narrow_strings((uint8_t *)data);
+    return 1;
+}
+/* VerQueryValueA(block, "\Sub\Block", &buf, &len): navigate the tree. "\" -> the
+ * VS_FIXEDFILEINFO; "\StringFileInfo\<lang>\<key>" / "\VarFileInfo\Translation"
+ * -> the leaf value. Buffer/len are returned as for the real API. */
+uint32_t aret_VerQueryValueA(uint32_t esp) {
+    const uint8_t *root = (const uint8_t *)(uintptr_t)arg(esp, 0);
+    const char *sub = (const char *)(uintptr_t)arg(esp, 1);
+    uint32_t *pbuf = (uint32_t *)(uintptr_t)arg(esp, 2);
+    uint32_t *plen = (uint32_t *)(uintptr_t)arg(esp, 3);
+    if (!root || !sub || !pbuf || !plen) return 0;
+    const uint8_t *node = root;
+    if (sub[0] == '\\' && sub[1] == 0) {
+        /* root value = VS_FIXEDFILEINFO */
+        *pbuf = (uint32_t)(uintptr_t)(node + vi_value_off(node));
+        *plen = vi_w(node, 2);
+        return 1;
+    }
+    const char *p = sub;
+    while (*p == '\\') {
+        p++;
+        char comp[128];
+        int k = 0;
+        while (*p && *p != '\\' && k < 127) comp[k++] = *p++;
+        comp[k] = 0;
+        if (k == 0) break;
+        node = vi_child(node, comp);
+        if (!node) return 0;
+    }
+    /* leaf value: length in chars (text) or bytes (binary), as the real API. */
+    *pbuf = (uint32_t)(uintptr_t)(node + vi_value_off(node));
+    *plen = vi_w(node, 2);
+    return 1;
+}
 uint32_t aret_InitializeCriticalSectionEx(uint32_t esp) { (void)esp; return 1; }
 uint32_t aret_DeleteCriticalSection(uint32_t esp) { (void)esp; return 0; }
 uint32_t aret_EnterCriticalSection(uint32_t esp) { (void)esp; return 0; }

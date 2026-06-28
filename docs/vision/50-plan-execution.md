@@ -1946,3 +1946,28 @@ Débloqué cette session par ~16 fixes **généraux** (instructions cpuid/xgetbv
 récupération de fonctions ; DCE ; inline `_EH_prolog` + `_chkstk` ; threading `ebp` ; cast args libc ;
 tail-jmp esp+4 ; masquage CPUID AVX/SSE4.2 ; TEB/PEB) — chacun bénéficiant à toute la classe des
 binaires MSVC, pas seulement strings.exe.
+
+### strings.exe — SORTIE 100% BIT-IDENTIQUE À WINE ✅✅✅ (version-info)
+- **2026-06-28 — strings.exe produit une sortie totalement identique à Wine, bannière comprise :**
+  ```
+  Strings v2.54 - Search for ANSI and Unicode strings in binary images.
+  Copyright (C) 1999-2021 Mark Russinovich
+  Sysinternals - www.sysinternals.com
+  hello / world / tiny
+  ```
+- **APIs version-info implémentées** (`GetFileVersionInfoSizeA`/`GetFileVersionInfoA`/`VerQueryValueA`) :
+  - Bornes de l'image mappée exportées (`aret_image_lo`/`hi` dans `aret_layout.c`) pour scanner en
+    sécurité.
+  - `aret_find_versioninfo` localise le `VS_VERSIONINFO` du PE par la signature `VS_FIXEDFILEINFO`
+    `0xFEEF04BD` (offset 0x28 du début), valide la clé `VS_VERSION_INFO`.
+  - `VerQueryValueA` parse l'arbre `VS_VERSIONINFO` (root → StringFileInfo/VarFileInfo → lang → clé).
+    Comparaison de clés **insensible à la casse** (le bloc langue est stocké `040904b0` mais interrogé
+    `040904B0`).
+  - `GetFileVersionInfoA` (variante ANSI) **rétrécit les valeurs de chaîne UTF-16→ANSI in place** —
+    sans quoi `printf("%s")` ne lit que le 1ᵉʳ caractère (`S` au lieu de `Strings`).
+  - Général : tout programme lisant sa propre ressource VERSIONINFO en bénéficie.
+- **Régression complète PASS** : difftest 268/268, magicdiv 2³², SMT 11/11, recompilabilité 100%,
+  transpile 4/4 (hash inchangé), winediff 33/33, cpudiff OK.
+
+#### 🏁🏁 MILESTONE COMPLET : Sysinternals strings.exe (MSVC static-CRT C++) → ELF Linux natif,
+#### tourne sans Wine, sortie **100% bit-identique à Wine**, exit 0.
