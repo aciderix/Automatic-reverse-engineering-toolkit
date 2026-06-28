@@ -1394,3 +1394,36 @@ flottante), à faire en session dédiée, une fonction à la fois, difftest à c
 - **Bilan** : la justesse du *lift entier* est désormais **très solide** (validée contre Unicorn sur un
   corpus large, des milliers d'états). Combinée à difftest/transpile-diff (pipeline) + Lua 35/35, l'axe
   « traduction CPU » est aussi blindé qu'on peut l'être sans preuve formelle. **Prêt pour l'axe 2 (Wine).**
+
+### 🎯 Différentiels `div`/`idiv` + flottant SSE comblés → bug de lifter `ss` corrigé ✅ FAIT
+- **2026-06-28 — Les 2 gaps de l'axe 1 fermés.** Suite au périmètre honnête ci-dessus (gaps « flottant »
+  et « div/idiv »), les deux sont désormais couverts par le différentiel Unicorn.
+- **`div`/`idiv` (entier 64-bit edx:eax)** ajoutés au corpus. L'interp rendu fidèle :
+  - `SDiv`/`SMod` **width-aware** (extension de signe du diviseur depuis sa largeur, comme le
+    `signed_cast` du backend C — même correctif que `Sar`).
+  - **Détection de faute par EIP** plutôt que par `rc` : sur un `#DE` (diviseur nul *ou* quotient qui
+    déborde la destination) Unicorn **rembobine l'instruction et laisse EIP au départ sans toujours
+    remonter un `rc != 0`** ; si EIP n'a pas avancé, l'état a fauté → on le saute (au lieu de comparer le
+    résultat tronqué de l'interp aux registres rembobinés d'Unicorn). Général : couvre div0 et overflow.
+  - Trap par état (None de l'interp / load hors page) saute **l'état** (`continue`), plus l'instruction
+    entière → ~1000 div / ~500 idiv valides scorés par 2000 états, **0 divergence** (le lift était juste).
+- **Flottant SSE scalaire** : interp étendu pour modéliser les **registres XMM** (low `RegId(16+n)`,
+  high `RegId(64+n)`) et évaluer les helpers `__fp_*` en **f64/f32 hôte** — qui, sur hôte x86-64,
+  compilent vers les **mêmes instructions SSE IEEE-754** que la softfloat d'Unicorn reproduit → résultats
+  **bit-à-bit** identiques, payload NaN et arrondi compris (vérifié directement). Conversions
+  flottant→entier reproduisant le `cvtt` x86 (troncature vers zéro + **indéfini entier** `0x80000000` /
+  `0x8000…` sur overflow/NaN, *pas* le `as` saturant de Rust). MXCSR mis au défaut. Corpus : add/sub/mul/
+  div **sd & ss**, cvtsi2sd/ss, cvttsd2si/ss2si, cvtsd2ss, cvtss2sd, comisd/ucomisd/comiss/ucomiss.
+- **1 bug réel de lifter trouvé et corrigé** (général, invisible à difftest/transpile/Lua car Lua est
+  x87) : une op SSE **simple précision** (`addss`, `mulss`, `cvtsi2ss`, `cvtsd2ss`, …) met à jour
+  **seulement** `dst[31:0]` et préserve `dst[127:32]` ; le lifter écrivait le résultat 32-bit dans la
+  demi-lane 64-bit en **zéroïsant `[63:32]`** — divergence dès que cette demi est relue en lane 64-bit
+  (movq/movsd, ops packed). `write_fp` fusionne maintenant le résultat simple précision dans la lane
+  basse en préservant `[63:32]` ; les cas `sd` / destination entière / mémoire restent `write_op0`.
+- **Vérifié** : `cargo test --features unpack cpudiff` **vert** (div/idiv + SSE) ; régression complète
+  **difftest 268/268, transpile-diff 4/4 (hash inchangé), `cargo test` vert**.
+- **Bilan axe 1** : **7 bugs de lifter** trouvés au total par le harness (les 6 entiers + ce `ss`),
+  tous généraux et corrigés. Les sous-ensembles **entier, div/idiv et flottant SSE scalaire** sont
+  maintenant validés contre Unicorn. Reste hors-différentiel : **x87** (lift par helpers `__x87_*` +
+  passe de profondeur de pile inter-instructions → mal adapté au harness per-instruction ; couvert
+  bout-en-bout par Lua 35/35) et les ops **SIMD packed** `__ps_*`/`__pi_*`. **Prêt pour l'axe 2 (Wine).**
