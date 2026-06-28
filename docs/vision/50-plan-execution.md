@@ -1731,3 +1731,32 @@ silencieux (à valider un jour) ; « **non lifté** » = `Asm`/abort = **sound**
   **transpile-diff 4/4 (hash 4b0121f182554d40 inchangé)**, **winediff 33/33**, cpudiff OK. cpuid/xgetbv
   ne sont pas validables par cpudiff (le cpuid d'Unicorn ≠ cpuid hôte) ; validés par le run
   différentiel strings.exe + la régression.
+
+### strings.exe — inline des helpers SEH à réécriture de frame (`_EH_prolog`) ✅ FAIT
+- **2026-06-28 — cause générale du crash post-init isolée** : `_EH_prolog` (prologue SEH MSVC,
+  statiquement lié, ~4 occurrences). Ce helper **réécrit le frame de l'appelant** : il consomme les
+  deux `push` de l'appelant (taille de frame + scopetable), sauve l'`ebp` appelant dans un slot,
+  repointe `ebp` **au-dessus** de l'adresse de retour dans le frame appelant (`lea ebp,[esp+K]`, K>0),
+  alloue les locals, sauve les registres, puis `ret`. L'appelant utilise ce nouvel `ebp`/`esp` *après*
+  l'appel. Or ARET passe `esp` **par valeur** et modélise le delta d'un appel statiquement → la
+  réécriture `ebp`/`esp` du callee ne remontait pas → `[ebp±x]` faux dans l'appelant (un pointeur d'arg
+  lu comme une petite constante de frame, déréférencé → crash).
+- **Solution générale (pas une rustine)** : **inliner le corps du helper au site d'appel** (mode
+  shared-stack/transpile uniquement). Tout devient une seule fonction → `esp`/`ebp`/mémoire circulent
+  en SSA exactement comme sur le matériel. Recette : émuler le `push` de l'adresse de retour du `call`,
+  inliner le corps lifté (jusqu'avant le `ret` terminal), émuler le `pop` du `ret` (`esp += ptr`) ;
+  chute vers l'instruction suivante. Le `push [ebp-0x8]; ret` final de `_EH_prolog` (retour via
+  l'adresse relogée) s'élide exactement (push+ret = esp net 0).
+- **Détection générale** : idiome de réécriture `lea ebp,[esp+K]` (K>0) dans une routine courte, sans
+  branche, finissant par un `ret` proche unique. Le code normal pointe `ebp` ≤ `esp` (`mov ebp,esp`) ;
+  seul un prologue à réécriture de frame le pointe *au-dessus* de sa propre adresse de retour. C'est la
+  routine de l'ABI MSVC, identique d'un binaire à l'autre. Garde : si une instruction du corps ne se
+  lifte pas pleinement (`Stmt::Asm`), on **n'inline pas** (refus de deviner). `fs:[0]` (chaîne SEH) est
+  déjà modélisé via `__aret_fs()` en transpile, donc `_EH_prolog` se lifte entièrement.
+- **Effet vérifié sur strings.exe** : le crash de l'indirection `ebp` (refcount locale dans
+  `sub_42b776`) **disparaît** ; l'exécution progresse jusqu'au cœur du traitement des **tables de
+  locale** du CRT (prochain bloqueur : déréférence d'un pointeur source NULL dans une copie de table
+  NLS — chaîne d'init `setlocale` du CRT statique, en cours d'analyse).
+- **Régression complète PASS** (l'inline est gaté au mode transpile : `--mode emit`/`verify` inchangés
+  par construction) : difftest **268/268**, in-place 3/3, magicdiv ALL 2³², SMT 11/11, recompilabilité
+  gzip/ls/cat **100%**, **transpile-diff 4/4 (hash 4b0121f182554d40 inchangé)**, **winediff 33/33**.

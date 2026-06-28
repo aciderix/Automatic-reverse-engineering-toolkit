@@ -12,14 +12,119 @@
 use super::lift::{cc_to_cond, lift};
 use super::types::*;
 use crate::analysis::Function;
-use crate::disasm::Flow;
+use crate::disasm::{Disassembler, Flow, Insn};
 use crate::loader::Program;
 use std::collections::HashMap;
 use std::fmt::Write;
 
+/// Recognise an MSVC EH/SEH frame-setup helper (`_EH_prolog`/`_SEH_prolog`) and
+/// return its straight-line body (entry up to, but excluding, the terminal
+/// `ret`). These helpers REWRITE THE CALLER'S FRAME: they consume the values the
+/// caller pushed (a frame size + a scopetable handler), store the caller's `ebp`
+/// into a stack slot, repoint `ebp` *above* the return address into the caller's
+/// frame (`lea ebp,[esp+K]`, K>0), allocate locals and save registers, then
+/// `ret` to the instruction after the call. The caller then relies on that new
+/// `ebp`/`esp`.
+///
+/// ARET passes `esp` by value to each lifted function and models a call's net
+/// stack effect statically (by calling convention), so a callee's `ebp`/`esp`
+/// rewrite never propagates back — the caller would resolve every `[ebp±x]` from
+/// the wrong place (the symptom: an incoming-arg pointer read as a small frame
+/// constant, then dereferenced → crash). Inlining the helper body into the
+/// caller at the call site makes `esp`/`ebp`/memory flow through one function's
+/// SSA exactly as on hardware.
+///
+/// Detection is by the unmistakable frame-rewrite idiom `lea ebp,[esp+K]` (K>0)
+/// inside a short, branch-free routine ending in a single near `ret`. Normal
+/// code points `ebp` at or below `esp` (`mov ebp,esp`); only a frame-rewriting
+/// prologue helper points it *above* its own return address into the caller's
+/// pushed arguments. This is the MSVC ABI routine, identical across binaries —
+/// general, not a per-binary special case. Returns `None` for anything else.
+fn frame_setup_helper_body(prog: &Program, disasm: &Disassembler, entry: u64) -> Option<Vec<Insn>> {
+    use iced_x86::{Mnemonic, OpKind, Register};
+    let mut body: Vec<Insn> = Vec::new();
+    let mut addr = entry;
+    let mut saw_rewrite = false;
+    for _ in 0..48 {
+        let insn = disasm.decode_at(prog, addr)?;
+        let next = insn.next_addr();
+        match insn.flow {
+            // Terminal near `ret`/`ret imm16`: the helper returns to the caller.
+            Flow::Return => return (saw_rewrite && !body.is_empty()).then_some(body),
+            Flow::Fallthrough => {}
+            // A branch/call/indirect/interrupt means this is not a simple linear
+            // ABI helper — never inline.
+            _ => return None,
+        }
+        let r = &insn.raw;
+        if r.mnemonic() == Mnemonic::Lea
+            && matches!(r.op0_register(), Register::EBP | Register::RBP)
+            && r.op1_kind() == OpKind::Memory
+            && matches!(r.memory_base(), Register::ESP | Register::RSP)
+            && r.memory_index() == Register::None
+            && (r.memory_displacement64() as i64) > 0
+        {
+            saw_rewrite = true;
+        }
+        body.push(insn);
+        addr = next;
+    }
+    None
+}
+
+/// If `target` is an EH/SEH frame-setup helper, build the statements that inline
+/// it at the call site: emulate the `call`'s push of `ret_addr`, then the lifted
+/// helper body, then the `ret`'s pop (`esp += ptr`) — leaving `esp`/`ebp`/memory
+/// exactly as the hardware path does and falling through to `ret_addr` (the next
+/// instruction in the block). Returns `None` (caller falls back to a normal call)
+/// for a non-helper, or if any body instruction does not fully lift (a `Stmt::Asm`
+/// fallback) — embedding an opaque `Asm` mid-helper would be unsound.
+fn inline_frame_helper(
+    prog: &Program,
+    disasm: &Disassembler,
+    target: u64,
+    ret_addr: u64,
+    bits: u32,
+) -> Option<Vec<Stmt>> {
+    let body = frame_setup_helper_body(prog, disasm, target)?;
+    let sp = Location::Reg(RegId(4));
+    let ptr = (bits / 8) as i128;
+    let ty = Ty::int(bits as u8);
+    let mut out: Vec<Stmt> = Vec::new();
+    // call: esp -= ptr; [esp] = ret_addr
+    out.push(Stmt::Set {
+        dst: sp.clone(),
+        expr: Expr::Binary(BinOp::Sub, Box::new(Expr::Read(sp.clone())), Box::new(Expr::Const(ptr, ty.clone()))),
+    });
+    out.push(Stmt::Store {
+        addr: Expr::Read(sp.clone()),
+        value: Expr::Const(ret_addr as i128, ty.clone()),
+        ty: ty.clone(),
+    });
+    // helper body (everything before its terminal `ret`).
+    for hinsn in &body {
+        let mut hs = lift(hinsn, bits);
+        if hs.iter().any(|s| matches!(s, Stmt::Asm(_))) {
+            return None; // would embed an unmodelled instruction — refuse to guess.
+        }
+        fold_ro_loads(&mut hs, hinsn, prog);
+        out.extend(hs);
+    }
+    // ret: esp += ptr (control falls through to ret_addr).
+    out.push(Stmt::Set {
+        dst: sp.clone(),
+        expr: Expr::Binary(BinOp::Add, Box::new(Expr::Read(sp)), Box::new(Expr::Const(ptr, ty))),
+    });
+    Some(out)
+}
+
 /// Lift a recovered function into an SSA-ready IR CFG (pre-SSA: `Set`/`Read`).
 pub fn build_ir(prog: &Program, func: &Function) -> IrFunction {
     let bits = prog.bitness.bits();
+    // Used to decode the body of an inlined EH/SEH frame-setup helper at its call
+    // site (shared-stack mode only — see `frame_setup_helper_body`).
+    let disasm = Disassembler::new(prog.bitness);
+    let inline_frame_helpers = crate::ir::lift::frames_off();
     let order: Vec<u64> = func.blocks.keys().copied().collect();
     let idx: HashMap<u64, u32> = order
         .iter()
@@ -80,6 +185,24 @@ pub fn build_ir(prog: &Program, func: &Function) -> IrFunction {
                 continue;
             }
             prev_unknown_import = false;
+            // EH/SEH frame-setup helper inlining (shared-stack/transpile only): a
+            // `call` to a recognised `_EH_prolog`/`_SEH_prolog` is replaced by the
+            // helper's body so the caller picks up the rewritten `ebp`/`esp` (which
+            // ARET's by-value `__esp` model could not propagate across the call).
+            // Emulate the call's push of the return address, inline the body, then
+            // emulate the `ret`'s pop — net stack identical to the hardware path.
+            if inline_frame_helpers && insn.flow == Flow::Call {
+                if let Some(target) = insn.target {
+                    if prog.is_executable(target) {
+                        if let Some(inlined) =
+                            inline_frame_helper(prog, &disasm, target, insn.next_addr(), bits)
+                        {
+                            stmts.extend(inlined);
+                            continue;
+                        }
+                    }
+                }
+            }
             let mut s = match x87.as_ref().and_then(|m| m.get(&insn.address)) {
                 Some(&(sp_in, mode)) => crate::ir::lift::lift_x87(insn, sp_in, mode),
                 None => lift(insn, bits),
