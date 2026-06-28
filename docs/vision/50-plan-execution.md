@@ -1760,3 +1760,24 @@ silencieux (à valider un jour) ; « **non lifté** » = `Asm`/abort = **sound**
 - **Régression complète PASS** (l'inline est gaté au mode transpile : `--mode emit`/`verify` inchangés
   par construction) : difftest **268/268**, in-place 3/3, magicdiv ALL 2³², SMT 11/11, recompilabilité
   gzip/ls/cat **100%**, **transpile-diff 4/4 (hash 4b0121f182554d40 inchangé)**, **winediff 33/33**.
+
+### strings.exe — threading d'`ebp` (helpers sans frame partageant le frame parent) ✅ FAIT
+- **2026-06-28 — 2ᵉ cause générale du même symptôme** : après l'inline de `_EH_prolog`, le crash s'est
+  déplacé vers `sub_42b7bc`, un **helper sans prologue** appelé par `sub_42b776` qui lit `[ebp+0x10]`
+  en **héritant du `ebp` de l'appelant** (posé par `_EH_prolog`). Or ARET initialisait le `ebp` d'entrée
+  de chaque fonction à son **propre** esp d'entrée (`__esp`) → `[ebp+0x10]` lisait au mauvais endroit
+  → pointeur NULL → crash. Ce sont les funclets EH de MSVC (sous-routines partageant le frame parent).
+- **Fix général (ABI)** : `ebp` est **callee-saved** (c'est le frame pointer) → le **threader** comme
+  4ᵉ registre passé aux appels internes en mode shared-stack (après eax/ecx/edx). Un helper sans frame
+  reçoit ainsi le `ebp` de l'appelant ; une fonction à prologue normal l'écrase (inchangé). Touche :
+  `ssa::to_ssa` (ebp = reg_param au lieu de frame_base en shared-stack), `internal_call_args`/
+  `internal_tailcall_args` (+ebp), prototype forward (`structured.rs`, 5 args), typedef `aret_fn` +
+  trampolines + `aret_call` (5 args ABI), sites runtime de `aret_call` (+0).
+- **Effet vérifié** : tout l'init locale du CRT **passe** désormais ; le crash saute très loin en aval,
+  dans un **clonage de catégorie de locale** (`sub_4314c9` : `malloc(0x220)` + copie de 0x88 dwords) —
+  prochain bloqueur, à analyser (pointeur NULL/forme de données NLS — `malloc` qui rendrait 0, ou champ
+  de structure locale non conforme à l'attente du CRT).
+- **Régression complète PASS** : difftest **268/268**, in-place 3/3, magicdiv ALL 2³², SMT 11/11,
+  recompilabilité **100%**, **transpile-diff 4/4 (hash 4b0121f182554d40 inchangé — empreinte
+  comportementale ; les programmes du corpus n'ont pas de helper sans frame)**, **winediff 33/33**,
+  cargo (wasm inclus) OK.

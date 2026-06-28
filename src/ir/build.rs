@@ -1487,15 +1487,18 @@ fn esp_minus_slot() -> Expr {
 }
 
 /// Arguments handed to an internal `call` in shared-stack mode: the pushed-return
-/// stack pointer, then the volatile general registers eax/ecx/edx (matching the
-/// callee's fixed parameter list, so both stack- and register-passed arguments
-/// are conveyed).
+/// stack pointer, then the volatile general registers eax/ecx/edx, then ebp
+/// (matching the callee's fixed parameter list, so both stack- and register-passed
+/// arguments are conveyed). ebp is threaded because it is callee-saved: a frameless
+/// helper that reads the caller's frame (`[ebp+x]`) without setting ebp must
+/// inherit the caller's ebp — see the reg-param list in `ssa::to_ssa`.
 fn internal_call_args() -> Vec<Expr> {
     vec![
         esp_minus_slot(),
         Expr::Read(Location::Reg(RegId(0))), // eax
         Expr::Read(Location::Reg(RegId(1))), // ecx
         Expr::Read(Location::Reg(RegId(2))), // edx
+        Expr::Read(Location::Reg(RegId(5))), // ebp (callee-saved frame pointer)
     ]
 }
 
@@ -1511,6 +1514,7 @@ fn internal_tailcall_args() -> Vec<Expr> {
         Expr::Read(Location::Reg(RegId(0))), // eax
         Expr::Read(Location::Reg(RegId(1))), // ecx
         Expr::Read(Location::Reg(RegId(2))), // edx
+        Expr::Read(Location::Reg(RegId(5))), // ebp (callee-saved frame pointer)
     ]
 }
 

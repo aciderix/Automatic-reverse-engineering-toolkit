@@ -94,7 +94,7 @@ uint32_t __aret_gs(void);
 /* Indirect-call dispatch: a function pointer holds the original code virtual
  * address, so calls through it are routed here, which maps the VA to the
  * transpiled `sub_<va>` (generated table in aret_dispatch.c). */
-uint64_t aret_call(uint32_t va, uint64_t esp, uint64_t a, uint64_t c, uint64_t d);
+uint64_t aret_call(uint32_t va, uint64_t esp, uint64_t a, uint64_t c, uint64_t d, uint64_t b);
 
 /* Register a transpiled callback (its code VA) to run at process exit; shared by
  * the atexit and _onexit shims. */

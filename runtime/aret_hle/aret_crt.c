@@ -369,7 +369,7 @@ static int aret_cmp_tramp(const void *a, const void *b) {
     uint32_t *f = (uint32_t *)(void *)(scratch + sizeof(scratch) - 64);
     f[1] = (uint32_t)(uintptr_t)a; /* arg0 @ [esp+4] */
     f[2] = (uint32_t)(uintptr_t)b; /* arg1 @ [esp+8] */
-    return (int)(int32_t)aret_call(aret_cmp_va, (uint32_t)(uintptr_t)f, 0, 0, 0);
+    return (int)(int32_t)aret_call(aret_cmp_va, (uint32_t)(uintptr_t)f, 0, 0, 0, 0);
 }
 uint32_t aret_qsort(uint32_t esp) {
     aret_cmp_va = AU(3);

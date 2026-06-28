@@ -236,11 +236,17 @@ pub fn to_ssa(func: &mut IrFunction) {
     } else if crate::emit::shared_stack() {
         // 32-bit shared machine stack (UBT M3): besides the stack, pass the
         // volatile general registers eax/ecx/edx so register-passed arguments
-        // (gcc `-O1` regparm, `__fastcall`) cross calls. The list is FIXED so
-        // every function has the same parameter positions; a register that is not
-        // read before being written gets an unused placeholder value to keep the
-        // position stable.
-        for r in [0u16, 1, 2] {
+        // (gcc `-O1` regparm, `__fastcall`) cross calls, AND ebp — the frame
+        // pointer is callee-saved, so a *frameless* helper that uses the caller's
+        // frame without a `push ebp; mov ebp,esp` prologue (the MSVC EH funclets
+        // that share their parent's frame and read `[ebp+x]`) must inherit the
+        // caller's ebp, not start from its own entry esp. Threading ebp is the
+        // correct ABI; without it those helpers read arguments from the wrong
+        // place (a NULL/garbage pointer, then a crash). The list is FIXED so every
+        // function has the same parameter positions; a register not read before
+        // being written gets an unused placeholder value to keep the position
+        // stable.
+        for r in [0u16, 1, 2, 5] {
             match undef.get(&Location::Reg(RegId(r))).copied() {
                 Some(v) => func.reg_params.push(v.0),
                 None => {
@@ -254,8 +260,10 @@ pub fn to_ssa(func: &mut IrFunction) {
     // Frame-base values: the entry (undef) versions of rsp/rbp. Stack-variable
     // promotion points these at a real local array so generic stack accesses
     // (arrays, rsp-relative spills) hit real memory instead of dereferencing an
-    // uninitialised frame register.
-    for r in [4u16, 5] {
+    // uninitialised frame register. In shared-stack mode ebp (RegId 5) is instead
+    // a threaded reg parameter (above), so only rsp is a frame base there.
+    let frame_regs: &[u16] = if crate::emit::shared_stack() { &[4] } else { &[4, 5] };
+    for &r in frame_regs {
         if let Some(v) = undef.get(&Location::Reg(RegId(r))) {
             func.frame_base_values.push(v.0);
         }

@@ -1104,7 +1104,7 @@ static void aret_run_atexit(void) {
     static uint8_t scratch[64 * 1024];
     uint32_t *f = (uint32_t *)(void *)(scratch + sizeof(scratch) - 64);
     for (int i = aret_atexit_n - 1; i >= 0; i--)
-        aret_call(aret_atexit_fns[i], (uint32_t)(uintptr_t)f, 0, 0, 0);
+        aret_call(aret_atexit_fns[i], (uint32_t)(uintptr_t)f, 0, 0, 0, 0);
 }
 /* Shared by aret_atexit and aret_onexit (mingw's static `atexit` registers its
  * callback through the msvcrt `_onexit` import, so that path must register too). */
@@ -1157,7 +1157,7 @@ uint32_t aret_initterm(uint32_t esp) {
     uint32_t first = arg(esp, 0), last = arg(esp, 1);
     for (uint32_t p = first; p + 4 <= last; p += 4) {
         uint32_t fn = *(const uint32_t *)(uintptr_t)p;
-        if (fn) aret_call(fn, esp, 0, 0, 0);
+        if (fn) aret_call(fn, esp, 0, 0, 0, 0);
     }
     return 0;
 }
@@ -1168,7 +1168,7 @@ uint32_t aret_initterm_e(uint32_t esp) {
     for (uint32_t p = first; p + 4 <= last; p += 4) {
         uint32_t fn = *(const uint32_t *)(uintptr_t)p;
         if (fn) {
-            uint32_t r = (uint32_t)aret_call(fn, esp, 0, 0, 0);
+            uint32_t r = (uint32_t)aret_call(fn, esp, 0, 0, 0, 0);
             if (r) return r;
         }
     }

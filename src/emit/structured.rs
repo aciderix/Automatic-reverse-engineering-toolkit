@@ -539,10 +539,15 @@ pub fn emit_split(funcs: &[IrFunction], chunk_size: usize) -> (String, Vec<Strin
     }
     header.push('\n');
     // Forward-declare every function. In shared-stack mode (the transpile path)
-    // each `sub_` has the uniform 4-arg signature, so emit it in full: an empty
-    // `()` is K&R "unspecified args" which x86 tolerates but WASM's strictly typed
-    // `call_indirect` does not (a mismatch traps via a bitcast trampoline).
-    let sig = if super::shared_stack() { "(uint64_t,uint64_t,uint64_t,uint64_t)" } else { "()" };
+    // each `sub_` has the uniform 5-arg signature (`__esp`, eax, ecx, edx, ebp),
+    // so emit it in full: an empty `()` is K&R "unspecified args" which x86
+    // tolerates but WASM's strictly typed `call_indirect` does not (a mismatch
+    // traps via a bitcast trampoline).
+    let sig = if super::shared_stack() {
+        "(uint64_t,uint64_t,uint64_t,uint64_t,uint64_t)"
+    } else {
+        "()"
+    };
     for a in forward.union(&defined) {
         let _ = writeln!(header, "uint64_t sub_{:x}{};", a, sig);
     }
