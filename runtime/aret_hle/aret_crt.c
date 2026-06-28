@@ -163,16 +163,18 @@ uint32_t aret_sprintf(uint32_t esp) {
     size_t n = aret_vformat(dst, (size_t)1 << 30, fmt, va);
     return (uint32_t)n;
 }
-/* snprintf / _snprintf: (dst, n, fmt, ...). cap of 0 means "measure". */
+/* snprintf / _snprintf: (dst, n, fmt, ...). cap of 0 means "measure".
+ * C99 returns the number of chars that *would* have been written (the full
+ * formatted length), not the truncated count — so format into a measuring
+ * buffer first, then copy the part that fits and NUL-terminate within cap. */
 uint32_t aret_snprintf(uint32_t esp) {
     char *dst = AS(0);
     size_t cap = AU(1);
     const char *fmt = ACS(2);
     const uint32_t *va = &((const uint32_t *)(uintptr_t)esp)[3];
-    char tmp[8192], *out = (cap && cap <= sizeof tmp) ? dst : tmp;
-    size_t room = (cap && cap <= sizeof tmp) ? cap : sizeof tmp;
-    size_t n = aret_vformat(out, room, fmt, va);
-    if (out != dst && cap) { size_t c = n < cap - 1 ? n : cap - 1; memcpy(dst, tmp, c); dst[c] = 0; }
+    char tmp[8192];
+    size_t n = aret_vformat(tmp, sizeof tmp, fmt, va);
+    if (cap) { size_t c = n < cap - 1 ? n : cap - 1; memcpy(dst, tmp, c); dst[c] = 0; }
     return (uint32_t)n;
 }
 /* snprintf and _snprintf both sanitize to aret_snprintf. */
@@ -185,10 +187,9 @@ uint32_t aret_vsnprintf(uint32_t esp) {
     size_t cap = AU(1);
     const char *fmt = ACS(2);
     const uint32_t *va = (const uint32_t *)(uintptr_t)AU(3);
-    char tmp[8192], *out = (cap && cap <= sizeof tmp) ? dst : tmp;
-    size_t room = (cap && cap <= sizeof tmp) ? cap : sizeof tmp;
-    size_t n = aret_vformat(out, room, fmt, va);
-    if (out != dst && cap) { size_t c = n < cap - 1 ? n : cap - 1; memcpy(dst, tmp, c); dst[c] = 0; }
+    char tmp[8192];
+    size_t n = aret_vformat(tmp, sizeof tmp, fmt, va);
+    if (cap) { size_t c = n < cap - 1 ? n : cap - 1; memcpy(dst, tmp, c); dst[c] = 0; }
     return (uint32_t)n;
 }
 uint32_t aret_vsprintf(uint32_t esp) {
