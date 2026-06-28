@@ -139,6 +139,31 @@ uint32_t aret_strtoul(uint32_t esp) {
     if (AU(1)) *(uint32_t *)AP(1) = (uint32_t)(uintptr_t)end;
     return (uint32_t)v;
 }
+/* 64-bit results: returned in the edx:eax pair (low | high<<32). The builder
+ * declares these shims `uint64_t` (see import_returns_u64) so the call site keeps
+ * both halves. */
+uint64_t aret_strtoll(uint32_t esp) {
+    char *end; long long v = strtoll(ACS(0), &end, AI(2));
+    if (AU(1)) *(uint32_t *)AP(1) = (uint32_t)(uintptr_t)end;
+    return (uint64_t)v;
+}
+uint64_t aret_strtoull(uint32_t esp) {
+    char *end; unsigned long long v = strtoull(ACS(0), &end, AI(2));
+    if (AU(1)) *(uint32_t *)AP(1) = (uint32_t)(uintptr_t)end;
+    return (uint64_t)v;
+}
+/* msvcrt names (mingw maps strtoll/strtoull onto these) — same semantics. */
+uint64_t aret_strtoi64(uint32_t esp)  { return aret_strtoll(esp); }
+uint64_t aret_strtoui64(uint32_t esp) { return aret_strtoull(esp); }
+/* div_t/ldiv_t are 8-byte structs returned in edx:eax: quot in eax, rem in edx. */
+uint64_t aret_div(uint32_t esp) {
+    int num = AI(0), den = AI(1);
+    return (uint32_t)(num / den) | ((uint64_t)(uint32_t)(num % den) << 32);
+}
+uint64_t aret_ldiv(uint32_t esp) {
+    long num = (int32_t)AU(0), den = (int32_t)AU(1);
+    return (uint32_t)(num / den) | ((uint64_t)(uint32_t)(num % den) << 32);
+}
 /* strtod/atof: David Gay's bignum strtod in the binary is huge and doesn't lift
  * cleanly; forward to the host. The double result is returned in st(0) via the
  * x87 fp channel (the caller recovers it after an fp-returning call). */
@@ -236,7 +261,9 @@ uint32_t aret_localeconv(uint32_t esp) { (void)esp; return RP(localeconv()); }
  * function pointer), returning `func` on success. We do not run these at exit, so
  * accept and return it — matching the documented startup-glue limitation that C++
  * global dtors are not executed. */
-uint32_t aret_onexit(uint32_t esp) { return AU(0); }
+/* _onexit(func): register an exit callback (mingw's static atexit routes here),
+ * returning the function pointer on success. */
+uint32_t aret_onexit(uint32_t esp) { aret_register_atexit(AU(0)); return AU(0); }
 
 /* ------------------------------------------------------------------ */
 /* <math.h> — the transcendental libm functions. Their statically-linked */
@@ -395,6 +422,20 @@ uint32_t aret_strftime(uint32_t esp) {
     char *s = AS(0); size_t max = AU(1); const char *fmt = ACS(2);
     struct tm t = aret_unpack_tm((const int32_t *)AP(3));
     return (uint32_t)strftime(s, max, fmt ? fmt : "", &t);
+}
+/* asctime(tm) -> "Www Mmm dd hh:mm:ss yyyy\n" in a static buffer. Formatted
+ * explicitly (not via host asctime) because msvcrt zero-pads the day ("09")
+ * while glibc space-pads it (" 9"). */
+uint32_t aret_asctime(uint32_t esp) {
+    static const char *const wd[] = {"Sun","Mon","Tue","Wed","Thu","Fri","Sat"};
+    static const char *const mo[] = {"Jan","Feb","Mar","Apr","May","Jun",
+                                     "Jul","Aug","Sep","Oct","Nov","Dec"};
+    static char buf[32];
+    const int32_t *g = (const int32_t *)AP(0);
+    if (!g || g[6] < 0 || g[6] > 6 || g[4] < 0 || g[4] > 11) return 0;
+    snprintf(buf, sizeof buf, "%s %s %02d %02d:%02d:%02d %d\n",
+             wd[g[6]], mo[g[4]], g[3], g[2], g[1], g[0], g[5] + 1900);
+    return (uint32_t)(uintptr_t)buf;
 }
 /* difftime returns a double — recovered through the x87 channel like libm. */
 uint32_t aret_difftime(uint32_t esp) {

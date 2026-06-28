@@ -293,6 +293,22 @@ fn uses_setjmp(prog: &Program) -> bool {
         .any(|raw| is_setjmp_intrinsic(&ir::build::sanitize_import(raw)))
 }
 
+/// Imports whose return value occupies the full `edx:eax` pair — a `long long`,
+/// or an 8-byte struct (`div_t`/`ldiv_t`) the 32-bit ABI returns in edx:eax.
+/// Their shim must be declared returning `uint64_t` so the call site reads both
+/// halves (the call lift already splits a 32-bit call's result into edx:eax); a
+/// `uint32_t` declaration would silently drop edx (the remainder / high word).
+fn import_returns_u64(sym: &str) -> bool {
+    // Names are post-`sanitize_import` (leading underscores stripped), so the
+    // msvcrt `_strtoi64` import is `aret_strtoi64`, etc.
+    matches!(
+        sym,
+        "aret_div" | "aret_ldiv" | "aret_lldiv" | "aret_imaxdiv"
+            | "aret_strtoll" | "aret_strtoull" | "aret_wcstoll" | "aret_wcstoull"
+            | "aret_strtoi64" | "aret_strtoui64" | "aret_atoi64" | "aret_wtoi64"
+    )
+}
+
 /// Emit a weak stub for every imported function (`aret_<name>`), so a binary that
 /// references imports without a real HLE shim still links. A stub warns once (via
 /// `aret_unimpl`) and returns 0; the HLE's strong definitions override the weak
@@ -318,9 +334,10 @@ fn emit_import_stubs(prog: &Program) -> String {
         // them as external symbols) still links; in the C backend the macro block
         // in aret_decls.h shadows the call sites, so this stub stays unused.
         let raw_escaped = raw.replace('\\', "\\\\").replace('"', "\\\"");
+        let ret = if import_returns_u64(sym) { "uint64_t" } else { "uint32_t" };
         let _ = writeln!(
             s,
-            "__attribute__((weak)) uint32_t {sym}(uint32_t esp) {{ (void)esp; aret_unimpl(\"{raw_escaped}\"); return 0; }}"
+            "__attribute__((weak)) {ret} {sym}(uint32_t esp) {{ (void)esp; aret_unimpl(\"{raw_escaped}\"); return 0; }}"
         );
     }
     s
@@ -819,7 +836,8 @@ pub fn transpile(
                     continue; // provided by the macro block below, not a prototype
                 }
                 if seen.insert(sym.clone()) {
-                    let _ = writeln!(protos, "uint32_t {sym}(uint32_t);");
+                    let ret = if import_returns_u64(&sym) { "uint64_t" } else { "uint32_t" };
+                    let _ = writeln!(protos, "{ret} {sym}(uint32_t);");
                 }
             }
             decls_h.push_str(&protos);

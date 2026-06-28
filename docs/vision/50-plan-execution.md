@@ -1559,3 +1559,26 @@ silencieux (à valider un jour) ; « **non lifté** » = `Asm`/abort = **sound**
 - **Résultat : winediff 13/13.** Régression : cargo vert, **difftest 268/268, transpile-diff 4/4 (hash
   inchangé)**. *Cibles futures* : plus de Win32 (temps/env/registre/handles avancés), `rep scas/cmps`,
   DF arrière. La boucle d'élargissement est rodée et reproductible.
+
+### Axe 2 : corpus 13→19, inventaire des manques + 64-bit edx:eax shims ✅ FAIT
+- **2026-06-28 — « Lister ce qui manque et élargir ».** +6 programmes (stdio binaire/seek, stdlib
+  div/strtoll/atexit, math étendu, temps figé, **Interlocked** Win32, env Win32) ; `TZ=UTC` figé dans
+  le harness pour le déterminisme des conversions de date. La sortie de winediff = **l'inventaire des
+  manques** (`unimplemented import called: X`). D'emblée 15/19 ; passes notables : **Interlocked\*** et
+  tout le **math étendu** (atan2/asin/acos/log10/sinh/round/cbrt/frexp/fmin…) **= vrai Windows**.
+- **Manques trouvés et comblés** → **19/19** :
+  - **`rewind`**, **`asctime`** (formaté à la main : msvcrt zéro-pad le jour `09`, glibc espace ` 9`),
+    **`ExpandEnvironmentStringsA`** (substitution `%VAR%`).
+  - **`atexit`** : mingw lie `atexit` en statique mais enregistre via l'**import `_onexit`** → `aret_onexit`
+    enregistre désormais le callback ; un handler hôte `atexit` unique les rejoue via `aret_call` (LIFO).
+  - **`div`/`ldiv`/`strtoll`/`strtoull`** (+ noms msvcrt `_strtoi64`/`_strtoui64`) : retour **64-bit dans
+    la paire `edx:eax`** (un `long long`, ou `div_t`/`ldiv_t` 8 octets). Cause racine : le builder
+    déclarait **tous** les shims `uint32_t` → le site d'appel **droppait edx**. Fix général :
+    `import_returns_u64` (builder) déclare un ensemble curé de shims `uint64_t` (stub faible **et**
+    prototype) → le split `edx:eax` déjà présent dans le lift d'appel capte les deux moitiés. Débloque
+    toute la classe (div/ldiv/strtoll/strtoull/_strtoi64/_atoi64…).
+- **Vérifié** : winediff **19/19** ; régression **cargo vert, cpudiff vert, difftest 268/268,
+  transpile-diff 4/4 (hash inchangé)** — le builder ne change rien pour un binaire sans import à retour
+  64-bit (opt-in). *Limite notée* : un `atexit` purement statique (sans `_onexit`) demanderait de
+  rejouer le flux de sortie CRT (hors périmètre). La boucle d'élargissement est rodée : corpus = tests
+  permanents **et** révélateurs de gaps.

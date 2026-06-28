@@ -93,6 +93,32 @@ uint32_t aret_SetEnvironmentVariableA(uint32_t esp) {
     if (!name) return 0;
     return (uint32_t)(val ? (setenv(name, val, 1) == 0) : (unsetenv(name) == 0));
 }
+/* ExpandEnvironmentStringsA(src, dst, size): substitute %NAME% with getenv(NAME),
+ * copy literals through. Returns the length written including the NUL (or the
+ * required size if dst is too small / NULL), matching the Win32 contract. */
+uint32_t aret_ExpandEnvironmentStringsA(uint32_t esp) {
+    const char *src = WCS(0); char *dst = WS(1); uint32_t size = WU(2);
+    if (!src) return 0;
+    char out[4096]; size_t o = 0;
+    for (const char *p = src; *p && o < sizeof out - 1;) {
+        const char *e;
+        if (*p == '%' && (e = strchr(p + 1, '%'))) {
+            size_t nl = (size_t)(e - p - 1);
+            char name[256];
+            if (nl < sizeof name) {
+                memcpy(name, p + 1, nl); name[nl] = 0;
+                const char *v = getenv(name);
+                if (v) { size_t vl = strlen(v); if (o + vl < sizeof out - 1) { memcpy(out + o, v, vl); o += vl; } }
+                p = e + 1; continue;
+            }
+        }
+        out[o++] = *p++;
+    }
+    out[o] = 0;
+    uint32_t need = (uint32_t)o + 1;
+    if (dst && size >= need) memcpy(dst, out, need);
+    return need;
+}
 uint32_t aret_GetCurrentDirectoryA(uint32_t esp) {
     uint32_t size = WU(0); char *buf = WS(1);
     char tmp[4096];

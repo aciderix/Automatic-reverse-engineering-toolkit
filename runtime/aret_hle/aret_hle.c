@@ -513,6 +513,10 @@ uint32_t aret_fflush(uint32_t esp) {
 uint32_t aret_fseek(uint32_t esp) {
     return (uint32_t)fseek((FILE *)(uintptr_t)arg(esp, 0), (long)(int32_t)arg(esp, 1), (int)arg(esp, 2));
 }
+uint32_t aret_rewind(uint32_t esp) {
+    rewind((FILE *)(uintptr_t)arg(esp, 0));
+    return 0;
+}
 
 uint32_t aret_ftell(uint32_t esp) {
     return (uint32_t)ftell((FILE *)(uintptr_t)arg(esp, 0));
@@ -806,7 +810,25 @@ uint32_t aret_cexit(uint32_t esp) { (void)esp; return 0; }
 uint32_t aret_lock(uint32_t esp) { (void)esp; return 0; }
 uint32_t aret_unlock(uint32_t esp) { (void)esp; return 0; }
 uint32_t aret_signal(uint32_t esp) { (void)esp; return 0; }
-uint32_t aret_atexit(uint32_t esp) { (void)esp; return 0; }
+/* atexit: the registered callbacks are transpiled sub_<va> using the machine-
+ * stack ABI, so dispatch them through aret_call (like the qsort trampoline) from
+ * a single host atexit handler. LIFO order, as C requires. */
+#define ARET_ATEXIT_MAX 64
+static uint32_t aret_atexit_fns[ARET_ATEXIT_MAX];
+static int aret_atexit_n;
+static void aret_run_atexit(void) {
+    static uint8_t scratch[64 * 1024];
+    uint32_t *f = (uint32_t *)(void *)(scratch + sizeof(scratch) - 64);
+    for (int i = aret_atexit_n - 1; i >= 0; i--)
+        aret_call(aret_atexit_fns[i], (uint32_t)(uintptr_t)f, 0, 0, 0);
+}
+/* Shared by aret_atexit and aret_onexit (mingw's static `atexit` registers its
+ * callback through the msvcrt `_onexit` import, so that path must register too). */
+void aret_register_atexit(uint32_t va) {
+    if (aret_atexit_n == 0) atexit(aret_run_atexit);
+    if (aret_atexit_n < ARET_ATEXIT_MAX) aret_atexit_fns[aret_atexit_n++] = va;
+}
+uint32_t aret_atexit(uint32_t esp) { aret_register_atexit(arg(esp, 0)); return 0; }
 uint32_t aret_setlocale(uint32_t esp) { (void)esp; return (uint32_t)(uintptr_t)"C"; }
 uint32_t aret_abort(uint32_t esp) { (void)esp; abort(); return 0; }
 uint32_t aret_exit(uint32_t esp) { exit((int)arg(esp, 0)); return 0; }
