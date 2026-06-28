@@ -616,6 +616,7 @@ fn lower(prog: &Program, f: &Function) -> ir::types::IrFunction {
 
 /// Transpile `funcs` to C, link with the HLE runtime, and produce a native
 /// executable in `out_dir`. When `run` is set, execute it and capture stdout.
+#[allow(clippy::too_many_arguments)]
 pub fn transpile(
     prog: &Program,
     funcs: &[&Function],
@@ -625,6 +626,7 @@ pub fn transpile(
     backend: &str,
     wasm: bool,
     snapshot: Option<&[(u64, Vec<u8>)]>,
+    prog_args: &[String],
 ) -> Result<TranspileReport> {
     // WebAssembly target: the recovered C is portable, and wasm32's linear memory
     // *is* the 32-bit address space, so it is a natural target (32-bit pointers,
@@ -924,7 +926,7 @@ pub fn transpile(
         }
         let run_output = if run {
             let rt = std::env::var("WASM_RUNTIME").unwrap_or_else(|_| "wasmtime".to_string());
-            let o = Command::new(&rt).arg(&binary).output()
+            let o = Command::new(&rt).arg(&binary).arg("--").args(prog_args).output()
                 .with_context(|| format!("failed to run {rt} (set WASM_RUNTIME?)"))?;
             let mut s = String::from_utf8_lossy(&o.stdout).into_owned();
             if !o.stderr.is_empty() { s.push_str(&String::from_utf8_lossy(&o.stderr)); }
@@ -1003,6 +1005,7 @@ pub fn transpile(
 
     let run_output = if run {
         let out = Command::new(&binary)
+            .args(prog_args)
             .output()
             .with_context(|| format!("failed to run {}", binary.display()))?;
         let mut s = String::from_utf8_lossy(&out.stdout).into_owned();

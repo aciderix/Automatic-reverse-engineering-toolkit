@@ -865,7 +865,45 @@ uint32_t aret_WideCharToMultiByte(uint32_t esp) {
     for (int i = 0; i < w; i++) dst[i] = (char)(src[i] & 0xff);
     return (uint32_t)w;
 }
-uint32_t aret_GetCommandLineA(uint32_t esp) { (void)esp; return (uint32_t)(uintptr_t)"program"; }
+/* GetCommandLineA/W: rebuild the command line from the real argv (the native
+ * process's arguments, captured in aret_real_argc/argv), quoting any argument
+ * that contains whitespace — the inverse of CommandLineToArgv, so a program that
+ * re-parses it sees the same arguments it would on Windows. */
+static void aret_build_cmdline(char *out, size_t cap) {
+    extern int aret_real_argc;
+    extern char **aret_real_argv;
+    size_t o = 0;
+    for (int i = 0; i < aret_real_argc && o + 2 < cap; i++) {
+        const char *a = aret_real_argv[i];
+        int quote = (a[0] == 0) || strpbrk(a, " \t") != NULL;
+        if (i && o + 1 < cap) out[o++] = ' ';
+        if (quote && o + 1 < cap) out[o++] = '"';
+        for (const char *p = a; *p && o + 2 < cap; p++) out[o++] = *p;
+        if (quote && o + 1 < cap) out[o++] = '"';
+    }
+    out[o] = 0;
+}
+uint32_t aret_GetCommandLineA(uint32_t esp) {
+    (void)esp;
+    static char cmd[8192];
+    static int built = 0;
+    if (!built) { built = 1; aret_build_cmdline(cmd, sizeof cmd); }
+    return (uint32_t)(uintptr_t)cmd;
+}
+uint32_t aret_GetCommandLineW(uint32_t esp) {
+    (void)esp;
+    static uint16_t wcmd[8192];
+    static int built = 0;
+    if (!built) {
+        built = 1;
+        char tmp[8192];
+        aret_build_cmdline(tmp, sizeof tmp);
+        size_t i = 0;
+        for (; tmp[i] && i < sizeof(wcmd) / sizeof(wcmd[0]) - 1; i++) wcmd[i] = (unsigned char)tmp[i];
+        wcmd[i] = 0;
+    }
+    return (uint32_t)(uintptr_t)wcmd;
+}
 
 /* msvcrt internal globals exposed as pointer-returning functions. Names match
  * sanitize_import() (leading underscores stripped), so the generator's call to

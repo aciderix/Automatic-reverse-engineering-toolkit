@@ -1601,3 +1601,20 @@ silencieux (à valider un jour) ; « **non lifté** » = `Asm`/abort = **sound**
   les émet pas ici ; le support `rep scas/cmps` + DF arrière reste au backlog (non bloquant).
 - **Vérifié** : winediff **24/24** ; régression **cargo vert, difftest 268/268, transpile-diff 4/4
   (hash inchangé)**. Corpus axe-2 = **24 programmes**, tous = vrai Windows.
+
+### Axe 2 : passage des arguments CLI (le vrai unlock des outils) ✅ FAIT
+- **2026-06-28 — Avant strings.exe : les arguments de ligne de commande.** Diagnostic (sur le vrai
+  `strings.exe` 32-bit fourni, transpilé en *transpile-only*) : ARET le **lift entièrement** (2837 fns,
+  2653 liftées, **0 appel direct non résolu**) — le blocage est 100 % axe-2 (**77 imports non
+  implémentés** + 178 partial-asm). Tête de liste : **`GetCommandLineA`/`W`** (les arguments) — qui
+  bloque **tout** outil CLI, pas seulement strings.
+- **Implémenté** : (1) `aret --mode transpile --run -- arg1 arg2…` **transmet** les arguments au binaire
+  natif (`clap last=true` → `prog_args` → `Command::args`) ; (2) `GetCommandLineA`/**`GetCommandLineW`**
+  reconstruisent la ligne de commande depuis le vrai argv (quoting des args à espaces — inverse de
+  `CommandLineToArgv`) ; argc/argv passaient déjà par la frame `main` synthétique. (3) le harness
+  winediff lit un fichier `NAME.args` optionnel (un arg par ligne) et le passe **à l'identique** à Wine
+  et à ARET.
+- **Vérifié** : nouveau `argv_echo` (argc + argv[1..] + somme numérique + `GetCommandLineA`) = **bit-
+  identique à Wine** ; winediff **25/25**. Régression : cargo vert, **difftest 268/268, transpile-diff
+  4/4 (hash inchangé)**. **Unlock général** : tout outil CLI (cat/strings/makecab…) reçoit enfin ses
+  arguments. Prochaine étape vers strings.exe : **mapping mémoire** (`CreateFileMapping`/`MapViewOfFile`).

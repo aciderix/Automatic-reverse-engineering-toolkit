@@ -68,6 +68,12 @@ struct Args {
     /// Path to the target binary.
     binary: PathBuf,
 
+    /// Transpile `--run`: arguments to pass to the transpiled program, after a
+    /// `--` separator (e.g. `aret prog.exe --mode transpile --run -- foo bar`).
+    /// They reach the program as argv (and `GetCommandLineA`/`W`).
+    #[arg(last = true)]
+    prog_args: Vec<String>,
+
     /// What to produce.
     #[arg(short, long, value_enum, default_value_t = Mode::Decompile)]
     mode: Mode,
@@ -484,6 +490,7 @@ fn main() -> Result<()> {
                 &args.backend,
                 wasm,
                 snapshot.as_deref(),
+                &args.prog_args,
             )?;
             out.push_str(&report.render());
             if args.strict && !report.is_sound() {

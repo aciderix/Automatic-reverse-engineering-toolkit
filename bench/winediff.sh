@@ -50,11 +50,17 @@ for src in "$CORPUS"/*.c; do
   if ! "$MINGW" -O1 -w "$src" -o "$TMP/$name.exe" 2>"$TMP/err"; then
     echo "FAIL  $name (PE build: $(head -1 "$TMP/err"))"; continue
   fi
+  # Optional per-program arguments: one per line in winecorpus/NAME.args. Passed
+  # identically to both Wine and ARET, so command-line handling is exercised.
+  pargs=()
+  if [ -f "$CORPUS/$name.args" ]; then
+    while IFS= read -r line || [ -n "$line" ]; do pargs+=("$line"); done < "$CORPUS/$name.args"
+  fi
   # Oracle: real PE under Wine. Run from the temp dir so any files land there.
-  oracle="$(cd "$TMP" && wine "$TMP/$name.exe" 2>/dev/null | norm)"
-  # ARET: transpile + run the same PE natively.
+  oracle="$(cd "$TMP" && wine "$TMP/$name.exe" "${pargs[@]}" 2>/dev/null | norm)"
+  # ARET: transpile + run the same PE natively (args after `--`).
   rm -rf "$TMP/out"
-  got="$(cd "$TMP" && "$ARET" "$TMP/$name.exe" --mode transpile --out-dir "$TMP/out" --run 2>"$TMP/aerr" \
+  got="$(cd "$TMP" && "$ARET" "$TMP/$name.exe" --mode transpile --out-dir "$TMP/out" --run -- "${pargs[@]}" 2>"$TMP/aerr" \
         | extract_aret | norm)"
   if [ "$oracle" = "$got" ]; then
     pass=$((pass+1)); echo "  ok    $name"
