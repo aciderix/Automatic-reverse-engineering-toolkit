@@ -1923,3 +1923,26 @@ helpers ABI MSVC EH/alloca, appels libc), bénéfique à tout binaire PE.
   est à finir.
 - **Régression complète PASS** : difftest **268/268**, magicdiv 2³², SMT 11/11, recompilabilité 100%,
   **transpile-diff 4/4 (hash 4b0121f182554d40 inchangé)**, **winediff 33/33**, **cpudiff OK**.
+
+### strings.exe — EXIT PROPRE ✅ (PEB.ProcessParameters) — milestone cœur ATTEINT
+- **2026-06-28 — strings.exe tourne intégralement et exit 0**, extraction de chaînes **bit-identique à
+  Wine** (`hello`/`world`/`tiny`…). Le segfault de cleanup venait du TEB/PEB synthétique : le CRT lit
+  `[fs:0x30]`=PEB puis `[PEB+0x10]`=ProcessParameters, qui était **NULL** → deref `[0+8]`.
+- **Fix (complétude TEB/PEB, général)** : bloc `RTL_USER_PROCESS_PARAMETERS` zéro-rempli (Length,
+  Flags=NORMALIZED) pointé depuis `[PEB+0x10]`. Tout binaire lisant les paramètres de process en
+  bénéficie.
+- **Seule différence restante vs Wine = la bannière de version** (`(null) v(null) - (null)` au lieu de
+  `Strings v2.54 - ...`) : strings.exe lit sa propre ressource VERSIONINFO via
+  `GetFileVersionInfoSizeA`/`GetFileVersionInfoA`/`VerQueryValueA` (non implémentés → `%s` sur NULL).
+  **Cosmétique** — l'extraction de chaînes (la fonction du programme) est exacte. Implémenter le
+  parsing de la ressource VS_VERSIONINFO du PE rendrait la sortie totalement identique (feature HLE
+  générale, à faire).
+- **Régression complète PASS** : difftest 268/268, magicdiv 2³², SMT 11/11, recompilabilité 100%,
+  transpile 4/4 (hash inchangé), winediff 33/33, cpudiff OK.
+
+#### 🏁 MILESTONE : un vrai binaire MSVC static-CRT C++ (Sysinternals strings.exe) transpilé en ELF
+#### Linux natif, tourne sans Wine, extraction de chaînes bit-identique à Wine, exit 0.
+Débloqué cette session par ~16 fixes **généraux** (instructions cpuid/xgetbv/bt/stmxcsr/SSE2-string ;
+récupération de fonctions ; DCE ; inline `_EH_prolog` + `_chkstk` ; threading `ebp` ; cast args libc ;
+tail-jmp esp+4 ; masquage CPUID AVX/SSE4.2 ; TEB/PEB) — chacun bénéficiant à toute la classe des
+binaires MSVC, pas seulement strings.exe.

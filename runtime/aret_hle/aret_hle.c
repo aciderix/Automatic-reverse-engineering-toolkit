@@ -1190,6 +1190,7 @@ uint32_t aret_initterm_e(uint32_t esp) {
 
 static uint8_t aret_teb[0x1000];
 static uint8_t aret_peb[0x1000];
+static uint8_t aret_procparams[0x400]; /* RTL_USER_PROCESS_PARAMETERS + slack */
 static int aret_teb_ready = 0;
 
 static void aret_teb_init(void) {
@@ -1211,6 +1212,15 @@ static void aret_teb_init(void) {
     uint32_t *p = (uint32_t *)aret_peb;
     aret_peb[0x02] = 0;              /* BeingDebugged = FALSE          */
     p[0x08 / 4] = 0x00400000u;       /* ImageBaseAddress (typical)     */
+    /* ProcessParameters (RTL_USER_PROCESS_PARAMETERS): the CRT reads its Flags and
+     * standard-handle/path fields. A zeroed block is a valid "normalized, no
+     * inherited handles" set and keeps those reads from dereferencing NULL. */
+    uint32_t pp = (uint32_t)(uintptr_t)aret_procparams;
+    p[0x10 / 4] = pp;                /* PEB.ProcessParameters          */
+    uint32_t *q = (uint32_t *)aret_procparams;
+    q[0x00 / 4] = sizeof(aret_procparams); /* MaximumLength            */
+    q[0x04 / 4] = sizeof(aret_procparams); /* Length                   */
+    q[0x08 / 4] = 1;                 /* Flags = RTL_USER_PROC_PARAMS_NORMALIZED */
 }
 
 uint32_t __aret_fs(void) {
