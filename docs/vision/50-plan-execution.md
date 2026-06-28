@@ -1807,3 +1807,29 @@ silencieux (à valider un jour) ; « **non lifté** » = `Asm`/abort = **sound**
   helpers purs (+ harness magicdiv) ; inline `_EH_prolog` ; threading d'`ebp`. Le transpileur est
   **généralement** plus correct (instructions, récupération, funclets EH/sans-frame), bien au-delà de
   strings.exe.
+
+### strings.exe — bug GÉNÉRAL trouvé : args libc 64-bit non rétrécis (memcpy) + `bt [mem],imm` ✅ FAIT
+- **2026-06-28 — la cause du crash « clonage locale » était GÉNÉRALE** (pas une rustine). En recompilant
+  le C généré en `-O0 -g` (sans inline LLVM) pour un mapping propre, le crash s'est révélé à
+  `chunk_11.c:384` = `memcpy(v52, v113, 0x88*4)`. Le désassemblage `-O0` montre **6 push** pour 3
+  arguments : nos opérandes sont `uint64_t` et le chunk n'inclut **pas** `<string.h>`, donc sans
+  prototype le compilateur passe chaque `uint64_t` en **64 bits (2 mots)** sur cible 32-bit. `memcpy`
+  lit alors `dst=v52.lo` (OK), `src=v52.**hi**=0` (faux), `n=v113.lo=0x4562f0` (faux) → copie folle
+  depuis NULL → crash. **Tout appel libc émis (memcpy issu de `rep movs`, etc.) était cassé** dès que
+  ses arguments étaient des `uint64_t` 32-bit-larges sans prototype.
+- **Fix général** (`emit::expr_c`, mode shared-stack) : pour un appel `Named` reconnu comme fonction
+  libc (`libc_arity` Some), **caster chaque argument en `(uint32_t)`** — un seul mot, ABI i386 correcte
+  (pointeurs/size_t/int tous 32-bit). `memcpy`/`memset`/`strncpy`/`read`/`write`/… réparés d'un coup.
+- **`bt [mem], imm` non modélisé** (révélé juste après) : le lifter ne gérait `bt`/`bts`/`btr`/`btc`
+  que pour un destinataire **registre**. La forme **mémoire avec index immédiat** est sûre (le bit
+  reste dans l'opérande, `idx mod width` — pas d'adressage bit-string) → gate élargi à
+  `op0=Register || op1=Immediate8`. (La forme mémoire avec index **registre** reste exclue : elle
+  adresse une chaîne de bits, non modélisée.)
+- **Effet sur strings.exe** : passe désormais **tout** le clonage de locale ; prochain bloqueur =
+  `int 0x29` (`__fastfail`) atteint via un **échec de check du cookie de pile** (`__security_check_cookie`,
+  `sub_403d2f`) : le slot cookie `[ebp-4]` est écrasé entre son store (`cookie^ebp`) et sa
+  vérification (lu == `ebp` → `ecx=0` ≠ cookie). Le C généré du cookie est correct → corruption de pile
+  en amont, à pister (prochaine étape).
+- **Régression complète PASS** : difftest **268/268**, magicdiv 2³², SMT 11/11, recompilabilité 100%,
+  **transpile-diff 4/4 (hash 4b0121f182554d40 inchangé)**, **winediff 33/33** (le cast libc valide tout
+  le corpus axe 2), cargo (wasm) OK.

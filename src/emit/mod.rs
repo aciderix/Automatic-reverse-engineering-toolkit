@@ -419,6 +419,19 @@ pub(crate) fn expr_c(e: &Expr) -> String {
                         format!("0 /*{}*/", n)
                     }
                 }
+                CallTarget::Named(n) if shared_stack() && libc_arity(n).is_some() => {
+                    // A real libc function (e.g. `memcpy` synthesised from `rep movs`)
+                    // called from a transpiled chunk, which has no `<string.h>`
+                    // prototype in scope. Our operands are `uint64_t`, so without a
+                    // prototype the compiler passes each as a *64-bit* pair on the
+                    // 32-bit target — and libc reads its first arg's high word as the
+                    // second arg, shifting everything (memcpy then sees src=high(dst),
+                    // n=low(src) → a wild copy and crash). Narrow every argument to a
+                    // single 32-bit word, which is the correct i386 ABI for these
+                    // (pointers/size_t/int are all 32-bit here).
+                    let na: Vec<String> = a.iter().map(|x| format!("(uint32_t)({x})")).collect();
+                    format!("{}({})", n, na.join(", "))
+                }
                 CallTarget::Named(n) => format!("{}({})", n, a.join(", ")),
                 CallTarget::Indirect(e) => {
                     // Shared-stack/transpile mode: a function pointer holds the

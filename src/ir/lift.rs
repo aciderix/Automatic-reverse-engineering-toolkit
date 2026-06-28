@@ -1662,12 +1662,15 @@ pub fn lift(insn: &Insn, bits: u32) -> Vec<Stmt> {
             vec![Stmt::Set { dst: rax.clone(), expr: combine_write(&rax, dw, sv, bits) }]
         }
 
-        // Bit test (+ complement/set/reset). Register form only: `CF = (dst >>
-        // (idx mod width)) & 1`, and the variants toggle/set/clear that bit. The
-        // memory form with a register index addresses a bit string and isn't
-        // modelled.
+        // Bit test (+ complement/set/reset): `CF = (dst >> (idx mod width)) & 1`,
+        // and the variants toggle/set/clear that bit. Handled for a register
+        // destination (any index) and for a *memory* destination with an
+        // **immediate** index — there the bit stays within the addressed operand
+        // (`idx mod width`), a plain load/modify/store. The memory form with a
+        // *register* index is excluded: it addresses a bit *string* (effective
+        // address shifts by idx/8), which this does not model.
         Mnemonic::Bt | Mnemonic::Btc | Mnemonic::Bts | Mnemonic::Btr
-            if ins.op_kind(0) == OpKind::Register =>
+            if ins.op_kind(0) == OpKind::Register || ins.op_kind(1) == OpKind::Immediate8 =>
         {
             let w = op0_width(ins, bits);
             let dst = some_or_asm!(op_value(ins, 0));
