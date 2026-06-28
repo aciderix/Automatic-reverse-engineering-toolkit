@@ -1520,3 +1520,23 @@ silencieux (à valider un jour) ; « **non lifté** » = `Asm`/abort = **sound**
      longueur *qui aurait été écrite* (sémantique C99 que le binaire mingw attend). Bug de shim HLE.
 - *Note* : winediff est une **métrique de couverture** (diagnostique), pas une porte dure comme
   difftest/transpile (qui restent à 100 %). Elle monte au fur et à mesure que le HLE se complète.
+
+### Axe 2 : instructions de chaîne simples liftées → winediff 7/7 ✅ FAIT
+- **2026-06-28 — Les 2 trouvailles de l'axe 2 corrigées ; corpus 7/7.**
+- **`snprintf`/`vsnprintf`** : renvoyaient la longueur *tronquée* ; corrigés pour rendre la longueur
+  C99 *qui aurait été écrite* (format dans un tampon de mesure puis copie tronquée). 5/7 → 6/7.
+- **Instructions de chaîne simples (non-rep)** : `movs`/`stos`/`lods`/`scas`/`cmps` (b/w/d/q) n'étaient
+  pas liftées (le `movsd` de chaîne partage le mnémonique avec le `movsd` SSE → abort sound).
+  Ajoutées : opèrent sur un élément à `[esi]`/`[edi]` et avancent le(s) pointeur(s), **désambiguïsées
+  par `is_string_instruction()`. `scas`/`cmps` posent les drapeaux** (via `sub_flags`). `cld` → no-op
+  (DF=0 = la direction *avant* assumée, comme le `rep movs` existant) ; `std`/DF=1 et `rep scas/cmps/
+  lods` restent non modélisés → **abort sound** (jamais d'avance arrière silencieuse). `sscanf` (qui
+  utilise un `movsd` interne) matche maintenant Wine → **winediff 7/7**.
+- *Validation* : end-to-end via winediff (sscanf = Wine) + régression. Pas dans cpudiff (les ops de
+  chaîne à double pointeur esi+edi demanderaient un setup mémoire spécial dans le harness
+  per-instruction ; couvertes end-to-end). **Régression : cargo vert, cpudiff vert, difftest 268/268,
+  transpile-diff 4/4 (hash inchangé).**
+- **Bilan axe 2** : socle solide (printf/malloc/qsort/math/fichier/chaînes/scan **= vrai Windows**), et
+  la boucle « différentiel Wine → trouve un gap → corrige → métrique monte » **fonctionne**. Prochaines
+  cibles quand on élargira le corpus : plus d'API Win32 (handles, temps, env, registre…), `rep` scas/
+  cmps, `std`/DF arrière (modéliser DF).

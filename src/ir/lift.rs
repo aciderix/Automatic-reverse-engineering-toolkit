@@ -881,6 +881,68 @@ pub fn lift(insn: &Insn, bits: u32) -> Vec<Stmt> {
         }
     }
 
+    // Single (non-rep) string instructions: operate on one element at [esi]/[edi]
+    // and advance the pointer(s). Forward (DF=0) is assumed — the ABI-default the
+    // compiler maintains (same assumption as `rep movs` above; a `std`/DF=1 region
+    // is left to a sound asm fallback, see `cld`/`std`). Handled here because the
+    // string `movsd`/`cmpsd` share a mnemonic with the SSE scalar ops; the
+    // `is_string_instruction` flag disambiguates. `rep scas/cmps/lods` (rarer) are
+    // not modelled and fall through to a sound asm fallback.
+    if ins.is_string_instruction() && !ins.has_rep_prefix() {
+        use Mnemonic::*;
+        let size: i128 = match ins.mnemonic() {
+            Movsb | Stosb | Lodsb | Scasb | Cmpsb => 1,
+            Movsw | Stosw | Lodsw | Scasw | Cmpsw => 2,
+            Movsd | Stosd | Lodsd | Scasd | Cmpsd => 4,
+            Movsq | Stosq | Lodsq | Scasq | Cmpsq => 8,
+            _ => 0,
+        };
+        if size != 0 {
+            let w = (size * 8) as u32;
+            let ty = Ty::int(w as u8);
+            let rsi = Location::Reg(RegId(6));
+            let rdi = Location::Reg(RegId(7));
+            let rax = Location::Reg(RegId(0));
+            let ld = |loc: &Location| Expr::Load { addr: Box::new(Expr::Read(loc.clone())), ty: ty.clone() };
+            let amask = |e: Expr| if w >= 64 { e } else { bin(BinOp::And, e, konst(mask(w))) };
+            let adv = |loc: &Location| Stmt::Set {
+                dst: loc.clone(),
+                expr: bin(BinOp::Add, Expr::Read(loc.clone()), konst(size)),
+            };
+            let mut out = Vec::new();
+            match ins.mnemonic() {
+                Movsb | Movsw | Movsd | Movsq => {
+                    out.push(Stmt::Store { addr: Expr::Read(rdi.clone()), value: ld(&rsi), ty: ty.clone() });
+                    out.push(adv(&rsi));
+                    out.push(adv(&rdi));
+                }
+                Stosb | Stosw | Stosd | Stosq => {
+                    out.push(Stmt::Store { addr: Expr::Read(rdi.clone()), value: amask(Expr::Read(rax)), ty: ty.clone() });
+                    out.push(adv(&rdi));
+                }
+                Lodsb | Lodsw | Lodsd | Lodsq => {
+                    out.push(Stmt::Set { dst: rax.clone(), expr: combine_write(&rax, w, ld(&rsi), bits) });
+                    out.push(adv(&rsi));
+                }
+                Scasb | Scasw | Scasd | Scasq => {
+                    let (a, b) = (amask(Expr::Read(rax)), ld(&rdi));
+                    let r = bin(BinOp::Sub, a.clone(), b.clone());
+                    out.extend(sub_flags(&a, &b, &r, w));
+                    out.push(adv(&rdi));
+                }
+                Cmpsb | Cmpsw | Cmpsd | Cmpsq => {
+                    let (a, b) = (ld(&rsi), ld(&rdi));
+                    let r = bin(BinOp::Sub, a.clone(), b.clone());
+                    out.extend(sub_flags(&a, &b, &r, w));
+                    out.push(adv(&rsi));
+                    out.push(adv(&rdi));
+                }
+                _ => return asm(),
+            }
+            return out;
+        }
+    }
+
     // Helper to require Some or bail to Asm.
     macro_rules! some_or_asm {
         ($e:expr) => {
@@ -893,6 +955,10 @@ pub fn lift(insn: &Insn, bits: u32) -> Vec<Stmt> {
 
     match ins.mnemonic() {
         Mnemonic::Nop | Mnemonic::Endbr32 | Mnemonic::Endbr64 => vec![Stmt::Nop],
+        // `cld` clears DF — the forward direction the string-op lifting assumes,
+        // so it is a no-op in our model. (`std`/DF=1 is left unmodelled -> sound
+        // asm fallback, so backward string ops abort rather than run forward.)
+        Mnemonic::Cld => vec![Stmt::Nop],
 
         Mnemonic::Mov => {
             let v = some_or_asm!(op_value(ins, 1));
