@@ -118,6 +118,49 @@ fn inline_frame_helper(
     Some(out)
 }
 
+/// Recognise the MSVC stack-probe / `_alloca` helper family (`_chkstk`,
+/// `_alloca_probe`, `_alloca_probe_16`/`_8`): a call passes the allocation size
+/// in `eax`, and the helper lowers `esp` by that amount (probing guard pages),
+/// relocates the return address and returns — the buffer is then at the new
+/// `esp`. Like `_EH_prolog`, it rewrites the caller's `esp`, which ARET's
+/// by-value `esp` model cannot propagate across a call: the caller would read its
+/// pre-`alloca` `esp`, place the buffer too high, and a `memset` of it overruns
+/// the saved cookie/return address (a crash). The fix is to model the call as
+/// `esp -= eax` (below). We don't need the page-probing — the native stack is one
+/// large mapping — only the net `esp` adjustment.
+///
+/// Detected by the unmistakable `xchg esp, eax` (the helper swaps the computed
+/// target into `esp`), found by a bounded scan that follows the tail `jmp` the
+/// aligned entry variants use to reach the worker. Normal code never `xchg`es
+/// `esp` with a general register. The alignment the `_16`/`_8` variants add is
+/// dropped (the buffer is then exactly the requested size, still sound).
+fn is_stack_alloc_helper(prog: &Program, disasm: &Disassembler, entry: u64) -> bool {
+    use iced_x86::{Mnemonic, Register};
+    let mut addr = entry;
+    for _ in 0..48 {
+        let Some(insn) = disasm.decode_at(prog, addr) else { return false };
+        let r = &insn.raw;
+        if r.mnemonic() == Mnemonic::Xchg {
+            let (a, b) = (r.op0_register(), r.op1_register());
+            if (a == Register::ESP && b == Register::EAX) || (a == Register::EAX && b == Register::ESP) {
+                return true;
+            }
+        }
+        match insn.flow {
+            // Follow the aligned entry variant's tail `jmp` to the worker.
+            Flow::Jump => match insn.target {
+                Some(t) => addr = t,
+                None => return false,
+            },
+            // Stay on the straight-line path (the probe loop is a side branch);
+            // stop at anything that ends the routine or could mislead.
+            Flow::Fallthrough | Flow::CondJump => addr = insn.next_addr(),
+            _ => return false,
+        }
+    }
+    false
+}
+
 /// Lift a recovered function into an SSA-ready IR CFG (pre-SSA: `Set`/`Read`).
 pub fn build_ir(prog: &Program, func: &Function) -> IrFunction {
     let bits = prog.bitness.bits();
@@ -194,6 +237,21 @@ pub fn build_ir(prog: &Program, func: &Function) -> IrFunction {
             if inline_frame_helpers && insn.flow == Flow::Call {
                 if let Some(target) = insn.target {
                     if prog.is_executable(target) {
+                        // `_chkstk`/`_alloca_probe`: the call allocates `eax` bytes
+                        // on the stack (esp -= eax) and returns the buffer at the
+                        // new esp. Model just the net esp adjustment.
+                        if is_stack_alloc_helper(prog, &disasm, target) {
+                            let sp = Location::Reg(RegId(4));
+                            stmts.push(Stmt::Set {
+                                dst: sp.clone(),
+                                expr: Expr::Binary(
+                                    BinOp::Sub,
+                                    Box::new(Expr::Read(sp)),
+                                    Box::new(Expr::Read(Location::Reg(RegId(0)))), // eax = size
+                                ),
+                            });
+                            continue;
+                        }
                         if let Some(inlined) =
                             inline_frame_helper(prog, &disasm, target, insn.next_addr(), bits)
                         {

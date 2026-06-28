@@ -1833,3 +1833,25 @@ silencieux (à valider un jour) ; « **non lifté** » = `Asm`/abort = **sound**
 - **Régression complète PASS** : difftest **268/268**, magicdiv 2³², SMT 11/11, recompilabilité 100%,
   **transpile-diff 4/4 (hash 4b0121f182554d40 inchangé)**, **winediff 33/33** (le cast libc valide tout
   le corpus axe 2), cargo (wasm) OK.
+
+### strings.exe — `_chkstk`/`_alloca` (esp inter-frame) + `stmxcsr`/`ldmxcsr` ✅ FAIT
+- **2026-06-28 — la corruption du cookie était GÉNÉRALE** (3ᵉ helper à réécriture d'esp). Watchpoint sur
+  le slot cookie : `sub_42f381` le stocke (`cookie^ebp`), puis un **`memset(dest, 0, 512)`** appelé par
+  `sub_42f381` lui-même l'écrase. Cause : `sub_42f381` fait un **`_alloca`** via `call 0x4426c0`
+  (`_alloca_probe16` → tail-jmp `0x403d40` = `_chkstk`), qui **abaisse `esp` de `eax` octets** et
+  relocalise l'adresse de retour (comme `_EH_prolog`). ARET ne propageant pas ce changement d'esp,
+  `esi = esp` prenait l'**ancien** esp (haut dans le frame) → le `memset` du buffer débordait sur le
+  cookie/retour → check `__security_check_cookie` (`sub_403d2f`) en échec → `int 0x29` (`__fastfail`).
+- **Fix général** (`ir::build`) : détecter la famille `_chkstk`/`_alloca_probe` par le marqueur unique
+  **`xchg esp, eax`** (scan borné suivant le tail-`jmp` des variantes alignées) et modéliser l'appel
+  comme **`esp = esp - eax`** (le buffer est au nouvel esp ; on n'a pas besoin du probing de pages — la
+  pile native est un grand mapping). Helper ABI MSVC standard (tout binaire avec `_alloca`/gros frame).
+- **`stmxcsr`/`ldmxcsr` non modélisés** (révélés ensuite) : registre de contrôle SSE. `ldmxcsr` → Nop
+  (on ne modélise pas l'état d'arrondi/exceptions SSE — défaut hôte, comme `fldcw` pour le x87) ;
+  `stmxcsr [m]` → écrit le défaut **0x1f80** (exceptions masquées, arrondi au plus proche), ce que
+  l'init FP du CRT relit.
+- **Effet** : strings.exe **dépasse tout l'init locale ET la corruption de cookie** ; prochain bloqueur
+  = segfault dans `sub_42697f` (deref `eax=0x351`) via une autre phase du démarrage CRT (`sub_404019`
+  → `sub_425e97`), + import `InitializeSListHead` (stub non-fatal). À analyser.
+- **Régression complète PASS** : difftest **268/268**, magicdiv 2³², SMT 11/11, recompilabilité 100%,
+  **transpile-diff 4/4 (hash 4b0121f182554d40 inchangé)**, **winediff 33/33**, cargo (wasm) OK.

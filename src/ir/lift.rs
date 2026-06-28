@@ -1641,6 +1641,16 @@ pub fn lift(insn: &Insn, bits: u32) -> Vec<Stmt> {
                 },
             ]
         }
+        // SSE control/status register. `ldmxcsr [m32]` loads MXCSR (rounding mode +
+        // exception masks/flags); we do not model the SSE rounding/exception state
+        // (results use the host default, round-to-nearest, exceptions masked) — a
+        // no-op, matching how the x87 control word (`fldcw`) is treated. `stmxcsr
+        // [m32]` stores MXCSR: write the reset default 0x1f80 (all exceptions
+        // masked, round-to-nearest), what the CRT's FP init reads back.
+        Mnemonic::Ldmxcsr | Mnemonic::Vldmxcsr => vec![Stmt::Nop],
+        Mnemonic::Stmxcsr | Mnemonic::Vstmxcsr => {
+            some_or_asm!(write_op0(ins, konst(0x1f80), bits))
+        }
         // cqo: RDX = sign-extension of RAX (64-bit).
         Mnemonic::Cqo => {
             let rax = Location::Reg(RegId(0));
