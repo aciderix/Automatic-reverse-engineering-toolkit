@@ -208,6 +208,22 @@ pub(crate) const FLOAT_HELPERS: &str = concat!(
     // x86 parity flag: set iff the low byte of the result has an even number of
     // set bits (`__builtin_parity` returns 1 for odd, so PF is its negation).
     "static inline uint64_t __ix_pf(uint64_t x){return !__builtin_parity((unsigned)(x&0xff));}\n",
+    // cpuid: run the *real* host cpuid (a user-mode instruction Wine also lets
+    // through), returning the requested result register (0=eax,1=ebx,2=ecx,3=edx)
+    // for (leaf, subleaf). The CRT uses it to pick SSE/AVX code paths; the host's
+    // features are what the transpiled binary actually runs on, so this is exact.
+    "#ifndef __wasm__\n",
+    "#include <cpuid.h>\n",
+    "static inline uint32_t __ix_cpuid(uint32_t leaf,uint32_t sub,uint32_t which){unsigned a=0,b=0,c=0,d=0;__get_cpuid_count(leaf,sub,&a,&b,&c,&d);return which==0?a:which==1?b:which==2?c:d;}\n",
+    // xgetbv: read the extended control register (XCR0) -> edx:eax. The CRT reads
+    // it (after cpuid reports OSXSAVE) to confirm OS-enabled AVX state; the binary
+    // only reaches it when the host supports it, so the real instruction is safe.
+    // Encoded as raw bytes (0f 01 d0) so it assembles without -mxsave.
+    "static inline uint64_t __ix_xgetbv(uint32_t ecx){uint32_t a,d;__asm__ __volatile__(\".byte 0x0f,0x01,0xd0\":\"=a\"(a),\"=d\"(d):\"c\"(ecx));return (uint64_t)a|((uint64_t)d<<32);}\n",
+    "#else\n",
+    "static inline uint32_t __ix_cpuid(uint32_t leaf,uint32_t sub,uint32_t which){(void)leaf;(void)sub;(void)which;return 0;}\n",
+    "static inline uint64_t __ix_xgetbv(uint32_t ecx){(void)ecx;return 3;}\n",
+    "#endif\n",
     "static inline uint64_t __ix_bswap32(uint64_t x){return __builtin_bswap32((uint32_t)x);}\n",
     "static inline uint64_t __ix_bswap64(uint64_t x){return __builtin_bswap64(x);}\n",
     "static inline uint64_t __ix_bsf32(uint64_t x){return (uint32_t)x?__builtin_ctz((uint32_t)x):0;}\n",

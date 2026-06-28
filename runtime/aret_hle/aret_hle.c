@@ -990,6 +990,11 @@ uint32_t aret_TlsFree(uint32_t esp) {
 uint32_t aret_EncodePointer(uint32_t esp) { return arg(esp, 0); }
 uint32_t aret_DecodePointer(uint32_t esp) { return arg(esp, 0); }
 uint32_t aret_InitializeCriticalSection(uint32_t esp) { (void)esp; return 0; }
+/* Single-threaded model: the spin count is irrelevant and there is never
+ * contention, so initialisation always succeeds. Returns BOOL=TRUE; a FALSE
+ * here makes the CRT treat init as failed and __fastfail (int 0x29). */
+uint32_t aret_InitializeCriticalSectionAndSpinCount(uint32_t esp) { (void)esp; return 1; }
+uint32_t aret_InitializeCriticalSectionEx(uint32_t esp) { (void)esp; return 1; }
 uint32_t aret_DeleteCriticalSection(uint32_t esp) { (void)esp; return 0; }
 uint32_t aret_EnterCriticalSection(uint32_t esp) { (void)esp; return 0; }
 uint32_t aret_LeaveCriticalSection(uint32_t esp) { (void)esp; return 0; }

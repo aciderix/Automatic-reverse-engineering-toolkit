@@ -1687,3 +1687,47 @@ silencieux (à valider un jour) ; « **non lifté** » = `Asm`/abort = **sound**
   planter Wine — bug de test, pas de signal réel.)*
 - **Vérifié** : `win32_fileops` = **bit-identique à Wine** ; winediff **33/33**. Régression : cargo
   **98/0** (wasm OK), **difftest 268/268, transpile-diff 4/4 (hash inchangé)**.
+
+### strings.exe (Sysinternals) — déblocage par run différentiel : cpuid/xgetbv + récupération de fonctions ✅ FAIT
+- **2026-06-28 — diagnostic par *run différentiel*** (transpile+run de strings.exe comparé à Wine,
+  itéré bloqueur par bloqueur ; principé car différentiel, pas « ça a l'air plausible »). Chaque
+  bloqueur résolu sur le **général**, jamais par rustine spécifique au binaire :
+  1. **`cpuid`** (instruction non modélisée) → handler lift renvoyant les 4 leaves via `__ix_cpuid`
+     (cpuid hôte réel, `__get_cpuid_count`, repli wasm). *(déjà posé au lot précédent)*
+  2. **`xgetbv`** (le CRT lit XCR0 après cpuid pour confirmer l'état AVX OS-activé) → handler lift
+     `Mnemonic::Xgetbv` (ecx → edx:eax) + helper `__ix_xgetbv` (XGETBV hôte par octets bruts
+     `0f 01 d0`, repli wasm = x87|SSE).
+  3. **`InitializeCriticalSectionAndSpinCount`** (import manquant) → renvoyait 0 (FALSE) par le stub
+     faible, ce qui faisait `__fastfail` (int 0x29) au CRT. Shim renvoyant **TRUE** (modèle mono-thread,
+     pas de contention) ; +`InitializeCriticalSectionEx`. `int 0x29` n'est alors plus atteint.
+  4. **Appel indirect vers fonction non récupérée `0x404aa4`** (thunk `ret` par défaut du
+     Control-Flow-Guard, `call [__guard_check_icall_fptr]`) → **récupération générale** : récolte du
+     *contenu* des slots d'appel/jmp indirect absolu (`call/jmp [disp32]`). Un `call [slot]` dont le
+     slot contient un pointeur vers une section exécutable est la **preuve définitive** d'une entrée de
+     fonction — contourne l'heuristique de prologue (un `ret` nu n'en est pas une). Slot IAT (pointe en
+     données non-exec) naturellement filtré.
+  5. **Appel indirect vers `0x4283b3`** (initialiseur CRT style `_initterm`, début `mov [mem],imm32`)
+     → **récupération générale** : le scan des tables de pointeurs de fonctions **tolère désormais des
+     trous NULL** (une liste `_initterm`/TLS-callback a légitimement des slots NULL/terminateur), avec
+     un plafond de NULL consécutifs pour ne pas fusionner des régions sans rapport.
+- **Régression de fond trouvée et corrigée (DCE)** : mon ajout antérieur du flag **PF** sur les shifts
+  laissait un `__ix_pf` **mort** sur le résultat du décalage. Comme `__ix_pf` est un appel, la DCE le
+  gardait → **deuxième usage** de l'opérande → la copy-propagation n'inlinait plus `x*M` dans le shift
+  → la **recovery de division magique ne firait plus** (`x*M >> s` au lieu de `x / c`). Fix général :
+  notion de **helper pur** (`__ix_pf`, `__ix_cpuid`, `__ix_xgetbv`, `__fp_*`, `__pi_*`, `__ps_*`,
+  `__x87_*`) supprimable par la DCE quand mort — en **excluant** ce qui peut fauter (`__ix_*div*/*mod*`
+  trappent #DE) ou écrire en mémoire (`__rep_*`, `aret_*`). `magicu`/`x / c` re-firé.
+- **Harness magicdiv réparé** (cassé **avant** mes changements) : concaténait N sorties `--mode emit`
+  portant chacune le préambule C → typedef `__fp32` redéfini (« conflicting types »). Préambule gardé
+  **une seule fois**, fonctions ajoutées seules ensuite.
+- **État strings.exe** : passe désormais **tout l'init CRT statique** (cpuid→xgetbv→critsec→_initterm).
+  Prochain bloqueur **réel** isolé : `_EH_prolog` (helper SEH MSVC qui **réécrit le frame de
+  l'appelant** — nouveau `ebp`/`esp` persistant après `ret`). Le modèle `__esp`-par-valeur d'ARET ne
+  propage pas ces changements inter-frame → `[ebp±x]` faux dans l'appelant (déréférence `5`, crash).
+  **Tâche dédiée suivante** (réécriture de frame inter-fonction ; ni cpuid ni récupération ne sont en
+  cause). Documenté ici pour ne pas le perdre.
+- **Vérifié** : régression **complète PASS** — cargo (tests OK), **difftest 268/268**, in-place 3/3,
+  **magicdiv ALL 2^32 EQUIVALENT** (re-firé), SMT 11/11, recompilabilité gzip/ls/cat **100%**,
+  **transpile-diff 4/4 (hash 4b0121f182554d40 inchangé)**, **winediff 33/33**, cpudiff OK. cpuid/xgetbv
+  ne sont pas validables par cpudiff (le cpuid d'Unicorn ≠ cpuid hôte) ; validés par le run
+  différentiel strings.exe + la régression.

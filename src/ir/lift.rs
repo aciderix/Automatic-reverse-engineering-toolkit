@@ -1601,6 +1601,46 @@ pub fn lift(insn: &Insn, bits: u32) -> Vec<Stmt> {
             let sign = bin(BinOp::And, bin(BinOp::Sar, eax, konst(31)), konst(mask(32)));
             vec![Stmt::Set { dst: rdx.clone(), expr: combine_write(&rdx, 32, sign, bits) }]
         }
+        // cpuid: leaf in eax, subleaf in ecx -> eax/ebx/ecx/edx. Run the real host
+        // cpuid via __ix_cpuid (a user-mode instruction; the transpiled binary
+        // executes on this host, so its features are the correct answer). Compute
+        // all four into temps first — eax/ecx are both inputs *and* outputs.
+        Mnemonic::Cpuid => {
+            let leaf = bin(BinOp::And, Expr::Read(Location::Reg(RegId(0))), konst(mask(32)));
+            let sub = bin(BinOp::And, Expr::Read(Location::Reg(RegId(1))), konst(mask(32)));
+            let t = |i: u32| Location::Temp((insn.address as u32).wrapping_mul(4).wrapping_add(i));
+            let call = |w: i128| fcall("__ix_cpuid", vec![leaf.clone(), sub.clone(), konst(w)]);
+            vec![
+                Stmt::Set { dst: t(0), expr: call(0) },
+                Stmt::Set { dst: t(1), expr: call(1) },
+                Stmt::Set { dst: t(2), expr: call(2) },
+                Stmt::Set { dst: t(3), expr: call(3) },
+                Stmt::Set { dst: Location::Reg(RegId(0)), expr: Expr::Read(t(0)) }, // eax
+                Stmt::Set { dst: Location::Reg(RegId(3)), expr: Expr::Read(t(1)) }, // ebx
+                Stmt::Set { dst: Location::Reg(RegId(1)), expr: Expr::Read(t(2)) }, // ecx
+                Stmt::Set { dst: Location::Reg(RegId(2)), expr: Expr::Read(t(3)) }, // edx
+            ]
+        }
+        // xgetbv: read extended control register XCR[ecx] into edx:eax. The CRT
+        // reads XCR0 after cpuid to confirm the OS has enabled AVX state. We defer
+        // to the host XGETBV (real XCR0); see __ix_xgetbv in the C prelude.
+        Mnemonic::Xgetbv => {
+            let ecx = bin(BinOp::And, Expr::Read(Location::Reg(RegId(1))), konst(mask(32)));
+            let t = Location::Temp((insn.address as u32).wrapping_mul(4).wrapping_add(8));
+            vec![
+                Stmt::Set { dst: t.clone(), expr: fcall("__ix_xgetbv", vec![ecx]) },
+                // eax = XCR0[31:0]
+                Stmt::Set {
+                    dst: Location::Reg(RegId(0)),
+                    expr: bin(BinOp::And, Expr::Read(t.clone()), konst(mask(32))),
+                },
+                // edx = XCR0[63:32]
+                Stmt::Set {
+                    dst: Location::Reg(RegId(2)),
+                    expr: bin(BinOp::And, bin(BinOp::Shr, Expr::Read(t), konst(32)), konst(mask(32))),
+                },
+            ]
+        }
         // cqo: RDX = sign-extension of RAX (64-bit).
         Mnemonic::Cqo => {
             let rax = Location::Reg(RegId(0));

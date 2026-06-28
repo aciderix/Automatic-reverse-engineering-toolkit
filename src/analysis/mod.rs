@@ -285,6 +285,31 @@ fn imm_code_ptrs(insn: &iced_x86::Instruction) -> Vec<u64> {
     out
 }
 
+/// Slot VA of an absolute-indirect `call [disp32]` / `jmp [disp32]` — a call
+/// through a fixed pointer slot in the image (no base/index register). The
+/// *contents* of that slot are a function address: this is definitive proof of a
+/// function entry, stronger than any prologue heuristic. The classic case is the
+/// Control-Flow-Guard check (`call [__guard_check_icall_fptr]`) whose default
+/// target is a bare `ret` thunk — not a recognisable prologue, reached by no
+/// direct call, so otherwise invisible to recovery. Indexed forms (`[base+idx*s]`,
+/// jump tables) are excluded by requiring no index and a memory base of None.
+fn abs_indirect_slot(insn: &iced_x86::Instruction) -> Option<u64> {
+    use iced_x86::{FlowControl, Register};
+    if !matches!(insn.flow_control(), FlowControl::IndirectCall | FlowControl::IndirectBranch) {
+        return None;
+    }
+    // Operand 0 of an indirect call/jmp is the target. Require a pure absolute
+    // memory operand `[disp32]`.
+    if insn.op0_kind() == iced_x86::OpKind::Memory
+        && insn.memory_base() == Register::None
+        && insn.memory_index() == Register::None
+    {
+        Some(insn.memory_displacement64())
+    } else {
+        None
+    }
+}
+
 fn global_decode(
     prog: &Program,
     disasm: &Disassembler,
@@ -359,21 +384,52 @@ fn global_decode(
                         _ => u32::from_le_bytes([d[o], d[o + 1], d[o + 2], d[o + 3]]) as u64,
                     }
                 };
-                // A run of >= 3 consecutive code pointers is a function-pointer
-                // table (vtable, applet/callback array, _initterm list): random
-                // data almost never has three consecutive valid code addresses, so
-                // accept *every* entry as an entry — including tiny callbacks
-                // (`xor eax,eax; ret`) whose prologue `looks_like_func_start` would
+                // A window holding >= 3 code pointers is a function-pointer table
+                // (vtable, applet/callback array, _initterm/TLS-callback list):
+                // random data almost never has three valid code addresses in a
+                // tight window, so accept *every* code entry — including tiny
+                // callbacks (`xor eax,eax; ret`, or a CRT initializer beginning
+                // `mov [mem],imm32`) whose prologue `looks_like_func_start` would
                 // reject. A lone code pointer still needs the prologue gate (a jump
                 // table's case-target run is excluded later via `jt_targets`).
+                //
+                // The window tolerates NULL gaps: an `_initterm`/TLS-callback list
+                // legitimately holds NULL slots (padding, a NULL terminator)
+                // between live pointers, so a strict "consecutive" run would miss
+                // the isolated entries. A NULL is unambiguous (never a code
+                // address), so allowing it does not loosen the random-data guard;
+                // we cap the gap at a few consecutive NULLs so unrelated zero
+                // regions are not merged into one bogus table.
+                const MAX_NULL_GAP: usize = 4;
                 let mut w = 0usize;
                 while w < nwords {
                     if in_exec(word(w)) {
                         let start = w;
-                        while w < nwords && in_exec(word(w)) {
-                            w += 1;
+                        let mut ncode = 0usize;
+                        loop {
+                            if in_exec(word(w)) {
+                                ncode += 1;
+                                w += 1;
+                            } else if word(w) == 0 {
+                                // Consume a bounded NULL gap only if a code pointer
+                                // continues the table after it.
+                                let mut z = w;
+                                while z < nwords && z - w < MAX_NULL_GAP && word(z) == 0 {
+                                    z += 1;
+                                }
+                                if z < nwords && z - w < MAX_NULL_GAP && in_exec(word(z)) {
+                                    w = z; // skip the gap, stay in the table
+                                } else {
+                                    break;
+                                }
+                            } else {
+                                break;
+                            }
+                            if w >= nwords {
+                                break;
+                            }
                         }
-                        let in_table = w - start >= 3;
+                        let in_table = ncode >= 3;
                         // A *jump table* (dense `switch`) is also a run of consecutive
                         // code pointers, but a given target repeats — many indices map
                         // to the same case, especially the `default`. A genuine
@@ -384,10 +440,15 @@ fn global_decode(
                         // for it instead of accepting it just for being in the run.
                         let mut counts: HashMap<u64, u32> = HashMap::new();
                         for k in start..w {
-                            *counts.entry(word(k)).or_insert(0) += 1;
+                            if word(k) != 0 {
+                                *counts.entry(word(k)).or_insert(0) += 1;
+                            }
                         }
                         for k in start..w {
                             let v = word(k);
+                            if v == 0 {
+                                continue; // NULL gap slot — not an entry
+                            }
                             let trusted = in_table && counts[&v] < 3;
                             if !global.contains_key(&v)
                                 && (trusted || looks_like_func_start(prog, v, false))
@@ -420,6 +481,20 @@ fn global_decode(
                     // Code immediates: a by-value callback — allow the leaf shape.
                     if in_exec(v) && !global.contains_key(&v) && looks_like_func_start(prog, v, true) {
                         cands.insert(v);
+                    }
+                }
+                // Absolute-indirect `call/jmp [slot]`: the pointer stored at the
+                // slot is the call target — definitive proof of a function entry,
+                // so it bypasses the prologue heuristic (the CFG-guard default is a
+                // bare `ret`). `read_u32`/`read_u64` returns the static slot value;
+                // an IAT slot holds an import RVA into non-exec data and is filtered
+                // by `in_exec`, so internal pointer slots only.
+                if let Some(slot) = abs_indirect_slot(&insn.raw) {
+                    let target = if ptr == 8 { prog.read_u64(slot) } else { prog.read_u32(slot).map(u64::from) };
+                    if let Some(v) = target {
+                        if in_exec(v) && !global.contains_key(&v) {
+                            cands.insert(v);
+                        }
                     }
                 }
             }

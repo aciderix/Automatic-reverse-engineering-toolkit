@@ -127,6 +127,50 @@ fn contains_call(e: &Expr) -> bool {
     }
 }
 
+/// Synthetic runtime helpers with no observable effect beyond their return
+/// value: no memory write, no fault/trap, no I/O. A dead call to one of these is
+/// safe to delete (unlike a general call). This matters beyond tidiness: a
+/// lingering dead flag helper adds an extra *use* of its operand, which blocks
+/// copy-propagation from inlining that operand and so defeats downstream idiom
+/// recovery — most visibly magic-division, where a dead parity `__ix_pf` left on
+/// the shift result keeps `x*M` from folding into the shift and the `x / c`
+/// rewrite never fires.
+///
+/// Deliberately a whitelist: helpers that can fault (`__ix_udiv32`/`idiv32`/… and
+/// the 64-bit `__ix_udiv`/`idiv` trap on #DE) or write memory (`__rep_*` string
+/// ops, the `aret_*` HLE shims) are excluded — dropping a dead one of those would
+/// remove an observable effect.
+fn is_pure_helper(name: &str) -> bool {
+    matches!(name, "__ix_pf" | "__ix_cpuid" | "__ix_xgetbv")
+        || name.starts_with("__fp_")
+        || name.starts_with("__pi_")
+        || name.starts_with("__ps_")
+        || name.starts_with("__x87_")
+}
+
+/// Whether an expression contains a call that is *not* a pure helper — i.e. a
+/// call whose result, if dead, must still be evaluated for its side effect.
+/// Mirrors `contains_call` but lets DCE drop dead pure-helper computations.
+fn has_impure_call(e: &Expr) -> bool {
+    match e {
+        Expr::Call { target, args, .. } => {
+            let target_impure = match target {
+                CallTarget::Named(n) => !is_pure_helper(n),
+                CallTarget::Indirect(x) => has_impure_call(x),
+                _ => true,
+            };
+            target_impure || args.iter().any(has_impure_call)
+        }
+        Expr::Load { addr, .. } => has_impure_call(addr),
+        Expr::Unary(_, x) | Expr::Cast { expr: x, .. } => has_impure_call(x),
+        Expr::Binary(_, a, b) => has_impure_call(a) || has_impure_call(b),
+        Expr::Select { cond, then_, else_ } => {
+            has_impure_call(cond) || has_impure_call(then_) || has_impure_call(else_)
+        }
+        _ => false,
+    }
+}
+
 fn propagate(func: &mut IrFunction) -> bool {
     // Single definition per value (SSA); collect defs and use counts.
     let mut defs: HashMap<u32, Expr> = HashMap::new();
@@ -545,7 +589,7 @@ fn dce(func: &mut IrFunction) -> bool {
         let before = b.stmts.len();
         b.stmts.retain(|s| match s {
             Stmt::Assign { dst, expr } => {
-                uses.get(&dst.0).copied().unwrap_or(0) > 0 || contains_call(expr)
+                uses.get(&dst.0).copied().unwrap_or(0) > 0 || has_impure_call(expr)
             }
             _ => true,
         });
