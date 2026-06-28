@@ -194,17 +194,47 @@ fn write_xmm128(ins: &Instruction, lo: Expr, hi: Expr) -> Option<Vec<Stmt>> {
     }
 }
 
+/// Write the result of a scalar-float op to operand 0.
+///
+/// A scalar SSE op updates only the low lane of its XMM destination and leaves
+/// the rest of the register unchanged: `ss` writes bits [31:0] (preserving
+/// [127:32]), `sd` writes [63:0] (preserving [127:64]). The lane width is the
+/// float width the helper produces — the trailing `32`/`64` of its name (the
+/// `…2si` helpers write an integer to a GP register, handled by `write_op0`).
+///
+/// Without preserving the upper bits a single-precision result would zero
+/// [63:32] of the low half, which diverges from hardware once that half is read
+/// back as a 64-bit lane (movq/movsd, packed ops).
+fn write_fp(name: &str, ins: &Instruction, value: Expr, bits: u32) -> Option<Vec<Stmt>> {
+    // Only a *single-precision* result into an XMM register needs the lane-merge
+    // (it must preserve [63:32]); every other case — a `sd` result (writes the
+    // whole low half), an integer destination (cvtt*2si), or a memory store —
+    // is the ordinary `write_op0`.
+    if ins.op_kind(0) == OpKind::Register
+        && ins.op_register(0).is_xmm()
+        && name.ends_with("32")
+    {
+        let n = xmm_num(ins.op_register(0))?;
+        let lo = xmm_lo(n);
+        // (lo & ~0xffffffff) | (value & 0xffffffff) — update [31:0], keep [63:32].
+        let keep = bin(BinOp::And, Expr::Read(lo.clone()), konst(!mask(32) & mask(64)));
+        let newbits = bin(BinOp::And, value, konst(mask(32)));
+        return Some(vec![Stmt::Set { dst: lo, expr: bin(BinOp::Or, keep, newbits) }]);
+    }
+    write_op0(ins, value, bits)
+}
+
 /// Lift a binary scalar-float op `dst = helper(dst, src)`.
 fn fbin(name: &str, ins: &Instruction, bits: u32) -> Option<Vec<Stmt>> {
     let a = op_value(ins, 0)?;
     let b = op_value(ins, 1)?;
-    write_op0(ins, fcall(name, vec![a, b]), bits)
+    write_fp(name, ins, fcall(name, vec![a, b]), bits)
 }
 
 /// Lift a unary scalar-float convert `dst = helper(src)` (`src` = operand 1).
 fn fcvt(name: &str, ins: &Instruction, bits: u32) -> Option<Vec<Stmt>> {
     let a = op_value(ins, 1)?;
-    write_op0(ins, fcall(name, vec![a]), bits)
+    write_fp(name, ins, fcall(name, vec![a]), bits)
 }
 
 /// Bit width of operand `i` (register size, or memory access size).

@@ -14,7 +14,7 @@
 //! for the dynamic unpacker). Run: `cargo test --features unpack cpudiff`.
 #![cfg(feature = "unpack")]
 
-use crate::ir::types::{BinOp, Expr, FlagKind, Location, Stmt, Ty, UnOp};
+use crate::ir::types::{BinOp, CallTarget, Expr, FlagKind, Location, Stmt, Ty, UnOp};
 use std::collections::HashMap;
 use std::os::raw::{c_int, c_void};
 
@@ -36,6 +36,8 @@ const UC_X86_REG_EFLAGS: c_int = 25;
 const UC_X86_REG_EIP: c_int = 26;
 const UC_X86_REG_ESI: c_int = 29;
 const UC_X86_REG_ESP: c_int = 30;
+const UC_X86_REG_XMM0: c_int = 122; // XMMn = 122 + n
+const UC_X86_REG_MXCSR: c_int = 249;
 
 #[link(name = "unicorn")]
 extern "C" {
@@ -85,15 +87,17 @@ fn flag_bit(f: FlagKind) -> u32 {
 struct CpuState {
     regs: [u64; 8],
     flags: HashMap<FlagKind, u64>,
+    xmm: [[u64; 2]; 8], // [n] = [low64, high64] of XMMn
 }
 
-// ---- IR interpreter (integer subset) --------------------------------------
+// ---- IR interpreter (integer subset + SSE scalar) -------------------------
 
 struct Interp {
     regs: [u64; 8],
     flags: HashMap<FlagKind, u64>,
     temps: HashMap<u32, u64>,
-    mem: Vec<u8>, // mirror of the scratch data page [DATA_ADDR, DATA_ADDR+DATA_SIZE)
+    mem: Vec<u8>,       // mirror of the scratch data page [DATA_ADDR, DATA_ADDR+DATA_SIZE)
+    xmm: [[u64; 2]; 8], // XMM lanes, mirroring CpuState
 }
 
 /// Byte width of an integer Ty (1/2/4/8), or `None` for non-integer.
@@ -112,6 +116,7 @@ impl Interp {
             flags: s.flags.clone(),
             temps: HashMap::new(),
             mem,
+            xmm: s.xmm,
         }
     }
 
@@ -147,6 +152,10 @@ impl Interp {
             Expr::Const(v, _) => *v as u64,
             Expr::Read(loc) => match loc {
                 Location::Reg(r) if (r.0 as usize) < 8 => self.regs[r.0 as usize],
+                // XMM lanes: low half is RegId(16+n), high half RegId(64+n)
+                // (matching the lifter's `xmm_lo`/`xmm_hi`).
+                Location::Reg(r) if (16..24).contains(&r.0) => self.xmm[(r.0 - 16) as usize][0],
+                Location::Reg(r) if (64..72).contains(&r.0) => self.xmm[(r.0 - 64) as usize][1],
                 Location::Flag(f) => self.flags.get(f).copied().unwrap_or(0),
                 Location::Temp(t) => self.temps.get(t).copied().unwrap_or(0),
                 _ => return None,
@@ -204,7 +213,18 @@ impl Interp {
             Expr::Select { cond, then_, else_ } => {
                 if self.eval(cond)? != 0 { self.eval(then_)? } else { self.eval(else_)? }
             }
-            // Memory, addresses, calls, SSA forms: not modelled -> skip the case.
+            // SSE scalar float helpers (`__fp_*`): evaluate the bit-pattern
+            // operands with host f64/f32 arithmetic, which on an x86-64 host is
+            // the same IEEE-754 hardware Unicorn's softfloat mirrors. Any other
+            // call (`__ps_*`, `__pi_*`, `__x87_*`, …) is unmodelled -> skip.
+            Expr::Call { target: CallTarget::Named(name), args, .. } => {
+                let mut vals = Vec::with_capacity(args.len());
+                for a in args {
+                    vals.push(self.eval(a)?);
+                }
+                fp_call(name, &vals)?
+            }
+            // Memory, addresses, other calls, SSA forms: not modelled -> skip.
             _ => return None,
         })
     }
@@ -216,6 +236,8 @@ impl Interp {
                 let v = self.eval(expr)?;
                 match dst {
                     Location::Reg(r) if (r.0 as usize) < 8 => self.regs[r.0 as usize] = v,
+                    Location::Reg(r) if (16..24).contains(&r.0) => self.xmm[(r.0 - 16) as usize][0] = v,
+                    Location::Reg(r) if (64..72).contains(&r.0) => self.xmm[(r.0 - 64) as usize][1] = v,
                     Location::Flag(f) => {
                         self.flags.insert(*f, v & 1);
                     }
@@ -284,6 +306,79 @@ fn bin(op: BinOp, a: u64, b: u64) -> Option<u64> {
     Some(r)
 }
 
+/// Evaluate one of the C backend's `__fp_*` scalar-float helpers on bit-pattern
+/// arguments, returning the bit pattern of the result (`None` for a helper this
+/// interpreter does not model — e.g. the packed `__ps_*` / integer-SIMD forms).
+///
+/// The arithmetic mirrors `runtime` C exactly (see `src/emit/mod.rs`): host
+/// f64/f32 operations on an x86-64 host are the same IEEE-754 SSE instructions
+/// Unicorn emulates, so results match bit-for-bit including NaN payloads and
+/// rounding. Float→int conversions reproduce x86 `cvtt` truncation toward zero
+/// with the "integer indefinite" (0x80000000 / 0x8000000000000000) the hardware
+/// yields on overflow/NaN — *not* Rust's saturating `as`.
+fn fp_call(name: &str, a: &[u64]) -> Option<u64> {
+    let g64 = f64::from_bits;
+    let g32 = |b: u64| f32::from_bits(b as u32);
+    let p64 = |d: f64| d.to_bits();
+    let p32 = |f: f32| f.to_bits() as u64;
+    Some(match name {
+        // double / float arithmetic
+        "__fp_add64" => p64(g64(a[0]) + g64(a[1])),
+        "__fp_sub64" => p64(g64(a[0]) - g64(a[1])),
+        "__fp_mul64" => p64(g64(a[0]) * g64(a[1])),
+        "__fp_div64" => p64(g64(a[0]) / g64(a[1])),
+        "__fp_add32" => p32(g32(a[0]) + g32(a[1])),
+        "__fp_sub32" => p32(g32(a[0]) - g32(a[1])),
+        "__fp_mul32" => p32(g32(a[0]) * g32(a[1])),
+        "__fp_div32" => p32(g32(a[0]) / g32(a[1])),
+        // int -> float (exact for i32 into f64; rounds otherwise, round-to-even)
+        "__fp_i32_64" => p64((a[0] as u32 as i32) as f64),
+        "__fp_i64_64" => p64((a[0] as i64) as f64),
+        "__fp_i32_32" => p32((a[0] as u32 as i32) as f32),
+        "__fp_i64_32" => p32((a[0] as i64) as f32),
+        // float <-> float
+        "__fp_32_64" => p64(g32(a[0]) as f64),
+        "__fp_64_32" => p32(g64(a[0]) as f32),
+        // float -> int (truncating; x86 indefinite on overflow/NaN)
+        "__fp_64_i32" => cvtt_i32(g64(a[0])),
+        "__fp_32_i32" => cvtt_i32(g32(a[0]) as f64),
+        "__fp_64_i64" => cvtt_i64(g64(a[0])),
+        "__fp_32_i64" => cvtt_i64(g32(a[0]) as f64),
+        // ordered comparisons (comiss/comisd predicates)
+        "__fp_lt64" => (g64(a[0]) < g64(a[1])) as u64,
+        "__fp_eq64" => (g64(a[0]) == g64(a[1])) as u64,
+        "__fp_un64" => (g64(a[0]).is_nan() || g64(a[1]).is_nan()) as u64,
+        "__fp_lt32" => (g32(a[0]) < g32(a[1])) as u64,
+        "__fp_eq32" => (g32(a[0]) == g32(a[1])) as u64,
+        "__fp_un32" => (g32(a[0]).is_nan() || g32(a[1]).is_nan()) as u64,
+        _ => return None,
+    })
+}
+
+/// x86 `cvttsd2si`/`cvttss2si` to 32-bit: truncate toward zero, and on a value
+/// out of the int32 range (or NaN) return the "integer indefinite" 0x80000000,
+/// sign-extended to 64 bits exactly as the C helper `(uint64_t)(int64_t)(int32_t)`.
+fn cvtt_i32(d: f64) -> u64 {
+    let t = d.trunc();
+    if d.is_nan() || t > i32::MAX as f64 || t < i32::MIN as f64 {
+        (i32::MIN as i64) as u64
+    } else {
+        (t as i32 as i64) as u64
+    }
+}
+
+/// x86 `cvttsd2si`/`cvttss2si` to 64-bit: as `cvtt_i32` but for the int64 range
+/// (indefinite is 0x8000000000000000). The positive bound is 2^63 (i64::MAX is
+/// not representable in f64 and rounds up to it).
+fn cvtt_i64(d: f64) -> u64 {
+    let t = d.trunc();
+    if d.is_nan() || t >= 9223372036854775808.0 || t < -9223372036854775808.0 {
+        i64::MIN as u64
+    } else {
+        (t as i64) as u64
+    }
+}
+
 // ---- The differential driver ----------------------------------------------
 
 /// A divergence between the lifted IR and Unicorn for one (instruction, state).
@@ -340,6 +435,37 @@ fn sext(v: u64, w: u32) -> u64 {
     }
 }
 
+/// Whether the lifted statements touch the SSE/float world — an XMM lane or an
+/// `__fp_*` helper. Only then does the harness seed and compare XMM registers,
+/// so the integer corpus pays no extra Unicorn traffic.
+fn fp_used(stmts: &[Stmt]) -> bool {
+    fn loc_fp(l: &Location) -> bool {
+        matches!(l, Location::Reg(r) if (16..24).contains(&r.0) || (64..72).contains(&r.0))
+    }
+    fn expr_fp(e: &Expr) -> bool {
+        match e {
+            Expr::Read(l) => loc_fp(l),
+            Expr::Load { addr, .. } => expr_fp(addr),
+            Expr::Unary(_, x) => expr_fp(x),
+            Expr::Binary(_, a, b) => expr_fp(a) || expr_fp(b),
+            Expr::Cast { expr, .. } => expr_fp(expr),
+            Expr::Select { cond, then_, else_ } => {
+                expr_fp(cond) || expr_fp(then_) || expr_fp(else_)
+            }
+            Expr::Call { target: CallTarget::Named(n), args, .. } => {
+                n.starts_with("__fp_") || args.iter().any(expr_fp)
+            }
+            Expr::Call { args, .. } => args.iter().any(expr_fp),
+            _ => false,
+        }
+    }
+    stmts.iter().any(|s| match s {
+        Stmt::Set { dst, expr } => loc_fp(dst) || expr_fp(expr),
+        Stmt::Store { addr, value, .. } => expr_fp(addr) || expr_fp(value),
+        _ => false,
+    })
+}
+
 /// Which of CF/ZF/SF/OF the lifted statements assign (only those are compared).
 fn flags_written(stmts: &[Stmt]) -> Vec<FlagKind> {
     let mut v = Vec::new();
@@ -366,6 +492,7 @@ fn diff_one(bytes: &[u8], iters: u32, seed: &mut u64) -> Result<Vec<Mismatch>, S
         return Ok(Vec::new());
     }
     let cmp_flags = flags_written(&stmts);
+    let fp = fp_used(&stmts);
     // If the instruction has a memory operand, point its base register at the
     // scratch page so loads/stores land in mapped memory. (Index-register forms
     // can wander out of the page; those loads return None and the case is
@@ -381,6 +508,10 @@ fn diff_one(bytes: &[u8], iters: u32, seed: &mut u64) -> Result<Vec<Mismatch>, S
         uc_mem_map(uc, STACK_ADDR & !0xfff, 0x4000, UC_PROT_ALL);
         uc_mem_map(uc, DATA_ADDR, DATA_SIZE, UC_PROT_ALL);
         uc_mem_write(uc, CODE_ADDR, bytes.as_ptr() as *const c_void, bytes.len());
+        // Default MXCSR (round-to-nearest, no FTZ/DAZ) so SSE rounding matches
+        // the host f64/f32 ops the interpreter uses.
+        let mxcsr: u32 = 0x1f80;
+        uc_reg_write(uc, UC_X86_REG_MXCSR, &mxcsr as *const u32 as *const c_void);
     }
 
     let mut out = Vec::new();
@@ -394,7 +525,7 @@ fn diff_one(bytes: &[u8], iters: u32, seed: &mut u64) -> Result<Vec<Mismatch>, S
             *seed = x;
             x
         };
-        let mut st = CpuState { regs: [0; 8], flags: HashMap::new() };
+        let mut st = CpuState { regs: [0; 8], flags: HashMap::new(), xmm: [[0; 2]; 8] };
         for r in 0..8 {
             st.regs[r] = (next() as u32) as u64;
         }
@@ -404,6 +535,20 @@ fn diff_one(bytes: &[u8], iters: u32, seed: &mut u64) -> Result<Vec<Mismatch>, S
         }
         for f in [FlagKind::Cf, FlagKind::Zf, FlagKind::Sf, FlagKind::Of, FlagKind::Pf, FlagKind::Af] {
             st.flags.insert(f, next() & 1);
+        }
+        // Seed XMM lanes with a mix of float classes: raw bit patterns (NaN/inf/
+        // huge), exact integer-valued doubles, and fractions — so arithmetic,
+        // conversions, and comparisons all get in-range and edge inputs.
+        if fp {
+            for n in 0..8 {
+                st.xmm[n][0] = match next() % 4 {
+                    0 => next(),
+                    1 => ((next() as i32) as f64).to_bits(),
+                    2 => (((next() as i32) as f64) / 64.0).to_bits(),
+                    _ => next(),
+                };
+                st.xmm[n][1] = next();
+            }
         }
         // Fresh random contents for the scratch page, mirrored into both engines.
         let mut page = vec![0u8; DATA_SIZE];
@@ -448,6 +593,11 @@ fn diff_one(bytes: &[u8], iters: u32, seed: &mut u64) -> Result<Vec<Mismatch>, S
                 uc_reg_write(uc, UC_GP[r], &v as *const u32 as *const c_void);
             }
             uc_reg_write(uc, UC_X86_REG_EFLAGS, &eflags as *const u32 as *const c_void);
+            if fp {
+                for n in 0..8 {
+                    uc_reg_write(uc, UC_X86_REG_XMM0 + n as c_int, st.xmm[n].as_ptr() as *const c_void);
+                }
+            }
             let rc = uc_emu_start(uc, CODE_ADDR, CODE_ADDR + bytes.len() as u64, 0, 1);
             if rc != 0 {
                 continue; // emulation fault (e.g. div by zero) — skip this state
@@ -500,6 +650,26 @@ fn diff_one(bytes: &[u8], iters: u32, seed: &mut u64) -> Result<Vec<Mismatch>, S
                     lifted,
                     oracle,
                 });
+            }
+        }
+        // ---- compare XMM registers (SSE scalar/float instructions) ----
+        if fp {
+            for n in 0..8 {
+                let mut uc_xmm = [0u64; 2];
+                unsafe {
+                    uc_reg_read(uc, UC_X86_REG_XMM0 + n as c_int, uc_xmm.as_mut_ptr() as *mut c_void);
+                }
+                for (half, tag) in [(0usize, "lo"), (1, "hi")] {
+                    if interp.xmm[n][half] != uc_xmm[half] {
+                        out.push(Mismatch {
+                            asm: asm.clone(),
+                            bytes: bytes.to_vec(),
+                            field: format!("xmm{n}.{tag}"),
+                            lifted: interp.xmm[n][half],
+                            oracle: uc_xmm[half],
+                        });
+                    }
+                }
             }
         }
         // ---- compare the scratch page (for memory stores) ----
@@ -693,6 +863,29 @@ fn corpus() -> Vec<Vec<u8>> {
         vec![0xf7, 0xf9], // idiv ecx
         vec![0xf7, 0xf3], // div  ebx
         vec![0xf7, 0xfb], // idiv ebx
+        // ---- SSE scalar float (xmm0/xmm1, the __fp_* helper path) ----
+        // double arithmetic (low 64 result, high 64 preserved)
+        vec![0xf2, 0x0f, 0x58, 0xc1], // addsd xmm0, xmm1
+        vec![0xf2, 0x0f, 0x5c, 0xc1], // subsd xmm0, xmm1
+        vec![0xf2, 0x0f, 0x59, 0xc1], // mulsd xmm0, xmm1
+        vec![0xf2, 0x0f, 0x5e, 0xc1], // divsd xmm0, xmm1
+        // single arithmetic (low 32 result)
+        vec![0xf3, 0x0f, 0x58, 0xc1], // addss xmm0, xmm1
+        vec![0xf3, 0x0f, 0x5c, 0xc1], // subss xmm0, xmm1
+        vec![0xf3, 0x0f, 0x59, 0xc1], // mulss xmm0, xmm1
+        vec![0xf3, 0x0f, 0x5e, 0xc1], // divss xmm0, xmm1
+        // int <-> float conversions (exercise rounding and #IA indefinite)
+        vec![0xf2, 0x0f, 0x2a, 0xc1], // cvtsi2sd xmm0, ecx
+        vec![0xf3, 0x0f, 0x2a, 0xc1], // cvtsi2ss xmm0, ecx
+        vec![0xf2, 0x0f, 0x2c, 0xc1], // cvttsd2si eax, xmm1
+        vec![0xf3, 0x0f, 0x2c, 0xc1], // cvttss2si eax, xmm1
+        vec![0xf2, 0x0f, 0x5a, 0xc1], // cvtsd2ss xmm0, xmm1
+        vec![0xf3, 0x0f, 0x5a, 0xc1], // cvtss2sd xmm0, xmm1
+        // ordered/unordered compares -> EFLAGS (CF/ZF/PF, SF=OF=0)
+        vec![0x66, 0x0f, 0x2f, 0xc1], // comisd  xmm0, xmm1
+        vec![0x66, 0x0f, 0x2e, 0xc1], // ucomisd xmm0, xmm1
+        vec![0x0f, 0x2f, 0xc1],       // comiss  xmm0, xmm1
+        vec![0x0f, 0x2e, 0xc1],       // ucomiss xmm0, xmm1
     ]
 }
 
