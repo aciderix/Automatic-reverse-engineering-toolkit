@@ -587,6 +587,17 @@ uint32_t aret_CloseHandle(uint32_t esp) {
     return close((int)arg(esp, 0)) == 0 ? 1 : 0;
 }
 
+/* GetFileSize(handle, lpFileSizeHigh) -> low 32 bits of the size (handles are
+ * fds in this model). Sets *lpFileSizeHigh when non-NULL; INVALID_FILE_SIZE on
+ * error. */
+uint32_t aret_GetFileSize(uint32_t esp) {
+    struct stat st;
+    if (fstat((int)arg(esp, 0), &st) != 0) return 0xFFFFFFFFu;
+    uint32_t *hi = (uint32_t *)(uintptr_t)arg(esp, 1);
+    if (hi) *hi = (uint32_t)(((uint64_t)st.st_size) >> 32);
+    return (uint32_t)(uint64_t)st.st_size;
+}
+
 uint32_t aret_DeleteFileA(uint32_t esp) {
     char path[1024];
     translate_path((const char *)(uintptr_t)arg(esp, 0), path, sizeof path);
@@ -738,8 +749,35 @@ uint32_t aret_DeleteCriticalSection(uint32_t esp) { (void)esp; return 0; }
 uint32_t aret_EnterCriticalSection(uint32_t esp) { (void)esp; return 0; }
 uint32_t aret_LeaveCriticalSection(uint32_t esp) { (void)esp; return 0; }
 uint32_t aret_IsDBCSLeadByteEx(uint32_t esp) { (void)esp; return 0; }
-uint32_t aret_MultiByteToWideChar(uint32_t esp) { (void)esp; return 0; }
-uint32_t aret_WideCharToMultiByte(uint32_t esp) { (void)esp; return 0; }
+/* CP_ACP narrow<->wide: model the code page as Latin-1 (each byte is one WCHAR).
+ * Enough for ASCII text — the common case — and a faithful identity round-trip.
+ * srclen < 0 means a NUL-terminated string (the terminator is included); a zero
+ * destination length means "measure" (return the count that would be written). */
+uint32_t aret_MultiByteToWideChar(uint32_t esp) {
+    const char *src = (const char *)(uintptr_t)arg(esp, 2);
+    int srclen = (int)arg(esp, 3);
+    uint16_t *dst = (uint16_t *)(uintptr_t)arg(esp, 4);
+    int dstlen = (int)arg(esp, 5);
+    if (!src) return 0;
+    int n = (srclen < 0) ? (int)strlen(src) + 1 : srclen;
+    if (dstlen == 0 || !dst) return (uint32_t)n;
+    int w = n < dstlen ? n : dstlen;
+    for (int i = 0; i < w; i++) dst[i] = (unsigned char)src[i];
+    return (uint32_t)w;
+}
+uint32_t aret_WideCharToMultiByte(uint32_t esp) {
+    const uint16_t *src = (const uint16_t *)(uintptr_t)arg(esp, 2);
+    int srclen = (int)arg(esp, 3);
+    char *dst = (char *)(uintptr_t)arg(esp, 4);
+    int dstlen = (int)arg(esp, 5);
+    if (!src) return 0;
+    int n;
+    if (srclen < 0) { n = 0; while (src[n]) n++; n++; } else n = srclen;
+    if (dstlen == 0 || !dst) return (uint32_t)n;
+    int w = n < dstlen ? n : dstlen;
+    for (int i = 0; i < w; i++) dst[i] = (char)(src[i] & 0xff);
+    return (uint32_t)w;
+}
 uint32_t aret_GetCommandLineA(uint32_t esp) { (void)esp; return (uint32_t)(uintptr_t)"program"; }
 
 /* msvcrt internal globals exposed as pointer-returning functions. Names match

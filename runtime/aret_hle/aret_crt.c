@@ -118,8 +118,12 @@ uint32_t aret_strncasecmp(uint32_t esp){ return (uint32_t)(int32_t)strncasecmp(A
 uint32_t aret_atol(uint32_t esp)   { return (uint32_t)atol(ACS(0)); }
 uint32_t aret_abs(uint32_t esp)    { return (uint32_t)abs(AI(0)); }
 uint32_t aret_labs(uint32_t esp)   { return (uint32_t)labs(AI(0)); }
-uint32_t aret_rand(uint32_t esp)   { (void)esp; return (uint32_t)rand(); }
-uint32_t aret_srand(uint32_t esp)  { srand(AU(0)); return 0; }
+/* Windows msvcrt uses a specific LCG; a program that seeds and reads `rand()`
+ * expects exactly this sequence, so reproduce it rather than forwarding to the
+ * host's rand() (which gives a different stream). */
+static uint32_t aret_rand_seed = 1;
+uint32_t aret_rand(uint32_t esp)   { (void)esp; aret_rand_seed = aret_rand_seed * 214013u + 2531011u; return (aret_rand_seed >> 16) & 0x7fff; }
+uint32_t aret_srand(uint32_t esp)  { aret_rand_seed = AU(0); return 0; }
 uint32_t aret_getenv(uint32_t esp) { return RP(getenv(ACS(0))); }
 /* Windows `_putenv` copies the "NAME=value" string; libc `putenv` stores the
  * pointer, so strdup to match (and avoid a dangling guest-stack pointer). */
@@ -162,6 +166,13 @@ uint32_t aret_sprintf(uint32_t esp) {
     const uint32_t *va = &((const uint32_t *)(uintptr_t)esp)[2];
     size_t n = aret_vformat(dst, (size_t)1 << 30, fmt, va);
     return (uint32_t)n;
+}
+/* wsprintfA(buf, fmt, ...) — USER32's sprintf; same cdecl/variadic layout. */
+uint32_t aret_wsprintfA(uint32_t esp) {
+    char *dst = AS(0);
+    const char *fmt = ACS(1);
+    const uint32_t *va = &((const uint32_t *)(uintptr_t)esp)[2];
+    return (uint32_t)aret_vformat(dst, (size_t)1 << 30, fmt, va);
 }
 /* snprintf / _snprintf: (dst, n, fmt, ...). cap of 0 means "measure".
  * C99 returns the number of chars that *would* have been written (the full
@@ -317,6 +328,27 @@ uint32_t aret_wcslen(uint32_t esp) {
     uint32_t n = 0;
     while (s[n]) n++;
     return n;
+}
+uint32_t aret_wcscpy(uint32_t esp) {
+    uint16_t *d = (uint16_t *)(uintptr_t)a32(esp, 0);
+    const uint16_t *s = (const uint16_t *)(uintptr_t)a32(esp, 1);
+    uint16_t *r = d;
+    while ((*d++ = *s++)) {}
+    return (uint32_t)(uintptr_t)r;
+}
+uint32_t aret_wcscat(uint32_t esp) {
+    uint16_t *d = (uint16_t *)(uintptr_t)a32(esp, 0);
+    const uint16_t *s = (const uint16_t *)(uintptr_t)a32(esp, 1);
+    uint16_t *r = d;
+    while (*d) d++;
+    while ((*d++ = *s++)) {}
+    return (uint32_t)(uintptr_t)r;
+}
+uint32_t aret_wcscmp(uint32_t esp) {
+    const uint16_t *a = (const uint16_t *)(uintptr_t)a32(esp, 0);
+    const uint16_t *b = (const uint16_t *)(uintptr_t)a32(esp, 1);
+    while (*a && *a == *b) { a++; b++; }
+    return (uint32_t)(int32_t)((int)*a - (int)*b);
 }
 
 /* ------------------------------------------------------------------ */

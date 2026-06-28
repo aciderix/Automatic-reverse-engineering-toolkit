@@ -1540,3 +1540,22 @@ silencieux (à valider un jour) ; « **non lifté** » = `Asm`/abort = **sound**
   la boucle « différentiel Wine → trouve un gap → corrige → métrique monte » **fonctionne**. Prochaines
   cibles quand on élargira le corpus : plus d'API Win32 (handles, temps, env, registre…), `rep` scas/
   cmps, `std`/DF arrière (modéliser DF).
+
+### Axe 2 : corpus élargi 7→13, méthode + 4 shims corrigés ✅ FAIT
+- **2026-06-28 — Méthode d'élargissement du corpus axe-2** (documentée pour la suite) : chaque
+  programme doit être (1) **déterministe** (bannir time/rand-sans-srand/PID/adresses/chemins/locale/
+  mémoire non-init), (2) **cibler une surface API non couverte** (par catégorie), (3) petit + résultats
+  imprimés, (4) via des **imports dynamiques** (qu'ARET intercepte). Boucle : ajouter un lot → winediff
+  → les `DIFF`/`FAIL` pointent les shims manquants → corriger → la métrique monte.
+- **+6 programmes** (ctype, plus de string, wide-char/MBCS, rand déterministe, Win32 heap/lstr/wsprintf,
+  Win32 fichier). D'emblée **9/13**, révélant **4 gaps réels** — tous corrigés :
+  1. **`rand`/`srand`** utilisaient le rand() glibc → séquence différente. Remplacés par le **LCG exact
+     msvcrt** (`seed=seed*214013+2531011; (seed>>16)&0x7fff`) → `srand(1);rand()=41` comme Windows.
+  2. **`MultiByteToWideChar`/`WideCharToMultiByte`** étaient des stubs `return 0` ; implémentés (CP_ACP
+     = Latin-1, octet↔WCHAR, gestion srclen<0 et longueur 0 = mesure). **`wcscpy`/`wcscat`/`wcscmp`**
+     ajoutés (wchar_t Windows = 16-bit).
+  3. **`GetFileSize`** non implémenté → `fstat` du handle (= fd dans le modèle).
+  4. **`wsprintfA`** (USER32) non implémenté → routé vers le moteur de format (comme sprintf).
+- **Résultat : winediff 13/13.** Régression : cargo vert, **difftest 268/268, transpile-diff 4/4 (hash
+  inchangé)**. *Cibles futures* : plus de Win32 (temps/env/registre/handles avancés), `rep scas/cmps`,
+  DF arrière. La boucle d'élargissement est rodée et reproductible.
