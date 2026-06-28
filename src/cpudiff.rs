@@ -351,6 +351,8 @@ fn helper_call(name: &str, a: &[u64]) -> Option<u64> {
             }
             return Some((if name == "__ix_idiv32" { q } else { n % dd }) as u64);
         }
+        // Parity flag: PF = 1 iff the low byte has an even number of set bits.
+        "__ix_pf" => return Some(((a[0] & 0xff).count_ones() % 2 == 0) as u64),
         _ => {}
     }
     let g64 = f64::from_bits;
@@ -507,7 +509,7 @@ fn flags_written(stmts: &[Stmt]) -> Vec<FlagKind> {
     let mut v = Vec::new();
     for s in stmts {
         if let Stmt::Set { dst: Location::Flag(f), .. } = s {
-            if matches!(f, FlagKind::Cf | FlagKind::Zf | FlagKind::Sf | FlagKind::Of) && !v.contains(f) {
+            if matches!(f, FlagKind::Cf | FlagKind::Zf | FlagKind::Sf | FlagKind::Of | FlagKind::Pf | FlagKind::Af) && !v.contains(f) {
                 v.push(*f);
             }
         }

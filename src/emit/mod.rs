@@ -205,6 +205,9 @@ pub(crate) const FLOAT_HELPERS: &str = concat!(
     "static inline uint64_t __ix_idiv(uint64_t hi,uint64_t lo,uint64_t d){if(!d)__ix_diverr();int neg=0;uint64_t nh=hi,nl=lo;if((int64_t)hi<0){neg^=1;nl=~lo+1;nh=~hi+(nl==0);}uint64_t dd=d;if((int64_t)d<0){neg^=1;dd=(uint64_t)(-(int64_t)d);}uint64_t q,r;__ix_divmod128(nh,nl,dd,&q,&r);return neg?(uint64_t)(-(int64_t)q):q;}\n",
     "static inline uint64_t __ix_imod(uint64_t hi,uint64_t lo,uint64_t d){if(!d)__ix_diverr();int neg=(int64_t)hi<0;uint64_t nh=hi,nl=lo;if(neg){nl=~lo+1;nh=~hi+(nl==0);}uint64_t dd=(int64_t)d<0?(uint64_t)(-(int64_t)d):d;uint64_t q,r;__ix_divmod128(nh,nl,dd,&q,&r);return neg?(uint64_t)(-(int64_t)r):r;}\n",
     "#endif\n",
+    // x86 parity flag: set iff the low byte of the result has an even number of
+    // set bits (`__builtin_parity` returns 1 for odd, so PF is its negation).
+    "static inline uint64_t __ix_pf(uint64_t x){return !__builtin_parity((unsigned)(x&0xff));}\n",
     "static inline uint64_t __ix_bswap32(uint64_t x){return __builtin_bswap32((uint32_t)x);}\n",
     "static inline uint64_t __ix_bswap64(uint64_t x){return __builtin_bswap64(x);}\n",
     "static inline uint64_t __ix_bsf32(uint64_t x){return (uint32_t)x?__builtin_ctz((uint32_t)x):0;}\n",

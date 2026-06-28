@@ -683,6 +683,33 @@ fn asm_fallback(insn: &Insn) -> Vec<Stmt> {
 /// Flags for a `w`-bit subtraction `a - b` with result `r` (covers `cmp`, `sub`,
 /// `neg`). Sign/overflow are read from bit `w-1` so they are correct whatever C
 /// width `r` is computed in (see `sign_bit`).
+/// PF — parity of the low byte of the result (1 if an even number of set bits).
+fn pf_flag(r: &Expr) -> Stmt {
+    set_flag(FlagKind::Pf, fcall("__ix_pf", vec![r.clone()]))
+}
+
+/// AF — carry/borrow out of bit 3 of `a (op) b` giving `r`: `(a ^ b ^ r) >> 4 & 1`.
+/// Defined for add/sub/adc/sbb/inc/dec/neg/cmp (undefined after logic ops, so it
+/// is not emitted there). `b` is the original operand and `r` includes any carry-
+/// in, so the low-nibble XOR yields the true auxiliary carry regardless of width.
+fn af_flag(a: &Expr, b: &Expr, r: &Expr) -> Stmt {
+    let x = bin(BinOp::Xor, bin(BinOp::Xor, a.clone(), b.clone()), r.clone());
+    set_flag(FlagKind::Af, bin(BinOp::And, bin(BinOp::Shr, x, konst(4)), konst(1)))
+}
+
+/// Set flag `f` to `val`, but keep its previous value when the shift count `c` is
+/// zero — x86 leaves *all* flags unchanged on a zero-count shift/rotate.
+fn flag_unless_zero(c: &Expr, f: FlagKind, val: Expr) -> Stmt {
+    set_flag(
+        f,
+        Expr::Select {
+            cond: Box::new(bin(BinOp::Eq, c.clone(), konst(0))),
+            then_: Box::new(read_flag(f)),
+            else_: Box::new(val),
+        },
+    )
+}
+
 fn sub_flags(a: &Expr, b: &Expr, r: &Expr, w: u32) -> Vec<Stmt> {
     sub_flags_cin(a, b, &konst(0), r, w)
 }
@@ -714,6 +741,8 @@ fn sub_flags_cin(a: &Expr, b: &Expr, cin: &Expr, r: &Expr, w: u32) -> Vec<Stmt> 
         set_flag(FlagKind::Sf, sign_bit(r, w)),
         set_flag(FlagKind::Cf, Expr::Binary(BinOp::Ult, Box::new(am), Box::new(bm))),
         set_flag(FlagKind::Of, of),
+        pf_flag(r),
+        af_flag(a, b, r),
     ];
 }
 
@@ -760,6 +789,8 @@ fn add_flags_cin(a: &Expr, b: &Expr, cin: &Expr, r: &Expr, w: u32) -> Vec<Stmt> 
         set_flag(FlagKind::Sf, signw(&m)),
         set_flag(FlagKind::Cf, cf),
         set_flag(FlagKind::Of, of),
+        pf_flag(r),
+        af_flag(a, b, r),
     ]
 }
 
@@ -771,6 +802,8 @@ fn logic_flags(r: &Expr, w: u32) -> Vec<Stmt> {
         set_flag(FlagKind::Sf, sign_bit(r, w)),
         set_flag(FlagKind::Cf, konst(0)),
         set_flag(FlagKind::Of, konst(0)),
+        pf_flag(r),
+        // AF is architecturally undefined after a logic op — not emitted.
     ]
 }
 
@@ -1372,6 +1405,8 @@ pub fn lift(insn: &Insn, bits: u32) -> Vec<Stmt> {
                 set_flag(FlagKind::Zf, bin(BinOp::Eq, m.clone(), konst(0))),
                 set_flag(FlagKind::Sf, sign_bit(&m, w)),
                 set_flag(FlagKind::Of, of),
+                pf_flag(&r),
+                af_flag(&a, &konst(1), &r),
             ];
             out.extend(some_or_asm!(write_op0(ins, r, bits)));
             out
@@ -1629,7 +1664,11 @@ pub fn lift(insn: &Insn, bits: u32) -> Vec<Stmt> {
                 bin(BinOp::Or, bin(BinOp::Shr, dst, konst(cnt as i128)), bin(BinOp::Shl, src, konst((w - cnt) as i128)))
             };
             let val = bin(BinOp::And, val, konst(mask(w)));
-            let mut out = vec![set_flag(FlagKind::Zf, bin(BinOp::Eq, val.clone(), konst(0)))];
+            let mut out = vec![
+                set_flag(FlagKind::Zf, bin(BinOp::Eq, val.clone(), konst(0))),
+                set_flag(FlagKind::Sf, sign_bit(&val, w)),
+                pf_flag(&val),
+            ];
             out.extend(some_or_asm!(write_op0(ins, val, bits)));
             out
         }
@@ -1658,11 +1697,15 @@ pub fn lift(insn: &Insn, bits: u32) -> Vec<Stmt> {
             };
             // ZF unchanged on a zero count (x86 leaves flags untouched then).
             let zf = Expr::Select {
-                cond: Box::new(bin(BinOp::Eq, c, konst(0))),
+                cond: Box::new(bin(BinOp::Eq, c.clone(), konst(0))),
                 then_: Box::new(read_flag(FlagKind::Zf)),
                 else_: Box::new(bin(BinOp::Eq, val.clone(), konst(0))),
             };
-            let mut out = vec![set_flag(FlagKind::Zf, zf)];
+            let mut out = vec![
+                set_flag(FlagKind::Zf, zf),
+                flag_unless_zero(&c, FlagKind::Sf, sign_bit(&val, w)),
+                flag_unless_zero(&c, FlagKind::Pf, fcall("__ix_pf", vec![val.clone()])),
+            ];
             out.extend(some_or_asm!(write_op0(ins, val, bits)));
             out
         }
@@ -1700,6 +1743,8 @@ pub fn lift(insn: &Insn, bits: u32) -> Vec<Stmt> {
             let mut out = vec![
                 set_flag(FlagKind::Zf, zf),
                 set_flag(FlagKind::Cf, cf),
+                flag_unless_zero(&c, FlagKind::Sf, sign_bit(&r, w)),
+                flag_unless_zero(&c, FlagKind::Pf, fcall("__ix_pf", vec![r.clone()])),
             ];
             out.extend(some_or_asm!(write_op0(ins, r, bits)));
             out
@@ -1732,6 +1777,8 @@ pub fn lift(insn: &Insn, bits: u32) -> Vec<Stmt> {
             let mut out = vec![
                 set_flag(FlagKind::Zf, zf),
                 set_flag(FlagKind::Cf, cf),
+                flag_unless_zero(&c, FlagKind::Sf, sign_bit(&r, w)),
+                flag_unless_zero(&c, FlagKind::Pf, fcall("__ix_pf", vec![r.clone()])),
             ];
             out.extend(some_or_asm!(write_op0(ins, r, bits)));
             out
@@ -2454,9 +2501,10 @@ mod tests {
 
     #[test]
     fn cmp_sets_flags() {
-        // cmp eax, ebx (39 d8): four flag definitions, no register write
+        // cmp eax, ebx (39 d8): six flag definitions (ZF/SF/CF/OF/PF/AF), no
+        // register write.
         let s = one(&[0x39, 0xd8], 32);
-        assert_eq!(s.len(), 4);
+        assert_eq!(s.len(), 6);
         assert!(s.iter().all(|st| matches!(
             st,
             Stmt::Set { dst: Location::Flag(_), .. }
