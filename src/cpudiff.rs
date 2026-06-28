@@ -33,6 +33,7 @@ const UC_X86_REG_ECX: c_int = 22;
 const UC_X86_REG_EDI: c_int = 23;
 const UC_X86_REG_EDX: c_int = 24;
 const UC_X86_REG_EFLAGS: c_int = 25;
+const UC_X86_REG_EIP: c_int = 26;
 const UC_X86_REG_ESI: c_int = 29;
 const UC_X86_REG_ESP: c_int = 30;
 
@@ -168,14 +169,23 @@ impl Interp {
             // which infers the width from an `And(x, mask)` wrapper (the lifter
             // masks register operands to their width), defaulting to 64.
             Expr::Binary(BinOp::Sar, a, b) => {
-                let w = signed_width(a);
-                let mut av = self.eval(a)?;
+                let av = sext(self.eval(a)?, signed_width(a));
                 let cv = self.eval(b)?;
-                if w < 64 && (av >> (w - 1)) & 1 == 1 {
-                    av |= !((1u64 << w) - 1);
-                }
                 let sh = if cv >= 64 { 63 } else { cv };
                 ((av as i64) >> sh) as u64
+            }
+            // Signed division/remainder are width-dependent the same way: the
+            // lifter masks each operand to its width, and the C backend's
+            // `signed_cast` sign-extends from that width before dividing. Mirror
+            // it so the interpreter matches the emitted C (and Unicorn). A zero
+            // divisor is a #DE trap on the hardware, so `None` drops that state.
+            Expr::Binary(op @ (BinOp::SDiv | BinOp::SMod), a, b) => {
+                let av = sext(self.eval(a)?, signed_width(a)) as i64;
+                let bv = sext(self.eval(b)?, signed_width(b)) as i64;
+                if bv == 0 {
+                    return None;
+                }
+                (if *op == BinOp::SDiv { av.wrapping_div(bv) } else { av.wrapping_rem(bv) }) as u64
             }
             Expr::Binary(op, a, b) => {
                 let x = self.eval(a)?;
@@ -319,6 +329,17 @@ fn signed_width(e: &Expr) -> u32 {
     64
 }
 
+/// Sign-extend the low `w` bits of `v` to 64 bits (no-op for `w >= 64`).
+fn sext(v: u64, w: u32) -> u64 {
+    if w >= 64 {
+        v
+    } else if (v >> (w - 1)) & 1 == 1 {
+        v | !((1u64 << w) - 1)
+    } else {
+        v & ((1u64 << w) - 1)
+    }
+}
+
 /// Which of CF/ZF/SF/OF the lifted statements assign (only those are compared).
 fn flags_written(stmts: &[Stmt]) -> Vec<FlagKind> {
     let mut v = Vec::new();
@@ -403,8 +424,12 @@ fn diff_one(bytes: &[u8], iters: u32, seed: &mut u64) -> Result<Vec<Mismatch>, S
             }
         }
         if !modelled {
-            // The interpreter can't model this instruction; do not score it.
-            return Ok(out);
+            // This state touched something the interpreter does not model — an
+            // unmodelled construct (then every state of the instruction is
+            // skipped, e.g. x87) or a per-state trap (a zero divisor, an
+            // out-of-page load). Either way, do not score it. Never a false
+            // positive; at worst the case is silently not exercised.
+            continue;
         }
 
         // ---- run Unicorn from the same state ----
@@ -426,6 +451,18 @@ fn diff_one(bytes: &[u8], iters: u32, seed: &mut u64) -> Result<Vec<Mismatch>, S
             let rc = uc_emu_start(uc, CODE_ADDR, CODE_ADDR + bytes.len() as u64, 0, 1);
             if rc != 0 {
                 continue; // emulation fault (e.g. div by zero) — skip this state
+            }
+            // The instruction pointer is the reliable retirement signal: on a
+            // CPU fault (a div #DE from a zero divisor or a quotient that
+            // overflows the destination) Unicorn rolls the instruction back and
+            // leaves EIP at the start — and does not always surface that as a
+            // non-zero `rc`. If EIP did not advance past the instruction, the
+            // state faulted on the hardware, so drop it rather than score the
+            // interpreter's wrapped result against Unicorn's rolled-back regs.
+            let mut eip: u32 = 0;
+            uc_reg_read(uc, UC_X86_REG_EIP, &mut eip as *mut u32 as *mut c_void);
+            if eip != (CODE_ADDR + bytes.len() as u64) as u32 {
+                continue;
             }
         }
         let mut uc_regs = [0u32; 8];
@@ -647,11 +684,15 @@ fn corpus() -> Vec<Vec<u8>> {
         vec![0x0f, 0xbd, 0xc8], // bsr ecx, eax
         vec![0x99], // cdq
         vec![0x98], // cwde
-        // NB: div/idiv are intentionally absent — faithfully scoring them needs the
-        // interpreter to model the 64-bit edx:eax dividend, divisor sign-extension
-        // (idiv), and the x86 #DE overflow trap the way Unicorn surfaces it. That,
-        // like the x87/SSE float path, is a known gap of the integer interpreter
-        // (the lifter's division is exercised end-to-end by Lua's `//`/`%`).
+        // div/idiv (implicit edx:eax dividend, 32-bit form). Zero-divisor states
+        // are dropped (interpreter returns None), and quotient-overflow states
+        // (#DE on the hardware) are dropped because Unicorn faults and the state
+        // is skipped before comparison. The signed forms exercise the divisor
+        // sign-extension the C backend emits via `signed_cast`.
+        vec![0xf7, 0xf1], // div  ecx   (edx:eax / ecx)
+        vec![0xf7, 0xf9], // idiv ecx
+        vec![0xf7, 0xf3], // div  ebx
+        vec![0xf7, 0xfb], // idiv ebx
     ]
 }
 
