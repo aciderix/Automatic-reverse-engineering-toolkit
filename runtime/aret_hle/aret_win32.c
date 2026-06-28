@@ -333,6 +333,28 @@ uint32_t aret_GetModuleFileNameA(uint32_t esp) {
     if (buf && size > len) { memcpy(buf, path, len + 1); return len; }
     return 0;
 }
+uint32_t aret_GetModuleFileNameW(uint32_t esp) {
+    const char *path = "C:\\program.exe";
+    uint16_t *buf = (uint16_t *)(uintptr_t)WU(1); uint32_t size = WU(2);
+    uint32_t len = (uint32_t)strlen(path);
+    if (buf && size > len) { for (uint32_t i = 0; i <= len; i++) buf[i] = (unsigned char)path[i]; return len; }
+    return 0;
+}
+uint32_t aret_GetModuleHandleExW(uint32_t esp) {
+    uint32_t *out = (uint32_t *)(uintptr_t)WU(2);
+    if (out) *out = 0x00400000u;
+    return 1;
+}
+/* Pseudo-handles: GetCurrentProcess()/Thread() are the constants -1 / -2. */
+uint32_t aret_GetCurrentProcess(uint32_t esp) { (void)esp; return 0xFFFFFFFFu; }
+uint32_t aret_GetCurrentThread(uint32_t esp)  { (void)esp; return 0xFFFFFFFEu; }
+/* GetStartupInfoW: a console process with no inherited startup customization —
+ * zero the STARTUPINFOW (68 bytes on 32-bit) and set cb; dwFlags stays 0. */
+uint32_t aret_GetStartupInfoW(uint32_t esp) {
+    uint8_t *si = (uint8_t *)(uintptr_t)WU(0);
+    if (si) { memset(si, 0, 68); *(uint32_t *)si = 68; }
+    return 0;
+}
 
 /* GetStartupInfoA(LPSTARTUPINFOA) — zero it (cb set); benign for CRT startup. */
 uint32_t aret_GetStartupInfoA(uint32_t esp) {

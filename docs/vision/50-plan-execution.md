@@ -1660,3 +1660,18 @@ silencieux (à valider un jour) ; « **non lifté** » = `Asm`/abort = **sound**
 - **Vérifié** : `tls_test`/`locale_cp` = **bit-identiques à Wine** ; **winediff 31/31** (les 29
   précédents inchangés malgré `LC_ALL=C`). Régression : cargo **98/0** (wasm OK), **difftest 268/268,
   transpile-diff 4/4 (hash inchangé)**.
+
+### Axe 2 (P1) : lot process/module ✅ FAIT
+- **2026-06-28 — +1 programme `win32_proc`.** La plupart du heap/module existait déjà (HeapAlloc/Free/
+  ReAlloc/Size, LocalAlloc/Free, GetModuleHandleA/W, GetProcAddress, GetProcessHeap — vérifié contre
+  Wine). Manquaient, comblés :
+  - **`GetCurrentProcess`/`GetCurrentThread`** : pseudo-handles constants -1 / -2 (calqués sur Wine).
+  - **`GetStartupInfoW`** : zéro-remplit la STARTUPINFOW + `cb` (console sans customisation → dwFlags=0).
+  - **`GetModuleFileNameW`** (variante wide), **`GetModuleHandleExW`** (pose `*phModule`, renvoie succès).
+- *Choix de principe noté* : `GetProcAddress` **reste à 0** (« non trouvé ») — on ne peut pas distribuer
+  de pointeurs appelables (nos shims ont l'ABI esp, pas l'ABI Win32). Renvoyer un faux pointeur qui
+  planterait à l'appel serait une rustine ; **0 est honnête et sound** (le programme gère « absent »).
+  Le test n'assert donc pas `GetProcAddress!=NULL` (on n'assert pas un comportement qu'on ne fait pas).
+- **Vérifié** : `win32_proc` = **bit-identique à Wine** ; winediff **32/32**. Régression : cargo **98/0**
+  (wasm OK), **difftest 268/268, transpile-diff 4/4 (hash inchangé)**. strings.exe : imports manquants
+  encore en baisse.
