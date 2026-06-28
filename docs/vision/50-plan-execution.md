@@ -1458,3 +1458,33 @@ flottante), à faire en session dédiée, une fonction à la fois, difftest à c
   LLVM auto-déclare les helpers (`declare i64 @__ix_udiv32(...)`), WASM utilise le backend C → tous
   couverts. **Bilan** : la seule divergence que le skip EIP masquait est fermée ; `div`/`idiv` sont
   sound (valeur juste, ou crash fidèle — jamais de faux silencieux).
+
+### Axe 1 consolidé : PF/AF modélisés + différentiel SIMD packed ✅ FAIT
+- **2026-06-28 — Deux tronçons axe-1 fermés** (suite à l'inventaire des gaps : « lifté mais non
+  validé » = risque de faux silencieux, à prioriser).
+- **PF/AF (drapeaux parité / retenue auxiliaire)** — le harness ne comparait que CF/ZF/SF/OF, et le
+  lifter ne posait PF qu'à de rares endroits flottants ; un `jp`/`jnp` (ou cmovp/setp) après une op
+  entière lisait donc un drapeau **éventé** (faux silencieux latent). Corrigé **généralement** :
+  - **PF** = parité de l'octet bas du résultat, via un helper `__ix_pf` (nommé dans la famille `__ix_`
+    pour que le préambule C à la demande l'inclue — sinon lien cassé en mode décompile). Posé sur
+    add/sub/adc/sbb/cmp, and/or/xor/test, inc/dec, neg, et les **shifts** (shl/shr/sar/shld/shrd).
+  - **AF** = retenue/emprunt hors du bit 3, `(a ^ b ^ r) >> 4 & 1`, posé sur add/sub/adc/sbb/inc/dec/
+    neg/cmp. **Pas** émis après logique/shift/mul (où x86 le laisse *indéfini*).
+  - **SF des shifts** aussi : ils ne posaient que ZF/CF (un `shr; js` lisait un SF éventé) — SF ajouté
+    avec préservation à compte nul, comme ZF/CF.
+  Le harness compare maintenant PF et AF et modélise `__ix_pf` ; **tout matche Unicorn** sur des
+  milliers d'états pour chaque op qui les pose.
+- **SIMD packed** — le lifter gérait déjà `__pi_*`/`__ps_*` (paddd, pcmpeqd, addps, pshufd, punpck…)
+  mais c'était **non fuzzé**. Ajouté au différentiel : interp étendu pour modéliser les helpers SIMD
+  (entiers lane-wise + flottants `f32` hôte = même softfloat qu'Unicorn) et **33 instructions packed**
+  au corpus (paddd/psubd/paddw, pcmpeqd/gtd/gtw, psubusw, pmuludq, pand/pandn/por/pxor, punpck l/h
+  dq/qdq, pshufd, addps/subps/mulps/divps, minps/maxps, sqrtps, cvtdq2ps, andps/andnps/orps/xorps,
+  cmpps, unpckl/hps, movmskps). **Coverage vérifiée** (chaque op scorée 2000/2000, pas de skip
+  vacant ; corrigé en passant un encodage de test : `pshufd` exige le préfixe `66`, sans quoi c'est
+  `pshufw` MMX). **0 bug trouvé** → le lift packed était déjà correct.
+- **Vérifié** : `cargo test` vert (cmp = 6 défs de drapeaux), **cpudiff vert**, **difftest 268/268**,
+  **transpile-diff 4/4 (hash inchangé** — l'optimiseur DCE les drapeaux non consommés, comportement
+  et taille de code inchangés). **Bilan** : sur l'axe 1 per-instruction, les drapeaux **CF/ZF/SF/OF/
+  PF/AF** sont tous vérifiés, et les sous-ensembles **entier, div/idiv, SSE scalaire ET SIMD packed**
+  sont validés contre Unicorn. Restent hors-différentiel : **x87** (couvert end-to-end par Lua) et le
+  64-bit (axe futur).

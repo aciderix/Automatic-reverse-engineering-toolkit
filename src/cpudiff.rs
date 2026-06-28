@@ -318,6 +318,31 @@ fn bin(op: BinOp, a: u64, b: u64) -> Option<u64> {
 /// rounding. Float→int conversions reproduce x86 `cvtt` truncation toward zero
 /// with the "integer indefinite" (0x80000000 / 0x8000000000000000) the hardware
 /// yields on overflow/NaN — *not* Rust's saturating `as`.
+/// Apply `f` to each of the two f32 lanes packed in a 64-bit half, returning the
+/// repacked bit pattern (host f32 ops match Unicorn's softfloat bit-for-bit).
+fn ps_map2(a: u64, b: u64, f: impl Fn(f32, f32) -> f32) -> u64 {
+    let lo = f(f32::from_bits(a as u32), f32::from_bits(b as u32)).to_bits();
+    let hi = f(f32::from_bits((a >> 32) as u32), f32::from_bits((b >> 32) as u32)).to_bits();
+    lo as u64 | (hi as u64) << 32
+}
+
+/// One `cmpps` lane: predicate `p & 7` (eq/lt/le/unord and their negations) →
+/// all-ones or all-zeros, mirroring the C `__ps_cmp1` helper.
+fn ps_cmp1(a: u32, b: u32, p: u64) -> u32 {
+    let (x, y) = (f32::from_bits(a), f32::from_bits(b));
+    let r = match p & 7 {
+        0 => x == y,
+        1 => x < y,
+        2 => x <= y,
+        3 => x.is_nan() || y.is_nan(),
+        4 => x != y,
+        5 => !(x < y),
+        6 => !(x <= y),
+        _ => !(x.is_nan() || y.is_nan()),
+    };
+    if r { 0xffff_ffff } else { 0 }
+}
+
 fn helper_call(name: &str, a: &[u64]) -> Option<u64> {
     // 32-bit integer-division helpers (the lifter routes div/idiv through these
     // so the C reproduces #DE). Return None on any fault state — zero divisor,
@@ -353,6 +378,107 @@ fn helper_call(name: &str, a: &[u64]) -> Option<u64> {
         }
         // Parity flag: PF = 1 iff the low byte has an even number of set bits.
         "__ix_pf" => return Some(((a[0] & 0xff).count_ones() % 2 == 0) as u64),
+
+        // ---- packed-integer SIMD (lanes within the two 64-bit halves) ----
+        "__pi_add32" => {
+            let l = (a[0] as u32).wrapping_add(a[1] as u32);
+            let h = ((a[0] >> 32) as u32).wrapping_add((a[1] >> 32) as u32);
+            return Some(l as u64 | (h as u64) << 32);
+        }
+        "__pi_sub32" => {
+            let l = (a[0] as u32).wrapping_sub(a[1] as u32);
+            let h = ((a[0] >> 32) as u32).wrapping_sub((a[1] >> 32) as u32);
+            return Some(l as u64 | (h as u64) << 32);
+        }
+        "__pi_eq32" => {
+            let l = if a[0] as u32 == a[1] as u32 { !0u32 } else { 0 };
+            let h = if (a[0] >> 32) as u32 == (a[1] >> 32) as u32 { !0u32 } else { 0 };
+            return Some(l as u64 | (h as u64) << 32);
+        }
+        "__pi_gt32" => {
+            let l = if (a[0] as i32) > (a[1] as i32) { !0u32 } else { 0 };
+            let h = if ((a[0] >> 32) as i32) > ((a[1] >> 32) as i32) { !0u32 } else { 0 };
+            return Some(l as u64 | (h as u64) << 32);
+        }
+        "__pi_muludq" => return Some((a[0] & 0xffff_ffff) * (a[1] & 0xffff_ffff)),
+        "__pi_unpckldq_lo" => return Some((a[0] & 0xffff_ffff) | ((a[1] & 0xffff_ffff) << 32)),
+        "__pi_unpckldq_hi" => return Some((a[0] >> 32) | ((a[1] >> 32) << 32)),
+        "__pi_shuf_lo" | "__pi_shuf_hi" => {
+            let (lo, hi, m) = (a[0], a[1], a[2]);
+            let lane = |k: u64| (if k < 2 { lo } else { hi }) >> ((k & 1) * 32) & 0xffff_ffff;
+            let (s0, s1) = if name == "__pi_shuf_lo" {
+                (m & 3, (m >> 2) & 3)
+            } else {
+                ((m >> 4) & 3, (m >> 6) & 3)
+            };
+            return Some(lane(s0) | (lane(s1) << 32));
+        }
+        "__pi_add16" => {
+            let mut r = 0u64;
+            for i in (0..64).step_by(16) {
+                let s = ((a[0] >> i) as u16).wrapping_add((a[1] >> i) as u16);
+                r |= (s as u64) << i;
+            }
+            return Some(r);
+        }
+        "__pi_gt16" => {
+            let mut r = 0u64;
+            for i in (0..64).step_by(16) {
+                if ((a[0] >> i) as i16) > ((a[1] >> i) as i16) {
+                    r |= 0xffffu64 << i;
+                }
+            }
+            return Some(r);
+        }
+        "__pi_subus16" => {
+            let mut r = 0u64;
+            for i in (0..64).step_by(16) {
+                let (x, y) = ((a[0] >> i) as u16, (a[1] >> i) as u16);
+                r |= (x.saturating_sub(y) as u64) << i;
+            }
+            return Some(r);
+        }
+
+        // ---- packed single-precision float (two f32 lanes per 64-bit half) ----
+        "__ps_add" => return Some(ps_map2(a[0], a[1], |x, y| x + y)),
+        "__ps_sub" => return Some(ps_map2(a[0], a[1], |x, y| x - y)),
+        "__ps_mul" => return Some(ps_map2(a[0], a[1], |x, y| x * y)),
+        "__ps_div" => return Some(ps_map2(a[0], a[1], |x, y| x / y)),
+        "__ps_min" | "__ps_max" => {
+            // x86 min/max return the *source* lane's original bits on NaN/equal:
+            // min = a<b ? a : b, max = a>b ? a : b.
+            let pick = |la: u32, lb: u32| -> u32 {
+                let (fa, fb) = (f32::from_bits(la), f32::from_bits(lb));
+                let take_a = if name == "__ps_min" { fa < fb } else { fa > fb };
+                if take_a { la } else { lb }
+            };
+            let l = pick(a[0] as u32, a[1] as u32);
+            let h = pick((a[0] >> 32) as u32, (a[1] >> 32) as u32);
+            return Some(l as u64 | (h as u64) << 32);
+        }
+        "__ps_sqrt" => {
+            let l = f32::from_bits(a[0] as u32).sqrt().to_bits();
+            let h = f32::from_bits((a[0] >> 32) as u32).sqrt().to_bits();
+            return Some(l as u64 | (h as u64) << 32);
+        }
+        "__ps_cvtdq" => {
+            let l = ((a[0] as i32) as f32).to_bits();
+            let h = (((a[0] >> 32) as i32) as f32).to_bits();
+            return Some(l as u64 | (h as u64) << 32);
+        }
+        "__ps_cmp" => {
+            let l = ps_cmp1(a[0] as u32, a[1] as u32, a[2]);
+            let h = ps_cmp1((a[0] >> 32) as u32, (a[1] >> 32) as u32, a[2]);
+            return Some(l as u64 | (h as u64) << 32);
+        }
+        "__ps_movmsk" => {
+            return Some(
+                ((a[0] >> 31) & 1)
+                    | (((a[0] >> 63) & 1) << 1)
+                    | (((a[1] >> 31) & 1) << 2)
+                    | (((a[1] >> 63) & 1) << 3),
+            );
+        }
         _ => {}
     }
     let g64 = f64::from_bits;
@@ -924,6 +1050,43 @@ fn corpus() -> Vec<Vec<u8>> {
         vec![0x66, 0x0f, 0x2e, 0xc1], // ucomisd xmm0, xmm1
         vec![0x0f, 0x2f, 0xc1],       // comiss  xmm0, xmm1
         vec![0x0f, 0x2e, 0xc1],       // ucomiss xmm0, xmm1
+        // ---- packed SIMD (xmm0, xmm1 — both 128-bit lanes compared) ----
+        // packed-integer (66 0F): lane-wise add/sub/compare/mul, bitwise, unpack
+        vec![0x66, 0x0f, 0xfe, 0xc1], // paddd     xmm0, xmm1
+        vec![0x66, 0x0f, 0xfa, 0xc1], // psubd     xmm0, xmm1
+        vec![0x66, 0x0f, 0xfd, 0xc1], // paddw     xmm0, xmm1
+        vec![0x66, 0x0f, 0x76, 0xc1], // pcmpeqd   xmm0, xmm1
+        vec![0x66, 0x0f, 0x66, 0xc1], // pcmpgtd   xmm0, xmm1
+        vec![0x66, 0x0f, 0x65, 0xc1], // pcmpgtw   xmm0, xmm1
+        vec![0x66, 0x0f, 0xd9, 0xc1], // psubusw   xmm0, xmm1
+        vec![0x66, 0x0f, 0xf4, 0xc1], // pmuludq   xmm0, xmm1
+        vec![0x66, 0x0f, 0xdb, 0xc1], // pand      xmm0, xmm1
+        vec![0x66, 0x0f, 0xdf, 0xc1], // pandn     xmm0, xmm1
+        vec![0x66, 0x0f, 0xeb, 0xc1], // por       xmm0, xmm1
+        vec![0x66, 0x0f, 0xef, 0xc1], // pxor      xmm0, xmm1
+        vec![0x66, 0x0f, 0x62, 0xc1], // punpckldq xmm0, xmm1
+        vec![0x66, 0x0f, 0x6a, 0xc1], // punpckhdq xmm0, xmm1
+        vec![0x66, 0x0f, 0x6c, 0xc1], // punpcklqdq xmm0, xmm1
+        vec![0x66, 0x0f, 0x6d, 0xc1], // punpckhqdq xmm0, xmm1
+        vec![0x66, 0x0f, 0x70, 0xc1, 0x1b], // pshufd xmm0, xmm1, 0x1b
+        // packed single-precision float (0F): arith, min/max, sqrt, cvt, bitwise,
+        // compare, unpack, movmask (GP result)
+        vec![0x0f, 0x58, 0xc1],       // addps     xmm0, xmm1
+        vec![0x0f, 0x5c, 0xc1],       // subps     xmm0, xmm1
+        vec![0x0f, 0x59, 0xc1],       // mulps     xmm0, xmm1
+        vec![0x0f, 0x5e, 0xc1],       // divps     xmm0, xmm1
+        vec![0x0f, 0x5d, 0xc1],       // minps     xmm0, xmm1
+        vec![0x0f, 0x5f, 0xc1],       // maxps     xmm0, xmm1
+        vec![0x0f, 0x51, 0xc1],       // sqrtps    xmm0, xmm1
+        vec![0x0f, 0x5b, 0xc1],       // cvtdq2ps  xmm0, xmm1
+        vec![0x0f, 0x54, 0xc1],       // andps     xmm0, xmm1
+        vec![0x0f, 0x55, 0xc1],       // andnps    xmm0, xmm1
+        vec![0x0f, 0x56, 0xc1],       // orps      xmm0, xmm1
+        vec![0x0f, 0x57, 0xc1],       // xorps     xmm0, xmm1
+        vec![0x0f, 0xc2, 0xc1, 0x02], // cmpleps   xmm0, xmm1
+        vec![0x0f, 0x14, 0xc1],       // unpcklps  xmm0, xmm1
+        vec![0x0f, 0x15, 0xc1],       // unpckhps  xmm0, xmm1
+        vec![0x0f, 0x50, 0xc1],       // movmskps  eax, xmm1
     ]
 }
 
