@@ -1582,3 +1582,22 @@ silencieux (à valider un jour) ; « **non lifté** » = `Asm`/abort = **sound**
   64-bit (opt-in). *Limite notée* : un `atexit` purement statique (sans `_onexit`) demanderait de
   rejouer le flux de sortie CRT (hors périmètre). La boucle d'élargissement est rodée : corpus = tests
   permanents **et** révélateurs de gaps.
+
+### Axe 2 : corpus 19→24, fichiers/wildcards + dossiers + TTY ✅ FAIT
+- **2026-06-28 — 3 catégories prioritaires (suggestion Gemini, alignée backlog).** +5 programmes
+  (FindFirstFile+wildcard, stress rep/string, console/TTY, dossiers, chemins). Inventaire winediff →
+  20/24, gaps comblés → **24/24** :
+  - **`FindFirstFileA`/`FindNextFileA`/`FindClose`** : énumération avec wildcard, pontée sur
+    opendir/readdir + **fnmatch insensible à la casse** (lowercasing manuel, FNM_CASEFOLD = extension
+    GNU non portable). Remplit `WIN32_FIND_DATAA` (attributs, taille, `cFileName` @offset 44 ; le
+    HANDLE = pointeur d'état d'itération). Cœur des outils CLI (`*.txt`).
+  - **`CreateDirectoryA`/`RemoveDirectoryA`** → mkdir/rmdir (via `translate_path`).
+  - **`GetFileType`** : ne renvoyait plus `FILE_TYPE_CHAR`(2) en dur → `fstat` du fd : FIFO/socket →
+    PIPE(3), char → CHAR(2), sinon DISK(1). **Crucial** : un outil CLI sait enfin distinguer TTY vs
+    redirection (winediff capture en pipe → le test attendait 3).
+  - **`_splitpath`/`_makepath`** (chemins Windows : drive/dir/fname/ext) ; `_fullpath` déjà présent.
+  - **`GetStdHandle`/`GetConsoleMode`** : déjà corrects (non-console sous redirection).
+- *Note* : `rep_strings` (memcmp/memchr massifs) **passe sans** déclencher `rep scas/cmps` — mingw ne
+  les émet pas ici ; le support `rep scas/cmps` + DF arrière reste au backlog (non bloquant).
+- **Vérifié** : winediff **24/24** ; régression **cargo vert, difftest 268/268, transpile-diff 4/4
+  (hash inchangé)**. Corpus axe-2 = **24 programmes**, tous = vrai Windows.

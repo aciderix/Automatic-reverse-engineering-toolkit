@@ -25,6 +25,7 @@
 #include <time.h>
 #include <unistd.h>
 #include <sys/time.h>
+#include <sys/stat.h>
 
 static inline uint32_t w32_arg(uint32_t esp, int i) {
     return ((const uint32_t *)(uintptr_t)esp)[i];
@@ -284,7 +285,15 @@ uint32_t aret_WaitForSingleObject(uint32_t esp) { (void)esp; return 0; } /* WAIT
 uint32_t aret_SetConsoleCtrlHandler(uint32_t esp) { (void)esp; return 1; }
 uint32_t aret_FlushFileBuffers(uint32_t esp)    { (void)esp; return 1; }
 uint32_t aret_SetHandleCount(uint32_t esp)      { return WU(0); }
-uint32_t aret_GetFileType(uint32_t esp)         { (void)esp; return 2; } /* FILE_TYPE_CHAR */
+/* GetFileType(handle): map the fd's kind to the Win32 constant so a CLI tool can
+ * tell a TTY (CHAR) from a pipe/redirect (PIPE) from a file (DISK). */
+uint32_t aret_GetFileType(uint32_t esp) {
+    struct stat st;
+    if (fstat((int)WU(0), &st) != 0) return 0; /* FILE_TYPE_UNKNOWN */
+    if (S_ISFIFO(st.st_mode) || S_ISSOCK(st.st_mode)) return 3; /* FILE_TYPE_PIPE */
+    if (S_ISCHR(st.st_mode)) return 2;                          /* FILE_TYPE_CHAR */
+    return 1;                                                   /* FILE_TYPE_DISK */
+}
 
 /* Console probes. When stdout is a real terminal these would succeed; when it is
  * a pipe/file they fail on Windows too. Reporting failure (0) makes a console

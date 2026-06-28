@@ -13,6 +13,8 @@
 #include <fcntl.h>
 #include <sys/stat.h>
 #include <ctype.h>
+#include <dirent.h>
+#include <fnmatch.h>
 
 /* Read stdcall/cdecl argument `i` (a 32-bit word) from the modelled stack. */
 static inline uint32_t arg(uint32_t esp, int i) {
@@ -606,6 +608,87 @@ uint32_t aret_DeleteFileA(uint32_t esp) {
     char path[1024];
     translate_path((const char *)(uintptr_t)arg(esp, 0), path, sizeof path);
     return unlink(path) == 0 ? 1 : 0;
+}
+uint32_t aret_CreateDirectoryA(uint32_t esp) {
+    char path[1024];
+    translate_path((const char *)(uintptr_t)arg(esp, 0), path, sizeof path);
+    return mkdir(path, 0777) == 0 ? 1 : 0;
+}
+uint32_t aret_RemoveDirectoryA(uint32_t esp) {
+    char path[1024];
+    translate_path((const char *)(uintptr_t)arg(esp, 0), path, sizeof path);
+    return rmdir(path) == 0 ? 1 : 0;
+}
+
+/* FindFirstFile/FindNextFile/FindClose — directory enumeration with a wildcard.
+ * Bridged to opendir/readdir + fnmatch (case-insensitive, like Windows). The
+ * HANDLE is a pointer to the iteration state. Fills WIN32_FIND_DATAA: the only
+ * fields a CLI tool reads are the attributes, the size, and cFileName (at the
+ * fixed offset 44 in the 32-bit struct); times are left zero. */
+#define ARET_FFD_NAME_OFF 44u
+#define FILE_ATTRIBUTE_DIRECTORY_F 0x10u
+#define FILE_ATTRIBUTE_NORMAL_F 0x80u
+typedef struct { DIR *d; char dir[1024]; char pat[260]; } aret_find_t;
+
+/* Case-insensitive wildcard match (Windows file matching is case-folding);
+ * FNM_CASEFOLD is a GNU extension, so lowercase both sides and use plain fnmatch. */
+static int aret_ci_match(const char *pat, const char *name) {
+    char lp[300], ln[300];
+    size_t i;
+    for (i = 0; pat[i] && i < sizeof lp - 1; i++) lp[i] = (char)tolower((unsigned char)pat[i]);
+    lp[i] = 0;
+    for (i = 0; name[i] && i < sizeof ln - 1; i++) ln[i] = (char)tolower((unsigned char)name[i]);
+    ln[i] = 0;
+    return fnmatch(lp, ln, 0);
+}
+static int aret_fill_find(aret_find_t *st, uint8_t *fd) {
+    struct dirent *e;
+    while ((e = readdir(st->d))) {
+        if (aret_ci_match(st->pat, e->d_name) != 0) continue;
+        char full[1300];
+        snprintf(full, sizeof full, "%s/%s", st->dir, e->d_name);
+        struct stat sb;
+        uint32_t attr = FILE_ATTRIBUTE_NORMAL_F;
+        uint64_t size = 0;
+        if (stat(full, &sb) == 0) {
+            if (S_ISDIR(sb.st_mode)) attr = FILE_ATTRIBUTE_DIRECTORY_F;
+            size = (uint64_t)sb.st_size;
+        }
+        memset(fd, 0, 320);
+        *(uint32_t *)(fd + 0) = attr;
+        *(uint32_t *)(fd + 28) = (uint32_t)(size >> 32);  /* nFileSizeHigh */
+        *(uint32_t *)(fd + 32) = (uint32_t)size;          /* nFileSizeLow  */
+        snprintf((char *)(fd + ARET_FFD_NAME_OFF), 260, "%s", e->d_name);
+        return 1;
+    }
+    return 0;
+}
+uint32_t aret_FindFirstFileA(uint32_t esp) {
+    char path[1024];
+    translate_path((const char *)(uintptr_t)arg(esp, 0), path, sizeof path);
+    aret_find_t *st = (aret_find_t *)malloc(sizeof *st);
+    if (!st) return ARET_INVALID_HANDLE;
+    /* split into directory + filename pattern at the last separator */
+    char *slash = strrchr(path, '/');
+    if (slash) { *slash = 0; snprintf(st->dir, sizeof st->dir, "%s", path); snprintf(st->pat, sizeof st->pat, "%s", slash + 1); }
+    else { snprintf(st->dir, sizeof st->dir, "."); snprintf(st->pat, sizeof st->pat, "%s", path); }
+    st->d = opendir(st->dir[0] ? st->dir : "/");
+    if (!st->d) { free(st); return ARET_INVALID_HANDLE; }
+    if (!aret_fill_find(st, (uint8_t *)(uintptr_t)arg(esp, 1))) {
+        closedir(st->d); free(st); return ARET_INVALID_HANDLE;
+    }
+    return (uint32_t)(uintptr_t)st;
+}
+uint32_t aret_FindNextFileA(uint32_t esp) {
+    aret_find_t *st = (aret_find_t *)(uintptr_t)arg(esp, 0);
+    if (!st) return 0;
+    return (uint32_t)aret_fill_find(st, (uint8_t *)(uintptr_t)arg(esp, 1));
+}
+uint32_t aret_FindClose(uint32_t esp) {
+    aret_find_t *st = (aret_find_t *)(uintptr_t)arg(esp, 0);
+    if (!st) return 0;
+    closedir(st->d); free(st);
+    return 1;
 }
 
 /* GetFileAttributesA(name) -> DWORD. Win32 file-existence/type probe (mingw's

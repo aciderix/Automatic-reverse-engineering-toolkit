@@ -164,6 +164,39 @@ uint64_t aret_ldiv(uint32_t esp) {
     long num = (int32_t)AU(0), den = (int32_t)AU(1);
     return (uint32_t)(num / den) | ((uint64_t)(uint32_t)(num % den) << 32);
 }
+
+/* <stdlib.h> Windows path helpers. _splitpath breaks a path into drive ("C:"),
+ * directory (through the last separator), filename and extension (with dot); any
+ * output buffer may be NULL. _makepath is its inverse; _fullpath resolves to an
+ * absolute path against the cwd. */
+uint32_t aret_splitpath(uint32_t esp) {
+    const char *path = ACS(0);
+    char *drive = AS(1), *dir = AS(2), *fname = AS(3), *ext = AS(4);
+    const char *p = path ? path : "";
+    if (p[0] && p[1] == ':') { if (drive) { drive[0] = p[0]; drive[1] = ':'; drive[2] = 0; } p += 2; }
+    else if (drive) drive[0] = 0;
+    const char *sep = NULL;
+    for (const char *q = p; *q; q++) if (*q == '/' || *q == '\\') sep = q;
+    const char *fn;
+    if (sep) { if (dir) { size_t n = (size_t)(sep - p + 1); memcpy(dir, p, n); dir[n] = 0; } fn = sep + 1; }
+    else { if (dir) dir[0] = 0; fn = p; }
+    const char *dot = NULL;
+    for (const char *q = fn; *q; q++) if (*q == '.') dot = q;
+    if (dot) { if (fname) { size_t n = (size_t)(dot - fn); memcpy(fname, fn, n); fname[n] = 0; } if (ext) strcpy(ext, dot); }
+    else { if (fname) strcpy(fname, fn); if (ext) ext[0] = 0; }
+    return 0;
+}
+uint32_t aret_makepath(uint32_t esp) {
+    char *path = AS(0);
+    const char *drive = ACS(1), *dir = ACS(2), *fname = ACS(3), *ext = ACS(4);
+    char *o = path;
+    if (drive && drive[0]) { *o++ = drive[0]; *o++ = ':'; }
+    if (dir && dir[0]) { size_t n = strlen(dir); memcpy(o, dir, n); o += n; if (o[-1] != '/' && o[-1] != '\\') *o++ = '\\'; }
+    if (fname) { size_t n = strlen(fname); memcpy(o, fname, n); o += n; }
+    if (ext && ext[0]) { if (ext[0] != '.') *o++ = '.'; size_t n = strlen(ext); memcpy(o, ext, n); o += n; }
+    *o = 0;
+    return 0;
+}
 /* strtod/atof: David Gay's bignum strtod in the binary is huge and doesn't lift
  * cleanly; forward to the host. The double result is returned in st(0) via the
  * x87 fp channel (the caller recovers it after an fp-returning call). */
