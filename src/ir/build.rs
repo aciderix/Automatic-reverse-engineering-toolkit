@@ -1393,14 +1393,28 @@ pub fn has_opaque_asm(irf: &IrFunction) -> bool {
         .any(|b| b.stmts.iter().any(stmt_has_asm))
 }
 
-fn name_calls_in_expr(e: &mut Expr, prog: &Program, bits: u32, held: &HeldImports) {
+fn name_calls_in_expr(e: &mut Expr, prog: &Program, bits: u32, held: &HeldImports, is_tail: bool) {
+    // The stack pointer an import shim is handed. An import reads its cdecl args at
+    // `[esp+0]`. For a normal `call import` ARET does not push a return address, so
+    // `esp` already points at the args. But a *tail* `jmp [import]` reuses the
+    // caller's frame, whose return address still sits at `[esp]`, so the import's
+    // args begin at `[esp+4]` — hand it `esp+4`. (Direct tail calls are fixed up in
+    // the `Jump` terminator; this covers the indirect `jmp [IAT]` shape.)
+    let shim_esp = || {
+        let esp = Expr::Read(Location::Reg(RegId(4)));
+        if is_tail {
+            Expr::Binary(BinOp::Add, Box::new(esp), Box::new(Expr::konst(4, 32)))
+        } else {
+            esp
+        }
+    };
     match e {
         Expr::Call { target, args, .. } => {
             if let CallTarget::Direct(a) = target {
                 if let CallBinding::Shim { name, thread_esp } = resolve_call(prog, *a) {
                     *target = CallTarget::Named(name);
                     if thread_esp && bits == 32 && args.is_empty() {
-                        *args = vec![Expr::Read(Location::Reg(RegId(4)))];
+                        *args = vec![shim_esp()];
                     }
                 }
             }
@@ -1425,26 +1439,27 @@ fn name_calls_in_expr(e: &mut Expr, prog: &Program, bits: u32, held: &HeldImport
             if let Some(name) = import {
                 *target = CallTarget::Named(name);
                 if bits == 32 && args.is_empty() {
-                    *args = vec![Expr::Read(Location::Reg(RegId(4)))];
+                    *args = vec![shim_esp()];
                 }
             }
+            // Nested sub-expressions are never the tail position.
             if let CallTarget::Indirect(x) = target {
-                name_calls_in_expr(x, prog, bits, held);
+                name_calls_in_expr(x, prog, bits, held, false);
             }
             for a in args.iter_mut() {
-                name_calls_in_expr(a, prog, bits, held);
+                name_calls_in_expr(a, prog, bits, held, false);
             }
         }
-        Expr::Load { addr, .. } => name_calls_in_expr(addr, prog, bits, held),
-        Expr::Unary(_, x) | Expr::Cast { expr: x, .. } => name_calls_in_expr(x, prog, bits, held),
+        Expr::Load { addr, .. } => name_calls_in_expr(addr, prog, bits, held, false),
+        Expr::Unary(_, x) | Expr::Cast { expr: x, .. } => name_calls_in_expr(x, prog, bits, held, false),
         Expr::Binary(_, a, b) => {
-            name_calls_in_expr(a, prog, bits, held);
-            name_calls_in_expr(b, prog, bits, held);
+            name_calls_in_expr(a, prog, bits, held, false);
+            name_calls_in_expr(b, prog, bits, held, false);
         }
         Expr::Select { cond, then_, else_ } => {
-            name_calls_in_expr(cond, prog, bits, held);
-            name_calls_in_expr(then_, prog, bits, held);
-            name_calls_in_expr(else_, prog, bits, held);
+            name_calls_in_expr(cond, prog, bits, held, false);
+            name_calls_in_expr(then_, prog, bits, held, false);
+            name_calls_in_expr(else_, prog, bits, held, false);
         }
         _ => {}
     }
@@ -1642,14 +1657,16 @@ fn thread_calls_in_stmt(s: &mut Stmt) {
 fn name_calls_in_stmt(s: &mut Stmt, prog: &Program, bits: u32, held: &HeldImports) {
     match s {
         Stmt::Set { expr, .. } | Stmt::Assign { expr, .. } | Stmt::CallStmt(expr) => {
-            name_calls_in_expr(expr, prog, bits, held)
+            name_calls_in_expr(expr, prog, bits, held, false)
         }
         Stmt::Store { addr, value, .. } => {
-            name_calls_in_expr(addr, prog, bits, held);
-            name_calls_in_expr(value, prog, bits, held);
+            name_calls_in_expr(addr, prog, bits, held, false);
+            name_calls_in_expr(value, prog, bits, held, false);
         }
-        Stmt::Branch { cond, .. } => name_calls_in_expr(cond, prog, bits, held),
-        Stmt::Return(Some(e)) => name_calls_in_expr(e, prog, bits, held),
+        Stmt::Branch { cond, .. } => name_calls_in_expr(cond, prog, bits, held, false),
+        // A `Return(Call)` is a tail call (`jmp [import]`): the caller's return
+        // address is still on the stack, so an import shim's args start at esp+4.
+        Stmt::Return(Some(e)) => name_calls_in_expr(e, prog, bits, held, true),
         _ => {}
     }
 }

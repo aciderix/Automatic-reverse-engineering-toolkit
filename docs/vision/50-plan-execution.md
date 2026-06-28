@@ -1881,3 +1881,25 @@ frame). 6. **Cast des args libc en uint32_t** (memcpy 64-bit cassé sans prototy
 7. `bt [mem],imm`. 8. `_chkstk`/`_alloca` (esp inter-frame). 9. `stmxcsr`/`ldmxcsr`. 10.
 `InitializeSListHead`. → Le transpileur est **généralement** plus correct (instructions, récupération,
 helpers ABI MSVC EH/alloca, appels libc), bénéfique à tout binaire PE.
+
+### strings.exe — bug GÉNÉRAL : tail-`jmp [import]` passait le mauvais esp (TLS/Fls/encoded-ptr cassés) ✅ FAIT
+- **2026-06-28 — la machinerie thread-state MSVCRT était bloquée par un vrai bug général.** Trace TLS
+  instrumentée : `aret_TlsGetValue` était appelé avec un **index garbage** (`0x44CB48` = une adresse
+  empilée), retournant 0/garbage, et `TlsSetValue(0,1)` corrompait le slot 0 → `__updatetlocinfo`
+  rendait 1 au lieu du locinfo.
+- **Cause** : les wrappers `__acrt_TlsGetValue`/Fls du MSVCRT finissent par un **tail-`jmp [IAT]`**
+  (`pop esi; pop ebp; jmp [TlsGetValue]`). Un `jmp [import]` ne pousse pas d'adresse de retour : celle
+  de l'appelant reste à `[esp]`, donc les arguments de l'import commencent à `[esp+4]`. Mais
+  `name_calls_in_expr` passait `esp` (correct pour un `call [import]` normal — pas de retaddr poussé
+  pour un import — mais **faux pour un tail-`jmp`**) → l'import lisait l'adresse de retour comme 1ᵉʳ
+  argument. Les tail-calls **directs** (`jmp import`) avaient déjà la compensation +4 ; la forme
+  **indirecte** (`jmp [IAT]`) ne l'avait pas.
+- **Fix général** (`ir::build::name_calls`) : thread d'un flag `is_tail` ; en position de tail-call
+  (`Stmt::Return(Call)`), un shim d'import reçoit **`esp+4`** (l'adresse de retour de l'appelant est
+  encore sur la pile). Couvre `jmp [IAT]` ET `jmp reg` (reg chargé depuis l'IAT).
+- **Effet vérifié** : `TlsGetValue(1)` retourne désormais le **locinfo valide** (pointeur heap) ; tout
+  l'état TLS/Fls/encoded-pointer du MSVCRT fonctionne. strings.exe dépasse la machinerie thread-state
+  C++ ; prochains bloqueurs = import `GetEnvironmentStringsW` + instruction **AVX/VEX** `vpxor`
+  (ARET modélise `pxor` SSE mais pas la forme VEX 3-opérandes ; chantier AVX à part).
+- **Régression complète PASS** : difftest **268/268**, magicdiv 2³², SMT 11/11, recompilabilité 100%,
+  **transpile-diff 4/4 (hash 4b0121f182554d40 inchangé)**, **winediff 33/33**, cargo (wasm) OK.
