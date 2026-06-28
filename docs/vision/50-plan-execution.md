@@ -1488,3 +1488,35 @@ flottante), à faire en session dédiée, une fonction à la fois, difftest à c
   PF/AF** sont tous vérifiés, et les sous-ensembles **entier, div/idiv, SSE scalaire ET SIMD packed**
   sont validés contre Unicorn. Restent hors-différentiel : **x87** (couvert end-to-end par Lua) et le
   64-bit (axe futur).
+
+### Backlog axe 1 (documenté avant de passer à l'axe 2) 📋
+Tronçons axe-1 **restants**, classés par risque. Aucun n'est bloquant (cœur blindé) ; conservés ici
+pour ne rien perdre après compression. Distinction clé : « **lifté mais non fuzzé** » = risque de faux
+silencieux (à valider un jour) ; « **non lifté** » = `Asm`/abort = **sound** (sans risque).
+- **Lifté mais non fuzzé par cpudiff** (reachable, bas risque, à ajouter au corpus quand utile) :
+  - **Atomiques** : `cmpxchg`, `xadd` (liftés) ; `cmpxchg8b`/`lock`/`xchg [mem]` à vérifier. Code threadé / compteurs de réf.
+  - **Chaînes/`rep`** : `rep movs/stos/scas/cmps` (helpers `__rep_*`). Mal adapté au harness *per-instruction* (région + compteur + DF) → mini-différentiel « région » ou fixtures. Couvert end-to-end aujourd'hui.
+  - **Transfert de drapeaux** : `sahf`/`lahf`, `pushf`/`popf` (liftés, niche).
+- **Couvert autrement (pas par cpudiff)** :
+  - **x87** : lift par helpers `__x87_*` + passe de profondeur de pile *inter-instructions* → inadapté au per-instruction. **Couvert end-to-end par Lua 35/35** (pow/sqrt/sin/floor-ceil/`%a`…).
+  - **Pipeline aval** (SSA/opt/structureur/backend) : difftest 268/268 + transpile-diff 4/4.
+- **Sound par construction (non lifté → abort, sans risque)** : **BCD** (aaa/aas/aam/aad/daa/das), arrondi **SSE non-défaut** (MXCSR ; l'x87 honore déjà RC), divers exotiques.
+- **Axe futur (hors périmètre actuel 32-bit)** : **lift 64-bit** (REX/registres 64-bit) — Phase 8 ; le contrôle de débordement de quotient `div`/`idiv` 64-bit (chemin software `-m32`) y est rattaché.
+
+### Axe 2 amorcé : différentiel Wine (couverture OS-API) ✅ FAIT (fondation)
+- **2026-06-28 — L'axe 2 existe.** `bench/winediff.sh` + corpus `bench/winecorpus/*.c` : pour chaque
+  programme, build PE (mingw) → exécution sous **Wine** (vérité terrain Win32) **vs** ARET transpilé
+  natif → diff stdout (fins de ligne normalisées). Gated SKIP si wine/mingw absents (comme les autres
+  harness). **Wine installé et fonctionnel** dans l'env (run d'un PE 32-bit OK). Donne la **métrique
+  chiffrée** d'avancée OS-API demandée au §0.
+- **Baseline : 5/7 programmes** identiques à Wine. ✅ **printf** (largeurs/flags/précision/l/ll/h/hh,
+  %x/%o/%e/%g/%%), **malloc/calloc/realloc/free** (+ liste chaînée), **qsort/bsearch**, **math**
+  (sqrt/pow/floor/ceil/sin/cos/exp/log/fmod/hypot/modf/ldexp), **fichier** (fopen/fprintf/fputs/fwrite/
+  fgets/fseek/fgetc/remove) — tous **bit-identiques au vrai Windows**. Excellent socle HLE.
+- **2 divergences réelles trouvées d'emblée** (c'est le but de l'axe 2 — « tirer la couverture API ») :
+  1. **`sscanf`** → ARET **abort sound** sur `movsd [edi],[esi]` (instruction de **chaîne** MOVS, pas
+     la SSE) non liftée. = le gap **rep/string** du backlog, exhibé par un vrai programme. À lifter.
+  2. **`snprintf`** renvoie **4** au lieu de **6** : le shim rend la longueur *tronquée* au lieu de la
+     longueur *qui aurait été écrite* (sémantique C99 que le binaire mingw attend). Bug de shim HLE.
+- *Note* : winediff est une **métrique de couverture** (diagnostique), pas une porte dure comme
+  difftest/transpile (qui restent à 100 %). Elle monte au fur et à mesure que le HLE se complète.
