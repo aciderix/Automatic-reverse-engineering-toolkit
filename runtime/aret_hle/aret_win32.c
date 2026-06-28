@@ -20,6 +20,7 @@
 #include <stdint.h>
 #include <stddef.h>
 #include <string.h>
+#include <ctype.h>
 #include <stdlib.h>
 #include <stdio.h>
 #include <time.h>
@@ -239,6 +240,75 @@ uint32_t aret_GetNativeSystemInfo(uint32_t esp) { return aret_GetSystemInfo(esp)
 
 uint32_t aret_GetACP(uint32_t esp)   { (void)esp; return 1252; } /* Windows-1252 */
 uint32_t aret_GetOEMCP(uint32_t esp) { (void)esp; return 437; }
+uint32_t aret_IsValidCodePage(uint32_t esp) {
+    switch (WU(0)) {
+        case 437: case 850: case 852: case 866: case 874: case 932: case 936:
+        case 949: case 950: case 1200: case 1201: case 1250: case 1251: case 1252:
+        case 1253: case 1254: case 1255: case 1256: case 1257: case 1258:
+        case 65000: case 65001: return 1;
+        default: return 0;
+    }
+}
+/* GetCPInfo: the code pages we report are single-byte (MaxCharSize 1); default
+ * char '?', no DBCS lead-byte ranges. CPINFO = {UINT MaxCharSize; BYTE Default[2];
+ * BYTE LeadByte[12];}. */
+uint32_t aret_GetCPInfo(uint32_t esp) {
+    uint8_t *ci = (uint8_t *)(uintptr_t)WU(1);
+    if (!ci) return 0;
+    *(uint32_t *)(ci + 0) = 1;
+    ci[4] = '?'; ci[5] = 0;
+    memset(ci + 6, 0, 12);
+    return 1;
+}
+/* GetStringTypeW(CT_CTYPE1, src, count, out): classify each WCHAR into the C1_*
+ * character-type bits (ASCII subset via ctype). */
+uint32_t aret_GetStringTypeW(uint32_t esp) {
+    if (WU(0) != 1) return 0; /* only CT_CTYPE1 modelled */
+    const uint16_t *s = (const uint16_t *)(uintptr_t)WU(1);
+    int n = (int)WU(2);
+    uint16_t *out = (uint16_t *)(uintptr_t)WU(3);
+    if (!s || !out) return 0;
+    if (n < 0) { n = 0; while (s[n]) n++; }
+    for (int i = 0; i < n; i++) {
+        unsigned c = s[i];
+        uint16_t t = 0;
+        if (c < 256) {
+            if (isupper((int)c)) t |= 0x0001 | 0x0100; /* UPPER | ALPHA */
+            if (islower((int)c)) t |= 0x0002 | 0x0100; /* LOWER | ALPHA */
+            if (isdigit((int)c)) t |= 0x0004;          /* DIGIT */
+            if (isspace((int)c)) t |= 0x0008;          /* SPACE */
+            if (ispunct((int)c)) t |= 0x0010;          /* PUNCT */
+            if (iscntrl((int)c)) t |= 0x0020;          /* CNTRL */
+            if (isblank((int)c)) t |= 0x0040;          /* BLANK */
+            if (isxdigit((int)c)) t |= 0x0080;         /* XDIGIT */
+            if (t) t |= 0x0200;                        /* DEFINED */
+        }
+        out[i] = t;
+    }
+    return 1;
+}
+/* LCMapStringW: the upper/lower-case mappings (the common CRT use); other flags
+ * pass the string through unchanged. */
+uint32_t aret_LCMapStringW(uint32_t esp) {
+    uint32_t flags = WU(1);
+    const uint16_t *src = (const uint16_t *)(uintptr_t)WU(2);
+    int srclen = (int)WU(3);
+    uint16_t *dst = (uint16_t *)(uintptr_t)WU(4);
+    int dstlen = (int)WU(5);
+    if (!src) return 0;
+    if (srclen < 0) { srclen = 0; while (src[srclen]) srclen++; srclen++; }
+    if (dstlen == 0 || !dst) return (uint32_t)srclen;
+    int n = srclen < dstlen ? srclen : dstlen;
+    for (int i = 0; i < n; i++) {
+        unsigned c = src[i];
+        if (c < 256) {
+            if (flags & 0x00000200u) c = (unsigned)toupper((int)c); /* LCMAP_UPPERCASE */
+            else if (flags & 0x00000100u) c = (unsigned)tolower((int)c); /* LCMAP_LOWERCASE */
+        }
+        dst[i] = (uint16_t)c;
+    }
+    return (uint32_t)n;
+}
 uint32_t aret_IsProcessorFeaturePresent(uint32_t esp) { (void)esp; return 1; }
 uint32_t aret_IsDebuggerPresent(uint32_t esp) { (void)esp; return 0; }
 uint32_t aret_IsBadReadPtr(uint32_t esp)  { return (uint32_t)(WU(0) == 0); }

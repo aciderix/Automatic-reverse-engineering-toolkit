@@ -35,8 +35,9 @@ fi
 # Isolated, quiet Wine prefix; initialise it once up front.
 export WINEDEBUG="${WINEDEBUG:--all}"
 export WINEPREFIX="$TMP/wineprefix"
-# Fixed timezone so date/time conversions are deterministic on both sides.
+# Fixed timezone + locale so date/time/codepage conversions are deterministic.
 export TZ=UTC
+export LC_ALL=C
 wine wineboot --init >/dev/null 2>&1 || true
 
 # Program output of `aret --mode transpile --run` is delimited by a marker, each

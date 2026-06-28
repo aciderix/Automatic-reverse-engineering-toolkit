@@ -939,9 +939,36 @@ uint32_t aret_FreeLibrary(uint32_t esp) { (void)esp; return 1; }
 uint32_t aret_SetUnhandledExceptionFilter(uint32_t esp) { (void)esp; return 0; }
 uint32_t aret_VirtualProtect(uint32_t esp) { (void)esp; return 1; }
 uint32_t aret_VirtualQuery(uint32_t esp) { (void)esp; return 0; }
-uint32_t aret_TlsGetValue(uint32_t esp) { (void)esp; return 0; }
-uint32_t aret_TlsSetValue(uint32_t esp) { (void)esp; return 1; }
-uint32_t aret_TlsAlloc(uint32_t esp) { (void)esp; return 0; }
+/* Thread-local storage (single-threaded model): a flat slot table. TlsAlloc
+ * hands out distinct indices; Set/Get round-trip per index. */
+#define ARET_TLS_MAX 1088
+static uint32_t aret_tls[ARET_TLS_MAX];
+static char aret_tls_used[ARET_TLS_MAX];
+uint32_t aret_TlsAlloc(uint32_t esp) {
+    (void)esp;
+    for (int i = 0; i < ARET_TLS_MAX; i++) if (!aret_tls_used[i]) { aret_tls_used[i] = 1; aret_tls[i] = 0; return (uint32_t)i; }
+    return 0xFFFFFFFFu; /* TLS_OUT_OF_INDEXES */
+}
+uint32_t aret_TlsGetValue(uint32_t esp) {
+    uint32_t i = arg(esp, 0);
+    return i < ARET_TLS_MAX ? aret_tls[i] : 0;
+}
+uint32_t aret_TlsSetValue(uint32_t esp) {
+    uint32_t i = arg(esp, 0);
+    if (i >= ARET_TLS_MAX) return 0;
+    aret_tls[i] = arg(esp, 1);
+    return 1;
+}
+uint32_t aret_TlsFree(uint32_t esp) {
+    uint32_t i = arg(esp, 0);
+    if (i >= ARET_TLS_MAX) return 0;
+    aret_tls_used[i] = 0;
+    return 1;
+}
+/* EncodePointer/DecodePointer obfuscate a pointer with a per-process cookie; the
+ * value is opaque to the program, so identity is correct and round-trips. */
+uint32_t aret_EncodePointer(uint32_t esp) { return arg(esp, 0); }
+uint32_t aret_DecodePointer(uint32_t esp) { return arg(esp, 0); }
 uint32_t aret_InitializeCriticalSection(uint32_t esp) { (void)esp; return 0; }
 uint32_t aret_DeleteCriticalSection(uint32_t esp) { (void)esp; return 0; }
 uint32_t aret_EnterCriticalSection(uint32_t esp) { (void)esp; return 0; }

@@ -1647,3 +1647,16 @@ silencieux (à valider un jour) ; « **non lifté** » = `Asm`/abort = **sound**
     échoue sur un handle redirigé (le programme bascule alors sur WriteFile) → pas de double sortie.
 - **Vérifié** : `win32_filew`/`win32_findw`/`console_cp` = **bit-identiques à Wine** ; winediff **29/29**.
   Régression : cargo **98/0** (wasm OK), **difftest 268/268, transpile-diff 4/4 (hash inchangé)**.
+
+### Axe 2 (P1) : lot locale/codepage + Tls + stubs de démarrage ✅ FAIT
+- **2026-06-28 — +2 programmes** (`tls_test`, `locale_cp`), `LC_ALL=C` figé dans le harness (avec TZ=UTC)
+  pour le déterminisme des codepages. Valeurs **calquées sur Wine** (sondé : `acp=1252 oem=437`,
+  GetCPInfo MaxCharSize=1, GetStringTypeW classe A/a/1/!/space, LCMapStringW `hello`→`HELLO`, Tls
+  round-trip, Encode/DecodePointer round-trip).
+- **Comblé** : **Tls** (étaient des stubs `TlsAlloc=0` → réels, table de slots, +`TlsFree`) ;
+  **`EncodePointer`/`DecodePointer`** (identité — la valeur est opaque, round-trip correct) ;
+  **`GetCPInfo`**, **`IsValidCodePage`**, **`GetStringTypeW`** (bits C1_* via ctype, sous-ensemble
+  ASCII), **`LCMapStringW`** (UPPER/LOWER). `GetACP`/`GetOEMCP` étaient déjà bons.
+- **Vérifié** : `tls_test`/`locale_cp` = **bit-identiques à Wine** ; **winediff 31/31** (les 29
+  précédents inchangés malgré `LC_ALL=C`). Régression : cargo **98/0** (wasm OK), **difftest 268/268,
+  transpile-diff 4/4 (hash inchangé)**.
