@@ -15,6 +15,9 @@
 #include <ctype.h>
 #include <dirent.h>
 #include <fnmatch.h>
+#ifndef __wasm__
+#include <sys/mman.h> /* WASI has no real file mmap; file mapping is native-only */
+#endif
 
 /* Read stdcall/cdecl argument `i` (a 32-bit word) from the modelled stack. */
 static inline uint32_t arg(uint32_t esp, int i) {
@@ -589,9 +592,74 @@ uint32_t aret_CreateFileA(uint32_t esp) {
     return fd < 0 ? ARET_INVALID_HANDLE : (uint32_t)fd;
 }
 
-uint32_t aret_CloseHandle(uint32_t esp) {
-    return close((int)arg(esp, 0)) == 0 ? 1 : 0;
+/* File mapping (CreateFileMapping/MapViewOfFile/UnmapViewOfFile) — bridged to
+ * host mmap. The guest runs natively with flat pointers, so a host mmap address
+ * is directly usable by the guest. A mapping HANDLE is a heap pointer (not an
+ * fd), so CloseHandle must recognise it; the view base→length is tracked so
+ * UnmapViewOfFile can munmap. */
+#ifndef __wasm__
+typedef struct { int fd; uint32_t prot; uint64_t size; } aret_mapping_t;
+#define ARET_MAP_MAX 64
+static aret_mapping_t *aret_maps[ARET_MAP_MAX];
+static struct { void *base; size_t len; } aret_views[ARET_MAP_MAX];
+
+uint32_t aret_CreateFileMappingA(uint32_t esp) {
+    int fd = (int)arg(esp, 0);          /* INVALID_HANDLE_VALUE => anonymous */
+    uint32_t prot = arg(esp, 2);        /* PAGE_READONLY=2, PAGE_READWRITE=4 */
+    uint64_t size = ((uint64_t)arg(esp, 3) << 32) | arg(esp, 4);
+    if (fd == (int)ARET_INVALID_HANDLE) fd = -1;
+    if (size == 0 && fd >= 0) { struct stat st; if (fstat(fd, &st) == 0) size = (uint64_t)st.st_size; }
+    if (size && prot == 4 && fd >= 0) { if (ftruncate(fd, (off_t)size) != 0) {/*best effort*/} }
+    aret_mapping_t *m = (aret_mapping_t *)malloc(sizeof *m);
+    if (!m) return 0;
+    m->fd = fd; m->prot = prot; m->size = size;
+    for (int i = 0; i < ARET_MAP_MAX; i++) if (!aret_maps[i]) { aret_maps[i] = m; break; }
+    return (uint32_t)(uintptr_t)m;
 }
+uint32_t aret_CreateFileMappingW(uint32_t esp) { return aret_CreateFileMappingA(esp); }
+
+uint32_t aret_MapViewOfFile(uint32_t esp) {
+    aret_mapping_t *m = (aret_mapping_t *)(uintptr_t)arg(esp, 0);
+    if (!m) return 0;
+    uint32_t access = arg(esp, 1);      /* FILE_MAP_COPY=1, WRITE=2, READ=4 */
+    uint64_t off = ((uint64_t)arg(esp, 2) << 32) | arg(esp, 3);
+    size_t len = (size_t)arg(esp, 4);
+    if (len == 0) len = (size_t)(m->size - off);
+    int prot = (m->prot == 4 || access == 1 || access == 2) ? (PROT_READ | PROT_WRITE) : PROT_READ;
+    int flags = (access == 1) ? MAP_PRIVATE : MAP_SHARED;
+    int mfd = m->fd;
+    int mflags = flags | (mfd < 0 ? MAP_ANONYMOUS : 0);
+    void *base = mmap(NULL, len ? len : 1, prot, mflags, mfd, (off_t)off);
+    if (base == MAP_FAILED) return 0;
+    for (int i = 0; i < ARET_MAP_MAX; i++) if (!aret_views[i].base) { aret_views[i].base = base; aret_views[i].len = len; break; }
+    return (uint32_t)(uintptr_t)base;
+}
+uint32_t aret_UnmapViewOfFile(uint32_t esp) {
+    void *base = (void *)(uintptr_t)arg(esp, 0);
+    for (int i = 0; i < ARET_MAP_MAX; i++) if (aret_views[i].base == base) {
+        munmap(base, aret_views[i].len); aret_views[i].base = NULL; return 1;
+    }
+    return 0;
+}
+uint32_t aret_FlushViewOfFile(uint32_t esp) {
+    void *base = (void *)(uintptr_t)arg(esp, 0);
+    size_t n = (size_t)arg(esp, 1);
+    for (int i = 0; i < ARET_MAP_MAX; i++) if (aret_views[i].base == base) {
+        msync(base, n ? n : aret_views[i].len, MS_SYNC); return 1;
+    }
+    return 0;
+}
+
+uint32_t aret_CloseHandle(uint32_t esp) {
+    uint32_t h = arg(esp, 0);
+    for (int i = 0; i < ARET_MAP_MAX; i++) if (aret_maps[i] && (uint32_t)(uintptr_t)aret_maps[i] == h) {
+        free(aret_maps[i]); aret_maps[i] = NULL; return 1;
+    }
+    return close((int)h) == 0 ? 1 : 0;
+}
+#else /* __wasm__: no file mapping; a HANDLE is always an fd. */
+uint32_t aret_CloseHandle(uint32_t esp) { return close((int)arg(esp, 0)) == 0 ? 1 : 0; }
+#endif
 
 /* GetFileSize(handle, lpFileSizeHigh) -> low 32 bits of the size (handles are
  * fds in this model). Sets *lpFileSizeHigh when non-NULL; INVALID_FILE_SIZE on

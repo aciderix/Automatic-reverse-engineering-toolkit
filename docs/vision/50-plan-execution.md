@@ -1618,3 +1618,16 @@ silencieux (à valider un jour) ; « **non lifté** » = `Asm`/abort = **sound**
   identique à Wine** ; winediff **25/25**. Régression : cargo vert, **difftest 268/268, transpile-diff
   4/4 (hash inchangé)**. **Unlock général** : tout outil CLI (cat/strings/makecab…) reçoit enfin ses
   arguments. Prochaine étape vers strings.exe : **mapping mémoire** (`CreateFileMapping`/`MapViewOfFile`).
+
+### Axe 2 : mapping mémoire de fichiers (vers strings.exe) ✅ FAIT
+- **2026-06-28 — `CreateFileMapping`/`MapViewOfFile`/`UnmapViewOfFile`/`FlushViewOfFile`** (+ `…W`),
+  pontés sur **mmap** hôte : le guest tourne en pointeurs natifs plats, donc l'adresse mmap est
+  directement utilisable. Un HANDLE de mapping est un **pointeur tas** (pas un fd) → `CloseHandle`
+  distingue (registre des mappings) ; les vues base→len sont suivies pour `munmap`. Lecture (cas
+  strings.exe) **et** écriture (PAGE_READWRITE → `ftruncate` + `MAP_SHARED` + writeback) gérées.
+- **Piège WASM corrigé** : WASI n'a pas de vrai `mmap` → section gardée `#ifndef __wasm__` (comme
+  setjmp/longjmp), avec un `CloseHandle` simple côté wasm. Détecté par le test `wasm_target` (qui
+  compile tout le runtime en wasm32-wasi).
+- **Vérifié** : `win32_mmap` (checksum d'un fichier mappé en lecture + écriture-au-travers relue) =
+  **bit-identique à Wine** ; winediff **26/26**. Régression : cargo **98/0**, **difftest 268/268,
+  transpile-diff 4/4 (hash inchangé)**, **wasm OK**, cpudiff OK.
