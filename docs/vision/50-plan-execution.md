@@ -1781,3 +1781,29 @@ silencieux (à valider un jour) ; « **non lifté** » = `Asm`/abort = **sound**
   recompilabilité **100%**, **transpile-diff 4/4 (hash 4b0121f182554d40 inchangé — empreinte
   comportementale ; les programmes du corpus n'ont pas de helper sans frame)**, **winediff 33/33**,
   cargo (wasm inclus) OK.
+
+### strings.exe — état après threading d'ebp : blocage profond dans le clonage de locale
+- **2026-06-28 — où on en est** : strings.exe exécute désormais **tout** le démarrage du CRT statique
+  (cpuid → xgetbv → critical sections → `_initterm` → init locale, refcount, allocation du locinfo
+  par-thread via `sub_42bf72`+`sub_42bb2b`). Le crash restant est dans `sub_4314c9`
+  (`__updatetlocinfoEx`-style), au `memcpy` qui clone une catégorie de locale (`rep movsd` d'origine,
+  0x88 dwords depuis `[locinfo+0x48]`).
+- **Diagnostic précis (gdb)** : à l'entrée de `sub_4314c9`, `arg2=locinfo` est **valide** et
+  `locinfo[0x48]=0x4562f0` (correct). Mais au `memcpy`, les arguments réels sont
+  `memcpy(dst=0x889d690 [malloc OK], src=0x0, n=0x4562f0)` — **src et count corrompus** : `n` reçoit la
+  valeur qui devrait être la *source* (0x4562f0), et `src`=0. Les slots de pile de l'appel
+  (`[ebp-0x1c4]`, `[ebp-0x188]`) sont écrasés.
+- **Ce n'est PAS un bug général de `rep movs`** : le test `rep_strings` du corpus winediff passe
+  (33/33), donc le lift de `rep movsd` est validé. La corruption vient d'une **écriture antérieure**
+  hors-limites dans ce chemin précis (frame corrompu), pas d'une erreur de traduction générale.
+- **Prochain pas (continuation)** : tracer quelle écriture antérieure dans `sub_4314c9` (ou un callee :
+  `sub_4315dd`, `sub_43124d`, `sub_42a0be`) corrompt `[ebp-0x1c4]`/`[ebp-0x188]`. Hypothèses : (a) un
+  store dont l'adresse est mal calculée suite à un reste de modèle esp/ebp dans une de ces fonctions ;
+  (b) une lecture `[locinfo+0x48]` OOB (0x4562f0+0x220 dépasse la fin de `.data` à 0x456c00) si le
+  layout mémoire d'ARET laisse un trou — à vérifier (watchpoint gdb sur `[ebp-0x188]`). C'est du
+  débogage mono-binaire profond ; à n'engager que si la cause s'avère **générale**.
+- **Acquis de la session (5 fixes généraux, tous commités/poussés, régression complète verte)** :
+  cpuid/xgetbv ; récupération (slots d'appel indirect absolu + tables NULL-tolérantes) ; DCE des
+  helpers purs (+ harness magicdiv) ; inline `_EH_prolog` ; threading d'`ebp`. Le transpileur est
+  **généralement** plus correct (instructions, récupération, funclets EH/sans-frame), bien au-delà de
+  strings.exe.
