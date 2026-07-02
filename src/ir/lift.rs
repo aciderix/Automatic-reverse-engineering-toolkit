@@ -812,6 +812,21 @@ fn bin(op: BinOp, a: Expr, b: Expr) -> Expr {
     Expr::Binary(op, Box::new(a), Box::new(b))
 }
 
+/// The `rep` count register (`ecx`/`rcx`), masked to the address width. The
+/// 64-bit IR keeps a 32-bit `ecx` as a value whose high bits are *unmasked leftover*
+/// (only truncated when stored back to a register/memory); a `rep` uses the whole
+/// `rcx` as its iteration count, so an `add ecx,k` that carried into bit 32 would
+/// otherwise become a multi-billion-element fill (a real `sqlite3.exe` crash: a
+/// `rep stosb` count `0xffffffa0 + 0xa8` read as `0x100000048`). Mask it here.
+fn rep_count(bits: u32) -> Expr {
+    let rcx = Expr::Read(Location::Reg(RegId(1)));
+    if bits == 32 {
+        bin(BinOp::And, rcx, Expr::Const(0xffff_ffff, Ty::int(64)))
+    } else {
+        rcx
+    }
+}
+
 /// Lift one instruction's compute semantics into IR statements. `bits` is the
 /// target pointer width (32 or 64). Returns `[Asm]` for anything not modelled.
 pub fn lift(insn: &Insn, bits: u32) -> Vec<Stmt> {
@@ -845,7 +860,7 @@ pub fn lift(insn: &Insn, bits: u32) -> Vec<Stmt> {
             let rdi = Location::Reg(RegId(7));
             let rsi = Location::Reg(RegId(6));
             let rcx = Location::Reg(RegId(1));
-            let bytes = bin(BinOp::Mul, Expr::Read(rcx.clone()), konst(sz));
+            let bytes = bin(BinOp::Mul, rep_count(bits), konst(sz));
             return vec![
                 Stmt::CallStmt(Expr::Call {
                     target: CallTarget::Named("memcpy".into()),
@@ -870,11 +885,11 @@ pub fn lift(insn: &Insn, bits: u32) -> Vec<Stmt> {
             let rdi = Location::Reg(RegId(7));
             let rax = Location::Reg(RegId(0));
             let rcx = Location::Reg(RegId(1));
-            let bytes = bin(BinOp::Mul, Expr::Read(rcx.clone()), konst(ssz));
+            let bytes = bin(BinOp::Mul, rep_count(bits), konst(ssz));
             return vec![
                 Stmt::CallStmt(fcall(
                     helper,
-                    vec![Expr::Read(rdi.clone()), Expr::Read(rax), Expr::Read(rcx.clone())],
+                    vec![Expr::Read(rdi.clone()), Expr::Read(rax), rep_count(bits)],
                 )),
                 Stmt::Set { dst: rdi.clone(), expr: bin(BinOp::Add, Expr::Read(rdi), bytes) },
                 Stmt::Set { dst: rcx, expr: konst(0) },
@@ -912,7 +927,7 @@ pub fn lift(insn: &Insn, bits: u32) -> Vec<Stmt> {
             let kt = Location::Temp((insn.address as u32).wrapping_mul(2).wrapping_add(1));
             let k = fcall(
                 schelper,
-                vec![Expr::Read(rdi.clone()), al.clone(), Expr::Read(rcx.clone()), konst(repe)],
+                vec![Expr::Read(rdi.clone()), al.clone(), rep_count(bits), konst(repe)],
             );
             let mut out = vec![Stmt::Set { dst: kt.clone(), expr: k }];
             out.push(Stmt::Set {
@@ -920,8 +935,8 @@ pub fn lift(insn: &Insn, bits: u32) -> Vec<Stmt> {
                 expr: bin(BinOp::Add, Expr::Read(rdi.clone()), bin(BinOp::Mul, Expr::Read(kt.clone()), konst(scsz))),
             });
             out.push(Stmt::Set {
-                dst: rcx.clone(),
-                expr: bin(BinOp::Sub, Expr::Read(rcx), Expr::Read(kt)),
+                dst: rcx,
+                expr: bin(BinOp::Sub, rep_count(bits), Expr::Read(kt)),
             });
             // Flags come from the last compared element, now at [edi - size].
             let last = Expr::Load {
