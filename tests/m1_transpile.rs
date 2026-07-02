@@ -942,3 +942,44 @@ fn computed_goto_switch_at_o0() {
         assert!(out.contains(expect), "missing `{expect}` in -O0 varied output:\n{out}");
     }
 }
+
+#[test]
+fn prune_to_function_closure() {
+    // Phase 2 — targeted conversion. `--function feature_a` must transpile ONLY
+    // feature_a's transitive direct-call closure (feature_a + helper_add +
+    // helper_mul = 3 functions), drive it from `main`, print "FEATURE_A: 42",
+    // and leave feature_b / helper_sub / the original `main` out of the binary.
+    if !has_m32() {
+        eprintln!("skipping prune test: `cc -m32` unavailable");
+        return;
+    }
+    let fixture = format!("{}/tests/m1/fixtures/prune_closure.exe", env!("CARGO_MANIFEST_DIR"));
+    let out_dir = std::env::temp_dir().join(format!("aret_prune_{}", std::process::id()));
+    let aret = env!("CARGO_BIN_EXE_aret");
+    let output = Command::new(aret)
+        .args(["--mode", "transpile", "--function", "feature_a", "--run"])
+        .arg("--out-dir")
+        .arg(&out_dir)
+        .arg(&fixture)
+        .output()
+        .expect("failed to run aret");
+    let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+    assert!(output.status.success(), "prune transpile failed:\n{stdout}");
+    // Only the closure was emitted, and it ran standalone.
+    assert!(stdout.contains("functions:  3"), "expected 3-function closure:\n{stdout}");
+    assert!(stdout.contains("FEATURE_A: 42"), "feature_a did not run standalone:\n{stdout}");
+    assert!(!stdout.contains("FEATURE_B"), "feature_b should have been pruned:\n{stdout}");
+    // The pruned code must not contain feature_b or its callee.
+    let mut c = String::new();
+    if let Ok(entries) = std::fs::read_dir(&out_dir) {
+        for e in entries.flatten() {
+            let p = e.path();
+            if p.file_name().and_then(|n| n.to_str()).is_some_and(|n| n.starts_with("chunk_")) {
+                c.push_str(&std::fs::read_to_string(&p).unwrap_or_default());
+            }
+        }
+    }
+    assert!(!c.contains("feature_b") && !c.contains("helper_sub"),
+        "pruned closure leaked feature_b/helper_sub into the generated C");
+    let _ = std::fs::remove_dir_all(&out_dir);
+}

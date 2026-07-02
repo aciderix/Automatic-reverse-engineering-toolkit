@@ -335,7 +335,10 @@ fn main() -> Result<()> {
         .filter(|f| match &args.function {
             None => true,
             Some(sel) => {
+                // Tolerate the leading underscore C symbols carry (`_feature_a`
+                // for a `feature_a` the user names), matching `--entry`'s rule.
                 f.name == *sel
+                    || f.name.trim_start_matches('_') == sel.trim_start_matches('_')
                     || format!("0x{:x}", f.entry) == sel.to_lowercase()
                     || format!("{:x}", f.entry) == sel.to_lowercase()
             }
@@ -463,6 +466,10 @@ fn main() -> Result<()> {
                         bail!("--entry: '{s}' is neither hex nor a known function symbol");
                     }
                 }
+                // `--function` (no `--entry`): the pruning below drives the
+                // selected function directly, so don't run CRT-startup detection
+                // (its note would be misleading).
+                None if args.function.is_some() => None,
                 // No `--entry`: if the program entry is a CRT bootstrap
                 // (`*CRTStartup`) and a distinct `main` symbol exists, start at
                 // `main` and skip the startup we do not model. Guarded so a
@@ -472,6 +479,38 @@ fn main() -> Result<()> {
                 None => analysis::auto_main_entry(&prog).inspect(|&a| {
                     eprintln!("note: entry 0x{:x} is CRT startup; starting at main 0x{a:x} (use --entry to override)", prog.entry);
                 }),
+            };
+            // Phase 2 — pruning by reachability. With `--function`, transpile
+            // only the selected function and its transitive *direct-call* callees
+            // (its closure), not the whole binary — targeted conversion of one
+            // feature of a large binary. The entry defaults to the selected
+            // function (so `main` drives it), unless `--entry` overrode it. Code
+            // reached solely through indirect calls/vtables is not pulled in; such
+            // a call fails loud at runtime rather than being faked (see
+            // `reachable_closure`).
+            let mut entry_override = entry_override;
+            let pruned;
+            let functions: &[&analysis::Function] = if let Some(sel) = &args.function {
+                let root = functions
+                    .first()
+                    .map(|f| f.entry)
+                    .ok_or_else(|| anyhow::anyhow!("--function {sel}: no matching recovered function"))?;
+                let closure = analysis::reachable_closure(&result.functions, root);
+                pruned = result
+                    .functions
+                    .iter()
+                    .filter(|f| closure.contains(&f.entry))
+                    .collect::<Vec<&analysis::Function>>();
+                eprintln!(
+                    "note: --function {sel}: pruned to {} function(s) (transitive closure of 0x{root:x})",
+                    pruned.len()
+                );
+                if args.entry.is_none() {
+                    entry_override = Some(root);
+                }
+                &pruned
+            } else {
+                &functions
             };
             let snapshot = match &args.snapshot {
                 Some(p) => {
@@ -483,7 +522,7 @@ fn main() -> Result<()> {
             };
             let report = builder::transpile(
                 &prog,
-                &functions,
+                functions,
                 &args.out_dir,
                 args.run,
                 entry_override,

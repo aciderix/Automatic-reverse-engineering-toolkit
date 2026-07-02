@@ -45,6 +45,35 @@ pub struct AnalysisResult {
     pub instruction_count: usize,
 }
 
+/// Transitive closure of direct-call callees reachable from `root` (inclusive),
+/// over the recovered `functions` — the set of functions that must be transpiled
+/// to run `root` standalone (Phase 2, targeted conversion / `--function`).
+///
+/// Only *direct* calls (the `callees` set) are followed. Code reached solely
+/// through an indirect call / vtable / callback is deliberately not pulled in:
+/// such a call is left to fail loud at runtime (`aret_call` → unmodelled) rather
+/// than silently guessing a target — consistent with the sacred principle. The
+/// returned set may contain callee addresses that are imports or unrecovered
+/// (not present as a `Function`); the caller filters to real functions.
+pub fn reachable_closure(functions: &[Function], root: u64) -> BTreeSet<u64> {
+    let by_entry: HashMap<u64, &Function> = functions.iter().map(|f| (f.entry, f)).collect();
+    let mut seen = BTreeSet::new();
+    let mut stack = vec![root];
+    while let Some(e) = stack.pop() {
+        if !seen.insert(e) {
+            continue;
+        }
+        if let Some(f) = by_entry.get(&e) {
+            for &c in &f.callees {
+                if !seen.contains(&c) {
+                    stack.push(c);
+                }
+            }
+        }
+    }
+    seen
+}
+
 /// Locate `main` in a stripped CRT binary by the call the startup makes to it.
 ///
 /// The mingw/MSVC C-runtime startup (`__tmainCRTStartup`) sets up the cdecl

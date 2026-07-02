@@ -110,7 +110,7 @@ de pile). Même famille que le tail-call déjà corrigé. Affecte **tout** vrai 
   72 tests, diff 268/268. *Reste Lua* : tourne jusqu'à l'interpréteur mais une
   erreur VM plus profonde demeure (« error message not a string ») — hors 1c.
 
-### Phase 2 — Pruning par accessibilité (CONVERSION CIBLÉE) ⬜
+### Phase 2 — Pruning par accessibilité (CONVERSION CIBLÉE) ✅ FAIT
 Transpiler **une fonction + uniquement ses callees** (fermeture transitive), pas
 tout le binaire. *Livrable* : `--prune`/auto avec `--function`. *Critère* :
 transpiler `sub_X` d'un gros binaire ne sort que la fermeture, compile, tourne.
@@ -2062,3 +2062,19 @@ binaires MSVC, pas seulement strings.exe.
   `cargo test --release` est **entièrement verte** (plus aucun échec préexistant).
 - **Régression complète PASS** : transpile 4/4 (hash inchangé `4b0121f182554d40`), winediff 34/34,
   suite unitaire 50+3+44+1+1 verte (dont WASM).
+
+### Phase 2 — Pruning par accessibilité (conversion ciblée) ✅ FAIT
+- **2026-07-02** : `--function <nom|addr>` en mode transpile ne sort plus tout le binaire ni la seule
+  fonction sélectionnée (qui casserait ses callees), mais sa **fermeture transitive d'appels directs**
+  (`analysis::reachable_closure`, BFS sur `Function::callees`). L'entrée bascule automatiquement sur la
+  fonction choisie (`main` la pilote), sauf `--entry` explicite.
+- **Sûreté** : seuls les appels **directs** sont suivis ; le code atteint uniquement par appel
+  indirect/vtable/callback n'est **pas** tiré dans la fermeture — un tel appel échoue bruyamment au
+  runtime (`aret_call` → unmodelled) plutôt que d'être deviné (principe sacré). Le matcher `--function`
+  tolère aussi le tiret de tête des symboles C (`_feature_a` ↔ `feature_a`), comme `--entry`.
+- **Vérifié** : fixture `prune_closure.exe` (2 features indépendantes pilotées par `main`).
+  `--function feature_a` → **3 fonctions** (feature_a + helper_add + helper_mul), tourne seul
+  (`FEATURE_A: 42`), et `feature_b`/`helper_sub`/`main` sont **absents** du C généré. Test
+  `prune_to_function_closure` (m1 44→45), suite complète verte, transpile 4/4 (hash inchangé
+  `4b0121f182554d40`).
+- **Bénéfice** : transpiler une seule feature d'un gros binaire sans payer (ni risquer) tout le reste.
