@@ -2045,3 +2045,20 @@ binaires MSVC, pas seulement strings.exe.
   recompilabilité 100 %, transpile 4/4 (hash inchangé `4b0121f182554d40`), **winediff 34/34**, cpudiff
   268/268. (L'unique échec du test unitaire WASM `signature_mismatch:sub_401000` est **préexistant** —
   vérifié par `git stash` sur `c95ca7f` — sans rapport avec ce fix.)
+
+### Cible WASM — signature d'entrée désynchronisée du threading ebp ✅
+- **2026-07-02** : le test unitaire `windows_pe_to_webassembly` échouait (`signature_mismatch:sub_401000`,
+  trap `unreachable`). **Régression latente** introduite par le threading ebp (signatures 4→5 args) : le
+  `typedef aret_fn`, les trampolines de dispatch et les déclarations `aret_decls.h` étaient passés à 5
+  args, **mais `aret_main.c` (déclaration + appel de l'entrée) et les stubs faibles `undef_subs` étaient
+  restés à 4 args**. Le backend C natif tolère l'écart (ABI x86-64 laxiste, 5ᵉ arg = registre poubelle) ;
+  **wasm-ld non** : signatures conflictuelles entre TU → il génère un stub piège `signature_mismatch:<fn>`
+  qui exécute `unreachable`. D'où le trap dès `main → sub_401000`.
+- **Fix** : `aret_main.c` déclare et appelle l'entrée avec 5 args (`…, uint64_t b` ; ebp initial = 0) ;
+  le stub `undef_subs` prend aussi 5 args. Toutes les signatures de la passe transpile sont désormais
+  cohérentes (5 args partout).
+- **Effet** : **WASM 7/7 fixtures** (chaîne pile, données globales, appels indirects, CRT printf/heap,
+  x87, couche Win32, SHA-256 réel) — le PE Windows tourne nativement en WebAssembly. La suite complète
+  `cargo test --release` est **entièrement verte** (plus aucun échec préexistant).
+- **Régression complète PASS** : transpile 4/4 (hash inchangé `4b0121f182554d40`), winediff 34/34,
+  suite unitaire 50+3+44+1+1 verte (dont WASM).

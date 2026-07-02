@@ -760,7 +760,7 @@ pub fn transpile(
          char **aret_real_argv = 0;\n\n\
          void __aret_map_memory(void);\n\
          void __aret_patch_iat(void);\n\
-         uint64_t sub_{entry:x}(uint64_t __esp, uint64_t a, uint64_t c, uint64_t d);\n\n\
+         uint64_t sub_{entry:x}(uint64_t __esp, uint64_t a, uint64_t c, uint64_t d, uint64_t b);\n\n\
          int main(int argc, char **argv) {{\n\
          \x20   aret_real_argc = argc; aret_real_argv = argv;\n\
          {map_call}    uint8_t *top = aret_stack + sizeof(aret_stack) - 64;\n\
@@ -772,7 +772,7 @@ pub fn transpile(
          \x20   sp[1] = (uint32_t)argc;                   /* argc  @ esp+4 */\n\
          \x20   sp[2] = (uint32_t)(uintptr_t)argv;        /* argv  @ esp+8 */\n\
          \x20   uint64_t esp = (uint64_t)(uintptr_t)top;\n\
-         \x20   return (int)sub_{entry:x}(esp, (uint32_t)argc, (uint32_t)(uintptr_t)argv, 0);\n\
+         \x20   return (int)sub_{entry:x}(esp, (uint32_t)argc, (uint32_t)(uintptr_t)argv, 0, 0);\n\
          }}\n",
     );
 
@@ -788,7 +788,7 @@ pub fn transpile(
     let mut stubs = emit_import_stubs(prog);
     for &addr in &undef_subs {
         stubs.push_str(&format!(
-            "__attribute__((weak)) uint64_t sub_{addr:x}(uint64_t e,uint64_t a,uint64_t c,uint64_t d){{ (void)e;(void)a;(void)c;(void)d; aret_unmodelled(\"sub_{addr:x} (unrecovered function)\"); return 0; }}\n"
+            "__attribute__((weak)) uint64_t sub_{addr:x}(uint64_t e,uint64_t a,uint64_t c,uint64_t d,uint64_t b){{ (void)e;(void)a;(void)c;(void)d;(void)b; aret_unmodelled(\"sub_{addr:x} (unrecovered function)\"); return 0; }}\n"
         ));
     }
     // Indirect-call dispatch table: internal entries (translated) + host-backed
