@@ -2161,3 +2161,19 @@ binaires MSVC, pas seulement strings.exe.
   **flottant** (`string.format("%.4f", math.pi^2)`) — complétude lifter x87 (Phase 5), séparé.
 - **Régression PASS** : difftest 268/268, transpile 4/4 (hash inchangé), recompilabilité gzip/ls/cat 100 %,
   52 tests.
+
+### Phase 5 — libm statiquement liée reconnue comme fp-returning en strippé ✅
+- **2026-07-02** : dans `luaV_execute` (boucle VM), `fld qword [eax]` retombait en asm opaque **en strippé**
+  alors que le symbolé liftait proprement. Cause : `call_returns_fp`/`compute_fp_returning` ne
+  reconnaissaient une fonction libm fp-returning que par **nom de symbole** (`pow`, `sin`…). En strippé
+  ces fonctions sont `sub_<addr>` (pas de symbole) et leur corps x87 complexe fait **bailler** l'analyse
+  de profondeur → jamais classées fp-returning → l'`OP_POW` de Lua (`call pow`) ne compte pas le `st(0)`
+  poussé → la profondeur x87 de tout `luaV_execute` se désynchronise → ses `fld` retombent en asm.
+- **Fix général** : reconnaître aussi la libm par **signature FLIRT** via `prog.crt_symbol(addr)` (le
+  nom CRT reconnu à l'entrée), en plus du symbole et du thunk d'import. Appliqué au seed de
+  `compute_fp_returning` et au site d'appel `call_returns_fp`.
+- **Effet** : `luaV_execute` strippé **0 `fld` non modélisé** (comme le symbolé), partial 23→19. Général
+  pour tout binaire strippé appelant une libm statique (le motif `OP_POW`→`pow` est universel).
+- **Soundness préservée** : cpudiff OK, difftest 268/268, transpile 4/4 (hash inchangé), recompilabilité
+  gzip/ls/cat 100 %, 52 tests. (Lua strippé progresse ensuite jusqu'à un segfault **atoi** dans une
+  autre fonction — trou séparé en cours.)

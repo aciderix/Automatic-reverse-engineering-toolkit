@@ -774,6 +774,10 @@ fn call_returns_fp(
             let t = ins.near_branch_target();
             fp.contains(&t)
                 || (t != 0 && prog.import_thunk(t).is_some_and(is_fp_returning_lib))
+                // Stripped: a statically linked libm function recognised by FLIRT
+                // signature (no symbol name to seed `fp`). Same rationale as the
+                // `crt_symbol` seed in `compute_fp_returning`.
+                || (t != 0 && prog.crt_symbol(t).is_some_and(is_fp_returning_lib))
         }
         // Indirect call straight through an IAT slot (`call [imm32]`) to an
         // fp-returning import — e.g. msvcrt `difftime` returns a `double`.
@@ -834,7 +838,14 @@ pub fn compute_fp_returning(prog: &Program, funcs: &[&Function]) -> std::collect
     // guarantees the fp return, and a caller must count the st(0) they push (e.g.
     // Lua's OP_POW calls `pow`; miscounting it desyncs the whole VM's x87 stack).
     for f in funcs {
-        if is_fp_returning_lib(&f.name) {
+        // By recovered symbol name, or — for a stripped binary — by the CRT name a
+        // FLIRT signature recognises at the entry. Without the latter a statically
+        // linked `pow`/`sin`/… (now just `sub_<addr>`) is never seen as fp-returning,
+        // so a caller like Lua's `OP_POW` miscounts the `st(0)` it pushes and the
+        // whole function's x87 depth desyncs (its `fld`s fall back to opaque asm).
+        if is_fp_returning_lib(&f.name)
+            || prog.crt_symbol(f.entry).is_some_and(is_fp_returning_lib)
+        {
             set.insert(f.entry);
         }
     }
