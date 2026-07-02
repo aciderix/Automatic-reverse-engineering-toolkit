@@ -4,7 +4,7 @@
 
 use anyhow::{bail, Context, Result};
 use object::{Object, ObjectSection, ObjectSymbol, SectionKind, SymbolKind};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 /// Pointer width of the target. Drives the disassembler bitness and the
 /// pseudo-C integer widths.
@@ -111,6 +111,11 @@ pub struct Program {
     /// the displacement field back to the real target so recursive/cross-function
     /// calls decode to the right address (and external calls get a name).
     pub relocs: BTreeMap<u64, RelocEntry>,
+    /// Virtual addresses covered by a PE base relocation (`.reloc`, HIGHLOW/DIR64)
+    /// — the bytes of an absolute address the loader patches at a non-default base.
+    /// These vary from binary to binary, so FLIRT signature generation wildcards
+    /// them (an absolute operand like `mov reg,[abs32]` must not pin a signature).
+    pub base_relocs: BTreeSet<u64>,
 }
 
 /// A resolved static relocation: the branch/data target address (when the symbol
@@ -223,6 +228,7 @@ impl Program {
         add_elf_imports(&obj, &sections, bitness, &mut imports);
 
         let relocs = parse_static_relocs(&obj);
+        let base_relocs = parse_pe_base_relocs(data);
 
         Ok(Program {
             format: format!("{:?}", obj.format()),
@@ -232,6 +238,7 @@ impl Program {
             symbols,
             imports,
             relocs,
+            base_relocs,
         })
     }
 
@@ -491,6 +498,46 @@ fn pe_header_section(data: &[u8]) -> Option<Section> {
     }
 
     build::<pe::ImageNtHeaders32>(data).or_else(|| build::<pe::ImageNtHeaders64>(data))
+}
+
+/// Parse a PE base-relocation table (`.reloc`) into the set of virtual addresses
+/// whose bytes hold an absolute address the loader patches (HIGHLOW = 4 bytes,
+/// DIR64 = 8). Best-effort: empty for non-PE, a stripped `.reloc`, or any parse
+/// error. Used only to wildcard those bytes in FLIRT signatures (they differ
+/// between binaries), so a false-empty just falls back to the prior behaviour.
+fn parse_pe_base_relocs(data: &[u8]) -> BTreeSet<u64> {
+    use object::read::pe::{ImageNtHeaders, ImageOptionalHeader};
+    use object::pe;
+
+    fn collect<Nt: ImageNtHeaders>(data: &[u8]) -> Option<BTreeSet<u64>> {
+        let dos = pe::ImageDosHeader::parse(data).ok()?;
+        let mut offset = dos.nt_headers_offset() as u64;
+        let (nt, dirs) = Nt::parse(data, &mut offset).ok()?;
+        let sections = nt.sections(data, offset).ok()?;
+        let base = nt.optional_header().image_base();
+        let mut set = BTreeSet::new();
+        let mut blocks = match dirs.relocation_blocks(data, &sections) {
+            Ok(Some(b)) => b,
+            _ => return Some(set),
+        };
+        while let Ok(Some(block)) = blocks.next() {
+            for reloc in block {
+                // HIGHLOW (3) = 32-bit absolute; DIR64 (10) = 64-bit absolute.
+                // ABSOLUTE (0) is padding. Record the covered VA(s) either way.
+                let va = base + reloc.virtual_address as u64;
+                if reloc.typ == pe::IMAGE_REL_BASED_HIGHLOW
+                    || reloc.typ == pe::IMAGE_REL_BASED_DIR64
+                {
+                    set.insert(va);
+                }
+            }
+        }
+        Some(set)
+    }
+
+    collect::<pe::ImageNtHeaders32>(data)
+        .or_else(|| collect::<pe::ImageNtHeaders64>(data))
+        .unwrap_or_default()
 }
 
 /// Parse a PE import table into a map of IAT slot virtual address -> imported

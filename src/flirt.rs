@@ -57,13 +57,25 @@ fn branch_mask(code: &[u8]) -> Vec<bool> {
 }
 
 /// Build a signature line (`name hex-with-..wildcards`) from a function's bytes.
-pub fn gen_signature(name: &str, code: &[u8]) -> Option<String> {
+///
+/// `reloc` marks, per byte, whether that byte is covered by a base relocation —
+/// i.e. part of an absolute address the loader patches (`mov reg,[abs32]`,
+/// `push offset`, a rebased pointer). Those bytes differ between binaries, so
+/// they are wildcarded alongside the relative-branch operands; otherwise a
+/// signature over-pins the *one* binary it was generated from and fails to match
+/// any other (the `__pei386_runtime_relocator` miss on stripped mingw output).
+pub fn gen_signature(name: &str, code: &[u8], reloc: &[bool]) -> Option<String> {
     let n = code.len().min(SIG_LEN);
     if n < 8 {
         return None; // too short to be distinctive
     }
     let code = &code[..n];
-    let mask = branch_mask(code);
+    let mut mask = branch_mask(code);
+    for (i, m) in mask.iter_mut().enumerate() {
+        if reloc.get(i).copied().unwrap_or(false) {
+            *m = false; // relocated (absolute) byte — wildcard it
+        }
+    }
     let mut hex = String::new();
     for (b, &keep) in code.iter().zip(mask.iter()) {
         if keep {
@@ -183,7 +195,7 @@ mod tests {
         // the call displacement; the signature must match both.
         let a = [0x55, 0x89, 0xe5, 0xe8, 0x11, 0x22, 0x33, 0x44, 0xc3];
         let b = [0x55, 0x89, 0xe5, 0xe8, 0xaa, 0xbb, 0xcc, 0xdd, 0xc3];
-        let line = gen_signature("_demo", &a).unwrap();
+        let line = gen_signature("_demo", &a, &[false; 9]).unwrap();
         let db = FlirtDb::parse(&line);
         assert_eq!(db.match_at(&a), Some("_demo"));
         assert_eq!(db.match_at(&b), Some("_demo"), "branch displacement must be wildcarded");
@@ -198,13 +210,31 @@ mod tests {
         // `call __mingw_v{s,f}printf` target, so both signatures match the same
         // code equally well. Binding either would be a guess → must be None.
         let code = [0x83, 0xec, 0x1c, 0xe8, 0x11, 0x22, 0x33, 0x44, 0xc3];
-        let f = gen_signature("_fprintf", &code).unwrap();
-        let s = gen_signature("_sprintf", &code).unwrap();
+        let f = gen_signature("_fprintf", &code, &[false; 9]).unwrap();
+        let s = gen_signature("_sprintf", &code, &[false; 9]).unwrap();
         let db = FlirtDb::parse(&format!("{f}\n{s}"));
         assert_eq!(db.match_at(&code), None, "ambiguous CRT match must not guess");
         // A single signature for the same bytes is unambiguous.
         let db1 = FlirtDb::parse(&f);
         assert_eq!(db1.match_at(&code), Some("_fprintf"));
+    }
+
+    #[test]
+    fn absolute_reloc_operand_is_wildcarded() {
+        // push ebp; mov ebp,esp; mov edi,[abs32]; ret — two binaries link the
+        // absolute operand to different addresses (the 4 bytes are base-relocated).
+        // The signature must wildcard them and match both.
+        let a = [0x55, 0x89, 0xe5, 0x8b, 0x3d, 0x6c, 0x40, 0x44, 0x00, 0xc3];
+        let b = [0x55, 0x89, 0xe5, 0x8b, 0x3d, 0x68, 0xc0, 0x40, 0x00, 0xc3];
+        // Bytes 5..9 (the disp32 of `mov edi,[abs32]`) are relocation-covered.
+        let mut reloc = [false; 10];
+        for m in reloc.iter_mut().take(9).skip(5) {
+            *m = true;
+        }
+        let line = gen_signature("_relreloc", &a, &reloc).unwrap();
+        let db = FlirtDb::parse(&line);
+        assert_eq!(db.match_at(&a), Some("_relreloc"));
+        assert_eq!(db.match_at(&b), Some("_relreloc"), "absolute operand must be wildcarded");
     }
 
     #[test]

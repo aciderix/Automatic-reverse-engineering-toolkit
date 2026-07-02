@@ -291,7 +291,12 @@ fn run_gensig(prog: &Program) -> String {
             continue;
         }
         let code = &sec.data[start..end.min(sec.data.len())];
-        if let Some(line) = flirt::gen_signature(&sym.name, code) {
+        // Per-byte "is this byte part of a patched absolute address?" flags, so
+        // the signature wildcards relocated operands (which vary per binary).
+        let reloc: Vec<bool> = (0..code.len())
+            .map(|k| prog.base_relocs.contains(&(a + k as u64)))
+            .collect();
+        if let Some(line) = flirt::gen_signature(&sym.name, code, &reloc) {
             out.push_str(&line);
             out.push('\n');
         }

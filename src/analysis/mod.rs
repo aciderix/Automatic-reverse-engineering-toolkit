@@ -272,6 +272,14 @@ pub fn analyze(prog: &Program, disasm: &Disassembler, prologue_scan: bool) -> An
 /// jump-table's run of case-target pointers would otherwise be mistaken for
 /// functions.
 fn looks_like_func_start(prog: &Program, addr: u64, allow_leaf: bool) -> bool {
+    // A function a library signature recognises (a statically-linked CRT routine
+    // or startup glue) is unambiguously a real entry, whatever prologue it uses —
+    // the strongest signal there is, and independent of the byte heuristics below.
+    // Lets address-taken recovery seed e.g. `atexit(___do_global_dtors)` even when
+    // the dtor runner starts with an unusual `mov eax,[abs];mov eax,[eax];test`.
+    if prog.crt_symbol(addr).is_some() || prog.is_startup_glue(addr) {
+        return true;
+    }
     let Some(code) = prog.read_from(addr) else { return false };
     let b0 = code[0];
     let b1 = code.get(1).copied().unwrap_or(0);

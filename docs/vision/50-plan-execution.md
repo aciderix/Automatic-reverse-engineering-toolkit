@@ -2078,3 +2078,32 @@ binaires MSVC, pas seulement strings.exe.
   `prune_to_function_closure` (m1 44→45), suite complète verte, transpile 4/4 (hash inchangé
   `4b0121f182554d40`).
 - **Bénéfice** : transpiler une seule feature d'un gros binaire sans payer (ni risquer) tout le reste.
+
+### Phase 3 — Robustesse FLIRT (opérandes relocalisés) + recovery amorcée par signature ✅ (avancée majeure)
+- **2026-07-02 — cause générale trouvée sur un binaire mingw strippé** (CRT : qsort+callback, sprintf,
+  printf ; glue `atexit(___do_global_dtors)`). Symbolé : SOUND, tourne parfait. **Strippé : sortie
+  correcte puis abort à la sortie** — deux trous généraux :
+  1. **Signatures FLIRT sur-spécifiques.** `gen_signature` ne masquait que les branches relatives, pas
+     les **opérandes absolus relocalisés** (`mov reg,[abs32]`, pointeurs de tables) qui **varient d'un
+     binaire à l'autre**. Résultat : la signature de `__pei386_runtime_relocator` (et des runners de
+     ctors/dtors) était épinglée sur *le* binaire d'origine et ne matchait aucun autre → glue liftée →
+     abort sur x87 non modélisé. **Fix** : parse de la table de base-relocation PE (`.reloc`,
+     HIGHLOW/DIR64 → `Program::base_relocs`) ; `gen_signature(name, code, reloc)` masque les octets
+     relocalisés (comme le vrai FLIRT d'IDA). DB régénérée et **fusionnée** (53 noms conservés, variantes
+     glue re-wildcardées ajoutées). Test `absolute_reloc_operand_is_wildcarded`.
+  2. **Glue atteinte par appel indirect jamais récupérée.** `___do_global_dtors` (enregistré par
+     `mov [esp],0x<dtors>; call atexit`) commence par `mov eax,[abs];mov eax,[eax];test` — prologue hors
+     heuristique → jamais récupéré comme fonction → appel indirect vers adresse non récupérée → abort.
+     **Fix général** : `looks_like_func_start` accepte désormais toute adresse **reconnue par signature**
+     (`crt_symbol`/`is_startup_glue`) — le signal le plus fort qui soit. La recovery address-taken amorce
+     alors la glue, qui est ensuite **host-backed** (no-op).
+- **Effet** : le binaire **strippé** tourne proprement jusqu'à la sortie, **bit-identique à Wine**
+  (`functions 107→108`, `host-backed 31→33`, plus d'abort). Bénéficie à **tout** binaire strippé à CRT
+  statique + glue mingw. Fixture committée `stripped_crt.exe` + test
+  `stripped_crt_glue_recovered_and_hostbacked`.
+- **Régression complète PASS** : cargo test (51 unit + m1 45→46), difftest 268/268, transpile 4/4 (hash
+  inchangé `4b0121f182554d40`), winediff 34/34, recompilabilité 100 %, SMT 11/11, magicdiv, in-place 3/3.
+- **Reste Phase 3** : signatures **MSVC** (`ucrtbase`/`msvcr*`) — nécessite un corpus MSVC symbolé (indispo
+  sur cet hôte Linux/mingw) ; le chemin mingw-strippé est désormais solide et le fix FLIRT (reloc) est
+  générique (profitera aux signatures MSVC quand on aura le corpus). Le volet 3a (Lua strippé, quelques
+  fonctions aux frontières) reste ouvert.

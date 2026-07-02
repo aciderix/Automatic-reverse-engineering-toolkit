@@ -944,6 +944,26 @@ fn computed_goto_switch_at_o0() {
 }
 
 #[test]
+fn stripped_crt_glue_recovered_and_hostbacked() {
+    // Phase 3 — a STRIPPED mingw binary (no symbols) that uses the CRT and whose
+    // startup registers `atexit(___do_global_dtors)`. ARET must recognise the
+    // statically-linked CRT/glue by FLIRT signature (with base-relocated operands
+    // wildcarded) and let that recognition seed address-taken recovery of the
+    // glue reached only by indirect call — otherwise the dtor runner is lifted
+    // and the program aborts at exit. A clean run to the expected output proves
+    // the whole chain works. Before the fix this aborted after printing.
+    if !has_m32() {
+        eprintln!("skipping stripped-CRT test: `cc -m32` unavailable");
+        return;
+    }
+    let out = transpile_and_run("stripped_crt.exe");
+    assert!(
+        out.contains("SORTED: 11 22 33 48 59 70 85 96"),
+        "stripped CRT binary did not run cleanly to completion:\n{out}"
+    );
+}
+
+#[test]
 fn prune_to_function_closure() {
     // Phase 2 — targeted conversion. `--function feature_a` must transpile ONLY
     // feature_a's transitive direct-call closure (feature_a + helper_add +
