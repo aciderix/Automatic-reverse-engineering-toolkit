@@ -74,6 +74,41 @@ uint32_t aret_GetSystemTimeAsFileTime(uint32_t esp) {
     return 0;
 }
 
+/* Fill a SYSTEMTIME (8 WORDs: year,month,dow,day,hour,min,sec,ms) from a broken-
+ * down time. Shared by GetSystemTime (UTC) and GetLocalTime. */
+static void aret_fill_systemtime(uint32_t p, int local) {
+    if (!p) return;
+    struct timeval tv; gettimeofday(&tv, NULL);
+    time_t t = tv.tv_sec; struct tm tmv;
+    if (local) localtime_r(&t, &tmv); else gmtime_r(&t, &tmv);
+    uint16_t *w = (uint16_t *)(uintptr_t)p;
+    w[0] = (uint16_t)(tmv.tm_year + 1900);
+    w[1] = (uint16_t)(tmv.tm_mon + 1);
+    w[2] = (uint16_t)tmv.tm_wday;
+    w[3] = (uint16_t)tmv.tm_mday;
+    w[4] = (uint16_t)tmv.tm_hour;
+    w[5] = (uint16_t)tmv.tm_min;
+    w[6] = (uint16_t)tmv.tm_sec;
+    w[7] = (uint16_t)(tv.tv_usec / 1000);
+}
+uint32_t aret_GetSystemTime(uint32_t esp) { aret_fill_systemtime(WU(0), 0); return 0; }
+uint32_t aret_GetLocalTime(uint32_t esp) { aret_fill_systemtime(WU(0), 1); return 0; }
+
+/* SystemTimeToFileTime(const SYSTEMTIME*, FILETIME*) -> 100ns ticks since 1601. */
+uint32_t aret_SystemTimeToFileTime(uint32_t esp) {
+    const uint16_t *w = (const uint16_t *)(uintptr_t)WU(0);
+    uint32_t out = WU(1);
+    if (!w || !out) return 0;
+    struct tm tmv; memset(&tmv, 0, sizeof tmv);
+    tmv.tm_year = w[0] - 1900; tmv.tm_mon = w[1] - 1; tmv.tm_mday = w[3];
+    tmv.tm_hour = w[4]; tmv.tm_min = w[5]; tmv.tm_sec = w[6];
+    time_t t = timegm(&tmv);
+    uint64_t ft = ((uint64_t)t * 10000000ull) + ((uint64_t)w[7] * 10000ull) + 116444736000000000ull;
+    ((uint32_t *)(uintptr_t)out)[0] = (uint32_t)ft;
+    ((uint32_t *)(uintptr_t)out)[1] = (uint32_t)(ft >> 32);
+    return 1;
+}
+
 /* ------------------------------------------------------------------ */
 /* Environment / process identity / paths                             */
 /* ------------------------------------------------------------------ */
