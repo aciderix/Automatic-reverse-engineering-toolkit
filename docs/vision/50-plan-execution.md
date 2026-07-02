@@ -2147,3 +2147,17 @@ binaires MSVC, pas seulement strings.exe.
   par version), pas la sur-récupération.
 - **Régression complète PASS** : cargo test (52 unit + m1 46), difftest 268/268, transpile 4/4 (hash
   inchangé `4b0121f182554d40`), recompilabilité gzip/ls/cat 100 %, winediff 34/34, SMT 11/11, in-place 3/3.
+
+### Phase 3a — Prologue de garde `__do_global_dtors_aux` reconnu (version-indépendant) ✅
+- **2026-07-02** : Lua strippé, après le fix de sur-récupération, tournait (compilateur OK, « STRIP 42 »,
+  `table.sort`) mais butait à la **sortie** sur `___do_global_dtors` (atteint par `atexit` → appel
+  indirect), non récupéré. Sa signature FLIRT (autre version mingw) ne matchait pas. **Fix général,
+  indépendant de la version** : `looks_like_func_start` reconnaît le prologue de garde
+  `mov eax,[abs32]; mov eax,[eax]; test eax,eax` (9 octets) — l'idiome `__do_global_dtors_aux`/
+  `__do_global_ctors_aux` — en plus de la variante sans déréférencement déjà gérée. Appliqué aux seuls
+  candidats *address-taken* (l'immédiat d'un `atexit`), donc sûr.
+- **Effet** : `os.exit(5)` propage enfin (exit 5, plus d'abort), et Lua strippé égale Wine sur
+  `table.sort`/`print`/arithmétique. Reste un `fld qword [eax]` non modélisé sur le chemin de formatage
+  **flottant** (`string.format("%.4f", math.pi^2)`) — complétude lifter x87 (Phase 5), séparé.
+- **Régression PASS** : difftest 268/268, transpile 4/4 (hash inchangé), recompilabilité gzip/ls/cat 100 %,
+  52 tests.

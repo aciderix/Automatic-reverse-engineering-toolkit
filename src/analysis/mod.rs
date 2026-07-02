@@ -298,6 +298,12 @@ fn looks_like_func_start(prog: &Program, addr: u64, allow_leaf: bool) -> bool {
         // initializer table). The 7-byte signature is specific enough not to
         // seed interior bytes.
         || (b0 == 0xa1 && code.get(5) == Some(&0x85) && code.get(6) == Some(&0xc0))
+        // Same guard with an extra pointer deref: `mov eax,[moffs32]; mov eax,[eax];
+        // test eax,eax` — mingw's `__do_global_dtors_aux`/`__do_global_ctors_aux`
+        // (registered via `atexit(&aux)`, reached only by indirect call at exit).
+        // The 9-byte signature is version-independent (unlike a FLIRT match).
+        || (b0 == 0xa1 && code.get(5) == Some(&0x8b) && code.get(6) == Some(&0x00)
+            && code.get(7) == Some(&0x85) && code.get(8) == Some(&0xc0))
         // mov reg, [esp+disp] (modrm rm=100=SIB, mod≠11; SIB=24 → base=esp).
         || (allow_leaf && b0 == 0x8b && (b1 & 0x07) == 0x04 && (b1 & 0xc0) != 0xc0 && b2 == 0x24)
 }
