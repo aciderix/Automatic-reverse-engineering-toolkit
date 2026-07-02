@@ -2249,3 +2249,20 @@ binaires MSVC, pas seulement strings.exe.
   (taille mal liftée parmi 2958 fonctions → sqlite « out of memory »). Forensics profonde restante (vrai
   gros binaire MSVC = cible multi-session). **Le gain général (`aret_disp`) est acquis et validé.**
 - **Régression PASS** : winediff 34/34, 53 tests, transpile 4/4 (hash inchangé).
+
+### Phase 3b — sqlite3.exe MSVC : 3 bugs généraux (aret_disp, rep scas, wmain wide-argv) ✅ (progrès)
+- **2026-07-02** : en pilotant un vrai `sqlite3.exe` MSVC 32-bit strippé (2958 fn), 3 bugs **généraux**
+  trouvés et corrigés (chacun touche une classe entière de binaires) :
+  1. **`aret_disp` esp+4** : dispatch host-backed indirect lisait l'adresse de retour comme 1er arg →
+     `GetSystemInfo` segfaultait.
+  2. **`rep(ne) scas`** (inline-strlen MSVC) non modélisé → `strlen`=0 → `malloc(0)` → « out of memory ».
+     Modélisé (helper `__rep_scasN`, edi/ecx/flags).
+  3. **wmain wide-argv** : sqlite importe `__wgetmainargs` → son entrée est un `wmain` qui lit `argv[i]`
+     en `wchar_t*`. L'argv narrow était lu un octet sur deux (`SELECT`→`SLC`). Le wrapper `aret_main`
+     construit maintenant un **argv UTF-16** quand `__wgetmainargs` est importé.
+- **État sqlite** : lit ses arguments correctement (`sqlite3 -version` → `3.40.1 …` bit-identique). Le
+  **moteur SQL** (open `:memory:` + exécution + impression des lignes) ne sort pas encore — couche plus
+  profonde (cible multi-session). Mais **3 bugs universels acquis** depuis un seul binaire, validant la
+  stratégie « creuser un vrai gros binaire intelligemment ».
+- **Régression PASS** (chaque commit) : cpudiff, difftest 268/268, transpile 4/4 (hash inchangé),
+  winediff 34/34, recompilabilité 100 %, 53 tests.

@@ -754,6 +754,29 @@ pub fn transpile(
     } else {
         ""
     };
+    // A `wmain`-style entry (the program imports `__wgetmainargs`, the wide CRT
+    // arg fetcher) reads `argv[i]` as `wchar_t*`. Handing it the native *narrow*
+    // argv makes it read every other byte (`SELECT` -> `SLC`, then
+    // WideCharToMultiByte keeps the low byte of each misread wchar). Build UTF-16
+    // copies of the real args and hand those over instead.
+    let wide_args = prog
+        .imports
+        .values()
+        .any(|n| n.trim_start_matches('_') == "wgetmainargs");
+    let (argv_prep, argv_expr) = if wide_args {
+        (
+            "\x20   /* Wide (UTF-16) argv — the entry imports __wgetmainargs (wmain). */\n\
+             \x20   static uint16_t aret_wbuf[1u << 16]; static uint32_t aret_wargv[1024];\n\
+             \x20   { uint32_t wo = 0; for (int i = 0; i < argc && i < 1024; i++) {\n\
+             \x20       aret_wargv[i] = (uint32_t)(uintptr_t)&aret_wbuf[wo];\n\
+             \x20       for (const unsigned char *p = (const unsigned char *)argv[i]; *p && wo < (1u << 16) - 1; p++) aret_wbuf[wo++] = *p;\n\
+             \x20       aret_wbuf[wo++] = 0; } }\n",
+            "(uint32_t)(uintptr_t)aret_wargv",
+        )
+    } else {
+        ("", "(uint32_t)(uintptr_t)argv")
+    };
+
     // aret_main.c — a native entry that maps memory, sets up the single shared
     // machine stack, then drives the transpiled entry point with the stack-top
     // pointer. Every transpiled function threads this `__esp` through its calls.
@@ -772,15 +795,16 @@ pub fn transpile(
          int main(int argc, char **argv) {{\n\
          \x20   aret_real_argc = argc; aret_real_argv = argv;\n\
          {map_call}    uint8_t *top = aret_stack + sizeof(aret_stack) - 64;\n\
+         {argv_prep}\
          \x20   /* Lay a cdecl frame so an entry at `main` reads argc/argv from the\n\
          \x20      shared machine stack at [esp+4]/[esp+8]; harmless for a no-arg\n\
          \x20      startup entry. */\n\
          \x20   uint32_t *sp = (uint32_t *)top;\n\
          \x20   sp[0] = 0;                                /* return address */\n\
          \x20   sp[1] = (uint32_t)argc;                   /* argc  @ esp+4 */\n\
-         \x20   sp[2] = (uint32_t)(uintptr_t)argv;        /* argv  @ esp+8 */\n\
+         \x20   sp[2] = {argv_expr};        /* argv  @ esp+8 */\n\
          \x20   uint64_t esp = (uint64_t)(uintptr_t)top;\n\
-         \x20   return (int)sub_{entry:x}(esp, (uint32_t)argc, (uint32_t)(uintptr_t)argv, 0, 0);\n\
+         \x20   return (int)sub_{entry:x}(esp, (uint32_t)argc, {argv_expr}, 0, 0);\n\
          }}\n",
     );
 
