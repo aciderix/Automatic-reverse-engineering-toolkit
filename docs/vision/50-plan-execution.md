@@ -1983,3 +1983,18 @@ binaires MSVC, pas seulement strings.exe.
   (`./out/app` vs `Z:\tmp\...\strings.exe`) — **environnemental**, pas un bug de traduction.
 - **Régression complète PASS** : difftest 268/268, magicdiv 2³², SMT 11/11, recompilabilité 100%,
   transpile 4/4 (hash inchangé), winediff 33/33, **cpudiff OK (scoring élargi)**.
+
+### Consolidation — garde de régression permanent pour les APIs version-info ✅
+- **2026-06-28** : les APIs version-info (`GetFileVersionInfoSizeA`/`GetFileVersionInfoA`/
+  `VerQueryValueA`) n'étaient gardées que par strings.exe (propriétaire, hors dépôt). Ajout d'un
+  programme de corpus **`version_info.c` + `version_info.rc`** (ressource VS_VERSIONINFO embarquée via
+  windres) : il lit sa propre ressource et imprime les valeurs de chaîne. `winediff.sh` compile
+  désormais un `.rc` optionnel (windres → COFF, link `-lversion`).
+- **Effet** : **winediff 34/34** — les APIs version-info sont validées contre Wine sur un programme
+  **indépendant de strings.exe** (preuve de généralisation + garde CI permanent, dans le dépôt).
+- *Note* : le fix `_chkstk`/`_alloca` MSVC ne peut pas être gardé par mingw (GCC utilise `___chkstk_ms`,
+  probe-only, sans réécriture de frame — vérifié : mon détecteur `xchg esp,eax` ne s'y déclenche pas,
+  winediff intact). Ce fix reste validé par le run strings.exe (documenté). Les instructions SSE2-string
+  sont, elles, gardées par cpudiff.
+- **Régression complète PASS** : difftest 268/268, magicdiv 2³², SMT 11/11, recompilabilité 100%,
+  transpile 4/4 (hash inchangé), **winediff 34/34**, cpudiff OK.

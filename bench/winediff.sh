@@ -24,6 +24,7 @@ CORPUS="$DIR/winecorpus"
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
 MINGW="${MINGW:-i686-w64-mingw32-gcc}"
+WINDRES="${WINDRES:-${MINGW%-gcc}-windres}"
 
 if ! command -v "$MINGW" >/dev/null 2>&1; then
   echo "SKIP  ($MINGW unavailable; install mingw-w64)"; exit 0
@@ -48,7 +49,15 @@ norm() { tr -d '\r'; }   # ignore CRLF-vs-LF line-ending differences
 pass=0; total=0
 for src in "$CORPUS"/*.c; do
   name="$(basename "$src" .c)"; total=$((total+1))
-  if ! "$MINGW" -O1 -w "$src" -o "$TMP/$name.exe" 2>"$TMP/err"; then
+  # Optional Windows resource (NAME.rc): compiled with windres and linked in, so
+  # tests can embed resources (e.g. a VS_VERSIONINFO block for the version APIs).
+  res_obj=""
+  if [ -f "$CORPUS/$name.rc" ] && command -v "$WINDRES" >/dev/null 2>&1; then
+    "$WINDRES" "$CORPUS/$name.rc" -O coff -o "$TMP/$name.res.o" 2>"$TMP/err" || \
+      { echo "FAIL  $name (windres: $(head -1 "$TMP/err"))"; continue; }
+    res_obj="$TMP/$name.res.o"
+  fi
+  if ! "$MINGW" -O1 -w "$src" $res_obj -lversion -o "$TMP/$name.exe" 2>"$TMP/err"; then
     echo "FAIL  $name (PE build: $(head -1 "$TMP/err"))"; continue
   fi
   # Optional per-program arguments: one per line in winecorpus/NAME.args. Passed
