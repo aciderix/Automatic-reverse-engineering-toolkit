@@ -944,6 +944,23 @@ fn computed_goto_switch_at_o0() {
 }
 
 #[test]
+fn cpp_style_vtable_dispatch() {
+    // Phase 4 core — a C++ virtual call compiles to `call [vtable + k]` through a
+    // `.rodata` vtable. This C model (static const method-pointer tables, dispatch
+    // via `obj->vt->method(obj)`) exercises exactly that: the method functions are
+    // reached only through the vtables, so address-taken recovery must find them
+    // and each indirect call must dispatch to the right one. A clean SOUND run
+    // matching Wine proves virtual dispatch works.
+    if !has_m32() {
+        eprintln!("skipping vtable test: `cc -m32` unavailable");
+        return;
+    }
+    let out = transpile_and_run("vtable_dispatch.exe");
+    assert!(out.contains("square=25 rect=12"), "virtual dispatch wrong:\n{out}");
+    assert!(out.contains("total = 37"), "virtual dispatch wrong:\n{out}");
+}
+
+#[test]
 fn stripped_crt_glue_recovered_and_hostbacked() {
     // Phase 3 — a STRIPPED mingw binary (no symbols) that uses the CRT and whose
     // startup registers `atexit(___do_global_dtors)`. ARET must recognise the

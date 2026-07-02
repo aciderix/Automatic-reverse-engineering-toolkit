@@ -173,7 +173,7 @@ CRT** (FLIRT mingw/MSVC). Volet (a) prioritaire car c'est le blocage mesuré.
   = travail de données incrémental. *Critère* : un exe MSVC strippé reconnaît son CRT et
   tourne.
 
-### Phase 4 — vtables / appels indirects C++ (VRAI CODE C++) ⬜
+### Phase 4 — vtables / appels indirects C++ (VRAI CODE C++) ⏳ CŒUR VALIDÉ
 Résoudre `call [vtable+k]` quand la vtable est en `.rodata` ; nommer la méthode.
 *Livrable* : recovery vtables (analysis/ir) + fixture C++ virtuelle. *Critère* :
 un appel virtuel se résout et s'exécute correctement (différentiel).
@@ -2224,3 +2224,14 @@ binaires MSVC, pas seulement strings.exe.
   recompilabilité gzip/ls/cat 100 %, winediff 34/34, 53 tests.
 - **Bilan Lua** : symbolé ET strippé tournent bit-identique à Wine. Le vrai binaire mingw Lua 5.4
   (650 Ko, strippé 320 Ko) → ELF natif fonctionnel, sans émulation.
+
+### Phase 4 — Dispatch virtuel C++ (vtable en `.rodata`) : cœur validé ✅
+- **2026-07-02** : un appel virtuel C++ compile en `call [vtable + k]` via une vtable en `.rodata`. Testé
+  avec un modèle C fidèle (tables de pointeurs de méthodes `const` en `.rodata`, dispatch
+  `obj->vt->method(obj)`) : fixture `vtable_dispatch.exe`. Les méthodes ne sont atteintes **que** par la
+  vtable → la recovery address-taken (durcie en Phase 3) les trouve, et chaque appel indirect dispatche
+  vers la bonne. **Résultat : SOUND, bit-identique à Wine** (`square=25 rect=12`, `total=37`), symbolé
+  **et** strippé. Le mécanisme cœur de Phase 4 est donc couvert par la machinerie générale existante
+  (indirect-call + address-taken). Test `cpp_style_vtable_dispatch`.
+- *Reste Phase 4* : vrai C++ compilé par g++ (exceptions, RTTI, noms manglés, `thiscall`) — non testable
+  sur l'hôte actuel (pas de `mingw g++`). Le dispatch vtable lui-même fonctionne.
