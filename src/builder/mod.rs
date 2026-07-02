@@ -374,10 +374,18 @@ fn emit_dispatch(internal: &[u64], host: &[(u64, String)], iat: &[(u64, String)]
             let _ = writeln!(s, "uint32_t {name}(uint32_t);");
         }
     }
+    // Indirect call to a host-backed function (a recovered CRT/glue routine, or a
+    // `jmp [IAT]` import thunk, reached through a function pointer). `aret_call`
+    // always hands over the caller's `esp` with the pushed return address at
+    // [esp+0] (the lifted indirect call models `esp -= 4`, as for the internal
+    // `sub_` ABI which reads its args at [esp+4]); the shim reads cdecl args at
+    // [esp+0], so undo that push with `esp + 4` — exactly like the IAT trampoline
+    // below. Without it the shim reads the return address as its first argument
+    // (a real crash: sqlite's `GetSystemInfo` wrote a SYSTEM_INFO through it).
     for (va, name) in host {
         let _ = writeln!(
             s,
-            "static uint64_t aret_disp_{va:x}(uint64_t esp,uint64_t a,uint64_t c,uint64_t d,uint64_t b){{(void)a;(void)c;(void)d;(void)b;return {name}((uint32_t)esp);}}"
+            "static uint64_t aret_disp_{va:x}(uint64_t esp,uint64_t a,uint64_t c,uint64_t d,uint64_t b){{(void)a;(void)c;(void)d;(void)b;return {name}((uint32_t)esp + 4);}}"
         );
     }
     // Indirect call straight through an IAT slot: the slot holds its own VA (set by
