@@ -2107,3 +2107,20 @@ binaires MSVC, pas seulement strings.exe.
   sur cet hôte Linux/mingw) ; le chemin mingw-strippé est désormais solide et le fix FLIRT (reloc) est
   générique (profitera aux signatures MSVC quand on aura le corpus). Le volet 3a (Lua strippé, quelques
   fonctions aux frontières) reste ouvert.
+
+### Lua débloqué — `--entry main` résolvait `___main` (glue) au lieu de `_main` ✅
+- **2026-07-02** : Lua produisait une **sortie vide** avec `--entry main` (symbolé *et* strippé) — un
+  faux « ça tourne » : `main` s'exécutait proprement (exit 0) mais **aucune** option (`-e`, `-v`, `-Q`)
+  n'était traitée. Diagnostic : `--entry main` était résolu vers **`___main`** (0x42f900, la glue mingw
+  qui roule les ctors) et **non** vers `_main` (0x43ae90, le vrai `main` C). Le résolveur faisait
+  `k.name.trim_start_matches('_') == s`, qui retire **tous** les underscores → `___main` matche « main »,
+  et son adresse plus basse gagnait l'itération. On exécutait donc la garde d'init de la glue, pas main.
+- **Fix général** : `symbol_matches(sym, want)` ne retire **qu'un** underscore par côté (la décoration
+  cdecl standard) → `main` ↔ `_main`, jamais `__main`/`___main`. Appliqué à `--entry` **et** `--function`.
+  Bug latent pour **tout** binaire mingw (dépendait de l'ordre d'adresses `___main` vs `_main`). Test
+  unitaire `symbol_matches_respects_single_underscore_decoration`.
+- **Effet** : **Lua symbolé tourne, bit-identique à Wine** (`table.sort`, `string.format`, `math.pi^2`,
+  méthodes de chaîne, `-e`). Lua redevient un oracle. Le **strippé** trouve bien `_main` (via `find_main`)
+  mais reste limité par la couverture FLIRT (≈20 fonctions CRT liftées au lieu d'être shimées : 31
+  partial vs 14) — élargissement de la DB = travail incrémental restant.
+- **Régression PASS** : cargo test (52 unit + m1 46), transpile 4/4 (hash inchangé `4b0121f182554d40`).

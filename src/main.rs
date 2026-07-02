@@ -147,6 +147,19 @@ struct Args {
 }
 
 /// Parse a `{ "0xhexva": "Name" }` IAT map and merge it into `prog.imports`.
+/// Does symbol `sym` name the user-requested function `want` (for `--entry` /
+/// `--function`)? Accepts the exact name or the single-underscore cdecl
+/// decoration a C symbol carries (`_main` for `main`) — but strips **at most one**
+/// underscore per side, so `main` resolves to the C `_main` and never to the
+/// mingw startup glue `__main`/`___main`, a wholly different function. (Matching
+/// all underscores made `--entry main` run `___main`'s init guard, so nothing ran.)
+fn symbol_matches(sym: &str, want: &str) -> bool {
+    fn stem(s: &str) -> &str {
+        s.strip_prefix('_').unwrap_or(s)
+    }
+    sym == want || stem(sym) == stem(want)
+}
+
 fn merge_iat_symbols(prog: &mut Program, path: &std::path::Path) -> Result<usize> {
     let text = std::fs::read_to_string(path)
         .with_context(|| format!("failed to read {}", path.display()))?;
@@ -340,10 +353,7 @@ fn main() -> Result<()> {
         .filter(|f| match &args.function {
             None => true,
             Some(sel) => {
-                // Tolerate the leading underscore C symbols carry (`_feature_a`
-                // for a `feature_a` the user names), matching `--entry`'s rule.
-                f.name == *sel
-                    || f.name.trim_start_matches('_') == sel.trim_start_matches('_')
+                symbol_matches(&f.name, sel)
                     || format!("0x{:x}", f.entry) == sel.to_lowercase()
                     || format!("{:x}", f.entry) == sel.to_lowercase()
             }
@@ -452,7 +462,7 @@ fn main() -> Result<()> {
                     } else if let Some(a) = prog
                         .symbols
                         .values()
-                        .find(|k| k.is_function && (k.name == *s || k.name.trim_start_matches('_') == *s))
+                        .find(|k| k.is_function && symbol_matches(&k.name, s))
                         .map(|k| k.address)
                     {
                         eprintln!("note: --entry {s} resolved to 0x{a:x}");
@@ -692,7 +702,21 @@ fn render_cfg(f: &analysis::Function) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::parse_str_map;
+    use super::{parse_str_map, symbol_matches};
+
+    #[test]
+    fn symbol_matches_respects_single_underscore_decoration() {
+        // The C `main` decorates to `_main`; mingw's startup glue is `__main`/
+        // `___main` — a different function. `--entry main` must pick the former.
+        assert!(symbol_matches("main", "main"));
+        assert!(symbol_matches("_main", "main"), "cdecl `_main` is the C main");
+        assert!(!symbol_matches("__main", "main"), "`__main` glue is NOT main");
+        assert!(!symbol_matches("___main", "main"), "`___main` glue is NOT main");
+        // User may include the underscore; extra decoration still must not leak.
+        assert!(symbol_matches("_feature_a", "feature_a"));
+        assert!(symbol_matches("_feature_a", "_feature_a"));
+        assert!(!symbol_matches("__feature_a", "feature_a"));
+    }
 
     #[test]
     fn parses_flat_iat_symbol_map() {
