@@ -2014,3 +2014,34 @@ binaires MSVC, pas seulement strings.exe.
   strings.exe, à investiguer.
 - **Régression complète PASS** : difftest 268/268, magicdiv 2³², SMT 11/11, recompilabilité 100%,
   transpile 4/4 (hash inchangé), winediff 34/34, cpudiff OK.
+
+### Généralisation — 2ᵉ binaire MSVC (`t32.exe`) : bug général du pop __stdcall des imports appelés via registre ✅
+- **2026-07-02 — R6016 résolu, cause *générale* trouvée**. Le bloqueur R6016 de `t32.exe` n'était PAS
+  spécifique au CRT : c'était un **décalage d'un slot des arguments** d'un `call eax` indirect, causé par
+  un pop `__stdcall` manquant sur l'appel *précédent*. Chaîne exacte (`_getptd` MSVC) :
+  `push [ptr_encodé]; call edi (=DecodePointer); call eax (=TlsSetValue)`.
+- **Cause racine (2 volets, tous deux généraux)** :
+  1. **`DecodePointer`/`EncodePointer` absents de la table `stdcall_pops`** → leur `ret 4` n'était pas
+     modélisé. Ajoutés (4 octets chacun).
+  2. **Le pop `__stdcall` n'était appliqué qu'aux `call [import]` directs, jamais aux `call reg`** où le
+     registre tient un pointeur d'import (motif compilateur courant : `mov edi,[iat]` une fois, puis
+     `call edi` répété). `import_call_raw_name` (passe pop par-instruction) ne voit que `call [abs]` ;
+     la résolution registre→import n'existe que dans la passe de nommage ultérieure. Résultat : `esp`
+     dérivait de `@N` après chaque `call reg` d'import stdcall, décalant tous les accès pile suivants —
+     ici les args du `call eax` d'après, d'où `TlsSetValue(slot=0x40F0D0, …)` → R6016.
+- **Fix général** : dans la passe de résolution registre→import (`build_ir`), injection du même
+  `esp += @N` après un `call reg` résolu vers un import stdcall (`stdcall_pop_for_regcall`). Le cas
+  `call [abs]` reste géré par la passe par-instruction (pas de double pop). Bénéficie à **tout** binaire
+  chargeant un import stdcall dans un registre avant de l'appeler.
+- **Bug latent corrigé au passage** : la table `stdcall_pops` avait `InitializeSListHead` avant
+  `InitializeCriticalSectionEx` (ordre alphabétique cassé → la recherche binaire ne trouvait plus `Ex`,
+  son pop de 12 était silencieusement ignoré). Réordonné + **test unitaire `table_is_sorted_by_name`**
+  ajouté pour verrouiller l'invariant (la recherche binaire suppose l'ordre).
+- **Effet t32.exe** : R6016 disparu, l'init des données par-thread du CRT réussit ; le programme
+  progresse jusqu'à `GetEnvironmentStringsW` (import non implémenté ; `t32.exe` est un lanceur de
+  processus qui exige `CreateProcessW`/job objects — hors périmètre M1, mais la *traduction CPU* est
+  désormais correcte au-delà de l'init CRT).
+- **Régression complète PASS** : difftest 268/268, in-place 3/3, magicdiv 2³², SMT 11/11,
+  recompilabilité 100 %, transpile 4/4 (hash inchangé `4b0121f182554d40`), **winediff 34/34**, cpudiff
+  268/268. (L'unique échec du test unitaire WASM `signature_mismatch:sub_401000` est **préexistant** —
+  vérifié par `git stash` sur `c95ca7f` — sans rapport avec ce fix.)

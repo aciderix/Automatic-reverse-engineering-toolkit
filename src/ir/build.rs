@@ -507,10 +507,36 @@ pub fn build_ir(prog: &Program, func: &Function) -> IrFunction {
     {
         let mut held: std::collections::HashMap<Location, String> = std::collections::HashMap::new();
         for b in &mut blocks {
-            for s in &mut b.stmts {
-                name_calls_in_stmt(s, prog, bits, &held);
-                update_import_regs(s, prog, &mut held);
+            let mut out: Vec<Stmt> = Vec::with_capacity(b.stmts.len());
+            for mut s in std::mem::take(&mut b.stmts) {
+                // A `call reg` through a register that holds a __stdcall import
+                // pointer must pop the callee's args just like a direct
+                // `call [import]` — but the per-insn pop pass (import_call_raw_name)
+                // only recognises `call [abs]`, never register-held imports, so it
+                // never fired here. Detect it now (register tracking only exists in
+                // this pass) and inject the same `esp += @N` after the call.
+                // Without it every stack access after the call drifts by @N, which
+                // shifted the args of a later `call eax` and mis-set thread-local
+                // storage (MSVC CRT `_getptd` -> R6016). `call [abs]` stays with the
+                // per-insn pass to avoid a double pop.
+                let reg_pop = (bits == 32)
+                    .then(|| stdcall_pop_for_regcall(&s, &held))
+                    .flatten();
+                name_calls_in_stmt(&mut s, prog, bits, &held);
+                update_import_regs(&s, prog, &mut held);
+                out.push(s);
+                if let Some(n) = reg_pop {
+                    out.push(Stmt::Set {
+                        dst: Location::Reg(RegId(4)),
+                        expr: Expr::Binary(
+                            BinOp::Add,
+                            Box::new(Expr::Read(Location::Reg(RegId(4)))),
+                            Box::new(Expr::Const(n as i128, Ty::int(32))),
+                        ),
+                    });
+                }
             }
+            b.stmts = out;
         }
     }
 
@@ -1481,6 +1507,60 @@ fn update_import_regs(s: &Stmt, prog: &Program, held: &mut HeldImports) {
         }
         Stmt::Asm(_) => held.clear(),
         _ => {}
+    }
+}
+
+/// If statement `s` performs an indirect `call reg` through a register currently
+/// holding a `__stdcall` import pointer (tracked in `held`), the number of bytes
+/// that callee pops on return — so the caller can model the pop. Only the
+/// register-held shape is reported: a `call [abs]` slot (`const_load_addr`) is
+/// handled by the per-insn `import_call_raw_name` pass and must not be popped
+/// twice. `held` stores the sanitized shim name (`aret_Foo`); the pop table is
+/// keyed by the raw import name, so strip the `aret_` prefix to look it up.
+fn stdcall_pop_for_regcall(s: &Stmt, held: &HeldImports) -> Option<u32> {
+    fn in_expr(e: &Expr, held: &HeldImports) -> Option<u32> {
+        match e {
+            Expr::Call { target, args, .. } => {
+                if let CallTarget::Indirect(inner) = target {
+                    if const_load_addr(inner).is_none() {
+                        if let Some(loc) = peeled_reg(inner) {
+                            if let Some(name) = held.get(loc) {
+                                let raw = name.strip_prefix("aret_").unwrap_or(name);
+                                if let Some(n) = crate::ir::stdcall_pops::stdcall_pop_bytes(raw) {
+                                    if n > 0 {
+                                        return Some(n);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                // The call may be nested (e.g. as the RHS of a Set): scan args and,
+                // for an indirect target, the pointer expression too.
+                if let CallTarget::Indirect(inner) = target {
+                    if let Some(n) = in_expr(inner, held) {
+                        return Some(n);
+                    }
+                }
+                args.iter().find_map(|a| in_expr(a, held))
+            }
+            Expr::Load { addr, .. } => in_expr(addr, held),
+            Expr::Unary(_, x) | Expr::Cast { expr: x, .. } => in_expr(x, held),
+            Expr::Binary(_, a, b) => in_expr(a, held).or_else(|| in_expr(b, held)),
+            Expr::Select { cond, then_, else_ } => in_expr(cond, held)
+                .or_else(|| in_expr(then_, held))
+                .or_else(|| in_expr(else_, held)),
+            _ => None,
+        }
+    }
+    match s {
+        Stmt::Set { expr, .. } | Stmt::CallStmt(expr) | Stmt::Return(Some(expr)) => {
+            in_expr(expr, held)
+        }
+        Stmt::Store { addr, value, .. } => in_expr(addr, held).or_else(|| in_expr(value, held)),
+        Stmt::Branch { cond, .. } => in_expr(cond, held),
+        Stmt::Switch { value, .. } => in_expr(value, held),
+        _ => None,
     }
 }
 

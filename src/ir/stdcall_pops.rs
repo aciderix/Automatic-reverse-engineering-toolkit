@@ -37,11 +37,13 @@ static TABLE: &[(&str, u32)] = &[
     ("CreateProcessA", 40),
     ("CreateRemoteThread", 28),
     ("CreateToolhelp32Snapshot", 8),
+    ("DecodePointer", 4),
     ("DeleteCriticalSection", 4),
     ("DeviceIoControl", 32),
     ("DispatchMessageA", 4),
     ("DuplicateHandle", 28),
     ("DuplicateToken", 12),
+    ("EncodePointer", 4),
     ("EnterCriticalSection", 4),
     ("EqualSid", 8),
     ("FileTimeToSystemTime", 8),
@@ -100,8 +102,8 @@ static TABLE: &[(&str, u32)] = &[
     ("GetVolumePathNamesForVolumeNameA", 16),
     ("InitializeCriticalSection", 4),
     ("InitializeCriticalSectionAndSpinCount", 8),
-    ("InitializeSListHead", 4),
     ("InitializeCriticalSectionEx", 12),
+    ("InitializeSListHead", 4),
     ("IsDBCSLeadByteEx", 8),
     ("IsIconic", 4),
     ("IsValidCodePage", 4),
@@ -186,3 +188,24 @@ static TABLE: &[(&str, u32)] = &[
     ("setsockopt", 20),
     ("shutdown", 8),
 ];
+
+#[cfg(test)]
+mod tests {
+    use super::TABLE;
+
+    /// `stdcall_pop_bytes` binary-searches `TABLE`, so an out-of-order entry
+    /// silently makes some imports unfindable — their pop is skipped and every
+    /// later stack access drifts. Guard the invariant here instead of trusting
+    /// hand-maintained alphabetical order.
+    #[test]
+    fn table_is_sorted_by_name() {
+        for pair in TABLE.windows(2) {
+            assert!(
+                pair[0].0 < pair[1].0,
+                "stdcall_pops TABLE not sorted: {:?} !< {:?}",
+                pair[0].0,
+                pair[1].0
+            );
+        }
+    }
+}
