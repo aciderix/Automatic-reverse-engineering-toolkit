@@ -413,6 +413,51 @@ fn helper_call(name: &str, a: &[u64]) -> Option<u64> {
             };
             return Some(lane(s0) | (lane(s1) << 32));
         }
+        "__pi_eq8" => {
+            let mut r = 0u64;
+            for i in (0..64).step_by(8) {
+                if (a[0] >> i) as u8 == (a[1] >> i) as u8 {
+                    r |= 0xffu64 << i;
+                }
+            }
+            return Some(r);
+        }
+        "__pi_eq16" => {
+            let mut r = 0u64;
+            for i in (0..64).step_by(16) {
+                if (a[0] >> i) as u16 == (a[1] >> i) as u16 {
+                    r |= 0xffffu64 << i;
+                }
+            }
+            return Some(r);
+        }
+        "__pi_gt8" => {
+            let mut r = 0u64;
+            for i in (0..64).step_by(8) {
+                if ((a[0] >> i) as i8) > ((a[1] >> i) as i8) {
+                    r |= 0xffu64 << i;
+                }
+            }
+            return Some(r);
+        }
+        "__pi_shufw" => {
+            let (x, imm) = (a[0], a[1]);
+            let mut r = 0u64;
+            for i in 0..4 {
+                let sel = (imm >> (i * 2)) & 3;
+                r |= ((x >> (sel * 16)) & 0xffff) << (i * 16);
+            }
+            return Some(r);
+        }
+        "__pi_mskb" => {
+            let (lo, hi) = (a[0], a[1]);
+            let mut m = 0u64;
+            for i in 0..8 {
+                m |= ((lo >> (i * 8 + 7)) & 1) << i;
+                m |= ((hi >> (i * 8 + 7)) & 1) << (i + 8);
+            }
+            return Some(m);
+        }
         "__pi_add16" => {
             let mut r = 0u64;
             for i in (0..64).step_by(16) {
@@ -1069,6 +1114,13 @@ fn corpus() -> Vec<Vec<u8>> {
         vec![0x66, 0x0f, 0x6c, 0xc1], // punpcklqdq xmm0, xmm1
         vec![0x66, 0x0f, 0x6d, 0xc1], // punpckhqdq xmm0, xmm1
         vec![0x66, 0x0f, 0x70, 0xc1, 0x1b], // pshufd xmm0, xmm1, 0x1b
+        // SSE2 string-scan ops (byte/word compare, byte mask, word shuffle)
+        vec![0x66, 0x0f, 0x74, 0xc1],       // pcmpeqb  xmm0, xmm1
+        vec![0x66, 0x0f, 0x75, 0xc1],       // pcmpeqw  xmm0, xmm1
+        vec![0x66, 0x0f, 0x64, 0xc1],       // pcmpgtb  xmm0, xmm1
+        vec![0x66, 0x0f, 0xd7, 0xc1],       // pmovmskb eax, xmm1
+        vec![0xf2, 0x0f, 0x70, 0xc1, 0x1b], // pshuflw  xmm0, xmm1, 0x1b
+        vec![0xf3, 0x0f, 0x70, 0xc1, 0x1b], // pshufhw  xmm0, xmm1, 0x1b
         // packed single-precision float (0F): arith, min/max, sqrt, cvt, bitwise,
         // compare, unpack, movmask (GP result)
         vec![0x0f, 0x58, 0xc1],       // addps     xmm0, xmm1

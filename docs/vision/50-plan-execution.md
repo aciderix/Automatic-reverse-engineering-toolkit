@@ -1971,3 +1971,15 @@ binaires MSVC, pas seulement strings.exe.
 
 #### 🏁🏁 MILESTONE COMPLET : Sysinternals strings.exe (MSVC static-CRT C++) → ELF Linux natif,
 #### tourne sans Wine, sortie **100% bit-identique à Wine**, exit 0.
+
+### Consolidation — validation cpudiff des ops SSE2-string ajoutées ✅
+- **2026-06-28** : les instructions SSE2 ajoutées pour strings.exe (`pcmpeqb`/`pcmpeqw`/`pcmpgtb`/
+  `pmovmskb`/`pshuflw`/`pshufhw`) n'étaient validées que par le run différentiel strings.exe. Ajoutées
+  au **corpus cpudiff** (axe 1) : encodages + implémentation des helpers `__pi_eq8`/`eq16`/`gt8`/
+  `shufw`/`mskb` dans l'interpréteur. **Hard-validées contre Unicorn** (vérifié : casser `__pi_eq8` fait
+  bien échouer le test avec des mismatchs `pcmpeqb` → l'instruction est scorée, pas skippée).
+- **Robustesse strings.exe confirmée** sur tous les flags fonctionnels (`-a`/`-u`/`-n`/`-o` et combos) :
+  bit-identique à Wine. Seule « différence » (`-b`/`-q` → usage) = le nom du programme dans `argv[0]`
+  (`./out/app` vs `Z:\tmp\...\strings.exe`) — **environnemental**, pas un bug de traduction.
+- **Régression complète PASS** : difftest 268/268, magicdiv 2³², SMT 11/11, recompilabilité 100%,
+  transpile 4/4 (hash inchangé), winediff 33/33, **cpudiff OK (scoring élargi)**.
