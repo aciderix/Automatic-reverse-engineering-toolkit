@@ -882,12 +882,64 @@ pub fn lift(insn: &Insn, bits: u32) -> Vec<Stmt> {
         }
     }
 
+    // `rep(ne) scas`: scan [edi] for the accumulator value, decrementing ecx and
+    // advancing edi, until ecx==0 or the compare condition ends the repeat
+    // (`repe`/F3 continues while equal, `repne`/F2 while not-equal). This is the
+    // ubiquitous MSVC inline-`strlen` idiom `xor eax,eax; or ecx,-1; repne scasb;
+    // not ecx` — without it ecx keeps its -1, `not ecx` yields 0, and a `strlen`
+    // reads as 0 (a real `sqlite3.exe` `malloc(0)` → "out of memory"). Forward
+    // (DF=0) assumed, as for `rep movs`. Handled for repne too (F2), which iced
+    // does not report via `has_rep_prefix()`.
+    {
+        use Mnemonic::*;
+        let (scsz, schelper): (i128, &str) = match ins.mnemonic() {
+            Scasb => (1, "__rep_scas8"),
+            Scasw => (2, "__rep_scas16"),
+            Scasd => (4, "__rep_scas32"),
+            _ => (0, ""),
+        };
+        if scsz != 0 && (ins.has_rep_prefix() || ins.has_repne_prefix()) {
+            let w = (scsz * 8) as u32;
+            let ty = Ty::int(w as u8);
+            let rdi = Location::Reg(RegId(7));
+            let rax = Location::Reg(RegId(0));
+            let rcx = Location::Reg(RegId(1));
+            // repe (F3) stops on the first mismatch; repne (F2) on the first match.
+            let repe: i128 = if ins.has_repne_prefix() { 0 } else { 1 };
+            let al = bin(BinOp::And, Expr::Read(rax), konst(mask(w)));
+            // Elements scanned (a pure read); stash in a per-instruction temp so
+            // the edi/ecx updates and the flag compare all see the same count.
+            let kt = Location::Temp((insn.address as u32).wrapping_mul(2).wrapping_add(1));
+            let k = fcall(
+                schelper,
+                vec![Expr::Read(rdi.clone()), al.clone(), Expr::Read(rcx.clone()), konst(repe)],
+            );
+            let mut out = vec![Stmt::Set { dst: kt.clone(), expr: k }];
+            out.push(Stmt::Set {
+                dst: rdi.clone(),
+                expr: bin(BinOp::Add, Expr::Read(rdi.clone()), bin(BinOp::Mul, Expr::Read(kt.clone()), konst(scsz))),
+            });
+            out.push(Stmt::Set {
+                dst: rcx.clone(),
+                expr: bin(BinOp::Sub, Expr::Read(rcx), Expr::Read(kt)),
+            });
+            // Flags come from the last compared element, now at [edi - size].
+            let last = Expr::Load {
+                addr: Box::new(bin(BinOp::Sub, Expr::Read(rdi), konst(scsz))),
+                ty,
+            };
+            let r = bin(BinOp::Sub, al.clone(), last.clone());
+            out.extend(sub_flags(&al, &last, &r, w));
+            return out;
+        }
+    }
+
     // Single (non-rep) string instructions: operate on one element at [esi]/[edi]
     // and advance the pointer(s). Forward (DF=0) is assumed — the ABI-default the
     // compiler maintains (same assumption as `rep movs` above; a `std`/DF=1 region
     // is left to a sound asm fallback, see `cld`/`std`). Handled here because the
     // string `movsd`/`cmpsd` share a mnemonic with the SSE scalar ops; the
-    // `is_string_instruction` flag disambiguates. `rep scas/cmps/lods` (rarer) are
+    // `is_string_instruction` flag disambiguates. `rep cmps/lods` (rarer) are
     // not modelled and fall through to a sound asm fallback.
     if ins.is_string_instruction() && !ins.has_rep_prefix() {
         use Mnemonic::*;

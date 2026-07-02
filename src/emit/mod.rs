@@ -305,6 +305,13 @@ pub(crate) const FLOAT_HELPERS: &str = concat!(
     "static inline uint64_t __rep_stos16(uint64_t d,uint64_t v,uint64_t n){uint16_t* p=(uint16_t*)(uintptr_t)d;for(uint64_t i=0;i<n;i++)p[i]=(uint16_t)v;return 0;}\n",
     "static inline uint64_t __rep_stos32(uint64_t d,uint64_t v,uint64_t n){uint32_t* p=(uint32_t*)(uintptr_t)d;for(uint64_t i=0;i<n;i++)p[i]=(uint32_t)v;return 0;}\n",
     "static inline uint64_t __rep_stos64(uint64_t d,uint64_t v,uint64_t n){uint64_t* p=(uint64_t*)(uintptr_t)d;for(uint64_t i=0;i<n;i++)p[i]=v;return 0;}\n",
+    // rep(ne) scas: scan `n` elements at `p` for `v`, returning the count consumed.
+    // `repe` (1) stops on the first mismatch, `repne` (0) on the first match; both
+    // stop when the count runs out. (edi/ecx updates and flags are applied by the
+    // caller from this count.)
+    "static inline uint64_t __rep_scas8(uint64_t d,uint64_t v,uint64_t n,uint64_t repe){const uint8_t* p=(const uint8_t*)(uintptr_t)d;uint8_t x=(uint8_t)v;uint64_t k=0;while(n!=0){int eq=(p[k]==x);k++;n--;if(repe?!eq:eq)break;}return k;}\n",
+    "static inline uint64_t __rep_scas16(uint64_t d,uint64_t v,uint64_t n,uint64_t repe){const uint16_t* p=(const uint16_t*)(uintptr_t)d;uint16_t x=(uint16_t)v;uint64_t k=0;while(n!=0){int eq=(p[k]==x);k++;n--;if(repe?!eq:eq)break;}return k;}\n",
+    "static inline uint64_t __rep_scas32(uint64_t d,uint64_t v,uint64_t n,uint64_t repe){const uint32_t* p=(const uint32_t*)(uintptr_t)d;uint32_t x=(uint32_t)v;uint64_t k=0;while(n!=0){int eq=(p[k]==x);k++;n--;if(repe?!eq:eq)break;}return k;}\n",
 );
 
 /// The runtime-helper preamble, included only when the body references it.

@@ -944,6 +944,23 @@ fn computed_goto_switch_at_o0() {
 }
 
 #[test]
+fn repne_scasb_inline_strlen() {
+    // The MSVC inline-strlen idiom `xor eax,eax; or ecx,-1; repne scasb; not ecx`
+    // must be modelled: without it `ecx` keeps its -1 and every strlen reads as 0
+    // (a real sqlite3.exe `malloc(0)` → "out of memory"). A clean run matching the
+    // native lengths proves `rep(ne) scas` decrements ecx / advances edi.
+    if !has_m32() {
+        eprintln!("skipping rep-scasb test: `cc -m32` unavailable");
+        return;
+    }
+    let out = transpile_and_run("rep_scasb_strlen.exe");
+    assert!(
+        out.contains("len(a)=11 len(b)=5 len(empty)=0"),
+        "repne scasb (inline strlen) mismodelled:\n{out}"
+    );
+}
+
+#[test]
 fn cpp_style_vtable_dispatch() {
     // Phase 4 core — a C++ virtual call compiles to `call [vtable + k]` through a
     // `.rodata` vtable. This C model (static const method-pointer tables, dispatch
