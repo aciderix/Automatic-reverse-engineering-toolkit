@@ -444,6 +444,15 @@ uint32_t aret_ResetEvent(uint32_t esp)          { (void)esp; return 1; }
 uint32_t aret_WaitForSingleObject(uint32_t esp) { (void)esp; return 0; } /* WAIT_OBJECT_0 */
 uint32_t aret_SetConsoleCtrlHandler(uint32_t esp) { (void)esp; return 1; }
 uint32_t aret_FlushFileBuffers(uint32_t esp)    { (void)esp; return 1; }
+/* File byte-range locks (LockFile/LockFileEx and their Unlock counterparts):
+ * grant unconditionally. We run a single translated process against its own
+ * files, so there is no other locker to contend with; sqlite's Win32 VFS calls
+ * LockFile before every read/write and reports "database is locked" if it
+ * returns 0 (the weak stub's value), so a real success is required to write. */
+uint32_t aret_LockFile(uint32_t esp)            { (void)esp; return 1; }
+uint32_t aret_LockFileEx(uint32_t esp)          { (void)esp; return 1; }
+uint32_t aret_UnlockFile(uint32_t esp)          { (void)esp; return 1; }
+uint32_t aret_UnlockFileEx(uint32_t esp)        { (void)esp; return 1; }
 uint32_t aret_SetHandleCount(uint32_t esp)      { return WU(0); }
 /* GetFileType(handle): map the fd's kind to the Win32 constant so a CLI tool can
  * tell a TTY (CHAR) from a pipe/redirect (PIPE) from a file (DISK). */

@@ -56,12 +56,26 @@ uint32_t aret_GetStdHandle(uint32_t esp) {
     return (uint32_t)std_fd(arg(esp, 0));
 }
 
+/* The 64-bit file offset carried by a Win32 OVERLAPPED (Offset @ +8, OffsetHigh
+ * @ +12), or -1 when lpOverlapped is NULL (synchronous I/O at the file pointer).
+ * sqlite's Win32 VFS (winRead/winWrite) ALWAYS passes the target offset this way
+ * rather than via SetFilePointer, so honouring it is required to hit the right
+ * page — ignoring it makes every read/write land at the file-pointer position
+ * (page 0), so page N reads back page 0's bytes → "file is not a database" /
+ * "database disk image is malformed". */
+static off_t overlapped_offset(uint32_t lpOverlapped) {
+    if (!lpOverlapped) return (off_t)-1;
+    const uint32_t *ov = (const uint32_t *)(uintptr_t)lpOverlapped;
+    return (off_t)(((uint64_t)ov[3] << 32) | ov[2]); /* OffsetHigh:Offset */
+}
+
 static uint32_t write_common(uint32_t esp) {
     int fd = std_fd(arg(esp, 0));
     const void *buf = (const void *)(uintptr_t)arg(esp, 1);
     uint32_t count = arg(esp, 2);
     uint32_t pdone = arg(esp, 3);
-    ssize_t n = write(fd, buf, count);
+    off_t off = overlapped_offset(arg(esp, 4));
+    ssize_t n = off >= 0 ? pwrite(fd, buf, count, off) : write(fd, buf, count);
     if (n < 0) {
         g_last_error = 5;
         if (pdone) *(uint32_t *)(uintptr_t)pdone = 0;
@@ -79,7 +93,8 @@ uint32_t aret_ReadFile(uint32_t esp) {
     void *buf = (void *)(uintptr_t)arg(esp, 1);
     uint32_t count = arg(esp, 2);
     uint32_t pdone = arg(esp, 3);
-    ssize_t n = read(fd, buf, count);
+    off_t off = overlapped_offset(arg(esp, 4));
+    ssize_t n = off >= 0 ? pread(fd, buf, count, off) : read(fd, buf, count);
     if (n < 0) {
         g_last_error = 5;
         if (pdone) *(uint32_t *)(uintptr_t)pdone = 0;
@@ -482,7 +497,27 @@ uint32_t aret_fputs(uint32_t esp) {
 
 uint32_t aret_fgets(uint32_t esp) {
     char *buf = (char *)(uintptr_t)arg(esp, 0);
-    char *r = fgets(buf, (int)arg(esp, 1), (FILE *)(uintptr_t)arg(esp, 2));
+    int n = (int)arg(esp, 1);
+    uint32_t file = arg(esp, 2);
+    /* stdin is a synthetic `_iob` handle, not a host FILE* — reading it via host
+     * fgets dereferences a bogus stream and segfaults (the sqlite3 shell reads
+     * its script from stdin this way). Read the underlying fd a byte at a time,
+     * matching fgets' semantics (up to n-1 chars, stop after '\n', NUL-end). */
+    int fd = iob_fd(file);
+    if (fd >= 0) {
+        if (n <= 0) return 0;
+        int i = 0;
+        while (i < n - 1) {
+            unsigned char c;
+            if (read(fd, &c, 1) != 1) break; /* EOF or error */
+            buf[i++] = (char)c;
+            if (c == '\n') break;
+        }
+        if (i == 0) return 0;                /* nothing read → NULL (EOF) */
+        buf[i] = '\0';
+        return (uint32_t)(uintptr_t)buf;
+    }
+    char *r = fgets(buf, n, (FILE *)(uintptr_t)file);
     return r ? (uint32_t)(uintptr_t)buf : 0;
 }
 
@@ -981,7 +1016,29 @@ uint32_t aret_LoadLibraryExW(uint32_t esp) { (void)esp; return 0x10000000u; }
 uint32_t aret_FreeLibrary(uint32_t esp) { (void)esp; return 1; }
 uint32_t aret_SetUnhandledExceptionFilter(uint32_t esp) { (void)esp; return 0; }
 uint32_t aret_VirtualProtect(uint32_t esp) { (void)esp; return 1; }
-uint32_t aret_VirtualQuery(uint32_t esp) { (void)esp; return 0; }
+/* VirtualQuery(lpAddress, lpBuffer, dwLength): report the page containing
+ * lpAddress as committed, image-backed, executable-readwrite memory. mingw-w64's
+ * pseudo-relocation runtime (`_pei386_runtime_relocator` -> `mark_section_writable`)
+ * calls this to find the region to VirtualProtect writable before applying import
+ * relocations; a 0 return makes it print "VirtualQuery failed ..." and abort().
+ * Our address space is a flat, always-writable host mapping (VirtualProtect is a
+ * no-op), so any plausible non-zero descriptor lets startup proceed. */
+uint32_t aret_VirtualQuery(uint32_t esp) {
+    uint32_t addr = arg(esp, 0);
+    uint32_t buf = arg(esp, 1);
+    uint32_t len = arg(esp, 2);
+    if (!buf || len < 28) return 0;
+    uint32_t *mbi = (uint32_t *)(uintptr_t)buf;
+    uint32_t base = addr & ~0xFFFu;   /* page-aligned base */
+    mbi[0] = base;        /* BaseAddress                      */
+    mbi[1] = base;        /* AllocationBase                   */
+    mbi[2] = 0x40;        /* AllocationProtect = EXEC_READWRITE */
+    mbi[3] = 0x10000;     /* RegionSize (64 KiB granularity)  */
+    mbi[4] = 0x1000;      /* State = MEM_COMMIT               */
+    mbi[5] = 0x40;        /* Protect = PAGE_EXECUTE_READWRITE */
+    mbi[6] = 0x1000000;   /* Type = MEM_IMAGE                 */
+    return 28;
+}
 /* Thread-local storage (single-threaded model): a flat slot table. TlsAlloc
  * hands out distinct indices; Set/Get round-trip per index. */
 #define ARET_TLS_MAX 1088
@@ -1302,6 +1359,40 @@ uint32_t aret_getmainargs(uint32_t esp) {
     if (pargc) *(int32_t *)(uintptr_t)pargc = aret_real_argc;
     if (pargv) *(uint32_t *)(uintptr_t)pargv = (uint32_t)(uintptr_t)aret_real_argv;
     if (penv) *(uint32_t *)(uintptr_t)penv = (uint32_t)(uintptr_t)environ;
+    return 0;
+}
+
+/* __wgetmainargs(int* argc, wchar_t*** argv, wchar_t*** env, int wild,
+ * _startupinfo*): the WIDE counterpart used by `wmainCRTStartup` (a stripped
+ * MSVC console app whose entry is wmain fetches its args through this, ignoring
+ * any argv the loader passed). Build UTF-16 copies of the real args once (Windows
+ * wchar_t is 16-bit; args are ASCII in practice, so a byte→u16 widening is
+ * exact) and hand back a 32-bit-addressable argv/env. Without this the out-params
+ * stay uninitialised and the shell dereferences a garbage argv → SIGABRT. */
+uint32_t aret_wgetmainargs(uint32_t esp) {
+    extern int aret_real_argc;
+    extern char **aret_real_argv;
+    static uint16_t wbuf[1u << 16];
+    static uint32_t wargv[1024];
+    static uint32_t wenv[1] = {0}; /* empty wide environ (NULL-terminated) */
+    static int built = 0;
+    int n = aret_real_argc;
+    if (n > 1024) n = 1024;
+    if (!built) {
+        uint32_t wo = 0;
+        for (int i = 0; i < n; i++) {
+            wargv[i] = (uint32_t)(uintptr_t)&wbuf[wo];
+            for (const unsigned char *p = (const unsigned char *)aret_real_argv[i];
+                 *p && wo < (1u << 16) - 1; p++)
+                wbuf[wo++] = *p;
+            wbuf[wo++] = 0;
+        }
+        built = 1;
+    }
+    uint32_t pargc = arg(esp, 0), pargv = arg(esp, 1), penv = arg(esp, 2);
+    if (pargc) *(int32_t *)(uintptr_t)pargc = n;
+    if (pargv) *(uint32_t *)(uintptr_t)pargv = (uint32_t)(uintptr_t)wargv;
+    if (penv) *(uint32_t *)(uintptr_t)penv = (uint32_t)(uintptr_t)wenv;
     return 0;
 }
 

@@ -2284,3 +2284,30 @@ binaires MSVC, pas seulement strings.exe.
   multi-session). *Validation de la stratégie « creuser un vrai gros binaire » : 5 bugs universels.*
 - **Régression PASS** (chaque commit) : cpudiff, difftest 268/268, transpile 4/4 (hash inchangé),
   winediff 34/34, recompilabilité 100 %, 53 tests.
+
+### Phase 3b/5 (suite) — 5 bugs HLE généraux + localisation du miscompile b-tree
+- **2026-07-02** : reprise de sqlite3.exe. Le **chemin lecture** (`SELECT … FROM sqlite_master`, ouvrir
+  une base valide) et les écritures **INSERT** marchent désormais bit-identique à Wine. **5 nouveaux
+  bugs GÉNÉRAUX du runtime HLE** (chacun touche toute une classe de binaires Win32/mingw) :
+  1. **`VirtualQuery`** renvoyait 0 → la relocation pseudo-reloc de mingw (`_pei386_runtime_relocator`)
+     faisait `abort()` (« VirtualQuery failed … »). Renvoie maintenant une `MEMORY_BASIC_INFORMATION`
+     valide (page committée, image, RWX). *Tout PE lié mingw en avait besoin.*
+  2. **`__wgetmainargs`** (CRT wide `wmainCRTStartup`) non implémenté → argc/argv non initialisés →
+     SIGABRT. Implémenté `aret_wgetmainargs` (argv UTF-16 construit depuis les args réels).
+  3. **`fgets` sur stdin** : castait un handle `_iob` synthétique en `FILE*` hôte → segfault (le shell
+     sqlite lit son script depuis stdin). Ajout du chemin fd brut (comme `getc`/`fputs`).
+  4. **`ReadFile`/`WriteFile` ignoraient `lpOverlapped`** : la VFS Win32 de sqlite passe l'offset du
+     fichier **via la struct OVERLAPPED** (pas `SetFilePointer`), donc chaque lecture/écriture tapait
+     l'offset du pointeur de fichier (page 0) → « file is not a database » / « malformed » à la lecture.
+     Corrigé avec `pread`/`pwrite` à l'offset OVERLAPPED. **→ débloque TOUTE la lecture de base sqlite.**
+  5. **Verrous de fichier** `LockFile`/`LockFileEx`/`Unlock*` absents → « database is locked ». Accordés
+     (modèle mono-processus).
+- **Miscompile b-tree LOCALISÉ** (reste à corriger) : le bug résiduel est **la suppression d'une seule
+  cellule** (`DELETE FROM u WHERE a=1` sur 2 lignes → malformed ; `DELETE` global via `OP_Clear` OK ;
+  INSERT/UPDATE-de-valeur/splits de page OK). Chemin : `sqlite3BtreeDelete`→`dropCell`. La page est
+  **valide** (pc=0x0ffc, taille cellule=4, usableSize=4096) mais le contrôle `if(pc+sz>usableSize)
+  return SQLITE_CORRUPT` se déclenche à tort (freeSpace n'est jamais atteint). → miscompile entier dans
+  `dropCell`/`BtreeDelete` (pc ou sz ou la comparaison). La page modifiée vit dans un **buffer pager
+  distinct** de celui journalisé, d'où la difficulté de capture gdb. Repro minimal acquis.
+- **Régression PASS** : cpudiff, difftest 268/268, transpile 4/4 (hash `4b0121f182554d40` inchangé),
+  winediff 34/34.
