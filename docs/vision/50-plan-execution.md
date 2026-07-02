@@ -115,9 +115,16 @@ Transpiler **une fonction + uniquement ses callees** (fermeture transitive), pas
 tout le binaire. *Livrable* : `--prune`/auto avec `--function`. *Critère* :
 transpiler `sub_X` d'un gros binaire ne sort que la fermeture, compile, tourne.
 
-### Phase 3 — Universalité des binaires **strippés** ⏳ EN COURS
+### Phase 3 — Universalité des binaires **strippés** ⏳ EN COURS (mingw solide, MSVC restant)
 Deux volets : (a) **récupération de fonctions** sans symboles, (b) **reconnaissance
 CRT** (FLIRT mingw/MSVC). Volet (a) prioritaire car c'est le blocage mesuré.
+> **Jalon (2026-07-02) : Lua mingw strippé tourne bit-identique à Wine** (650 Ko →
+> ELF natif, `table.sort`/`string.format` flottant/`gsub`/`gmatch`/`os.exit`, exit
+> propre). Le chemin **mingw-strippé** est validé bout-en-bout sur un vrai gros
+> binaire. Détail des 7 fixes généraux de la session : journal §4 (opérandes FLIRT
+> relocalisés, recovery amorcée par signature, cases de switch ≠ fonctions,
+> prologue `__do_global_dtors_aux`, libm fp-returning par FLIRT, thunks jamais
+> signaturés, callback passé par valeur). **Reste : signatures MSVC (volet 3b).**
 - **3a. Découverte des fonctions adressées (address-taken) ✅ FAIT.** Mesure : Lua
   symbolé récupère **987** fonctions, strippé seulement **314** — le scan de
   prologue ne connaît que `55 8B EC` (cadre de pile), or `-O2` omet le pointeur de
@@ -151,13 +158,20 @@ CRT** (FLIRT mingw/MSVC). Volet (a) prioritaire car c'est le blocage mesuré.
   `aret_onexit`). Effet : Lua strippé ne meurt plus sur `_lock` ; ces internes msvcrt
   font enfin leur vrai travail (no-op / retour de pointeur) pour tout binaire. 81
   tests, diff 268/268, Lua symbolé toujours parfait.
-- *Reste 3a* : ~16 fonctions encore manquantes au strippé ; surtout, une fonction
-  reste **mal récupérée** (frontières) → Lua strippé bute désormais sur une erreur
-  *interne* Lua (« function or expression needs too many registers ») = un sous-
-  programme miscompilé parmi les 971. Forensics ciblée à faire (diff symbolé/strippé
-  des frontières de fonctions).
-- *Reste 3b* : signatures FLIRT pour `ucrtbase`/`msvcr*` (MSVC) + DB plus large
-  via `--mode gensig`. *Critère* : un exe MSVC strippé reconnaît son CRT et tourne.
+- **3c. Frontières & reconnaissance strippé durcies (session 2026-07-02) ✅ FAIT.**
+  Le trou « frontières » ci-dessus était la **sur-récupération** : les cibles de cas
+  d'un `switch` (table `.rdata`) prises pour des fonctions, tronquant la vraie. Résolu
+  (jump-tables résolues avant le seed + post-élagage des cibles). Plus : `--entry main`
+  visait `___main` (glue) au lieu de `_main` ; libm statique non fp-returning en
+  strippé (profondeur x87 désync) ; faux positif FLIRT sur les thunks ; callbacks par
+  valeur non récupérés. Tous corrigés **généralement**, régression complète verte à
+  chaque commit. Résultat : Lua strippé **complet** (voir jalon ci-dessus). Détail :
+  journal §4.
+- *Reste 3b (ouvert)* : signatures FLIRT pour **`ucrtbase`/`msvcr*` (MSVC)** — nécessite
+  un **corpus MSVC symbolé** (indisponible sur l'hôte Linux/mingw actuel) ; le fix
+  reloc-wildcarding profitera à ces signatures. Élargissement de la DB mingw par version
+  = travail de données incrémental. *Critère* : un exe MSVC strippé reconnaît son CRT et
+  tourne.
 
 ### Phase 4 — vtables / appels indirects C++ (VRAI CODE C++) ⬜
 Résoudre `call [vtable+k]` quand la vtable est en `.rodata` ; nommer la méthode.
