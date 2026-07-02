@@ -70,6 +70,17 @@ pub fn gen_signature(name: &str, code: &[u8], reloc: &[bool]) -> Option<String> 
         return None; // too short to be distinctive
     }
     let code = &code[..n];
+    // An import thunk / tail-call stub — `jmp [IAT]` (ff 25), `call [mem]` (ff 15),
+    // `jmp rel32` (e9/eb) — carries no identity: its one variable operand is a
+    // relocated address, wildcarded away, leaving a pattern that matches *every*
+    // thunk (e.g. atoi's thunk matched `__lc_codepage_func`, misbinding a call to
+    // the real atoi → crash). Thunks are already resolved structurally via
+    // `import_thunk`, so never signature one.
+    if matches!(code[0], 0xe9 | 0xeb)
+        || (code[0] == 0xff && matches!(code.get(1), Some(0x25) | Some(0x15)))
+    {
+        return None;
+    }
     let mut mask = branch_mask(code);
     for (i, m) in mask.iter_mut().enumerate() {
         if reloc.get(i).copied().unwrap_or(false) {
@@ -235,6 +246,22 @@ mod tests {
         let db = FlirtDb::parse(&line);
         assert_eq!(db.match_at(&a), Some("_relreloc"));
         assert_eq!(db.match_at(&b), Some("_relreloc"), "absolute operand must be wildcarded");
+    }
+
+    #[test]
+    fn thunk_functions_get_no_signature() {
+        // `jmp [IAT]; nop…` (an import thunk) and `jmp rel32` (tail stub): the
+        // only identity is a relocated operand, so a signature would match every
+        // thunk. gen_signature must refuse them (they resolve via import_thunk).
+        let jmp_iat = [0xff, 0x25, 0x88, 0x52, 0x44, 0x00, 0x90, 0x90, 0x90];
+        assert_eq!(gen_signature("_atoi", &jmp_iat, &[false; 9]), None);
+        let call_mem = [0xff, 0x15, 0x00, 0x10, 0x40, 0x00, 0xc3, 0x90, 0x90];
+        assert_eq!(gen_signature("_x", &call_mem, &[false; 9]), None);
+        let jmp_rel = [0xe9, 0x11, 0x22, 0x33, 0x44, 0x90, 0x90, 0x90, 0x90];
+        assert_eq!(gen_signature("_y", &jmp_rel, &[false; 9]), None);
+        // A real prologue is still signatured.
+        let real = [0x55, 0x89, 0xe5, 0x83, 0xec, 0x18, 0x8b, 0x45, 0x08];
+        assert!(gen_signature("_real", &real, &[false; 9]).is_some());
     }
 
     #[test]

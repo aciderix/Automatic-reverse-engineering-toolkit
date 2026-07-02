@@ -2177,3 +2177,19 @@ binaires MSVC, pas seulement strings.exe.
 - **Soundness préservée** : cpudiff OK, difftest 268/268, transpile 4/4 (hash inchangé), recompilabilité
   gzip/ls/cat 100 %, 52 tests. (Lua strippé progresse ensuite jusqu'à un segfault **atoi** dans une
   autre fonction — trou séparé en cours.)
+
+### Phase 3 — Signatures de thunks supprimées (faux positif FLIRT introduit par le reloc-wildcarding) ✅
+- **2026-07-02** : Lua strippé segfaultait dans `atoi` sur le chemin de formatage flottant de printf.
+  Cause : `____lc_codepage_func` (un thunk `jmp [0x43c090]; nop`) était reconnu comme **`atoi`** →
+  l'appel liait le vrai `atoi(pointeur_poubelle)` → crash. Un thunk `jmp [IAT]` n'a pour seule identité
+  que son opérande d'adresse **relocalisé**, que mon reloc-wildcarding (ec72102) masquait → la signature
+  d'atoi devenait `ff25..........90`, matchant **n'importe quel** thunk.
+- **Fix général et principiel** : un thunk n'est **jamais** signaturé (il est résolu structurellement par
+  `import_thunk`). `gen_signature` refuse les corps commençant par `jmp [mem]` (ff25) / `call [mem]`
+  (ff15) / `jmp rel32` (e9/eb) ; les 80 signatures de thunks de la DB (sur 111) sont retirées (il en
+  reste 31, les vrais corps de fonctions). Test `thunk_functions_get_no_signature`.
+- **Effet** : Lua strippé imprime enfin `9.8696 ff` / `1,3,5,9` — **bit-identique à Wine** sur
+  `string.format` flottant + `table.sort`. host-backed 71→70 (les thunks étaient redondants). Bute
+  ensuite à la sortie sur `0x439460` (encore une glue par appel indirect, séparé).
+- **Régression PASS** : difftest 268/268, transpile 4/4 (hash inchangé), recompilabilité gzip/ls/cat
+  100 %, winediff 34/34, 53 tests.
