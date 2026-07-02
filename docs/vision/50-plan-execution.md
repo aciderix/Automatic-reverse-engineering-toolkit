@@ -2266,3 +2266,21 @@ binaires MSVC, pas seulement strings.exe.
   stratégie « creuser un vrai gros binaire intelligemment ».
 - **Régression PASS** (chaque commit) : cpudiff, difftest 268/268, transpile 4/4 (hash inchangé),
   winediff 34/34, recompilabilité 100 %, 53 tests.
+
+### Phase 3b/5 — sqlite3.exe : moteur SQL scalaire bit-identique à Wine (5 bugs généraux) ✅ JALON
+- **2026-07-02** : un vrai `sqlite3.exe` MSVC 32-bit strippé (2958 fn) exécute désormais les **requêtes
+  SQL scalaires bit-identiques à Wine** : `SELECT 42`, `hex(255)`→`323535`, `abs`, `substr`, `upper`,
+  `length`, gestion d'erreurs (`no such table`), méta-commandes (`.databases`), `sqlite3 -version`.
+- **5 bugs GÉNÉRAUX tirés d'un seul binaire** (chacun touche une classe entière) :
+  1. `aret_disp` esp+4 (dispatch host-backed indirect).
+  2. `rep(ne) scas` (inline-strlen MSVC → `malloc(0)`).
+  3. wmain wide-argv (`__wgetmainargs` → argv UTF-16).
+  4. Masque du compteur `rep` sur 32-bit (débordement bit 32 → fill de 4 milliards → segfault).
+  5. `xchg` high-byte (`xchg al,ah`, byte-swap de `hex()`).
+  \+ shims CRT `_access`/`_chmod`/`HeapSize`/`_msize`/`GetSystemTime`/`SystemTimeToFileTime`.
+- **Reste** : le chemin **b-tree** (`CREATE TABLE`/`INSERT`) corrompt la base (`database disk image is
+  malformed`) — un miscompile subtil dans du code entier **entièrement lifté** (pas un asm fallback ;
+  les 60 partial(asm) sont tous x87, hors chemin b-tree). Forensics profonde restante (cible
+  multi-session). *Validation de la stratégie « creuser un vrai gros binaire » : 5 bugs universels.*
+- **Régression PASS** (chaque commit) : cpudiff, difftest 268/268, transpile 4/4 (hash inchangé),
+  winediff 34/34, recompilabilité 100 %, 53 tests.
