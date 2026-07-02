@@ -2332,8 +2332,17 @@ binaires MSVC, pas seulement strings.exe.
      inconnus, toujours impur — comme un appel direct).
 - **Effet** : `DELETE`/`UPDATE` marchent désormais **bit-identique à Wine** (fichier vérifié). Test de
   régression ajouté (`indirect_call_is_impure_and_survives_dce`).
-- **Reste sur sqlite** (bugs séparés, non liés à la DCE) : `CREATE TABLE` sur base neuve n'est pas
-  persisté (probables autres appels indirects morts dans le chemin schéma) ; `CREATE` sur fichier neuf
-  boucle (`GetVersionExA`/`AreFileApisANSI` non implémentés). À poursuivre.
+- **Matrice de capacités sqlite (post-fix, vérifiée Wine)** : scalaire ✅, lecture de base ✅,
+  `INSERT` ✅, `DELETE` ✅ (persisté, relu par Wine), `UPDATE` ✅ (persisté, relu par Wire).
+  `CREATE TABLE` ❌.
+- **Reste sur sqlite** (bugs séparés, non liés à la DCE) : `CREATE TABLE` corrompt une structure —
+  symptôme **non déterministe** (tantôt exit 0 sans persister, tantôt récursion très profonde dans le
+  parser `sub_41bf36`→`sub_41be70`, pile de parseur Lemon de 48 o/élément). La grammaire CREATE parse
+  bien (`EXPLAIN CREATE` OK, erreurs de syntaxe correctes), donc c'est l'**exécution** du CREATE
+  (écriture schéma + reparse `OP_ParseSchema`) qui construit un pointeur/chaîne non initialisé
+  (mémoire garbage → chaîne longue/circulaire). Signature classique d'un autre miscompile
+  (probable valeur/appel non émis dans le chemin schéma), à traquer avec la même méthode
+  (`sqlite3CorruptError`/désassemblage ciblé). `CREATE` sur fichier **neuf** demande en plus
+  `GetVersionExA`/`AreFileApisANSI`. À poursuivre en session dédiée.
 - **Régression PASS** : cpudiff, difftest 268/268, transpile 4/4 (hash `4b0121f182554d40` inchangé),
   winediff 34/34, 54 tests unitaires.
