@@ -488,32 +488,28 @@ fn combine_write(dst: &Location, w: u32, value: Expr, bits: u32) -> Expr {
     Expr::Binary(BinOp::Or, Box::new(keep), Box::new(newbits))
 }
 
+/// Assign `value` to a register operand, handling the high-byte registers
+/// (`ah`/`bh`/`ch`/`dh` — bits 8..=15 of the full register) as well as the normal
+/// width-masked case. Factored out so both operands of an `xchg` (either of which
+/// may be a high byte, e.g. `xchg al, ah`) share it.
+fn write_reg(r: Register, value: Expr, bits: u32) -> Option<Vec<Stmt>> {
+    let id = reg_id(r)?;
+    let dst = Location::Reg(id);
+    if is_high_byte(r) {
+        // dst = (dst & ~0xff00) | ((value & 0xff) << 8)
+        let keep = bin(BinOp::And, Expr::Read(dst.clone()), konst(!0xff00i128 & mask(64)));
+        let newbits = bin(BinOp::Shl, bin(BinOp::And, value, konst(0xff)), konst(8));
+        return Some(vec![Stmt::Set { dst, expr: bin(BinOp::Or, keep, newbits) }]);
+    }
+    let w = (r.size() * 8) as u32;
+    let expr = combine_write(&dst, w, value, bits);
+    Some(vec![Stmt::Set { dst, expr }])
+}
+
 /// Assign `value` to operand 0 (register or memory).
 fn write_op0(ins: &Instruction, value: Expr, bits: u32) -> Option<Vec<Stmt>> {
     match ins.op_kind(0) {
-        OpKind::Register => {
-            let r = ins.op_register(0);
-            let id = reg_id(r)?;
-            let dst = Location::Reg(id);
-            if is_high_byte(r) {
-                // dst = (dst & ~0xff00) | ((value & 0xff) << 8)
-                let keep = Expr::Binary(
-                    BinOp::And,
-                    Box::new(Expr::Read(dst.clone())),
-                    Box::new(konst(!0xff00i128 & mask(64))),
-                );
-                let newbits = Expr::Binary(
-                    BinOp::Shl,
-                    Box::new(Expr::Binary(BinOp::And, Box::new(value), Box::new(konst(0xff)))),
-                    Box::new(konst(8)),
-                );
-                let expr = Expr::Binary(BinOp::Or, Box::new(keep), Box::new(newbits));
-                return Some(vec![Stmt::Set { dst, expr }]);
-            }
-            let w = (r.size() * 8) as u32;
-            let expr = combine_write(&dst, w, value, bits);
-            Some(vec![Stmt::Set { dst, expr }])
-        }
+        OpKind::Register => write_reg(ins.op_register(0), value, bits),
         OpKind::Memory => {
             // A write through a segment override (`fs:`/`gs:`, TLS) is dropped:
             // reads of TLS are modelled as a constant (see `op_value`), so a write
@@ -2078,19 +2074,17 @@ pub fn lift(insn: &Insn, bits: u32) -> Vec<Stmt> {
         // each side sees the other's original value.
         Mnemonic::Xchg
             if ins.op_kind(1) == OpKind::Register
-                && !is_high_byte(ins.op_register(1))
-                && ((ins.op_kind(0) == OpKind::Register && !is_high_byte(ins.op_register(0)))
-                    || ins.op_kind(0) == OpKind::Memory) =>
+                && (ins.op_kind(0) == OpKind::Register || ins.op_kind(0) == OpKind::Memory) =>
         {
+            // Either operand may be a high byte (`xchg al, ah` byte-swaps `ax`, used
+            // by MSVC's `hex()`/endian helpers); `write_reg` handles the ah/bh/ch/dh
+            // position, so op1 no longer needs the low-byte-only `combine_write`.
             let v0 = some_or_asm!(op_value(ins, 0));
             let v1 = some_or_asm!(op_value(ins, 1));
-            let id1 = some_or_asm!(reg_id(ins.op_register(1)));
-            let w1 = (ins.op_register(1).size() * 8) as u32;
             let t = Location::Temp((insn.address as u32).wrapping_mul(2));
-            let dst1 = Location::Reg(id1);
             let mut out = vec![Stmt::Set { dst: t.clone(), expr: v0 }];
             out.extend(some_or_asm!(write_op0(ins, v1, bits)));
-            out.push(Stmt::Set { dst: dst1.clone(), expr: combine_write(&dst1, w1, Expr::Read(t), bits) });
+            out.extend(some_or_asm!(write_reg(ins.op_register(1), Expr::Read(t), bits)));
             out
         }
         // xadd dst, src: src gets dst's old value; dst = dst + src (atomic add-and-

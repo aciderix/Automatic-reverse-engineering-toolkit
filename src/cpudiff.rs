@@ -937,6 +937,8 @@ fn corpus() -> Vec<Vec<u8>> {
         vec![0x09, 0xc8], // or  eax, ecx
         vec![0x31, 0xc8], // xor eax, ecx
         vec![0x85, 0xc8], // test eax, ecx
+        vec![0x86, 0xe0], // xchg al, ah (high-byte swap, used by hex()/endian helpers)
+        vec![0x87, 0xc8], // xchg eax, ecx
         // r/m32, sign-extended imm8 (the sub_flags / add_flags case)
         vec![0x83, 0xc0, 0xc1], // add eax, -63
         vec![0x83, 0xe8, 0xc1], // sub eax, -63
