@@ -2311,3 +2311,29 @@ binaires MSVC, pas seulement strings.exe.
   distinct** de celui journalisé, d'où la difficulté de capture gdb. Repro minimal acquis.
 - **Régression PASS** : cpudiff, difftest 268/268, transpile 4/4 (hash `4b0121f182554d40` inchangé),
   winediff 34/34.
+
+### Phase 3b/5 (suite) — bug #6 RÉSOLU : appels indirects supprimés par la DCE
+- **2026-07-02** : le miscompile de suppression de cellule est **trouvé et corrigé** — c'était un vrai
+  **bug de lifter général**, pas propre à sqlite. Forensics :
+  1. `DELETE FROM u WHERE a=1` (2 lignes) → malformed. Réduit à : `dropCell`/`clearCell`.
+  2. Via `sqlite3CorruptError` (trouvé par la string « database corruption » → VA `sub_42a0fd`),
+     capture du **numéro de ligne** `__LINE__` = **74862** = `clearCellOverflow` : `if(pCell+nSize >
+     aDataEnd) return CORRUPT`. Or `clearCellOverflow` n'est appelé que si la cellule a un overflow —
+     ce qui est faux pour une cellule de 4 octets. → la **CellInfo est corrompue** (nPayload=0,
+     nLocal=57020, nSize=2349 pour une cellule valide `02 01 02 09`).
+  3. Désassemblage à `0x452029` : `call *0x50(%esi)` = `pPage->xParseCell(pPage, pCell, &info)`
+     **présent dans le binaire mais absent du C transpilé** — l'appel indirect est **supprimé**, donc
+     `info` reste non initialisé.
+  4. **Cause racine** (`src/opt/mod.rs::has_impure_call`) : `CallTarget::Indirect(x) =>
+     has_impure_call(x)` — un appel indirect n'était jugé impur que si son **expression cible** (le
+     pointeur de fonction, un simple `Load`) contenait un appel impur, donc **jamais**. La DCE le
+     classait pur et le supprimait quand son résultat était mort (ici `eax` réécrit juste après par
+     `movzwl`). **Fix** : `CallTarget::Indirect(_) => true` (un appel indirect a des effets de bord
+     inconnus, toujours impur — comme un appel direct).
+- **Effet** : `DELETE`/`UPDATE` marchent désormais **bit-identique à Wine** (fichier vérifié). Test de
+  régression ajouté (`indirect_call_is_impure_and_survives_dce`).
+- **Reste sur sqlite** (bugs séparés, non liés à la DCE) : `CREATE TABLE` sur base neuve n'est pas
+  persisté (probables autres appels indirects morts dans le chemin schéma) ; `CREATE` sur fichier neuf
+  boucle (`GetVersionExA`/`AreFileApisANSI` non implémentés). À poursuivre.
+- **Régression PASS** : cpudiff, difftest 268/268, transpile 4/4 (hash `4b0121f182554d40` inchangé),
+  winediff 34/34, 54 tests unitaires.

@@ -156,7 +156,16 @@ fn has_impure_call(e: &Expr) -> bool {
         Expr::Call { target, args, .. } => {
             let target_impure = match target {
                 CallTarget::Named(n) => !is_pure_helper(n),
-                CallTarget::Indirect(x) => has_impure_call(x),
+                // An indirect call has an unknown target, hence unknown side
+                // effects — it must ALWAYS be treated as impure (like a Direct
+                // call), never dropped when its result is dead. Recursing into the
+                // target *expression* (the function pointer, e.g. a plain memory
+                // load) wrongly classified such calls as pure, so DCE deleted them
+                // and silently discarded their side effects — e.g. sqlite's
+                // `pPage->xParseCell(pPage, pCell, &info)` whose result is
+                // immediately overwritten: dropping it left `info` uninitialised
+                // and corrupted every DELETE/UPDATE.
+                CallTarget::Indirect(_) => true,
                 _ => true,
             };
             target_impure || args.iter().any(has_impure_call)
@@ -707,6 +716,37 @@ mod tests {
             _ => None,
         });
         assert_eq!(stored, Some(Expr::Const(7, Ty::int(32))));
+    }
+
+    #[test]
+    fn indirect_call_is_impure_and_survives_dce() {
+        // An indirect call (through a function pointer, e.g. `call [esi+0x50]` for
+        // a C++/vtable or struct callback like sqlite's `pPage->xParseCell`) has an
+        // unknown target and therefore unknown side effects. It must be classified
+        // impure and NEVER dropped by DCE, even when its result is dead — otherwise
+        // its side effects (memory writes through pointer args) are silently lost.
+        let fp = Expr::Load { addr: Box::new(Expr::konst(0x1000, 32)), ty: Ty::int(32) };
+        let call = Expr::Call {
+            target: CallTarget::Indirect(Box::new(fp)),
+            args: vec![],
+            ret: Ty::int(32),
+        };
+        assert!(has_impure_call(&call), "an indirect call must be classified impure");
+
+        // End-to-end: its result is dead (a register immediately overwritten), yet
+        // the call must survive optimization.
+        let mut f = one_block(vec![
+            Stmt::Assign { dst: ValueId(0), expr: call },
+            // v0 is never used → dead result, but the call is not removable.
+            Stmt::Store { addr: Expr::konst(0x2000, 32), value: Expr::konst(1, 32), ty: Ty::int(32) },
+            Stmt::Return(None),
+        ]);
+        optimize(&mut f);
+        let has_call = f.blocks[0].stmts.iter().any(|s| matches!(
+            s,
+            Stmt::Assign { expr: Expr::Call { target: CallTarget::Indirect(_), .. }, .. }
+        ));
+        assert!(has_call, "DCE must not drop a dead-result indirect call");
     }
 
     #[test]
