@@ -1998,3 +1998,19 @@ binaires MSVC, pas seulement strings.exe.
   sont, elles, gardées par cpudiff.
 - **Régression complète PASS** : difftest 268/268, magicdiv 2³², SMT 11/11, recompilabilité 100%,
   transpile 4/4 (hash inchangé), **winediff 34/34**, cpudiff OK.
+
+### Généralisation — 2ᵉ binaire MSVC (distlib `t32.exe`) : fix récupération call-thunk ✅
+- **2026-06-28 — 2ᵉ vrai PE MSVC testé** : `t32.exe` (lanceur console distlib, KERNEL32+SHLWAPI, 304
+  fonctions, section .tls statique). ARET le transpile ; 1ᵉʳ bloqueur trouvé = **appel indirect vers
+  fonction non récupérée `0x405c3f`** — un thunk `call [import]; ret 4` dont l'adresse est prise comme
+  immédiat de code (callback). `looks_like_func_start` reconnaissait `jmp [mem]` (`ff 25`) mais pas
+  `call [mem]` (`ff 15`).
+- **Fix général** : ajout de `ff 15` (`call [mem]; ret`, thunk d'appel d'import / wrapper de callback
+  adressé) aux prologues reconnus. Bénéficie à tout binaire utilisant ce motif de thunk.
+- **Prochain bloqueur t32.exe** (documenté, non corrigé) : **R6016 « not enough space for thread
+  data »** — `TlsSetValue` reçoit un slot garbage (`0x40F0D0`, une adresse IAT) avec les args décalés
+  d'un slot. C'est le dispatch indirect CFG-gardé de la table d'abstraction Tls du CRT (`_getptd` via
+  des pointeurs résolus par GetProcAddress → fallback direct). Même famille que le dispatch de
+  strings.exe, à investiguer.
+- **Régression complète PASS** : difftest 268/268, magicdiv 2³², SMT 11/11, recompilabilité 100%,
+  transpile 4/4 (hash inchangé), winediff 34/34, cpudiff OK.
