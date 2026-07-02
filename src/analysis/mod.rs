@@ -405,6 +405,13 @@ fn global_decode(
         // `!global.contains_key` gate instead of splitting the function. We also
         // skip resolved jump-table targets outright.
         loop {
+            // Resolve any jump tables now visible *before* seeding function
+            // candidates this round, so a switch's case targets are excluded from
+            // the data scan (they must not be mistaken for function-pointer-table
+            // entries). Newly seeded functions (drained below) can reveal further
+            // tables, caught on the next iteration.
+            let jt_progress =
+                resolve_jump_tables_fixpoint(prog, disasm, &mut global, &mut entries, &mut jump_tables);
             let jt_targets: BTreeSet<u64> =
                 jump_tables.values().flat_map(|v| v.iter().copied()).collect();
             let mut cands: BTreeSet<u64> = BTreeSet::new();
@@ -537,7 +544,7 @@ fn global_decode(
                     }
                 }
             }
-            let mut progressed = false;
+            let mut progressed = jt_progress;
             for c in cands {
                 // A function drained earlier this pass (lower address) may now
                 // cover `c`, or it may be a jump-table case target — either way
@@ -577,20 +584,61 @@ fn global_decode(
     // exists), the inline attempt in `drain` fails and is never retried. Re-run
     // resolution to a fixpoint now that all reachable code is decoded, decoding
     // any newly discovered case targets.
+    resolve_jump_tables_fixpoint(prog, disasm, &mut global, &mut entries, &mut jump_tables);
+
+    // A switch stores its case-target addresses in a `.rdata` word array. The data
+    // scan above sees that dense run of code pointers and, if the switch's function
+    // was not yet decoded when it ran (its `jmp [table+idx*4]` unresolved), mistakes
+    // the array for a function-pointer table and seeds each interior case body as a
+    // bogus function — which then truncates the real function at that boundary. The
+    // race is unavoidable (the data scan is global; the function is reached late),
+    // so correct it *after* the fixpoint, when every jump table is resolved: a
+    // resolved case target is an interior block, never a function entry. Removing it
+    // lets the real function collect through it. (A prologue-only seed only; a real
+    // symbol/call target is never a case target.)
+    let jt_targets: BTreeSet<u64> =
+        jump_tables.values().flat_map(|v| v.iter().copied()).collect();
+    entries.retain(|e| !jt_targets.contains(e));
+    prologue_only.retain(|e| !jt_targets.contains(e));
+
+    (global, entries, jump_tables, prologue_only)
+}
+
+/// Resolve every static jump table reachable in `global` to a fixpoint, decoding
+/// each newly discovered case target. Returns whether any *new* table was found.
+///
+/// Jump-table resolution is order-sensitive: it scans the instructions preceding
+/// an indirect `jmp` for the table idiom, so if a `jmp` was first decoded as
+/// another path's target (before its own `lea/movsxd/add` setup existed), the
+/// inline attempt in `drain` failed and is never retried — hence this re-run once
+/// all reachable code is decoded. Running it *before* function-candidate seeding
+/// is what keeps a switch's case targets (interior addresses a compiler stores in
+/// a `.rdata` table) out of the seed set: otherwise the data scan sees a dense run
+/// of code pointers and mistakes the case bodies for a function-pointer table,
+/// seeding each as a bogus function that then truncates the real one.
+fn resolve_jump_tables_fixpoint(
+    prog: &Program,
+    disasm: &Disassembler,
+    global: &mut BTreeMap<u64, Insn>,
+    entries: &mut BTreeSet<u64>,
+    jump_tables: &mut HashMap<u64, Vec<u64>>,
+) -> bool {
+    let mut any = false;
     loop {
         let found: Vec<(u64, Vec<u64>)> = global
             .iter()
             .filter(|(addr, insn)| insn.flow == Flow::Indirect && !jump_tables.contains_key(addr))
             .filter_map(|(addr, insn)| {
-                resolve_jump_table(prog, &global, insn)
-                    .or_else(|| resolve_pie_jump_table(prog, &global, insn))
-                    .or_else(|| resolve_abs_jump_table(prog, &global, insn))
+                resolve_jump_table(prog, global, insn)
+                    .or_else(|| resolve_pie_jump_table(prog, global, insn))
+                    .or_else(|| resolve_abs_jump_table(prog, global, insn))
                     .map(|t| (*addr, t))
             })
             .collect();
         if found.is_empty() {
             break;
         }
+        any = true;
         let mut newwork: VecDeque<u64> = VecDeque::new();
         for (addr, targets) in found {
             for &t in &targets {
@@ -601,11 +649,10 @@ fn global_decode(
             jump_tables.insert(addr, targets);
         }
         if !newwork.is_empty() {
-            drain(prog, disasm, &mut global, &mut entries, &mut jump_tables, &mut newwork);
+            drain(prog, disasm, global, entries, jump_tables, &mut newwork);
         }
     }
-
-    (global, entries, jump_tables, prologue_only)
+    any
 }
 
 /// Recognise a jump-table dispatch `jmp [table + idx*ptr]` and read its target

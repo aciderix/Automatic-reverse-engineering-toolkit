@@ -2124,3 +2124,26 @@ binaires MSVC, pas seulement strings.exe.
   mais reste limité par la couverture FLIRT (≈20 fonctions CRT liftées au lieu d'être shimées : 31
   partial vs 14) — élargissement de la DB = travail incrémental restant.
 - **Régression PASS** : cargo test (52 unit + m1 46), transpile 4/4 (hash inchangé `4b0121f182554d40`).
+
+### Phase 3a — Sur-récupération : cases de `switch` prises pour des fonctions ✅
+- **2026-07-02** : en mode strippé, Lua **sur-récupérait** massivement dans la région du compilateur
+  (79 fonctions vs 50 symbolé) → fonctions **tronquées** → `luaK_exp2K` segfault, sortie vide. Cause
+  générale : un `switch` range ses adresses de cas dans une table `.rdata`. Le scan de données voit cette
+  suite dense de pointeurs de code et, si la fonction du `switch` n'était **pas encore décodée** quand il
+  tourne (son `jmp [table+idx*4]` non résolu — la table est globale, la fonction atteinte tard), prend
+  chaque **corps de cas** (adresse intérieure) pour une entrée de table de pointeurs de fonctions → seed
+  d'une fausse fonction qui tronque la vraie au niveau de la frontière.
+- **Fix propre, indépendant de l'ordre** : (1) résolution des jump-tables extraite en
+  `resolve_jump_tables_fixpoint`, lancée **avant** le seed des candidats (haut de la boucle) *et* en
+  final ; (2) **post-élagage** : après le point fixe (toutes tables résolues), on retire de `entries` /
+  `prologue_only` toute adresse qui est une **cible de jump-table résolue** — un corps de cas intérieur
+  n'est jamais une entrée de fonction, et son retrait laisse la vraie fonction se recomposer à travers
+  lui. La course (scan global vs fonction atteinte tard) est ainsi corrigée après coup.
+- **Effet** : Lua strippé passe de **79→49** fonctions dans la région (symbolé : 50), partial 31→23 ; le
+  **compilateur bytecode tourne** (imprime « STRIP 42 » au lieu de vide/segfault). Bénéficie à **tout**
+  binaire strippé à `switch` (le motif est universel).
+- **Reste** : Lua strippé bute maintenant à la *sortie* sur `___do_global_dtors` (0x42f860) atteint par
+  appel indirect, non reconnu par FLIRT (signature d'une autre version mingw). Séparé (couverture FLIRT
+  par version), pas la sur-récupération.
+- **Régression complète PASS** : cargo test (52 unit + m1 46), difftest 268/268, transpile 4/4 (hash
+  inchangé `4b0121f182554d40`), recompilabilité gzip/ls/cat 100 %, winediff 34/34, SMT 11/11, in-place 3/3.
