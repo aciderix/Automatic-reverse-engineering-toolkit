@@ -2193,3 +2193,20 @@ binaires MSVC, pas seulement strings.exe.
   ensuite à la sortie sur `0x439460` (encore une glue par appel indirect, séparé).
 - **Régression PASS** : difftest 268/268, transpile 4/4 (hash inchangé), recompilabilité gzip/ls/cat
   100 %, winediff 34/34, 53 tests.
+
+### Phase 3a — Callback passé par valeur (`push imm`/`mov [esp],imm`) reconnu → Lua strippé COMPLET ✅
+- **2026-07-02** : dernier trou de Lua strippé — `_dtoa_lock_cleanup` (nettoyage dtoa en sortie,
+  enregistré par `atexit`, prologue exotique `mov eax,imm; xchg [mem],eax`) atteint par appel indirect,
+  non récupéré → abort après la sortie flottante correcte.
+- **Fix général** : un immédiat placé dans un **slot d'argument pile** (`push imm32` /
+  `mov [esp+d], imm32`) qui pointe vers du code exécutable est un **pointeur de fonction passé par
+  valeur** — un callback (`atexit(cleanup)`, `qsort(…, cmp)`). La position d'argument le prouve, quel
+  que soit le prologue de la callee. `stack_arg_code_imm` le seed sans l'heuristique de prologue
+  (restreint aux formes push/mov-vers-pile pour ne pas confondre un `mov reg,imm` scalaire).
+- **Effet** : **Lua strippé complet, bit-identique à Wine** — `table.sort`, `string.format` flottant
+  (π/e/√2), `gsub`, `gmatch`/patterns, `os.exit`, **sortie propre exit 0**. D'inutilisable
+  (vide/segfault) à pleinement fonctionnel. Général pour tout binaire strippé enregistrant des callbacks.
+- **Régression PASS** : difftest 268/268, transpile 4/4 (hash inchangé `4b0121f182554d40`),
+  recompilabilité gzip/ls/cat 100 %, winediff 34/34, 53 tests.
+- **Bilan Lua** : symbolé ET strippé tournent bit-identique à Wine. Le vrai binaire mingw Lua 5.4
+  (650 Ko, strippé 320 Ko) → ELF natif fonctionnel, sans émulation.

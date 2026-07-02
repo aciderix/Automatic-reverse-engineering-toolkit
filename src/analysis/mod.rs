@@ -308,6 +308,34 @@ fn looks_like_func_start(prog: &Program, addr: u64, allow_leaf: bool) -> bool {
         || (allow_leaf && b0 == 0x8b && (b1 & 0x07) == 0x04 && (b1 & 0xc0) != 0xc0 && b2 == 0x24)
 }
 
+/// The immediate of a `push imm32` or `mov [esp+d], imm32` — a value being placed
+/// in an outgoing stack-argument slot. When it points into executable code it is
+/// almost always a function pointer passed by value (a callback being registered
+/// or handed to a helper: `atexit(cleanup)`, `qsort(…, cmp)`), which is a stronger
+/// signal than any prologue heuristic — so such a target is seeded whatever
+/// prologue the callee uses (many CRT cleanups start with `mov eax,imm; xchg`, not
+/// `push ebp`). Restricted to the stack-arg forms so a `mov reg, imm` loading a
+/// scalar constant is not mistaken for a callback.
+fn stack_arg_code_imm(insn: &iced_x86::Instruction) -> Option<u64> {
+    use iced_x86::{Mnemonic, OpKind, Register};
+    match insn.mnemonic() {
+        Mnemonic::Push
+            if matches!(insn.op0_kind(), OpKind::Immediate32 | OpKind::Immediate32to64) =>
+        {
+            Some(insn.immediate(0))
+        }
+        Mnemonic::Mov
+            if insn.op0_kind() == OpKind::Memory
+                && insn.memory_base() == Register::ESP
+                && insn.memory_index() == Register::None
+                && matches!(insn.op1_kind(), OpKind::Immediate32 | OpKind::Immediate32to64) =>
+        {
+            Some(insn.immediate(1))
+        }
+        _ => None,
+    }
+}
+
 /// Code-address immediates of an instruction: a `push imm32`/`mov reg,imm32`/
 /// `mov [mem],imm32` whose immediate, or an absolute `[imm32]` memory operand,
 /// could be a taken function address. Branch displacements are `NearBranch`
@@ -532,6 +560,17 @@ fn global_decode(
                 for v in imm_code_ptrs(&insn.raw) {
                     // Code immediates: a by-value callback — allow the leaf shape.
                     if in_exec(v) && !global.contains_key(&v) && looks_like_func_start(prog, v, true) {
+                        cands.insert(v);
+                    }
+                }
+                // A code pointer placed on the stack as an argument (`push imm32` /
+                // `mov [esp+d], imm32`) is a callback passed by value — e.g.
+                // `atexit(_dtoa_lock_cleanup)`, `qsort(…, cmp)`. The argument
+                // position proves it is a function, whatever prologue the callee
+                // has, so accept it without the prologue heuristic. (A resolved
+                // jump-table target caught this way is pruned after the fixpoint.)
+                if let Some(v) = stack_arg_code_imm(&insn.raw) {
+                    if in_exec(v) && !global.contains_key(&v) {
                         cands.insert(v);
                     }
                 }
