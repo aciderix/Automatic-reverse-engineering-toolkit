@@ -2235,3 +2235,17 @@ binaires MSVC, pas seulement strings.exe.
   (indirect-call + address-taken). Test `cpp_style_vtable_dispatch`.
 - *Reste Phase 4* : vrai C++ compilé par g++ (exceptions, RTTI, noms manglés, `thiscall`) — non testable
   sur l'hôte actuel (pas de `mingw g++`). Le dispatch vtable lui-même fonctionne.
+
+### Phase 3b — Vrai binaire MSVC 32-bit (sqlite3.exe) : bug général aret_disp + shims CRT ✅ (en cours)
+- **2026-07-02** : téléchargé un **vrai `sqlite3.exe` MSVC 32-bit strippé** (SQLite 3.40.1, 2958 fonctions
+  récupérées) — le premier vrai binaire MSVC piloté bout-en-bout. Révèle et corrige plusieurs bugs :
+  1. **Bug général `aret_disp`** (commité) : un appel indirect vers une fonction host-backed passait
+     `esp` au lieu de `esp+4` → le shim lisait l'adresse de retour comme 1er argument. `GetSystemInfo`
+     de sqlite écrivait un `SYSTEM_INFO` à travers → **segfault**. Corrigé (compense le push comme le
+     trampoline IAT). Régression complète verte.
+  2. **Shims CRT ajoutés** : `_access`/`_chmod` (POSIX via `translate_path`), `HeapSize`/`_msize`
+     (`malloc_usable_size` — sqlite traçait 0 octet par bloc → « out of memory »).
+- **État sqlite** : ne segfaulte plus, passe l'init ; bute maintenant sur un **`malloc(0)` dans `main`**
+  (taille mal liftée parmi 2958 fonctions → sqlite « out of memory »). Forensics profonde restante (vrai
+  gros binaire MSVC = cible multi-session). **Le gain général (`aret_disp`) est acquis et validé.**
+- **Régression PASS** : winediff 34/34, 53 tests, transpile 4/4 (hash inchangé).

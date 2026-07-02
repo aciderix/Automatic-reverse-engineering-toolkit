@@ -20,6 +20,7 @@
 #include <stdint.h>
 #include <stddef.h>
 #include <string.h>
+#include <malloc.h>
 #include <ctype.h>
 #include <stdlib.h>
 #include <stdio.h>
@@ -194,7 +195,13 @@ uint32_t aret_HeapAlloc(uint32_t esp) {
 }
 uint32_t aret_HeapFree(uint32_t esp) { free(WP(2)); return 1; }
 uint32_t aret_HeapReAlloc(uint32_t esp) { return WRP(realloc(WP(2), WU(3))); }
-uint32_t aret_HeapSize(uint32_t esp) { (void)esp; return 0; }
+/* HeapSize(hHeap, dwFlags, lpMem) — the usable size of an allocation. sqlite's
+ * Windows allocator (`winMemSize`) uses it to track memory; returning 0 made it
+ * believe every block was empty and abort with "out of memory". */
+uint32_t aret_HeapSize(uint32_t esp) {
+    void *p = WP(2);
+    return p ? (uint32_t)malloc_usable_size(p) : 0;
+}
 uint32_t aret_HeapCreate(uint32_t esp) { (void)esp; return 1; }
 uint32_t aret_HeapDestroy(uint32_t esp) { (void)esp; return 1; }
 

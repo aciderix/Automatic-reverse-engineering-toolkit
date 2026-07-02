@@ -9,6 +9,7 @@
 #include <unistd.h>
 #include <stdlib.h>
 #include <string.h>
+#include <malloc.h>
 #include <stdio.h>
 #include <fcntl.h>
 #include <sys/stat.h>
@@ -352,6 +353,14 @@ uint32_t aret_free(uint32_t esp) {
     return 0;
 }
 
+/* MSVC `_msize(p)` — usable size of a heap block. sqlite's default allocator
+ * (`SQLITE_MALLOCSIZE`) calls it to track memory; without it every block reads
+ * as 0 bytes and sqlite aborts with "out of memory". */
+uint32_t aret_msize(uint32_t esp) {
+    void *p = (void *)(uintptr_t)arg(esp, 0);
+    return p ? (uint32_t)malloc_usable_size(p) : 0;
+}
+
 uint32_t aret_memcpy(uint32_t esp) {
     void *d = (void *)(uintptr_t)arg(esp, 0);
     memcpy(d, (const void *)(uintptr_t)arg(esp, 1), arg(esp, 2));
@@ -539,6 +548,20 @@ uint32_t aret_rename(uint32_t esp) {
     translate_path((const char *)(uintptr_t)arg(esp, 1), to, sizeof to);
     make_parents(to);
     return (uint32_t)rename(from, to);
+}
+
+/* POSIX-style CRT file checks the MSVC runtime exposes (`_access`/`_chmod`). The
+ * MSVC access mode bits (0=exist, 2=write, 4=read, 6=rw) coincide with POSIX
+ * F_OK/W_OK/R_OK, so pass them through against the translated host path. */
+uint32_t aret_access(uint32_t esp) {
+    char path[1024];
+    translate_path((const char *)(uintptr_t)arg(esp, 0), path, sizeof path);
+    return (uint32_t)access(path, (int)arg(esp, 1));
+}
+uint32_t aret_chmod(uint32_t esp) {
+    char path[1024];
+    translate_path((const char *)(uintptr_t)arg(esp, 0), path, sizeof path);
+    return (uint32_t)chmod(path, (int)arg(esp, 1));
 }
 
 /* freopen(path, mode, stream): reopen `stream` on `path`. A null/synthetic _iob
