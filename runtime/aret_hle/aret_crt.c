@@ -200,14 +200,14 @@ uint32_t aret_makepath(uint32_t esp) {
 /* strtod/atof: David Gay's bignum strtod in the binary is huge and doesn't lift
  * cleanly; forward to the host. The double result is returned in st(0) via the
  * x87 fp channel (the caller recovers it after an fp-returning call). */
-extern long double __aret_x87_ret; extern int __aret_x87_ret_valid;
+extern long double __aret_x87_ret;
 uint32_t aret_strtod(uint32_t esp) {
     char *end; double v = strtod(ACS(0), &end);
     if (AU(1)) *(uint32_t *)AP(1) = (uint32_t)(uintptr_t)end;
-    __aret_x87_ret = v; __aret_x87_ret_valid = 1;
+    __aret_x87_ret = v;
     return 0;
 }
-uint32_t aret_atof(uint32_t esp) { __aret_x87_ret = atof(ACS(0)); __aret_x87_ret_valid = 1; return 0; }
+uint32_t aret_atof(uint32_t esp) { __aret_x87_ret = atof(ACS(0)); return 0; }
 
 /* msvcrt `_errno()` returns `int *` to the (thread-local) errno; our libc shims
  * set the host errno, and this hands back the same location so callers that
@@ -307,8 +307,8 @@ uint32_t aret_onexit(uint32_t esp) { aret_register_atexit(AU(0)); return AU(0); 
 /* ------------------------------------------------------------------ */
 extern long double __aret_x87_ret;
 #define AD(i)  (*(double *)(uintptr_t)(esp + (unsigned)(i) * 8))
-#define MATH1(name, fn) uint32_t aret_##name(uint32_t esp) { __aret_x87_ret = fn(AD(0)); __aret_x87_ret_valid = 1; return 0; }
-#define MATH2(name, fn) uint32_t aret_##name(uint32_t esp) { __aret_x87_ret = fn(AD(0), AD(1)); __aret_x87_ret_valid = 1; return 0; }
+#define MATH1(name, fn) uint32_t aret_##name(uint32_t esp) { __aret_x87_ret = fn(AD(0)); return 0; }
+#define MATH2(name, fn) uint32_t aret_##name(uint32_t esp) { __aret_x87_ret = fn(AD(0), AD(1)); return 0; }
 MATH2(pow, pow)
 MATH1(exp, exp)
 MATH1(log, log)
@@ -481,7 +481,7 @@ uint32_t aret_asctime(uint32_t esp) {
 }
 /* difftime returns a double — recovered through the x87 channel like libm. */
 uint32_t aret_difftime(uint32_t esp) {
-    __aret_x87_ret = difftime((time_t)(int32_t)AU(0), (time_t)(int32_t)AU(1)); __aret_x87_ret_valid = 1;
+    __aret_x87_ret = difftime((time_t)(int32_t)AU(0), (time_t)(int32_t)AU(1));
     return 0;
 }
 /* system(cmd): faithfully forward — the original program intends to run it. */

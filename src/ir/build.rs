@@ -277,19 +277,6 @@ pub fn build_ir(prog: &Program, func: &Function) -> IrFunction {
                 None => lift(insn, bits),
             };
             fold_ro_loads(&mut s, insn, prog);
-            // Runtime x87 fallback: wrap every call so a callee that returns fp via
-            // the channel (static-fp or host libm — including INDIRECT/computed
-            // calls the static pass cannot classify) is pushed onto the runtime
-            // stack, while a runtime-mode fp callee (result left on the shared
-            // stack) is not double-pushed. `precall` clears the flag first.
-            let is_call_rt = x87_rt
-                && matches!(
-                    insn.raw.flow_control(),
-                    iced_x86::FlowControl::Call | iced_x86::FlowControl::IndirectCall
-                );
-            if is_call_rt {
-                stmts.push(crate::ir::lift::x87rt_stmt("__x87rt_precall"));
-            }
             stmts.extend(s);
             // stdcall import ABI: a __stdcall callee pops its own arguments. ARET's
             // shim does not, so model the pop by raising esp by `@N` after the call —
@@ -318,8 +305,13 @@ pub fn build_ir(prog: &Program, func: &Function) -> IrFunction {
                     stmts.push(Stmt::Set { dst: slot, expr: crate::ir::lift::x87_ret_load() });
                 }
             }
-            if is_call_rt {
-                stmts.push(crate::ir::lift::x87rt_stmt("__x87rt_postcall"));
+            // Runtime x87 fallback: `fp_calls` is empty (bailed), so recognise a
+            // fp-returning call here and push its channel result onto the runtime
+            // stack, mirroring the hardware st(0).
+            if x87_rt
+                && FP_RETURNING.with(|c| call_returns_fp(prog, &insn.raw, &c.borrow()))
+            {
+                stmts.push(crate::ir::lift::x87rt_stmt("__x87rt_pushret"));
             }
         }
 

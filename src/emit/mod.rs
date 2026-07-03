@@ -298,9 +298,8 @@ pub(crate) const FLOAT_HELPERS: &str = concat!(
     // call. Backed by one shared global (defined in aret_hle.c) so the value
     // crosses translation-unit boundaries between chunks.
     "extern long double __aret_x87_ret;\n",
-    "extern int __aret_x87_ret_valid;\n",
-    "static inline uint64_t __x87_retstore(long double v){__aret_x87_ret=v;__aret_x87_ret_valid=1;return 0;}\n",
-    "static inline long double __x87_retload(void){__aret_x87_ret_valid=0;return __aret_x87_ret;}\n",
+    "static inline uint64_t __x87_retstore(long double v){__aret_x87_ret=v;return 0;}\n",
+    "static inline long double __x87_retload(void){return __aret_x87_ret;}\n",
     // `rep stos`: fill `n` elements at `d` with the low bytes of `v` (forward, DF=0).
     "static inline uint64_t __rep_stos8(uint64_t d,uint64_t v,uint64_t n){uint8_t* p=(uint8_t*)(uintptr_t)d;for(uint64_t i=0;i<n;i++)p[i]=(uint8_t)v;return 0;}\n",
     "static inline uint64_t __rep_stos16(uint64_t d,uint64_t v,uint64_t n){uint16_t* p=(uint16_t*)(uintptr_t)d;for(uint64_t i=0;i<n;i++)p[i]=(uint16_t)v;return 0;}\n",
@@ -367,14 +366,7 @@ pub(crate) const FLOAT_HELPERS: &str = concat!(
     // pushret after a recognised fp-returning call. Together with the bounds trap
     // above, an unrecognised fp return surfaces as an underflow trap, not garbage.
     "static inline uint64_t __x87rt_reset(void){__x87rt_p=0;return 0;}\n",
-    "static inline uint64_t __x87rt_pushret(void){__x87rt_psh(__aret_x87_ret);__aret_x87_ret_valid=0;return 0;}\n",
-    // Wrap a call in runtime mode: clear the channel-valid flag before, then push
-    // the channel onto the stack after IF a callee wrote it (fp return via channel:
-    // static-fp or host libm). A runtime-mode fp callee instead leaves its result
-    // on the shared stack (flag stays clear) → no double push. Handles indirect
-    // (computed) fp-returning calls the static analysis cannot classify.
-    "static inline uint64_t __x87rt_precall(void){__aret_x87_ret_valid=0;return 0;}\n",
-    "static inline uint64_t __x87rt_postcall(void){if(__aret_x87_ret_valid){__x87rt_psh(__aret_x87_ret);__aret_x87_ret_valid=0;}return 0;}\n",
+    "static inline uint64_t __x87rt_pushret(void){__x87rt_psh(__aret_x87_ret);return 0;}\n",
     "static inline uint64_t __x87rt_retstore(void){if(__x87rt_p>0)__aret_x87_ret=__x87rt_s[--__x87rt_p];return 0;}\n",
     "static inline uint64_t __x87rt_free(void){if(__x87rt_p>0)__x87rt_p--;return 0;}\n",
     // ---- increment 2: comparisons, status word, transcendentals ----
