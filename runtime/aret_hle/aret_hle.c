@@ -732,6 +732,22 @@ uint32_t aret_CloseHandle(uint32_t esp) {
 uint32_t aret_CloseHandle(uint32_t esp) { return close((int)arg(esp, 0)) == 0 ? 1 : 0; }
 #endif
 
+/* CreatePipe(hRead, hWrite, sa, size) -> BOOL. An anonymous pipe maps exactly to
+ * POSIX pipe(): the two HANDLEs are the read/write fds (this model's HANDLE == fd,
+ * so WriteFile/ReadFile/CloseHandle operate on them directly). Faithful and
+ * self-contained. (The security attributes and the advisory buffer size are not
+ * modelled — the kernel picks the buffer size, as Windows also may.) */
+uint32_t aret_CreatePipe(uint32_t esp) {
+    uint32_t *hr = (uint32_t *)(uintptr_t)arg(esp, 0);
+    uint32_t *hw = (uint32_t *)(uintptr_t)arg(esp, 1);
+    if (!hr || !hw) return 0;
+    int fds[2];
+    if (pipe(fds) != 0) return 0;
+    *hr = (uint32_t)fds[0];
+    *hw = (uint32_t)fds[1];
+    return 1;
+}
+
 /* GetFileSize(handle, lpFileSizeHigh) -> low 32 bits of the size (handles are
  * fds in this model). Sets *lpFileSizeHigh when non-NULL; INVALID_FILE_SIZE on
  * error. */

@@ -2719,3 +2719,36 @@ binaires MSVC, pas seulement strings.exe.
   légitime, pas une rustine.
 - **Gain MESURÉ** (367 modules winetest) : médiane **78 % → 79 %** ; `GetTempPathW` disparaît des trous.
 - **Régression** : cargo **54+2**, transpile-diff **4/4** (hash inchangé), **winediff 40/40**.
+
+### Cluster process/thread/pipe — audit du modèle + part fidèle (CreatePipe) ✅ / threads = chantier dédié
+- **2026-07-03 — « proprement » = auditer AVANT d'écrire.** Le cluster (nouveau #1 winetest :
+  `GetExitCodeProcess` 343, `CreateProcessA`, `CreateThread`, `WaitForMultipleObjects`, `CreatePipe`…)
+  n'est PAS uniforme. Audit du modèle d'exécution ARET :
+  - **Registres** = variables C locales par appel (`uint64_t v0,v7,…`) → **thread-safe par construction**.
+  - **TEB/PEB** = `static uint8_t aret_teb[0x1000]` **global**, **`g_last_error` global** → **PAS**
+    thread-local. La **pile machine** est une **région unique partagée**.
+  - ⇒ le modèle est **fondamentalement mono-thread** aujourd'hui.
+- **Conséquence (principe sacré : ne jamais simuler ce qu'on ne peut rendre fidèle)** :
+  - **`CreatePipe` (anonyme)** → mappe exactement sur `pipe()` POSIX (le HANDLE de ce modèle == fd, donc
+    WriteFile/ReadFile/CloseHandle marchent dessus). **Ajouté, fidèle, validé** :
+    `bench/winecorpus/win32_pipe.c` (round-trip write/read) = bit-à-bit Wine. **winediff 40→41.**
+  - **Déjà sound en mono-thread** (aucune action) : `GetCurrentProcess/Thread/ThreadId` (existants),
+    `CriticalSection` Init/Enter/Leave (no-op — **correct sans concurrence réelle**),
+    `WaitForSingleObject` (WAIT_OBJECT_0 immédiat — cohérent sans objet bloquant réel), `CloseHandle`.
+  - **`CreateThread`/`CreateProcessA/W`/`OpenProcess`/`TerminateProcess`** → **NON simulés** : ils
+    échouent (stub faible → 0/FALSE, sound) plutôt que feindre un thread qui *race* ou un enfant qui ne
+    tourne jamais (ce serait un faux silencieux). `CreateProcess` est une **frontière dure** : il n'y a pas
+    de Windows pour exécuter un `.exe` enfant.
+- **Chantier threads (dédié, quand un binaire cible réel l'exige)** — le chemin est clair, mesuré :
+  1. **TEB + last-error thread-locaux** (`__thread`) — fondation.
+  2. **Pile machine par thread** dans `CreateThread` (malloc 32-bit, `__esp` initial au sommet) +
+     dispatch `aret_call(startAddr, esp, param)` (ABI stdcall du thread-proc sur la pile partagée).
+  3. **Sync réelle** : `CRITICAL_SECTION` → `pthread_mutex` **récursif**, `CreateEvent`/`SetEvent`/
+     `WaitForSingleObject`/`MultipleObjects` → `pthread` cond/join.
+  4. **Validation MT** : garde multi-thread vs Wine (N threads + compteur sous section critique →
+     somme déterministe ; signalisation d'événement → déterministe).
+- **Note honnête de priorité** : les démonstrateurs actuels (sqlite CLI, Lua, la plupart des applets
+  busybox) sont **mono-thread** → le chantier threads est de la **complétude** (couvre les binaires
+  thread-lourds / la suite winetest), pas un déblocage des cibles actuelles. À lancer sur demande ou quand
+  un binaire mesuré le réclame — pas spéculativement.
+- **Régression** : cargo, transpile-diff (hash inchangé), **winediff 41** (à confirmer).
