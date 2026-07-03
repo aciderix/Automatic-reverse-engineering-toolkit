@@ -2362,12 +2362,44 @@ binaires MSVC, pas seulement strings.exe.
   `CREATE`/`INSERT`/`DELETE`/`UPDATE`, `GROUP BY`+agrégats, `JOIN`, `CREATE INDEX`+usage indexé, `IN`,
   `HAVING`, CTE (`WITH`), sous-requête scalaire, **fonctions fenêtre** (`OVER (PARTITION BY …)`),
   `ORDER BY`, cross-join. Un vrai `sqlite3.exe` MSVC 32-bit strippé exécute donc son moteur SQL
-  nativement sous Linux. (Le « hang » sur fichier neuf était le même bug whereSplit ; les warnings
-  `GetVersionExA`/`AreFileApisANSI` sont inoffensifs — les stubs à 0 gardent sqlite sur le chemin VFS
-  simple qui marche ; leur implémenter des valeurs « succès » active au contraire des chemins VFS plus
-  récents qui cassent — donc **ne pas** les shimer.)
+  nativement sous Linux. (Le « hang » sur fichier neuf était le même bug whereSplit. ⚠️ **Note
+  corrigée** : la version d'origine de cette note disait que laisser `GetVersionExA`/`AreFileApisANSI`
+  en stub-à-0 était un « choix » car les rendre fidèles cassait un chemin VFS récent — **c'était en
+  réalité la seule rustine par binaire du projet, masquant un bug HLE général**. Levée à l'entrée
+  suivante : chemin VFS wide implémenté proprement + cause racine `SetLastError` corrigée.)
 - Test corpus `tailrec` ajouté (garde le chemin de saut normal).
 - **Régression PASS** : cpudiff, difftest 272/272, transpile 4/4 (= réf native, 58 fn), winediff 34/34,
   55 tests.
 - **Régression PASS** : cpudiff, difftest 268/268, transpile 4/4 (hash `4b0121f182554d40` inchangé),
   winediff 34/34, 54 tests unitaires.
+
+### Phase 3b/7 — Rustine VFS sqlite SUPPRIMÉE : couche fichier wide + cause racine `SetLastError` ✅
+- **2026-07-03 — la seule vraie rustine du projet levée**, en corrigeant un bug HLE **général**. Le
+  jalon sqlite ci-dessus laissait `GetVersionExA`/`AreFileApisANSI` en **stub-à-0 exprès** pour garder
+  sqlite sur son chemin VFS ANSI simple ; la note d'alors justifiait ce « choix » par « les rendre
+  fidèles casse le chemin VFS récent ». C'était contraire au **principe sacré** (« jamais de rustine
+  par binaire, corriger le général ») : on masquait un bug au lieu de le surfacer.
+- **Diagnostic (différentiel Wine)** : rendus fidèles (`GetVersionExA`/W → 6.2.9200 NT, `AreFileApisANSI`
+  → TRUE, exactement ce que Wine rapporte), sqlite bascule sur son **vrai chemin VFS wide (Win8+)** et
+  échoue `disk I/O error (10)` en appelant `GetFullPathNameW`/`GetFileAttributesExW` (**non
+  implémentées**) puis `FormatMessageW`. Donc le bug caché n'était **pas** un miscompile lifter mais un
+  **manque d'APIs fichier wide** + une **cause racine générale**.
+- **Cause racine (générale, `runtime/aret_hle/aret_hle.c`)** : les shims d'attributs fichier
+  (`GetFileAttributes*`) renvoyaient bien « absent » mais **ne posaient pas `GetLastError`**. sqlite
+  `winAccess` lit `GetLastError` pour distinguer *fichier absent* (normal) d'une *vraie erreur d'accès* ;
+  sans `ERROR_FILE_NOT_FOUND` il concluait `SQLITE_IOERR_ACCESS`. `aret_attr_named`/`aret_attr_ex_named`
+  posent maintenant `g_last_error` (2=FILE, 3=PATH) à l'échec et 0 au succès. **Touche tout binaire Win32
+  sondant l'existence d'un fichier via `GetFileAttributes*` + `GetLastError`.**
+- **APIs wide implémentées** : `GetFullPathNameW` (+ helper `aret_n2w` narrow→UTF-16),
+  `GetFileAttributesExA`/`W` (`WIN32_FILE_ATTRIBUTE_DATA` via `stat`), `GetVersionExA`/`W` +
+  `AreFileApisANSI` fidèles. `FormatMessageW` s'est avéré n'être qu'un **symptôme** (chemin d'erreur),
+  non requis une fois la cause corrigée.
+- **Effet** : le vrai `sqlite3.exe` MSVC prend désormais son **chemin VFS wide réel** (celui de
+  Windows/Wine, plus le chemin ANSI « de contournement »), et `CREATE`/`INSERT`/`UPDATE`/`DELETE` +
+  le fichier `.db` produit sont **bit-identiques à Wine octet à octet**. **Plus aucune rustine.**
+- **Garde** : `bench/winecorpus/wide_fileattr.c` (GetFullPathNameW, GetFileAttributesExW, et le contrat
+  `GetLastError=FILE_NOT_FOUND` sur fichier absent) — indépendante de sqlite (hors dépôt). **winediff
+  34/34 → 35/35.**
+- **Régression PASS** : cargo test (54+3+48+1+1), **difftest 271/271** (0 divergence), **transpile-diff
+  4/4** (H=`19acad982194bf07`, O0–O3 cohérents), **cpudiff vert**, **winediff 35/35**. Fix HLE-only (le
+  lifter n'est pas touché).
