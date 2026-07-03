@@ -2318,6 +2318,12 @@ pub(crate) fn x87_ret_store(v: Expr) -> Stmt {
     Stmt::CallStmt(x87call("__x87_retstore", vec![v]))
 }
 
+/// A bare `CallStmt` to a no-arg runtime x87 helper — for `build.rs` to emit the
+/// runtime-fallback fp-return handoff (`__x87rt_reset`/`pushret`/`retstore`).
+pub(crate) fn x87rt_stmt(name: &str) -> Stmt {
+    Stmt::CallStmt(x87call(name, vec![]))
+}
+
 /// Read the fp return channel (st(0)) — emitted after a call to a fp-returning
 /// function, to recover the result the x87 ABI left in st(0).
 pub(crate) fn x87_ret_load() -> Expr {
@@ -2438,6 +2444,154 @@ pub(crate) enum RoundMode {
 /// proven-bit-exact subset.
 pub(crate) fn lift_x87(insn: &Insn, sp_in: u32, mode: RoundMode) -> Vec<Stmt> {
     x87_try(insn, sp_in as i32, mode).unwrap_or_else(|| asm_fallback(insn))
+}
+
+/// Lower an x87 instruction against the RUNTIME FPU-stack model (`__x87rt_*`),
+/// the fallback used when a function's static stack-depth analysis bailed. No
+/// compile-time depth is needed: the stack lives in runtime state, so this is
+/// correct by construction. Each op is one *impure* `CallStmt` (the optimiser
+/// never drops/reorders it). Ops not modelled here (compares, status word,
+/// transcendentals) stay a sound `Asm`/abort. Only call for `is_x87` insns.
+pub(crate) fn lift_x87_runtime(insn: &Insn) -> Vec<Stmt> {
+    x87_rt_try(insn).unwrap_or_else(|| asm_fallback(insn))
+}
+
+fn x87_rt_try(insn: &Insn) -> Option<Vec<Stmt>> {
+    use Mnemonic::*;
+    let ins = &insn.raw;
+    let mn = ins.mnemonic();
+    let rt = |name: &str, args: Vec<Expr>| Stmt::CallStmt(x87call(name, args));
+    Some(match mn {
+        // pushes: memory load, or duplicate st(i)
+        Fld | Fild => {
+            if ins.op_kind(0) == OpKind::Memory {
+                if ins.segment_prefix() != Register::None {
+                    return None;
+                }
+                let (addr, _) = mem_addr(ins)?;
+                let h = match (mn, ins.memory_size()) {
+                    (Fld, MemorySize::Float32) => "__x87rt_ld32",
+                    (Fld, MemorySize::Float64) => "__x87rt_ld64",
+                    (Fld, MemorySize::Float80) => "__x87rt_ld80",
+                    (Fild, MemorySize::Int16) => "__x87rt_ild16",
+                    (Fild, MemorySize::Int32) => "__x87rt_ild32",
+                    (Fild, MemorySize::Int64) => "__x87rt_ild64",
+                    _ => return None,
+                };
+                vec![rt(h, vec![addr])]
+            } else {
+                let r = ins.op_register(0);
+                if !r.is_st() {
+                    return None;
+                }
+                vec![rt("__x87rt_ldi", vec![konst(r.number() as i128)])]
+            }
+        }
+        Fld1 => vec![rt("__x87rt_ld1", vec![])],
+        Fldz => vec![rt("__x87rt_ldz", vec![])],
+
+        // stores (optionally popping)
+        Fst | Fstp | Fist | Fistp => {
+            let pop = konst(matches!(mn, Fstp | Fistp) as i128);
+            match ins.op_kind(0) {
+                OpKind::Register => {
+                    let r = ins.op_register(0);
+                    if !r.is_st() || !matches!(mn, Fst | Fstp) {
+                        return None;
+                    }
+                    vec![rt("__x87rt_sti", vec![konst(r.number() as i128), pop])]
+                }
+                OpKind::Memory => {
+                    if ins.segment_prefix() != Register::None {
+                        return None;
+                    }
+                    let (addr, _) = mem_addr(ins)?;
+                    let h = match (mn, ins.memory_size()) {
+                        (Fst | Fstp, MemorySize::Float32) => "__x87rt_st32",
+                        (Fst | Fstp, MemorySize::Float64) => "__x87rt_st64",
+                        (Fst | Fstp, MemorySize::Float80) => "__x87rt_st80",
+                        // fist/fistp honour the runtime rounding mode (rc) — no
+                        // need to prove it statically, we track it at runtime.
+                        (Fist | Fistp, MemorySize::Int16) => "__x87rt_ist16",
+                        (Fist | Fistp, MemorySize::Int32) => "__x87rt_ist32",
+                        (Fist | Fistp, MemorySize::Int64) => "__x87rt_ist64",
+                        _ => return None,
+                    };
+                    vec![rt(h, vec![addr, pop])]
+                }
+                _ => return None,
+            }
+        }
+
+        // arithmetic: memory operand (st0 = st0 OP mem) or register form
+        Fadd | Faddp | Fiadd | Fmul | Fmulp | Fimul | Fsub | Fsubp | Fisub | Fsubr | Fsubrp
+        | Fisubr | Fdiv | Fdivp | Fidiv | Fdivr | Fdivrp | Fidivr => {
+            let op: i128 = match mn {
+                Fadd | Faddp | Fiadd => 0,
+                Fsub | Fsubp | Fisub => 1,
+                Fsubr | Fsubrp | Fisubr => 2,
+                Fmul | Fmulp | Fimul => 3,
+                Fdiv | Fdivp | Fidiv => 4,
+                _ => 5, // divr
+            };
+            let is_p = matches!(mn, Faddp | Fsubp | Fsubrp | Fmulp | Fdivp | Fdivrp);
+            let is_i = matches!(mn, Fiadd | Fisub | Fisubr | Fimul | Fidiv | Fidivr);
+            if ins.op_kind(0) == OpKind::Memory {
+                if ins.segment_prefix() != Register::None {
+                    return None;
+                }
+                let (addr, _) = mem_addr(ins)?;
+                let h = match (is_i, ins.memory_size()) {
+                    (false, MemorySize::Float32) => "__x87rt_am32",
+                    (false, MemorySize::Float64) => "__x87rt_am64",
+                    (true, MemorySize::Int16) => "__x87rt_ami16",
+                    (true, MemorySize::Int32) => "__x87rt_ami32",
+                    _ => return None,
+                };
+                vec![rt(h, vec![konst(op), addr])]
+            } else if is_p {
+                let ai = if ins.op_count() >= 1 && ins.op_register(0).is_st() {
+                    ins.op_register(0).number() as i128
+                } else {
+                    1
+                };
+                vec![rt("__x87rt_ar", vec![konst(op), konst(ai), konst(0), konst(1)])]
+            } else {
+                let (r0, r1) = (ins.op_register(0), ins.op_register(1));
+                if !r0.is_st() || !r1.is_st() {
+                    return None;
+                }
+                vec![rt(
+                    "__x87rt_ar",
+                    vec![konst(op), konst(r0.number() as i128), konst(r1.number() as i128), konst(0)],
+                )]
+            }
+        }
+
+        Fxch => {
+            let di = (0..ins.op_count())
+                .map(|k| ins.op_register(k))
+                .filter(|r| r.is_st())
+                .map(|r| r.number() as i128)
+                .find(|&n| n != 0)
+                .unwrap_or(1);
+            vec![rt("__x87rt_xch", vec![konst(di)])]
+        }
+        Fabs => vec![rt("__x87rt_abs", vec![])],
+        Fchs => vec![rt("__x87rt_chs", vec![])],
+        Fsqrt => vec![rt("__x87rt_sqrt", vec![])],
+        Frndint => vec![rt("__x87rt_rndint", vec![])],
+        Fldcw => {
+            let (addr, _) = mem_addr(ins)?;
+            vec![rt("__x87rt_ldcw", vec![addr])]
+        }
+        Fnstcw | Fstcw => {
+            let (addr, _) = mem_addr(ins)?;
+            vec![rt("__x87rt_stcw", vec![addr])]
+        }
+
+        _ => return None,
+    })
 }
 
 fn x87_try(insn: &Insn, sp: i32, mode: RoundMode) -> Option<Vec<Stmt>> {

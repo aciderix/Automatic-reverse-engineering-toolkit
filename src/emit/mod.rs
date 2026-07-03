@@ -312,11 +312,63 @@ pub(crate) const FLOAT_HELPERS: &str = concat!(
     "static inline uint64_t __rep_scas8(uint64_t d,uint64_t v,uint64_t n,uint64_t repe){const uint8_t* p=(const uint8_t*)(uintptr_t)d;uint8_t x=(uint8_t)v;uint64_t k=0;while(n!=0){int eq=(p[k]==x);k++;n--;if(repe?!eq:eq)break;}return k;}\n",
     "static inline uint64_t __rep_scas16(uint64_t d,uint64_t v,uint64_t n,uint64_t repe){const uint16_t* p=(const uint16_t*)(uintptr_t)d;uint16_t x=(uint16_t)v;uint64_t k=0;while(n!=0){int eq=(p[k]==x);k++;n--;if(repe?!eq:eq)break;}return k;}\n",
     "static inline uint64_t __rep_scas32(uint64_t d,uint64_t v,uint64_t n,uint64_t repe){const uint32_t* p=(const uint32_t*)(uintptr_t)d;uint32_t x=(uint32_t)v;uint64_t k=0;while(n!=0){int eq=(p[k]==x);k++;n--;if(repe?!eq:eq)break;}return k;}\n",
+    // ---- Runtime x87 FPU-stack model: the fallback used for functions whose
+    // static depth analysis bailed. The stack is ordinary runtime state, so no
+    // compile-time depth is needed — correct by construction. Named `__x87rt_`
+    // (not `__x87_`) so the optimiser treats them as IMPURE (they mutate the
+    // stack): never dropped or reordered. Per-TU state is sound because the x87
+    // stack is empty at every call boundary (ABI). `st(0)` = s[p-1].
+    "static long double __x87rt_s[16] __attribute__((unused));\n",
+    "static int __x87rt_p __attribute__((unused))=0;\n",
+    "static int __x87rt_rc __attribute__((unused))=0;\n",
+    // Bounds-checked slot access: `st(i)` = s[p-1-i]. An out-of-range access means
+    // the runtime stack is inconsistent (e.g. a value an unrecognised callee left
+    // in st(0) was never pushed) — TRAP rather than read stale data, keeping the
+    // fallback SOUND (correct, or a loud abort; never silently wrong).
+    "static inline long double* __x87rt_at(int i){int k=__x87rt_p-1-i;if(k<0||k>=16)__builtin_trap();return &__x87rt_s[k];}\n",
+    "static inline void __x87rt_psh(long double v){if(__x87rt_p<0||__x87rt_p>=16)__builtin_trap();__x87rt_s[__x87rt_p++]=v;}\n",
+    "static inline uint64_t __x87rt_ld32(uint64_t a){__x87rt_psh((long double)*(float*)(uintptr_t)a);return 0;}\n",
+    "static inline uint64_t __x87rt_ld64(uint64_t a){__x87rt_psh((long double)*(double*)(uintptr_t)a);return 0;}\n",
+    "static inline uint64_t __x87rt_ld80(uint64_t a){__x87rt_psh(*(long double*)(uintptr_t)a);return 0;}\n",
+    "static inline uint64_t __x87rt_ild16(uint64_t a){__x87rt_psh((long double)*(int16_t*)(uintptr_t)a);return 0;}\n",
+    "static inline uint64_t __x87rt_ild32(uint64_t a){__x87rt_psh((long double)*(int32_t*)(uintptr_t)a);return 0;}\n",
+    "static inline uint64_t __x87rt_ild64(uint64_t a){__x87rt_psh((long double)*(int64_t*)(uintptr_t)a);return 0;}\n",
+    "static inline uint64_t __x87rt_ldi(int i){long double v=*__x87rt_at(i);__x87rt_psh(v);return 0;}\n",
+    "static inline uint64_t __x87rt_ld1(void){__x87rt_psh(1.0L);return 0;}\n",
+    "static inline uint64_t __x87rt_ldz(void){__x87rt_psh(0.0L);return 0;}\n",
+    "static inline uint64_t __x87rt_st32(uint64_t a,int pp){*(float*)(uintptr_t)a=(float)*__x87rt_at(0);if(pp)__x87rt_p--;return 0;}\n",
+    "static inline uint64_t __x87rt_st64(uint64_t a,int pp){*(double*)(uintptr_t)a=(double)*__x87rt_at(0);if(pp)__x87rt_p--;return 0;}\n",
+    "static inline uint64_t __x87rt_st80(uint64_t a,int pp){*(long double*)(uintptr_t)a=*__x87rt_at(0);if(pp)__x87rt_p--;return 0;}\n",
+    "static inline long double __x87rt_rnd(long double v){switch(__x87rt_rc){case 1:return __builtin_floorl(v);case 2:return __builtin_ceill(v);case 3:return __builtin_truncl(v);default:return __builtin_rintl(v);}}\n",
+    "static inline uint64_t __x87rt_ist16(uint64_t a,int pp){*(int16_t*)(uintptr_t)a=(int16_t)(long long)__x87rt_rnd(*__x87rt_at(0));if(pp)__x87rt_p--;return 0;}\n",
+    "static inline uint64_t __x87rt_ist32(uint64_t a,int pp){*(int32_t*)(uintptr_t)a=(int32_t)(long long)__x87rt_rnd(*__x87rt_at(0));if(pp)__x87rt_p--;return 0;}\n",
+    "static inline uint64_t __x87rt_ist64(uint64_t a,int pp){*(int64_t*)(uintptr_t)a=(int64_t)__x87rt_rnd(*__x87rt_at(0));if(pp)__x87rt_p--;return 0;}\n",
+    "static inline uint64_t __x87rt_sti(int i,int pp){*__x87rt_at(i)=*__x87rt_at(0);if(pp)__x87rt_p--;return 0;}\n",
+    "static inline long double __x87rt_op(int o,long double a,long double b){switch(o){case 0:return a+b;case 1:return a-b;case 2:return b-a;case 3:return a*b;case 4:return a/b;default:return b/a;}}\n",
+    "static inline uint64_t __x87rt_ar(int o,int ai,int bi,int pp){long double* a=__x87rt_at(ai);long double b=*__x87rt_at(bi);*a=__x87rt_op(o,*a,b);if(pp)__x87rt_p--;return 0;}\n",
+    "static inline uint64_t __x87rt_am32(int o,uint64_t a){long double* t=__x87rt_at(0);*t=__x87rt_op(o,*t,(long double)*(float*)(uintptr_t)a);return 0;}\n",
+    "static inline uint64_t __x87rt_am64(int o,uint64_t a){long double* t=__x87rt_at(0);*t=__x87rt_op(o,*t,(long double)*(double*)(uintptr_t)a);return 0;}\n",
+    "static inline uint64_t __x87rt_ami16(int o,uint64_t a){long double* t=__x87rt_at(0);*t=__x87rt_op(o,*t,(long double)*(int16_t*)(uintptr_t)a);return 0;}\n",
+    "static inline uint64_t __x87rt_ami32(int o,uint64_t a){long double* t=__x87rt_at(0);*t=__x87rt_op(o,*t,(long double)*(int32_t*)(uintptr_t)a);return 0;}\n",
+    "static inline uint64_t __x87rt_xch(int i){long double* a=__x87rt_at(0);long double* b=__x87rt_at(i);long double t=*a;*a=*b;*b=t;return 0;}\n",
+    "static inline uint64_t __x87rt_chs(void){long double* t=__x87rt_at(0);*t=-*t;return 0;}\n",
+    "static inline uint64_t __x87rt_abs(void){long double* t=__x87rt_at(0);if(*t<0)*t=-*t;return 0;}\n",
+    "static inline uint64_t __x87rt_sqrt(void){long double* t=__x87rt_at(0);*t=__builtin_sqrtl(*t);return 0;}\n",
+    "static inline uint64_t __x87rt_rndint(void){long double* t=__x87rt_at(0);*t=__x87rt_rnd(*t);return 0;}\n",
+    "static inline uint64_t __x87rt_ldcw(uint64_t a){__x87rt_rc=(*(uint16_t*)(uintptr_t)a>>10)&3;return 0;}\n",
+    "static inline uint64_t __x87rt_stcw(uint64_t a){*(uint16_t*)(uintptr_t)a=(uint16_t)(0x037F|(__x87rt_rc<<10));return 0;}\n",
+    // fp-return handoff for runtime-mode functions (shares the static channel).
+    // reset at entry (clean stack), retstore at ret (publish st(0) if fp-returning),
+    // pushret after a recognised fp-returning call. Together with the bounds trap
+    // above, an unrecognised fp return surfaces as an underflow trap, not garbage.
+    "static inline uint64_t __x87rt_reset(void){__x87rt_p=0;return 0;}\n",
+    "static inline uint64_t __x87rt_pushret(void){__x87rt_psh(__aret_x87_ret);return 0;}\n",
+    "static inline uint64_t __x87rt_retstore(void){if(__x87rt_p>0)__aret_x87_ret=__x87rt_s[--__x87rt_p];return 0;}\n",
 );
 
 /// The runtime-helper preamble, included only when the body references it.
 pub(crate) fn float_preamble(body: &str) -> &'static str {
-    if body.contains("__fp_") || body.contains("__pi_") || body.contains("__ix_") || body.contains("__x87_") || body.contains("__rep_") {
+    if body.contains("__fp_") || body.contains("__pi_") || body.contains("__ix_") || body.contains("__x87_") || body.contains("__x87rt_") || body.contains("__rep_") {
         FLOAT_HELPERS
     } else {
         ""

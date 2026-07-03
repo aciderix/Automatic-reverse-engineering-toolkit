@@ -184,6 +184,11 @@ pub fn build_ir(prog: &Program, func: &Function) -> IrFunction {
         Some((ops, calls)) => (Some(ops), calls),
         None => (None, HashMap::new()),
     };
+    // Runtime x87 fallback mode: the whole function bailed static depth analysis
+    // (`x87` is None) AND we are in shared-stack (transpile) mode. Only transpile
+    // gains from it — in decompile the `Asm` fallback runs the real x87 instruction
+    // (correct), so replacing it there could only regress. Gated accordingly.
+    let x87_rt = x87.is_none() && crate::emit::shared_stack();
     // Does this function itself return an fp value (st(0))? Then store st(0) into
     // the fp return channel at each `ret`, so callers can recover it.
     let self_returns_fp = FP_RETURNING.with(|c| c.borrow().contains(&func.entry));
@@ -263,6 +268,12 @@ pub fn build_ir(prog: &Program, func: &Function) -> IrFunction {
             }
             let mut s = match x87.as_ref().and_then(|m| m.get(&insn.address)) {
                 Some(&(sp_in, mode)) => crate::ir::lift::lift_x87(insn, sp_in, mode),
+                // Runtime x87 fallback: the whole function bailed static analysis
+                // (`x87` is None), so lower each FPU op against the runtime stack
+                // model instead of degrading to a hard `Asm`/abort.
+                None if x87_rt && crate::ir::lift::is_x87(&insn.raw) => {
+                    crate::ir::lift::lift_x87_runtime(insn)
+                }
                 None => lift(insn, bits),
             };
             fold_ro_loads(&mut s, insn, prog);
@@ -294,6 +305,14 @@ pub fn build_ir(prog: &Program, func: &Function) -> IrFunction {
                     stmts.push(Stmt::Set { dst: slot, expr: crate::ir::lift::x87_ret_load() });
                 }
             }
+            // Runtime x87 fallback: `fp_calls` is empty (bailed), so recognise a
+            // fp-returning call here and push its channel result onto the runtime
+            // stack, mirroring the hardware st(0).
+            if x87_rt
+                && FP_RETURNING.with(|c| call_returns_fp(prog, &insn.raw, &c.borrow()))
+            {
+                stmts.push(crate::ir::lift::x87rt_stmt("__x87rt_pushret"));
+            }
         }
 
         // Internal successors (block indices), in CFG order.
@@ -302,6 +321,19 @@ pub fn build_ir(prog: &Program, func: &Function) -> IrFunction {
             .iter()
             .filter_map(|t| idx.get(t).copied())
             .collect();
+
+        // Runtime x87 fallback bookkeeping: start the entry block with a clean
+        // stack, and publish st(0) to the fp return channel before each `ret` (in
+        // case this function returns an fp value the static analysis could not
+        // classify). Combined with the bounds trap, this keeps the fallback sound.
+        if x87_rt {
+            if addr == func.entry {
+                stmts.insert(0, crate::ir::lift::x87rt_stmt("__x87rt_reset"));
+            }
+            if matches!(blk.terminator, Flow::Return) {
+                stmts.push(crate::ir::lift::x87rt_stmt("__x87rt_retstore"));
+            }
+        }
 
         // Terminator.
         match blk.terminator {
