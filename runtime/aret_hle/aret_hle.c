@@ -149,6 +149,19 @@ size_t aret_vformat(char *out, size_t cap, const char *fmt, const uint32_t *a) {
             }
         }
         int longlong = 0, seen_l = 0;
+        /* MSVC size prefixes glibc does not understand — translate rather than copy
+         * into `spec`: `I64` -> 64-bit ("ll"), `I32` -> 32-bit int, bare `I` ->
+         * pointer width (32-bit on Win32). Without this, `%I64d` falls through to
+         * the literal-spec default and prints "%I64d" (seen in busybox `expr`). */
+        if (p[0] == 'I' && p[1] == '6' && p[2] == '4') {
+            longlong = 1;
+            if (si < sizeof(spec) - 3) { spec[si++] = 'l'; spec[si++] = 'l'; }
+            p += 3;
+        } else if (p[0] == 'I' && p[1] == '3' && p[2] == '2') {
+            p += 3; /* 32-bit int — no glibc modifier needed */
+        } else if (p[0] == 'I') {
+            p += 1; /* pointer width == 32-bit int on Win32 */
+        }
         while (*p == 'l' || *p == 'h' || *p == 'L' || *p == 'z' || *p == 'j' || *p == 't') {
             if (*p == 'l') { if (seen_l) longlong = 1; seen_l = 1; }
             if (*p == 'L' || *p == 'j') longlong = 1;

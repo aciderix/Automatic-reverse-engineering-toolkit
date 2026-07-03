@@ -2773,3 +2773,25 @@ binaires MSVC, pas seulement strings.exe.
   épuisés**. Le reste est soit le chantier threads, soit des sous-systèmes à fidélité délicate (messages
   d'erreur exacts, SID/sécurité, SEH). Prochain choix de valeur × sûreté à faire en conséquence.
 - **Régression** : cargo **54+2**, transpile-diff **4/4** (hash inchangé), **winediff 42/42**.
+
+### Axe 1×2 — vrai binaire de bout en bout (busybox) : printf %I64 corrigé ✅
+- **2026-07-03 — mesurer le PRODUIT, pas un proxy.** Le statique (couverture d'imports) *ment* sur le
+  fonctionnel (sqlite est « INCOMPLETE » à 80 % *et* marche). Seul un vrai binaire lancé de bout en bout
+  vs Wine dit « où on en est vraiment » — et fait remonter le prochain bug **réel** (corrigé général).
+  busybox-w32 (des dizaines d'outils Unix en un binaire) = énorme surface fonctionnelle.
+- **Piège d'invocation (pas un bug ARET)** : busybox choisit l'applet par `argv[0]` (mode multiplexeur
+  seulement si `basename(argv[0])=="busybox"`). Nommé « app », il répond « applet not found » — **exactement
+  comme Wine avec le même renommage** (vérifié). Nommé `busybox`, tout tourne (`busybox echo hello` → OK).
+- **Bug RÉEL trouvé et corrigé (général)** : busybox `expr` formate son résultat avec **`%I64d`** (préfixe
+  de taille 64-bit MSVC). glibc ne connaît pas `I64` → `aret_vformat` tombait sur le défaut « spec
+  littérale » et imprimait **`%I64d`** au lieu de `42`. **Fix** : le reformatteur partagé traduit le
+  préfixe MSVC — `I64` → `ll` (64-bit), `I32` → int 32-bit, `I` nu → largeur pointeur (32-bit Win32) —
+  au lieu de le copier dans la spec glibc. **Général** : bénéficie à tout binaire MSVC utilisant le printf
+  64-bit (un import unique : le reformatteur `aret_vformat` sert printf/sprintf/snprintf/vsnprintf).
+- **Vérifié** : busybox `expr 100+23`/`6+7`/`50-8`/`12/4` = **bit-identique à Wine** ; garde permanente
+  `bench/winecorpus/crt_printf_i64.c` (`%I64d/u/x/X`, négatifs, largeur `%08I64x`, mix) = bit-à-bit Wine.
+  **winediff 42→43.**
+- **Régression** : cargo **54+2**, transpile-diff **4/4** (hash inchangé), winediff **43/43**.
+- **Leçon** : un vrai binaire varié a immédiatement exposé un bug printf **général** qu'aucun test synthétique
+  ni sweep statique n'avait révélé. C'est le meilleur révélateur de « où on en est ». À systématiser
+  (harness busybox).
