@@ -2531,3 +2531,36 @@ binaires MSVC, pas seulement strings.exe.
   est le balayage large répétable, et c'est *précisément* lui (pas un poke étroit) qui a exposé ces deux
   défauts. Le faux `ceil` prouve une fois de plus la leçon : la complétude se **mesure** contre la vérité
   terrain sur un vrai binaire, elle ne s'**affirme** pas jalon par jalon.
+
+### Outil — couverture d'imports statique (`--mode imports`) : mesurer l'axe 2 D'AVANCE ✅
+- **2026-07-03 — opérationnalise « mesurer plutôt qu'affirmer » pour l'axe 2.** Discussion de fond
+  (avec l'utilisateur) sur la nature du problème : les « aires » d'un binaire (FTS5, RTREE, JSON…) ne
+  sont **pas** des aires qu'ARET implémente — une feature applicative n'est, une fois compilée, que
+  (a) des instructions x86 (axe 1, fini, balayé par cpudiff/Unicorn) + (b) des appels OS/CRT (axe 2,
+  la table d'imports). Donc **on ne couvre pas des features une par une** ; on ferme deux dimensions
+  finies et **connues d'avance**. Pour l'axe 2, « connu d'avance » = la table d'imports du PE se lit
+  **statiquement**.
+- **`--mode imports`** : classe **toute** la table d'imports d'un binaire contre l'ensemble des shims
+  livrés (`implemented_shims()` — parse HLE/CRT/Win32 + macros génératrices), et sort couvert / non
+  couvert (%) **+ la liste nominative du trou d'axe 2**. Complémentaire du verdict transpile, qui ne
+  liste que les imports *effectivement appelés* par le code récupéré (plafonné, dépend de la
+  récupération) : ici c'est **a-priori**, indépendant de la récupération — la vraie mesure de
+  préparation d'ARET pour un binaire.
+- **Honnêteté du tampon (principe sacré appliqué à l'outil lui-même)** : un import *fonction* sans shim
+  touche le stub faible au runtime (vrai trou) ; un import *donnée* (`_iob`, `__initenv`, `__mb_cur_max`)
+  peut être satisfait par le chemin IAT/layout. Le rapport dit donc « trou de **shim** » = **borne
+  supérieure conservatrice** du vrai trou runtime, jamais une sous-estimation. Formulation calibrée pour
+  ne pas sur-affirmer.
+- **Mesuré** : `hello_realcrt.exe` 53 imports → 50 couverts (94 %), trou = `__initenv`/`__mb_cur_max`/
+  `_iob` (données) ; un exe synthétique à API rares → 87 %, trou nominatif (`FindFirstChangeNotificationA`,
+  `GetEnvironmentVariableW`, `GetTickCount64`). Zéro dépendance toolchain (lecture du loader seule).
+- **Fixture permanente** : `tests/import_coverage.rs` (2 tests) — cas *entièrement couvert* (verdict
+  FULLY COVERED, compte = table PE) et cas *trou réel* (liste nominative, somme couvert+non-couvert =
+  total, jamais de FULLY COVERED menteur).
+- **Régression** : cargo **54+2** verts, transpile-diff **4/4** (hash `19acad982194bf07` inchangé — outil
+  de lecture, zéro dérive sémantique).
+- **Cadre** : reformule « élargir le balayage » — au lieu de couvrir RTREE/FTS5 une par une, la question
+  générale et **bornée** devient « ce binaire importe-t-il un appel Win32/CRT non shimé ? », réponse
+  statique et énumérable. Prochain levier de diversité : passer quelques binaires variés à `--mode
+  imports` pour prioriser les shims généraux qui débloquent le plus de binaires (jamais une rustine
+  par binaire).

@@ -563,6 +563,48 @@ fn implemented_shims() -> std::collections::BTreeSet<String> {
     set
 }
 
+/// Static axis-2 coverage of a binary's import table: for every distinct import
+/// the PE declares, whether ARET ships a native shim for it (`aret_<sanitized>`
+/// present in the HLE/CRT/Win32 layers, or a setjmp/longjmp intrinsic). Unlike
+/// the transpile report's `unimplemented_imports` — which lists only the imports
+/// the recovered code is *proven to call* — this classifies the **whole** import
+/// table, appelés ou non. It is the a-priori, *known-in-advance* measure of how
+/// ready ARET is for a given binary (axis 2), independent of function recovery:
+/// an uncovered import is one that would hit the weak stub at runtime, so the
+/// list is exactly the axis-2 gap to close (by a general shim, never a per-binary
+/// patch). Names are raw import names, deduplicated and sorted.
+pub struct ImportCoverage {
+    /// Raw import names ARET already shims natively.
+    pub covered: Vec<String>,
+    /// Raw import names with no shim — would reach the unimplemented weak stub.
+    pub uncovered: Vec<String>,
+}
+
+impl ImportCoverage {
+    pub fn total(&self) -> usize {
+        self.covered.len() + self.uncovered.len()
+    }
+}
+
+/// Classify a program's whole import table against the shipped shim set.
+pub fn import_coverage(prog: &crate::loader::Program) -> ImportCoverage {
+    let impl_set = implemented_shims();
+    let mut covered = std::collections::BTreeSet::new();
+    let mut uncovered = std::collections::BTreeSet::new();
+    for raw in prog.imports.values() {
+        let shim = crate::ir::build::sanitize_import(raw);
+        if impl_set.contains(&shim) || is_setjmp_intrinsic(&shim) {
+            covered.insert(raw.clone());
+        } else {
+            uncovered.insert(raw.clone());
+        }
+    }
+    ImportCoverage {
+        covered: covered.into_iter().collect(),
+        uncovered: uncovered.into_iter().collect(),
+    }
+}
+
 /// Named shims a recovered function actually *calls* (`CallTarget::Named`), e.g.
 /// `aret_qsort` for an intercepted `qsort` import. Intersected against
 /// `implemented_shims` to find calls that would hit the unimplemented stub.

@@ -33,6 +33,10 @@ use std::path::PathBuf;
 enum Mode {
     /// Summarize the binary (format, arch, sections, entry, symbols).
     Info,
+    /// Report axis-2 (OS/CRT) import coverage: which of the binary's imports ARET
+    /// already shims vs which would hit the unimplemented stub — the a-priori,
+    /// known-in-advance measure of how ready ARET is for this binary.
+    Imports,
     /// Linear disassembly listing of recovered functions.
     Asm,
     /// Dump the control-flow graph (blocks and edges) per function.
@@ -334,6 +338,12 @@ fn main() -> Result<()> {
         return emit(&args, out);
     }
 
+    if args.mode == Mode::Imports {
+        // Static, pre-recovery: classifies the whole import table (not just the
+        // calls recovery reaches), so it works without analysing the code.
+        return emit(&args, render_import_coverage(&prog));
+    }
+
     if args.mode == Mode::Unpack {
         // Dynamic unpacking does not use static function recovery (the real code
         // is still encrypted) — emulate the stub instead.
@@ -362,7 +372,7 @@ fn main() -> Result<()> {
 
     let mut out = String::new();
     match args.mode {
-        Mode::Info => unreachable!(),
+        Mode::Info | Mode::Imports => unreachable!(),
         Mode::Asm => {
             for f in &functions {
                 out.push_str(&render_asm(f));
@@ -662,6 +672,35 @@ fn render_info(prog: &Program) -> String {
     }
     if prog.symbols.len() > 40 {
         let _ = writeln!(s, "  ... and {} more", prog.symbols.len() - 40);
+    }
+    s
+}
+
+/// Render the axis-2 import-coverage report: how much of *this* binary's OS/CRT
+/// surface ARET already provides natively, and — the actionable part — the exact
+/// list of imports that are still gaps (each to be closed by a general shim).
+fn render_import_coverage(prog: &Program) -> String {
+    use std::fmt::Write;
+    let cov = builder::import_coverage(prog);
+    let total = cov.total();
+    let mut s = String::new();
+    let _ = writeln!(s, "Import coverage (axis 2 — OS/CRT surface)");
+    let _ = writeln!(s, "  binary:    {}", prog.format);
+    let pct = if total == 0 { 100 } else { cov.covered.len() * 100 / total };
+    let _ = writeln!(s, "  imports:   {total}");
+    let _ = writeln!(s, "  covered:   {} ({pct}%) — native ARET shim present", cov.covered.len());
+    let _ = writeln!(s, "  uncovered: {} — no native aret_ shim", cov.uncovered.len());
+    if cov.uncovered.is_empty() {
+        let _ = writeln!(s, "  verdict:   FULLY COVERED — every import has a native shim");
+    } else {
+        // Honest scope: a function import with no shim hits the weak stub at
+        // runtime (a real gap); a *data* import (e.g. `_iob`, `__initenv`) may be
+        // satisfied by the IAT/layout path instead — so this is the shim gap, a
+        // conservative upper bound on the true runtime gap, never an under-count.
+        let _ = writeln!(s, "  --- axis-2 shim gap for this binary (close each with a general shim) ---");
+        for n in &cov.uncovered {
+            let _ = writeln!(s, "    {n}");
+        }
     }
     s
 }
