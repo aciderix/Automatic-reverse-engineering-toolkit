@@ -2672,3 +2672,31 @@ binaires MSVC, pas seulement strings.exe.
 - **Note honnête** : les noms de module par-PE ne sont pas capturés (l'index winetest demande un parsing
   de la table de ressources — différé) ; l'**agrégat d'imports** (le livrable priorisant) est indépendant
   des noms. `corpus_sweep.sh` couvre le format (SKIP propre, agrégation), les binaires restent non commités.
+
+### Shims — lot 1 winetest (SetConsoleMode + BSTR + COM minimal), priorisé par la donnée ✅
+- **2026-07-03 — d'abord re-trier par *fidélité*, pas juste par fréquence.** Le classement winetest
+  mettait `GetExitCodeProcess`/`SetConsoleMode` en tête (343 chacun). Re-triage honnête avant d'écrire :
+  `GetExitCodeProcess` est **stateful** (couplé au cluster process) → **différé** ; `lstrcmpW` est une
+  **collation locale** (pas un `wcscmp`) → différé ; `IsBadStringPtr` exige un **vrai sondage mémoire** →
+  différé. Ne garder que le sous-ensemble qu'on peut rendre **exact** (principe sacré : pas d'approximation
+  silencieuse).
+- **Implémenté (haute confiance, tous validés bit-à-bit contre Wine)** :
+  - `SetConsoleMode` (`aret_win32.c`) — miroir exact de `GetConsoleMode` existant : console ssi `isatty`
+    → sur handle redirigé (pipe = harness winetest/diff), renvoie **FALSE** comme Windows/Wine.
+  - **BSTR oleaut32** — `SysAllocString`/`SysAllocStringLen`/`SysFreeString`/`SysStringLen`/
+    `SysStringByteLen` : ABI **contractuelle** `[u32 byteLen][wchar[len]][NUL]`, pointeur retourné *après*
+    le préfixe → impl. native **exacte** (pas approximative).
+  - **ole32 minimal** — `CoInitialize`/`CoInitializeEx` (S_OK au 1er init, **S_FALSE** imbriqué, via
+    compteur), `CoUninitialize`, `CoTaskMemAlloc`/`Realloc`/`Free` (=malloc/realloc/free). Exact pour le
+    code qui n'init COM et (dé)alloue ; le vrai `CoCreateInstance` reste longue traîne.
+- **Garde permanente** : `bench/winecorpus/win32_console_ole.c` exerce les trois groupes (console
+  redirigé → FALSE ; layout BSTR : longueur/accès char/round-trip ; COM : S_OK/S_FALSE + alloc round-trip)
+  et **matche Wine bit-à-bit**. `bench/winediff.sh` lie désormais `-lole32 -loleaut32`. **winediff 38→39.**
+- **Gain MESURÉ (pas affirmé)** sur les 367 modules winetest : **médiane 75 % → 78 %** (p25 57→61,
+  p75 85→87 — toute la distribution monte). `SetConsoleMode` **disparaît** du sommet des trous ; BSTR/COM
+  aussi. Nouveau #1 : `GetExitCodeProcess` (le stateful correctement différé).
+- **Régression** : cargo **54+2**, transpile-diff **4/4** (hash inchangé — shims runtime), winediff **39/39**.
+- **Leçon** : « priorisé par la donnée » **puis** « filtré par la fidélité » — la fréquence dit *quoi*
+  regarder, le principe sacré dit *quoi expédier*. Prochain lot : `GetTempPathW`/`GetTempFileName`
+  (fonctionnel), puis le cluster process/thread (`GetExitCodeProcess`/`CreateProcess`/`CreateThread` —
+  vrai modèle), et évaluer `IsBadStringPtr` avec un sondage `/proc/self/maps`.

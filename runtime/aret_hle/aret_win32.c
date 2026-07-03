@@ -534,6 +534,17 @@ uint32_t aret_GetConsoleMode(uint32_t esp) {
     if (WU(1)) *(uint32_t *)(uintptr_t)WU(1) = 0x3; /* ENABLE_PROCESSED|LINE_INPUT */
     return 1;
 }
+/* SetConsoleMode: on a real console Windows accepts the mode and returns TRUE; on
+ * a redirected handle (pipe/file — every non-interactive run, incl. the winetest
+ * harness and the differential harness) it fails and returns FALSE. We mirror
+ * GetConsoleMode exactly (console iff isatty). We do not enforce the termios
+ * changes a mode implies — consistent with GetConsoleMode reporting a fixed mode;
+ * the measured/tested path is always the non-console FALSE branch. */
+uint32_t aret_SetConsoleMode(uint32_t esp) {
+    int fd = aret_handle_fd(WU(0));
+    if (fd < 0 || !isatty(fd)) return 0;            /* not a console -> FALSE */
+    return 1;
+}
 uint32_t aret_GetConsoleScreenBufferInfo(uint32_t esp) {
     int fd = aret_handle_fd(WU(0));
     if (fd < 0 || !isatty(fd)) return 0;            /* not a console */
@@ -546,3 +557,60 @@ uint32_t aret_GetConsoleScreenBufferInfo(uint32_t esp) {
     p[9] = 80; p[10] = 25;              /* dwMaximumWindowSize */
     return 1;
 }
+
+/* ---- oleaut32 BSTR (contractual ABI, not an approximation) -----------------
+ * A BSTR is a pointer to a NUL-terminated UTF-16 array preceded by a 4-byte
+ * byte-length prefix: [u32 byteLen][wchar[len]][u16 0]. SysAllocString returns a
+ * pointer PAST the prefix; SysStringLen/ByteLen read it back; SysFreeString frees
+ * from the prefix. This layout is documented and fixed, so a thin native impl is
+ * exact. */
+uint32_t aret_SysAllocStringLen(uint32_t esp) {
+    const uint16_t *src = (const uint16_t *)(uintptr_t)WU(0);
+    uint32_t len = WU(1);                                   /* char count */
+    uint32_t *base = (uint32_t *)malloc(4 + (size_t)(len + 1) * 2);
+    if (!base) return 0;
+    base[0] = len * 2;                                      /* byte length */
+    uint16_t *s = (uint16_t *)(base + 1);
+    for (uint32_t i = 0; i < len; i++) s[i] = src ? src[i] : 0;
+    s[len] = 0;
+    return (uint32_t)(uintptr_t)s;
+}
+uint32_t aret_SysAllocString(uint32_t esp) {
+    const uint16_t *src = (const uint16_t *)(uintptr_t)WU(0);
+    if (!src) return 0;
+    uint32_t len = 0;
+    while (src[len]) len++;
+    uint32_t *base = (uint32_t *)malloc(4 + (size_t)(len + 1) * 2);
+    if (!base) return 0;
+    base[0] = len * 2;
+    uint16_t *s = (uint16_t *)(base + 1);
+    for (uint32_t i = 0; i < len; i++) s[i] = src[i];
+    s[len] = 0;
+    return (uint32_t)(uintptr_t)s;
+}
+uint32_t aret_SysFreeString(uint32_t esp) {
+    uint32_t b = WU(0);
+    if (b) free((void *)(uintptr_t)(b - 4));
+    return 0;
+}
+uint32_t aret_SysStringLen(uint32_t esp) {
+    uint32_t b = WU(0);
+    return b ? *(uint32_t *)(uintptr_t)(b - 4) / 2 : 0;
+}
+uint32_t aret_SysStringByteLen(uint32_t esp) {
+    uint32_t b = WU(0);
+    return b ? *(uint32_t *)(uintptr_t)(b - 4) : 0;
+}
+
+/* ---- ole32 minimal (thin: init + task allocator, no object model) ----------
+ * CoInitialize(Ex) returns S_OK on the first init of a thread and S_FALSE (1) on
+ * a nested one — the contract callers check; CoUninitialize unwinds it. The task
+ * allocator is malloc/free. Exact for code that only inits COM and (de)allocates
+ * task memory. A real CoCreateInstance stays long-tail (needs an object model). */
+static int aret_co_init_depth = 0;
+uint32_t aret_CoInitialize(uint32_t esp)   { (void)esp; return aret_co_init_depth++ ? 1u : 0u; }
+uint32_t aret_CoInitializeEx(uint32_t esp) { (void)esp; return aret_co_init_depth++ ? 1u : 0u; }
+uint32_t aret_CoUninitialize(uint32_t esp) { (void)esp; if (aret_co_init_depth) aret_co_init_depth--; return 0; }
+uint32_t aret_CoTaskMemAlloc(uint32_t esp)   { return (uint32_t)(uintptr_t)malloc((size_t)WU(0)); }
+uint32_t aret_CoTaskMemRealloc(uint32_t esp) { return (uint32_t)(uintptr_t)realloc((void *)(uintptr_t)WU(0), (size_t)WU(1)); }
+uint32_t aret_CoTaskMemFree(uint32_t esp)    { free((void *)(uintptr_t)WU(0)); return 0; }
