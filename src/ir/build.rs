@@ -322,19 +322,6 @@ pub fn build_ir(prog: &Program, func: &Function) -> IrFunction {
             .filter_map(|t| idx.get(t).copied())
             .collect();
 
-        // Runtime x87 fallback bookkeeping: start the entry block with a clean
-        // stack, and publish st(0) to the fp return channel before each `ret` (in
-        // case this function returns an fp value the static analysis could not
-        // classify). Combined with the bounds trap, this keeps the fallback sound.
-        if x87_rt {
-            if addr == func.entry {
-                stmts.insert(0, crate::ir::lift::x87rt_stmt("__x87rt_reset"));
-            }
-            if matches!(blk.terminator, Flow::Return) {
-                stmts.push(crate::ir::lift::x87rt_stmt("__x87rt_retstore"));
-            }
-        }
-
         // Terminator.
         match blk.terminator {
             Flow::CondJump => {
