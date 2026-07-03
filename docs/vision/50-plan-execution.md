@@ -2640,3 +2640,35 @@ binaires MSVC, pas seulement strings.exe.
      — vrai modèle (threads/process POSIX), plus lourd mais très rentable (shells, SSH, archiveurs).
   3. **SID/sécurité** : `EqualSid`/`GetUserNameA` — stubs raisonnables.
 - **Régression** : outil de lecture seule ; n'affecte ni le lifting ni le runtime.
+
+### Mesure — corpus WineTest (367 modules de conformance) : axe 2 chiffré à l'échelle ✅
+- **2026-07-03 — la meilleure source possible, mesurée.** `winetest.exe` (build CI winehq, 91 Mo, 32-bit)
+  **bundle ~380 modules de test par-DLL** en PE embarqués. Carvés (scan MZ/PE) → 367 modules mesurables,
+  passés au `--mode imports` (statique, aucune exécution). Ces modules sont **auto-oracles** (tests de
+  conformance : comportement connu-correct, cross-validé Windows↔Wine) et **énumèrent toute la surface
+  API** — les « aires », déjà écrites par les auteurs Wine.
+- **Résultat chiffré (mesuré, pas affirmé)** : couverture d'imports par module — **min 0, p25 57 %,
+  médiane 75 %, p75 85 %, max 100 %**. **Le module de conformance médian est déjà couvert à 75 %** par le
+  HLE actuel d'ARET. Signal fort de préparation axe 2 sur du code de test qui pousse les cas limites.
+- **Classement des manquants sur TOUTE la suite** (nb de modules, top) : **`SetConsoleMode` (343) et
+  `GetExitCodeProcess` (343)** dominent — présents dans quasi **chaque** module (le harness winetest les
+  appelle au démarrage de chaque test), **et triviaux à shimer**. Puis `IsBadStringPtrW/A` (188/94),
+  cluster **COM** (`CoUninitialize`/`CoCreateInstance`/`CoInitialize`, 100-122), `lstrcmpW` (104),
+  temp-fichiers (`GetTempPathW` 78, `GetTempFileNameA/W` 34/31), sync/thread (`CreateEventW` 74,
+  `CreateThread` 59, `CreateProcessA` 41), **USER32** (`DestroyWindow`/`CreateWindowExA`/`DefWindowProcA`
+  — longue traîne GUI), **registre** (`RegCloseKey`/`RegOpenKeyExA`/`RegQueryValueExA` — besoin d'un
+  backing store), **ressources PE** (`LoadResource`/`SizeofResource`/`FindResourceW`), **BSTR/OLE**
+  (`SysAllocString`/`SysFreeString`/`VariantClear`), **WinRT** (`Ro*`/`Windows*String`), `_assert`,
+  `_vsnwprintf`.
+- **Leçon (mesurer > deviner)** : jamais je n'aurais priorisé `SetConsoleMode`/`GetExitCodeProcess` — le
+  balayage large les fait remonter en tête, mécaniquement. **La priorisation devient une donnée, pas une
+  intuition.** Le tri valeur × sûreté qui en découle pour un lot **général** :
+  1. **Triviales ultra-fréquentes** : `GetExitCodeProcess`, `SetConsoleMode`, `lstrcmpW`,
+     `IsBadStringPtrA/W`, `GetTempPathW`/`GetTempFileNameA/W`, `_assert`, `_vsnwprintf` — ~15 lignes,
+     validées contre Wine, débloquent des **centaines** de modules d'un coup.
+  2. **COM/OLE minimal** : `CoInitialize(Ex)`/`CoUninitialize`/`CoTaskMemFree`, `SysAllocString`/
+     `SysFreeString` — init/alloc simples (le vrai `CoCreateInstance` reste longue traîne).
+  3. **Registre** (backing store) et **USER32/WinRT** = longue traîne, Phase 7+ (Winelib candidat idéal).
+- **Note honnête** : les noms de module par-PE ne sont pas capturés (l'index winetest demande un parsing
+  de la table de ressources — différé) ; l'**agrégat d'imports** (le livrable priorisant) est indépendant
+  des noms. `corpus_sweep.sh` couvre le format (SKIP propre, agrégation), les binaires restent non commités.
