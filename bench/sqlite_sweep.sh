@@ -40,11 +40,44 @@ export WINEDEBUG=-all WINEPREFIX="$OUT/wp"
 wine "$CACHE" :memory: < "$SQL" 2>/dev/null | sed 's/\r$//' > "$OUT/wine.txt"
 
 total=$(grep -c "^SELECT '" "$SQL")
+rc=0
 if diff -q "$OUT/aret.txt" "$OUT/wine.txt" >/dev/null; then
-  echo "sqlite feature sweep: ALL bit-identical to Wine ($total labelled features + DDL/DML)"
-  exit 0
+  echo "sqlite feature sweep (:memory:): ALL bit-identical to Wine ($total labelled features + DDL/DML)"
 else
-  echo "sqlite feature sweep: DIVERGENCE (ARET '<' vs Wine '>')"
+  echo "sqlite feature sweep (:memory:): DIVERGENCE (ARET '<' vs Wine '>')"
   diff "$OUT/aret.txt" "$OUT/wine.txt" | grep -E "^[<>]" | head -40
-  exit 1
+  rc=1
 fi
+
+# On-disk pass: the same feature battery against a real FILE database, plus the
+# file-touching shell paths — persistence across processes, ATTACH, .backup, and
+# .read of a SQL script. These exercise the OS/CRT file layer (CreateFile, the
+# stat family, …) that :memory: never touches, so a wrong file/stat shim shows up
+# here as a divergence against the same PE under Wine, not a silent pass.
+run_disk() { # $1=tag  $2=engine runner (function)  $3=output transcript
+  local tag="$1" run="$2" outf="$3"
+  local db="$OUT/disk_$tag.db" db2="$OUT/disk2_$tag.db" bak="$OUT/disk_$tag.bak"
+  local script="$OUT/script_$tag.sql"
+  rm -f "$db" "$db2" "$bak"
+  printf "CREATE TABLE imp(x);\nINSERT INTO imp VALUES(42),(43);\n" > "$script"
+  {
+    $run "$db" < "$SQL"                                              # feature battery, on disk
+    printf "CREATE TABLE p(a,b);\nINSERT INTO p VALUES(1,'x'),(2,'y'),(3,'z');\n" | $run "$db2" >/dev/null
+    printf "SELECT 'persist',count(*),sum(a) FROM p;\n" | $run "$db2"   # reopened in a fresh process
+    printf "ATTACH '%s' AS d;\nSELECT 'attach',(SELECT count(*) FROM p);\nDETACH d;\n.backup %s\n" "$db2" "$bak" | $run "$db" >/dev/null
+    printf "SELECT 'backup',sum(a) FROM p;\n" | $run "$bak"          # .backup produced a valid DB
+    printf ".read %s\nSELECT 'read',sum(x) FROM imp;\n" "$script" | $run "$db"  # .read a SQL file (stat family)
+  } 2>/dev/null | sed 's/\r$//' > "$outf"
+}
+aret_run() { "$OUT/t/app" "$@"; }
+wine_run() { wine "$CACHE" "$@"; }
+run_disk aret aret_run "$OUT/disk_aret.txt"
+run_disk wine wine_run "$OUT/disk_wine.txt"
+if diff -q "$OUT/disk_aret.txt" "$OUT/disk_wine.txt" >/dev/null; then
+  echo "sqlite feature sweep (on-disk + persist/ATTACH/.backup/.read): bit-identical to Wine"
+else
+  echo "sqlite feature sweep (on-disk): DIVERGENCE (ARET '<' vs Wine '>')"
+  diff "$OUT/disk_aret.txt" "$OUT/disk_wine.txt" | grep -E "^[<>]" | head -40
+  rc=1
+fi
+exit $rc

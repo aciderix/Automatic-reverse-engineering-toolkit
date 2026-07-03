@@ -2564,3 +2564,37 @@ binaires MSVC, pas seulement strings.exe.
   statique et énumérable. Prochain levier de diversité : passer quelques binaires variés à `--mode
   imports` pour prioriser les shims généraux qui débloquent le plus de binaires (jamais une rustine
   par binaire).
+
+### Shims — famille stat msvcrt + groupe fichiers CRT (débloque le sweep on-disk) ✅
+- **2026-07-03 — mesure d'abord, puis fix général.** `--mode imports` sur le vrai `sqlite3.exe` listait
+  41 imports non shimés, dont un groupe fichiers/répertoires. **Mais on ne devine pas depuis la liste**
+  (elle contient des chemins morts/diagnostic) : j'ai *reproduit* un workload **sur disque** vs Wine.
+  Résultat mesuré : le cœur on-disk (sweep complet sur fichier, persistance inter-process, `ATTACH`,
+  `.backup`) **marchait déjà** bit-identique ; **seul `.read`** (import d'un script SQL) divergeait —
+  et **bruyamment** (`Error: cannot open`, jamais un faux). Cause exacte tracée : `.read` appelle
+  **`_fstat`** (non shimé → stub faible qui ne remplit pas le buffer) → sqlite lit un stat nul → échoue.
+- **Fix général (`runtime/aret_hle/aret_hle.c`)** : famille stat msvcrt + groupe fichiers CRT —
+  `_fstat`/`_stat`/`_stati64`/`_fstati64`, `_mkdir`, `_unlink`, `_getpid`. Marshalling **ABI-exact** :
+  `struct _stat` (36 o) et `struct _stati64` (48 o) ont une disposition Windows **fixe** qui **ne
+  correspond pas** à une struct i386 naturelle — MSVC aligne le `__int64 st_size` sur 8 octets (offset
+  24), l'ABI i386 SysV l'aligne sur 4 → une struct naturelle mettrait `st_size` à 20 et **décalerait
+  tous les champs suivants** (taille fausse silencieuse). Donc **écriture à offsets d'octets explicites**,
+  seule voie sûre. `st_mode` traduit POSIX → bits msvcrt (`_S_IFDIR`/`_S_IFREG`/`_S_IFCHR` + permissions
+  reflétées) pour les tests is-dir/is-reg que font les programmes.
+- **Validation ABI (principe sacré appliqué au marshalling)** : garde permanente
+  `bench/winecorpus/crt_stat.c` — `_stat`/`_fstat`/`_stati64` sur un fichier de taille connue + un
+  répertoire, compare les champs **déterministes et sémantiques** (`st_size` exact, classification
+  reg/dir) contre Wine ; dev/ino/uid/timestamps (spécifiques à l'hôte) volontairement non comparés.
+  **Bit-identique à Wine → l'ABI est prouvée, pas juste « `.read` passe »**. winediff 37→38.
+- **Sweep élargi (mesurer, pas affirmer)** : `bench/sqlite_sweep.sh` a désormais une **passe on-disk** en
+  plus de `:memory:` — même batterie de features sur une base **fichier**, + persistance inter-process,
+  `ATTACH`, `.backup`, `.read`. Résultat : **bit-identique à Wine** sur les deux passes. La couche
+  fichier est maintenant *mesurée* en continu, plus supposée.
+- **Couverture** : sqlite 146→**151** shims couverts (78 %→80 %). `.read` fonctionne (`42` = Wine).
+- **Reste du groupe (honnête, non bloquant)** : `_findfirst`/`_findnext`/`_findclose` **différés** — ABI
+  distincte et plus risquée (`struct _finddata_t` + expansion glob `*.txt`), et **non déclenchés** par
+  les workloads mesurés (aucune divergence sans eux). À faire dans un commit dédié *quand* un workload
+  mesuré les exige (listing de répertoire, `.import` glob). Idem `_popen`/`_pclose` (shell) et
+  `LoadLibraryW` (extensions) — chemins non balayés, sound s'ils sont atteints.
+- **Régression** : cargo **54+2**, transpile-diff **4/4** (hash `19acad982194bf07` inchangé — shims
+  runtime, zéro effet sur le lifting), **winediff 38/38**, **sweep :memory: + on-disk bit-identiques**.

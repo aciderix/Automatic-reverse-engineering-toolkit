@@ -991,6 +991,110 @@ uint32_t aret_open(uint32_t esp) {
     return (uint32_t)(fd < 0 ? (uint32_t)-1 : (uint32_t)fd);
 }
 
+/* ---- msvcrt stat family + CRT file-info group -----------------------------
+ * msvcrt's `struct _stat` (a.k.a. _stat32, 36 bytes) and `struct _stati64`
+ * (48 bytes) have a FIXED Windows field layout that does NOT match a natural
+ * i386 struct: MSVC 8-byte-aligns the `__int64 st_size` (offset 24) whereas the
+ * i386 System V ABI 4-byte-aligns `long long` — a natural struct would put
+ * st_size at 20 and misread every field after it (a silent-wrong size). So we
+ * write to explicit byte offsets, the only layout-safe way. Common head:
+ *   0 dev(u32) 4 ino(u16) 6 mode(u16) 8 nlink(i16) 10 uid(i16) 12 gid(i16)
+ *   16 rdev(u32); then size + a/m/ctime (32- or 64-bit size). */
+static void aret_put_u16(uint8_t *b, unsigned o, uint16_t v) { b[o] = (uint8_t)v; b[o + 1] = (uint8_t)(v >> 8); }
+static void aret_put_u32(uint8_t *b, unsigned o, uint32_t v) { for (int i = 0; i < 4; i++) b[o + i] = (uint8_t)(v >> (8 * i)); }
+static void aret_put_u64(uint8_t *b, unsigned o, uint64_t v) { for (int i = 0; i < 8; i++) b[o + i] = (uint8_t)(v >> (8 * i)); }
+
+/* POSIX st_mode -> the msvcrt st_mode bits callers actually test: the file-type
+ * field (_S_IFDIR 0x4000 / _S_IFCHR 0x2000 / _S_IFREG 0x8000) and read/write/exec
+ * permission bits mirrored to owner/group/other — as msvcrt itself derives them.
+ * The is-directory / is-regular checks (the ones programs make) depend on this. */
+static uint16_t aret_msvcrt_mode(mode_t m) {
+    uint16_t type = S_ISDIR(m) ? 0x4000u : (S_ISCHR(m) ? 0x2000u : 0x8000u);
+    uint16_t perm = 0x0100u;                                  /* _S_IREAD (always) */
+    if (m & S_IWUSR) perm |= 0x0080u;                         /* _S_IWRITE */
+    if (S_ISDIR(m) || (m & S_IXUSR)) perm |= 0x0040u;         /* _S_IEXEC */
+    perm |= (uint16_t)(perm >> 3) | (uint16_t)(perm >> 6);    /* mirror to grp/other */
+    return (uint16_t)(type | perm);
+}
+static void aret_fill_stat32(uint8_t *b, const struct stat *st) {
+    memset(b, 0, 36);
+    aret_put_u32(b, 0, (uint32_t)st->st_dev);
+    aret_put_u16(b, 4, (uint16_t)st->st_ino);
+    aret_put_u16(b, 6, aret_msvcrt_mode(st->st_mode));
+    aret_put_u16(b, 8, (uint16_t)st->st_nlink);
+    aret_put_u32(b, 16, (uint32_t)st->st_rdev);
+    aret_put_u32(b, 20, (uint32_t)st->st_size);
+    aret_put_u32(b, 24, (uint32_t)st->st_atime);
+    aret_put_u32(b, 28, (uint32_t)st->st_mtime);
+    aret_put_u32(b, 32, (uint32_t)st->st_ctime);
+}
+static void aret_fill_stati64(uint8_t *b, const struct stat *st) {
+    memset(b, 0, 48);
+    aret_put_u32(b, 0, (uint32_t)st->st_dev);
+    aret_put_u16(b, 4, (uint16_t)st->st_ino);
+    aret_put_u16(b, 6, aret_msvcrt_mode(st->st_mode));
+    aret_put_u16(b, 8, (uint16_t)st->st_nlink);
+    aret_put_u32(b, 16, (uint32_t)st->st_rdev);
+    aret_put_u64(b, 24, (uint64_t)st->st_size);          /* 8-byte-aligned per MSVC */
+    aret_put_u32(b, 32, (uint32_t)st->st_atime);
+    aret_put_u32(b, 36, (uint32_t)st->st_mtime);
+    aret_put_u32(b, 40, (uint32_t)st->st_ctime);
+}
+
+/* _fstat(fd, struct _stat*) -> 0 / -1. */
+uint32_t aret_fstat(uint32_t esp) {
+    uint8_t *buf = (uint8_t *)(uintptr_t)arg(esp, 1);
+    struct stat st;
+    if (!buf || fstat((int)arg(esp, 0), &st) != 0) return (uint32_t)-1;
+    aret_fill_stat32(buf, &st);
+    return 0;
+}
+/* _stat(path, struct _stat*) -> 0 / -1. */
+uint32_t aret_stat(uint32_t esp) {
+    char path[1024];
+    translate_path((const char *)(uintptr_t)arg(esp, 0), path, sizeof path);
+    uint8_t *buf = (uint8_t *)(uintptr_t)arg(esp, 1);
+    struct stat st;
+    if (!buf || stat(path, &st) != 0) return (uint32_t)-1;
+    aret_fill_stat32(buf, &st);
+    return 0;
+}
+/* _stati64 / _stat32i64(path, struct _stati64*) -> 0 / -1 (64-bit st_size). */
+uint32_t aret_stati64(uint32_t esp) {
+    char path[1024];
+    translate_path((const char *)(uintptr_t)arg(esp, 0), path, sizeof path);
+    uint8_t *buf = (uint8_t *)(uintptr_t)arg(esp, 1);
+    struct stat st;
+    if (!buf || stat(path, &st) != 0) return (uint32_t)-1;
+    aret_fill_stati64(buf, &st);
+    return 0;
+}
+/* _fstati64 / _fstat32i64(fd, struct _stati64*) -> 0 / -1. */
+uint32_t aret_fstati64(uint32_t esp) {
+    uint8_t *buf = (uint8_t *)(uintptr_t)arg(esp, 1);
+    struct stat st;
+    if (!buf || fstat((int)arg(esp, 0), &st) != 0) return (uint32_t)-1;
+    aret_fill_stati64(buf, &st);
+    return 0;
+}
+/* _mkdir(path) -> 0 / -1 (msvcrt takes only the path; mode is implied 0777). */
+uint32_t aret_mkdir(uint32_t esp) {
+    char path[1024];
+    translate_path((const char *)(uintptr_t)arg(esp, 0), path, sizeof path);
+    return (uint32_t)(mkdir(path, 0777) == 0 ? 0 : (uint32_t)-1);
+}
+/* _unlink(path) -> 0 / -1. */
+uint32_t aret_unlink(uint32_t esp) {
+    char path[1024];
+    translate_path((const char *)(uintptr_t)arg(esp, 0), path, sizeof path);
+    return (uint32_t)(unlink(path) == 0 ? 0 : (uint32_t)-1);
+}
+/* _getpid() -> process id. */
+uint32_t aret_getpid(uint32_t esp) {
+    (void)esp;
+    return (uint32_t)getpid();
+}
+
 uint32_t aret_SetFilePointer(uint32_t esp) {
     int fd = (int)arg(esp, 0);
     int32_t dist = (int32_t)arg(esp, 1);
