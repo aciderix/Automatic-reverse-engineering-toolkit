@@ -2598,3 +2598,45 @@ binaires MSVC, pas seulement strings.exe.
   `LoadLibraryW` (extensions) — chemins non balayés, sound s'ils sont atteints.
 - **Régression** : cargo **54+2**, transpile-diff **4/4** (hash `19acad982194bf07` inchangé — shims
   runtime, zéro effet sur le lifting), **winediff 38/38**, **sweep :memory: + on-disk bit-identiques**.
+
+### Outil + mesure — balayage de corpus (`corpus_sweep.sh`) : prioriser les shims par la donnée ✅
+- **2026-07-03 — « mesurer large » pour orienter l'axe 2, sans exécuter.** Suite logique de `--mode
+  imports` : au lieu de creuser un seul binaire, on **mesure un corpus varié** en STATIQUE (lecture du
+  loader + classification de la table d'imports — sûr sur n'importe quelle provenance, aucune exécution).
+  `bench/corpus_sweep.sh` prend un dossier de PE, sort par binaire {imports, couverts, %} (+ verdict de
+  solidité avec `DEEP=1`), puis **agrège** : combien de binaires distincts réclament chaque import non
+  shimé → le **haut de la liste = les shims généraux qui débloquent le plus de programmes**. SKIP propre
+  sans corpus. Les binaires ne sont PAS commités (tiers/volumineux) ; on pointe l'outil sur un dossier.
+- **Corpus mesuré** (6 vrais PE 32-bit variés, provenance sûre : busybox, plink/pscp PuTTY, 7za,
+  sqlite3, + une variante UPX de busybox) :
+
+  | binaire | imports | couverts | % |
+  |---|---|---|---|
+  | sqlite3 | 187 | 151 | **80 %** |
+  | busybox_upx | 8 | 5 | 62 %* |
+  | 7za | 140 | 85 | 60 % |
+  | pscp | 145 | 85 | 58 % |
+  | busybox | 307 | 174 | 56 % |
+  | plink | 145 | 82 | 56 % |
+
+  \* le binaire packé n'expose que les imports du **stub** du packer (8) — il faut `--mode unpack` d'abord.
+  Confirme empiriquement qu'un PE packé ne se mesure pas tel quel.
+- **Classement mesuré des shims manquants les plus rentables** (nb de binaires) : `TerminateProcess`(5),
+  `SetEndOfFile`(5), `FormatMessageA`(5), `WaitForMultipleObjects`(4), `UnhandledExceptionFilter`(4),
+  `SetFileTime`(4), `SetConsoleMode`(4), `GetProcessTimes`(4), `EqualSid`(4), puis un cluster
+  **process/thread/pipe** (`CreateThread`/`CreateProcessA`/`CreatePipe`/`CreateNamedPipeA`/`OpenProcess`/
+  `GetExitCodeProcess`, 3 chacun), **fichier-métadonnées** (`SetStdHandle`/`SetHandleInformation`/
+  `LocalFileTimeToFileTime`), **exceptions** (`RtlUnwind`/`RaiseException`), **env**
+  (`GetEnvironmentStringsW`/`FreeEnvironmentStringsW`).
+- **Lecture honnête** : couverture ~56–60 % pour un vrai binaire full-CRT typique (sqlite à 80 % car
+  déjà travaillé). **Tous INCOMPLETE** au verdict — normal et conservateur (un seul import non shimé,
+  même sur chemin mort, suffit ; ce n'est PAS un échec runtime : sqlite est INCOMPLETE *et* bit-identique
+  à Wine). Le verdict est une borne supérieure de risque statique, pas un pronostic d'exécution.
+- **Priorisation qui en découle** (valeur × sûreté), pour un prochain lot **général** (jamais par binaire) :
+  1. **Trivialités haute-fréquence** : `SetEndOfFile` (=ftruncate), `SetFileTime`/`LocalFileTimeToFileTime`
+     (=utimes), `FormatMessageA` (formatage d'erreur), `GetExitCodeProcess`, `SetStdHandle`,
+     `SetConsoleMode`, `sscanf`, `putc` — ~15 lignes chacun, débloquent 2–5 binaires.
+  2. **Cluster process/thread/pipe** : `CreateThread`/`CreateProcessA`/`CreatePipe`/`WaitForMultipleObjects`
+     — vrai modèle (threads/process POSIX), plus lourd mais très rentable (shells, SSH, archiveurs).
+  3. **SID/sécurité** : `EqualSid`/`GetUserNameA` — stubs raisonnables.
+- **Régression** : outil de lecture seule ; n'affecte ni le lifting ni le runtime.
