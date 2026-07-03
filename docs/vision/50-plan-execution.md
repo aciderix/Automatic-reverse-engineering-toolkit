@@ -2357,10 +2357,16 @@ binaires MSVC, pas seulement strings.exe.
   l'entrée = un appel *frais*, pas une arête arrière). **Fix** : quand la cible du `jmp` == `func.entry`,
   émettre un tail-call (`return sub_self(args)`), pas un `Jump` de boucle — les registres args courants
   (eax/ecx/edx/ebp, dont `edx=pRight`) sont alors passés correctement.
-- **Effet** : **CRUD complet bit-identique à Wine** — `CREATE`/`INSERT`/`DELETE`/`UPDATE`/`SELECT` avec
-  `WHERE … AND … ORDER BY …`, persistance disque relue par Wine. Test corpus `tailrec` ajouté (garde le
-  chemin de saut normal). Reste mineur : `CREATE` sur fichier **neuf** demande `GetVersionExA`/
-  `AreFileApisANSI` (shims à ajouter).
+- **Effet** : **moteur SQL sqlite complet bit-identique à Wine** (aux fins de ligne CRLF↔LF près, que
+  winediff normalise déjà). Vérifié sur `:memory:` ET fichier neuf (créé par nous, relu par Wine) :
+  `CREATE`/`INSERT`/`DELETE`/`UPDATE`, `GROUP BY`+agrégats, `JOIN`, `CREATE INDEX`+usage indexé, `IN`,
+  `HAVING`, CTE (`WITH`), sous-requête scalaire, **fonctions fenêtre** (`OVER (PARTITION BY …)`),
+  `ORDER BY`, cross-join. Un vrai `sqlite3.exe` MSVC 32-bit strippé exécute donc son moteur SQL
+  nativement sous Linux. (Le « hang » sur fichier neuf était le même bug whereSplit ; les warnings
+  `GetVersionExA`/`AreFileApisANSI` sont inoffensifs — les stubs à 0 gardent sqlite sur le chemin VFS
+  simple qui marche ; leur implémenter des valeurs « succès » active au contraire des chemins VFS plus
+  récents qui cassent — donc **ne pas** les shimer.)
+- Test corpus `tailrec` ajouté (garde le chemin de saut normal).
 - **Régression PASS** : cpudiff, difftest 272/272, transpile 4/4 (= réf native, 58 fn), winediff 34/34,
   55 tests.
 - **Régression PASS** : cpudiff, difftest 268/268, transpile 4/4 (hash `4b0121f182554d40` inchangé),
