@@ -2752,3 +2752,24 @@ binaires MSVC, pas seulement strings.exe.
   thread-lourds / la suite winetest), pas un déblocage des cibles actuelles. À lancer sur demande ou quand
   un binaire mesuré le réclame — pas spéculativement.
 - **Régression** : cargo, transpile-diff (hash inchangé), **winediff 41** (à confirmer).
+
+### Shims — groupe fichier-métadonnées (SetEndOfFile + SetFileTime/GetFileTime + Local↔File) ✅
+- **2026-07-03 — priorisé par le CROISEMENT winetest × corpus réel.** Nuance de méthode : winetest (code
+  de test) sur-pondère les fonctions du harness ; on croise donc avec les 6 vrais binaires pour ne pas
+  sur-ajuster. Le croisement (haut dans le corpus RÉEL) pointe le groupe fichier-métadonnées :
+  `SetEndOfFile` (5), `SetFileTime` (4), `LocalFileTimeToFileTime` (3) — fidèle et validable.
+- **Implémenté (`aret_hle.c`)** : `SetEndOfFile` (=ftruncate au SEEK_CUR), `SetFileTime`/`GetFileTime`
+  (FILETIME↔timespec via futimens/fstat ; pas de birthtime Linux → creation = ctime, comme Wine ; champ
+  NULL/zéro laissé inchangé via `UTIME_OMIT`), `LocalFileTimeToFileTime`/`FileTimeToLocalFileTime`
+  (décalage constant par le biais TZ *courant* — `tm_gmtoff` — comme Windows ; identité sous TZ=UTC).
+- **Validation FONCTIONNELLE (round-trip déterministe, indépendant de l'hôte)** :
+  `bench/winecorpus/win32_filetime.c` — SetEndOfFile tronque à 40 o ; SetFileTime sur un instant à la
+  seconde (granularité FS non pertinente) → GetFileTime round-trip exact ; Local↔File identité sous UTC.
+  **Bit-à-bit Wine. winediff 41→42.**
+- **Gain mesuré** : `SetEndOfFile`/`SetFileTime` **disparaissent** du sommet des trous du corpus réel.
+  Restent en tête : le **cluster process/thread** (TerminateProcess/WaitForMultipleObjects/GetProcessTimes/
+  CreateThread — chantier threads), `FormatMessageA` (chaînes fragiles), `EqualSid`/`UnhandledExceptionFilter`.
+- **Constat** : les trous **fichier/CRT faciles et fidèles** du corpus réel sont désormais **quasi
+  épuisés**. Le reste est soit le chantier threads, soit des sous-systèmes à fidélité délicate (messages
+  d'erreur exacts, SID/sécurité, SEH). Prochain choix de valeur × sûreté à faire en conséquence.
+- **Régression** : cargo **54+2**, transpile-diff **4/4** (hash inchangé), **winediff 42/42**.

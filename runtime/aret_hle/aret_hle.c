@@ -15,6 +15,7 @@
 #include <sys/stat.h>
 #include <ctype.h>
 #include <errno.h>
+#include <time.h>
 #include <dirent.h>
 #include <fnmatch.h>
 #ifndef __wasm__
@@ -1191,6 +1192,78 @@ uint32_t aret_wremove(uint32_t esp) {
     aret_w2n((const uint16_t *)(uintptr_t)arg(esp, 0), path, sizeof path);
     translate_path(path, host, sizeof host);
     return (uint32_t)(remove(host) == 0 ? 0 : (uint32_t)-1);
+}
+
+/* ---- file end / file times (FILETIME <-> POSIX) ---------------------------
+ * FILETIME = 100-ns ticks since 1601-01-01 UTC. */
+static void aret_ft_to_ts(const uint32_t *ft, struct timespec *ts) {
+    uint64_t v = ((uint64_t)ft[1] << 32) | ft[0];
+    if (v == 0) { ts->tv_sec = 0; ts->tv_nsec = UTIME_OMIT; return; } /* 0 -> leave unchanged */
+    v -= 116444736000000000ULL;                                       /* 1601 -> 1970 epoch */
+    ts->tv_sec = (time_t)(v / 10000000ULL);
+    ts->tv_nsec = (long)((v % 10000000ULL) * 100ULL);
+}
+static void aret_ts_to_ft(time_t sec, long nsec, uint32_t *out) {
+    uint64_t v = ((uint64_t)sec + 11644473600ULL) * 10000000ULL + (uint64_t)nsec / 100ULL;
+    out[0] = (uint32_t)v;
+    out[1] = (uint32_t)(v >> 32);
+}
+/* SetEndOfFile(h) -> truncate the file to the current file position. */
+uint32_t aret_SetEndOfFile(uint32_t esp) {
+    int fd = (int)arg(esp, 0);
+    off_t pos = lseek(fd, 0, SEEK_CUR);
+    if (pos < 0) return 0;
+    return (uint32_t)(ftruncate(fd, pos) == 0 ? 1 : 0);
+}
+/* SetFileTime(h, create, access, write): sets access+write (Linux has no settable
+ * creation time; a NULL or all-zero field is left unchanged, as on Windows). */
+uint32_t aret_SetFileTime(uint32_t esp) {
+    int fd = (int)arg(esp, 0);
+    const uint32_t *at = (const uint32_t *)(uintptr_t)arg(esp, 2);
+    const uint32_t *wt = (const uint32_t *)(uintptr_t)arg(esp, 3);
+    struct timespec ts[2];
+    if (at) aret_ft_to_ts(at, &ts[0]); else { ts[0].tv_sec = 0; ts[0].tv_nsec = UTIME_OMIT; }
+    if (wt) aret_ft_to_ts(wt, &ts[1]); else { ts[1].tv_sec = 0; ts[1].tv_nsec = UTIME_OMIT; }
+    return (uint32_t)(futimens(fd, ts) == 0 ? 1 : 0);
+}
+/* GetFileTime(h, create, access, write): fills the FILETIMEs it is handed. No
+ * birth time on Linux via fstat, so creation reuses ctime (as Wine also does). */
+uint32_t aret_GetFileTime(uint32_t esp) {
+    int fd = (int)arg(esp, 0);
+    struct stat st;
+    if (fstat(fd, &st) != 0) return 0;
+    uint32_t *ct = (uint32_t *)(uintptr_t)arg(esp, 1);
+    uint32_t *at = (uint32_t *)(uintptr_t)arg(esp, 2);
+    uint32_t *wt = (uint32_t *)(uintptr_t)arg(esp, 3);
+    if (ct) aret_ts_to_ft(st.st_ctime, 0, ct);
+    if (at) aret_ts_to_ft(st.st_atime, 0, at);
+    if (wt) aret_ts_to_ft(st.st_mtime, 0, wt);
+    return 1;
+}
+/* Local<->UTC FILETIME: a constant shift by the *current* timezone bias (Windows
+ * uses the current bias, not the historical one). tm_gmtoff is seconds east of
+ * UTC; under a UTC timezone (the differential harness) this is the identity. */
+static int64_t aret_tz_off_100ns(void) {
+    time_t t = time(NULL);
+    struct tm lt;
+    localtime_r(&t, &lt);
+    return (int64_t)lt.tm_gmtoff * 10000000LL;
+}
+uint32_t aret_LocalFileTimeToFileTime(uint32_t esp) {
+    const uint32_t *in = (const uint32_t *)(uintptr_t)arg(esp, 0);
+    uint32_t *out = (uint32_t *)(uintptr_t)arg(esp, 1);
+    if (!in || !out) return 0;
+    uint64_t v = (((uint64_t)in[1] << 32) | in[0]) - (uint64_t)aret_tz_off_100ns();
+    out[0] = (uint32_t)v; out[1] = (uint32_t)(v >> 32);
+    return 1;
+}
+uint32_t aret_FileTimeToLocalFileTime(uint32_t esp) {
+    const uint32_t *in = (const uint32_t *)(uintptr_t)arg(esp, 0);
+    uint32_t *out = (uint32_t *)(uintptr_t)arg(esp, 1);
+    if (!in || !out) return 0;
+    uint64_t v = (((uint64_t)in[1] << 32) | in[0]) + (uint64_t)aret_tz_off_100ns();
+    out[0] = (uint32_t)v; out[1] = (uint32_t)(v >> 32);
+    return 1;
 }
 
 uint32_t aret_SetFilePointer(uint32_t esp) {
