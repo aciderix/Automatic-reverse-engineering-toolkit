@@ -2458,3 +2458,25 @@ binaires MSVC, pas seulement strings.exe.
 - **Leçon méta (principe sacré)** : le différentiel *large* contre Wine a d'abord rattrapé un faux
   silencieux (→ révocation honnête), puis validé le vrai fix. La discipline « ne jamais présenter un
   faux comme correct » a fonctionné de bout en bout, y compris contre ma propre hâte.
+
+### Méthode — balayage systématique de la surface d'un vrai binaire (sqlite_sweep) ✅
+- **2026-07-03 — comble un trou de méthode réel** : les différentiels existants couvraient le corpus
+  interne (difftest/transpile-diff) et de **petits programmes synthétiques** (winediff), mais **aucun
+  balayage large de la surface fonctionnelle d'un vrai binaire cible**. La « complétude sqlite » était
+  *affirmée* jalon par jalon selon les requêtes qui se trouvaient testées — jamais **mesurée**. C'est ce
+  trou qui a laissé « math COMPLET » s'écrire avec un `sin` cassé (rattrapé par un test large *a
+  posteriori*).
+- **`bench/sqlite_sweep.sh` + `bench/sqlite_sweep.sql`** : télécharge le vrai `sqlite3.exe` MSVC (3.40.1,
+  versionné/public, caché), le transpile avec ARET, exécute une **batterie DÉTERMINISTE large** (30 aires
+  étiquetées) et diffe **ARET vs Wine** (vérité terrain). Toute ligne divergente = un trou/bug réel.
+  SKIP propre si wine/réseau/binaire absents.
+- **Résultat mesuré (pas affirmé)** : **30/30 aires bit-identiques à Wine** — select/where, agrégats,
+  HAVING, joins (inner/left), sous-requêtes, CTE (+récursive), UNION/INTERSECT/EXCEPT, window (row_number/
+  rank/dense_rank/lag/lead/frames/ntile), strings, printf/quote/hex/unicode, **toute la math scalaire**,
+  LIKE/GLOB/ESCAPE, CASE/coalesce/nullif, cast/typeof, JSON, dates, group_concat ORDER BY, DISTINCT/
+  FILTER, UPDATE…RETURNING, collate NOCASE, index partiel, vues, colonnes générées STORED, triggers.
+- **Trous connus (sound, non silencieux)** : `atan2` (appel indirect non récupéré `0x4e4a70`, axe
+  récupération Phase 3) ; **non balayés** : FTS/RTREE/tables virtuelles/ATTACH/backup/I-O blob — pourraient
+  buter, aborteraient (jamais faux). **« Fonctionnel prouvé là où balayé + sound partout »**, pas « 100 % ».
+- **Leçon systématisée** : mesurer la surface d'un vrai binaire est désormais un **outil répétable**, pas
+  un poke ad-hoc. À faire pour Lua/busybox aussi.
