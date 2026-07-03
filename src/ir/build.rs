@@ -320,12 +320,28 @@ pub fn build_ir(prog: &Program, func: &Function) -> IrFunction {
             }
             Flow::Jump => {
                 let last = blk.insns.last().unwrap();
-                let t = blk.successors.first().and_then(|t| idx.get(t).copied());
+                let target_addr = blk.successors.first().copied();
+                let t = target_addr.and_then(|a| idx.get(&a).copied());
+                // A `jmp` to this function's OWN entry is a self tail-call: the
+                // compiler turned tail recursion into a jmp-to-self, and re-running
+                // the entry (prologue included) is a *fresh* call, not a loop back-
+                // edge. Modelling it as a loop to the entry block is doubly wrong —
+                // it re-runs the prologue (leaking the shared machine stack every
+                // iteration) and cannot thread the argument registers, because the
+                // entry block has no φ merging the initial call with the back-edge
+                // (the external caller is not a CFG predecessor). A loop-carried
+                // register argument then reads its stale entry value forever — e.g.
+                // __fastcall `whereSplit(pWC, pExpr, op)` whose tail step sets
+                // edx=pE2->pRight looped on the original pExpr, spinning out an
+                // unbounded WHERE-term list on any `x AND y` (which hung CREATE
+                // TABLE's schema reparse). Emit it as a tail call instead.
+                let is_self_tail = target_addr == Some(func.entry);
                 match t {
-                    Some(t) => stmts.push(Stmt::Jump(BlockId(t))),
-                    // No internal target: a direct jump to a function entry (or a
-                    // resolved external symbol) is a tail call — `return f(args)`.
-                    None => {
+                    Some(t) if !is_self_tail => stmts.push(Stmt::Jump(BlockId(t))),
+                    // No internal target (or a jump to our own entry): a direct jump
+                    // to a function entry (or a resolved external symbol) is a tail
+                    // call — `return f(args)`.
+                    _ => {
                         let ct = match (last.target, &last.call_name) {
                             (Some(target), _) if prog.is_executable(target) => {
                                 Some(CallTarget::Direct(target))

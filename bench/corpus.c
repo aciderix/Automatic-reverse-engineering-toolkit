@@ -57,6 +57,18 @@ int nestcond(int a, int b)       { if (a > 0) { if (b > 0) return a+b; else retu
    the .rela.text reloc is applied). */
 int sumrec(int n) { return n <= 0 ? 0 : n + sumrec(n - 1); }
 
+/* Tail recursion carrying an accumulator. gcc/mingw lower this to a clean
+   mid-function loop (so it guards that the `Some(t) if !is_self_tail` jump path
+   still handles ordinary loop-jumps correctly). The MSVC-specific `jmp`-to-own-
+   entry form of the same idiom — which needs the self-tail-call lowering to
+   thread the updated args round the loop rather than re-read the stale entry
+   ones — is what spun sqlite's __fastcall whereSplit forever; that path is
+   covered end-to-end by the sqlite CREATE/WHERE-AND regression. */
+unsigned tailrec(unsigned n, unsigned acc) {
+    n &= 31; /* keep the recursion bounded for the differential harness */
+    return n == 0 ? acc : tailrec(n - 1, acc + n * 7u + 1u);
+}
+
 /* Subtract-with-borrow idioms: gcc emits `sbb` for these at -O1/-O2. */
 int borrow(unsigned a, unsigned b) { return (a < b) ? -1 : 0; }
 int cmp3(unsigned a, unsigned b)   { return (a > b) - (a < b); }

@@ -2333,16 +2333,35 @@ binaires MSVC, pas seulement strings.exe.
 - **Effet** : `DELETE`/`UPDATE` marchent désormais **bit-identique à Wine** (fichier vérifié). Test de
   régression ajouté (`indirect_call_is_impure_and_survives_dce`).
 - **Matrice de capacités sqlite (post-fix, vérifiée Wine)** : scalaire ✅, lecture de base ✅,
-  `INSERT` ✅, `DELETE` ✅ (persisté, relu par Wine), `UPDATE` ✅ (persisté, relu par Wire).
-  `CREATE TABLE` ❌.
-- **Reste sur sqlite** (bugs séparés, non liés à la DCE) : `CREATE TABLE` corrompt une structure —
-  symptôme **non déterministe** (tantôt exit 0 sans persister, tantôt récursion très profonde dans le
-  parser `sub_41bf36`→`sub_41be70`, pile de parseur Lemon de 48 o/élément). La grammaire CREATE parse
-  bien (`EXPLAIN CREATE` OK, erreurs de syntaxe correctes), donc c'est l'**exécution** du CREATE
-  (écriture schéma + reparse `OP_ParseSchema`) qui construit un pointeur/chaîne non initialisé
-  (mémoire garbage → chaîne longue/circulaire). Signature classique d'un autre miscompile
-  (probable valeur/appel non émis dans le chemin schéma), à traquer avec la même méthode
-  (`sqlite3CorruptError`/désassemblage ciblé). `CREATE` sur fichier **neuf** demande en plus
-  `GetVersionExA`/`AreFileApisANSI`. À poursuivre en session dédiée.
+  `INSERT` ✅, `DELETE` ✅ (persisté, relu par Wine), `UPDATE` ✅ (persisté, relu par Wine).
+  `CREATE TABLE` ❌ → **RÉSOLU** (jalon suivant).
+
+### Phase 3b/5 (suite) — CREATE TABLE RÉSOLU : appel-tail sur soi-même mal structuré ✅ CRUD COMPLET
+- **2026-07-03** : `CREATE TABLE` (et `WHERE … AND/OR …`) marchaient pas — bug de lifter général.
+  Forensics :
+  1. La grammaire CREATE parse bien (`EXPLAIN CREATE` OK). C'est l'**exécution** qui boucle
+     (récursion non déterministe dans `sub_41bf36`→`sub_41be70`, éléments de 48 o = pile de termes).
+  2. Isolé : le reparse `OP_ParseSchema` lance `SELECT … WHERE tbl_name=… AND type!='trigger'`. Or
+     **tout `WHERE … AND/OR …` renvoyait vide / bouclait** (condition simple OK, `1 AND 1` KO), alors
+     que `SELECT 1 AND 1` scalaire est correct.
+  3. `v21=44` = **TK_AND** → `sub_41bf36` = `whereSplit` (découpe récursive de l'arbre AND),
+     `sub_41be70` = `whereClauseInsert` (grossit le tableau de `WhereTerm`).
+  4. Désassemblage `0x41bf36` (`__fastcall`, args en eax/edx/ecx) : `whereSplit(pWC,pE2->pLeft,op)`
+     est un **appel**, puis `whereSplit(pWC,pE2->pRight,op)` est un **tail-call** via `jmp 0x41bf36`
+     (l'entrée). Le transpileur transformait ce `jmp` vers l'entrée en **boucle** — ce qui (a) rejoue
+     le prologue (fuite de la pile partagée) et (b) ne peut pas ré-injecter l'argument registre mis à
+     jour (`edx=pE2->pRight`) car le bloc d'entrée n'a pas de φ pour l'appel initial. La boucle
+     relisait `pExpr` d'origine à l'infini → insertion illimitée de termes.
+- **Cause racine** (`ir/build.rs`, `Flow::Jump`) : un `jmp` vers **l'entrée de la fonction elle-même**
+  est un **self tail-call** (le compilo a transformé une tail-récursion en jmp-sur-soi ; rejouer
+  l'entrée = un appel *frais*, pas une arête arrière). **Fix** : quand la cible du `jmp` == `func.entry`,
+  émettre un tail-call (`return sub_self(args)`), pas un `Jump` de boucle — les registres args courants
+  (eax/ecx/edx/ebp, dont `edx=pRight`) sont alors passés correctement.
+- **Effet** : **CRUD complet bit-identique à Wine** — `CREATE`/`INSERT`/`DELETE`/`UPDATE`/`SELECT` avec
+  `WHERE … AND … ORDER BY …`, persistance disque relue par Wine. Test corpus `tailrec` ajouté (garde le
+  chemin de saut normal). Reste mineur : `CREATE` sur fichier **neuf** demande `GetVersionExA`/
+  `AreFileApisANSI` (shims à ajouter).
+- **Régression PASS** : cpudiff, difftest 272/272, transpile 4/4 (= réf native, 58 fn), winediff 34/34,
+  55 tests.
 - **Régression PASS** : cpudiff, difftest 268/268, transpile 4/4 (hash `4b0121f182554d40` inchangé),
   winediff 34/34, 54 tests unitaires.
