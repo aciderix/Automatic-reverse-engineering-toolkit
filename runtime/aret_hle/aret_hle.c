@@ -14,6 +14,7 @@
 #include <fcntl.h>
 #include <sys/stat.h>
 #include <ctype.h>
+#include <errno.h>
 #include <dirent.h>
 #include <fnmatch.h>
 #ifndef __wasm__
@@ -854,7 +855,13 @@ static uint32_t aret_attr_named(const char *name) {
     char path[1024];
     translate_path(name, path, sizeof path);
     struct stat st;
-    if (stat(path, &st) != 0) return 0xFFFFFFFFu; /* INVALID_FILE_ATTRIBUTES */
+    if (stat(path, &st) != 0) {
+        /* Callers (e.g. sqlite's winAccess) inspect GetLastError to tell "does
+         * not exist" (fine) from a real access error (SQLITE_IOERR). Set it. */
+        g_last_error = (errno == ENOTDIR) ? 3u : 2u; /* PATH/FILE_NOT_FOUND */
+        return 0xFFFFFFFFu;                          /* INVALID_FILE_ATTRIBUTES */
+    }
+    g_last_error = 0;
     uint32_t attr = 0;
     if (S_ISDIR(st.st_mode)) attr |= 0x10u;        /* FILE_ATTRIBUTE_DIRECTORY */
     if (!(st.st_mode & S_IWUSR)) attr |= 0x01u;    /* FILE_ATTRIBUTE_READONLY */
@@ -869,11 +876,95 @@ uint32_t aret_GetFileAttributesW(uint32_t esp) {
     aret_w2n((const uint16_t *)(uintptr_t)arg(esp, 0), name, sizeof name);
     return aret_attr_named(name);
 }
+
+/* Fill a WIN32_FILE_ATTRIBUTE_DATA (36 bytes: attrs, 3 FILETIMEs, size hi/lo)
+ * from stat(). Returns 1 on success, 0 if the path does not exist (and sets
+ * GetLastError, like aret_attr_named). Shared by GetFileAttributesExA/W — the
+ * standard-info level (0) is the only one used. */
+static int aret_attr_ex_named(const char *name, uint32_t *out) {
+    char path[1024];
+    translate_path(name, path, sizeof path);
+    struct stat st;
+    if (!out || stat(path, &st) != 0) {
+        g_last_error = (errno == ENOTDIR) ? 3u : 2u; /* PATH/FILE_NOT_FOUND */
+        return 0;
+    }
+    g_last_error = 0;
+    uint32_t attr = 0;
+    if (S_ISDIR(st.st_mode)) attr |= 0x10u;      /* FILE_ATTRIBUTE_DIRECTORY */
+    if (!(st.st_mode & S_IWUSR)) attr |= 0x01u;  /* FILE_ATTRIBUTE_READONLY */
+    if (attr == 0) attr = 0x80u;                 /* FILE_ATTRIBUTE_NORMAL */
+    /* Unix time (s) -> Windows FILETIME (100ns ticks since 1601-01-01). */
+    uint64_t ct = ((uint64_t)st.st_ctime + 11644473600ULL) * 10000000ULL;
+    uint64_t at = ((uint64_t)st.st_atime + 11644473600ULL) * 10000000ULL;
+    uint64_t wt = ((uint64_t)st.st_mtime + 11644473600ULL) * 10000000ULL;
+    uint64_t sz = (uint64_t)st.st_size;
+    out[0] = attr;
+    out[1] = (uint32_t)ct; out[2] = (uint32_t)(ct >> 32);   /* ftCreationTime */
+    out[3] = (uint32_t)at; out[4] = (uint32_t)(at >> 32);   /* ftLastAccessTime */
+    out[5] = (uint32_t)wt; out[6] = (uint32_t)(wt >> 32);   /* ftLastWriteTime */
+    out[7] = (uint32_t)(sz >> 32);                          /* nFileSizeHigh */
+    out[8] = (uint32_t)sz;                                  /* nFileSizeLow */
+    return 1;
+}
+uint32_t aret_GetFileAttributesExA(uint32_t esp) {
+    return aret_attr_ex_named((const char *)(uintptr_t)arg(esp, 0),
+                              (uint32_t *)(uintptr_t)arg(esp, 2));
+}
+uint32_t aret_GetFileAttributesExW(uint32_t esp) {
+    char name[1024];
+    aret_w2n((const uint16_t *)(uintptr_t)arg(esp, 0), name, sizeof name);
+    return aret_attr_ex_named(name, (uint32_t *)(uintptr_t)arg(esp, 2));
+}
+
 uint32_t aret_DeleteFileW(uint32_t esp) {
     char name[1024], path[1024];
     aret_w2n((const uint16_t *)(uintptr_t)arg(esp, 0), name, sizeof name);
     translate_path(name, path, sizeof path);
     return unlink(path) == 0 ? 1 : 0;
+}
+
+/* Widen a byte string (ASCII/Latin-1) to UTF-16LE. Writes at most cap WCHARs
+ * incl. the NUL; returns the length written excluding the NUL. */
+static size_t aret_n2w(const char *s, uint16_t *out, size_t cap) {
+    size_t i = 0;
+    if (out && cap) {
+        for (; s && s[i] && i + 1 < cap; i++) out[i] = (uint16_t)(unsigned char)s[i];
+        out[i] = 0;
+    }
+    return i;
+}
+
+/* GetFullPathNameW(name, nBufferLength(WCHARs), buf(wide), *filePart(wide**)):
+ * wide sibling of GetFullPathNameA. Resolves against the cwd, sets *filePart to
+ * the last path component within buf. Returns the length in WCHARs written (excl.
+ * NUL), or the required size incl. NUL if the buffer is too small, 0 on failure.
+ * The Win8+ VFS path of many CRT programs (e.g. sqlite) resolves paths through
+ * this wide entry point. */
+uint32_t aret_GetFullPathNameW(uint32_t esp) {
+    char name[2048];
+    aret_w2n((const uint16_t *)(uintptr_t)arg(esp, 0), name, sizeof name);
+    uint32_t buflen = arg(esp, 1);              /* in WCHARs */
+    uint16_t *buf = (uint16_t *)(uintptr_t)arg(esp, 2);
+    uint32_t *filepart = (uint32_t *)(uintptr_t)arg(esp, 3);
+    char tmp[4096];
+    if (name[0] == '/' || name[0] == '\\' || (name[0] && name[1] == ':')) {
+        snprintf(tmp, sizeof tmp, "%s", name);
+    } else {
+        char cwd[2048];
+        if (!getcwd(cwd, sizeof cwd)) return 0;
+        snprintf(tmp, sizeof tmp, "%s/%s", cwd, name);
+    }
+    uint32_t len = (uint32_t)strlen(tmp);
+    if (!buf || buflen <= len) return len + 1;  /* required size incl. NUL */
+    aret_n2w(tmp, buf, buflen);
+    if (filepart) {
+        uint32_t sep = 0;                        /* index just past last separator */
+        for (uint32_t i = 0; i < len; i++)
+            if (tmp[i] == '/' || tmp[i] == '\\') sep = i + 1;
+        *filepart = (uint32_t)(uintptr_t)(buf + sep);
+    }
+    return len;
 }
 
 /* _open(name, oflag, [pmode]) -> fd. msvcrt oflag bits differ from POSIX, so

@@ -306,6 +306,35 @@ uint32_t aret_GetSystemInfo(uint32_t esp) {
 }
 uint32_t aret_GetNativeSystemInfo(uint32_t esp) { return aret_GetSystemInfo(esp); }
 
+/* GetVersionExA/W(LPOSVERSIONINFO): report a real Windows version and return
+ * TRUE, exactly as Windows/Wine do (Wine 9 reports 6.2.9200 NT). The caller sets
+ * dwOSVersionInfoSize (v[0]); we fill the version fields. szCSDVersion is left
+ * zeroed (empty service pack — a valid state the program handles). Faithful
+ * values matter: the CRT/VFS pick their code path from the reported version. */
+uint32_t aret_GetVersionExA(uint32_t esp) {
+    uint32_t *v = (uint32_t *)WP(0);
+    if (v) {
+        v[1] = 6;      /* dwMajorVersion */
+        v[2] = 2;      /* dwMinorVersion (6.2 = Windows 8 / Server 2012) */
+        v[3] = 9200;   /* dwBuildNumber */
+        v[4] = 2;      /* dwPlatformId = VER_PLATFORM_WIN32_NT */
+        memset((char *)&v[5], 0, 128); /* szCSDVersion[128] (ANSI) */
+    }
+    return 1; /* TRUE */
+}
+uint32_t aret_GetVersionExW(uint32_t esp) {
+    uint32_t *v = (uint32_t *)WP(0);
+    if (v) {
+        v[1] = 6; v[2] = 2; v[3] = 9200; v[4] = 2;
+        memset((char *)&v[5], 0, 256); /* szCSDVersion[128] (WCHAR) */
+    }
+    return 1;
+}
+
+/* AreFileApisANSI(): the process uses the ANSI code page for narrow file APIs,
+ * the Windows default (Wine returns TRUE). */
+uint32_t aret_AreFileApisANSI(uint32_t esp) { (void)esp; return 1; }
+
 uint32_t aret_GetACP(uint32_t esp)   { (void)esp; return 1252; } /* Windows-1252 */
 uint32_t aret_GetOEMCP(uint32_t esp) { (void)esp; return 437; }
 uint32_t aret_IsValidCodePage(uint32_t esp) {
