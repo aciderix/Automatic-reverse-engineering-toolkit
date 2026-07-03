@@ -2435,3 +2435,26 @@ binaires MSVC, pas seulement strings.exe.
   et sound.
 - **Régression (état conservé, incrément 1)** : difftest 271/271, transpile-diff 4/4 (hash inchangé),
   cargo, winediff 35/35.
+
+### Phase 5 — Filet x87 runtime : transcendantes RÉSOLUES (cause racine C2) + garde permanente ✅
+- **2026-07-03 (suite) — le faux silencieux `sin(1)→sin(sin(1))` diagnostiqué et corrigé à la racine.**
+  Forensics : `__x87rt_sin` seul est correct (fixture `fsin` isolée = 0.841471) ; une fonction *nommée*
+  `cos` faisant fsin est correcte aussi → ni le helper ni la reconnaissance-par-nom. La double
+  application venait de la **CRT sin/cos** (`sub_4e5750`) qui fait une **réduction d'argument pilotée
+  par le bit C2** du status word : `fsin; fnstsw; test C2` — si C2=1 (|x|≥2^63) elle réduit et refait
+  fsin. Or `__x87rt_sin/cos/sincos/ptan` **ne touchaient pas le status word** → C2 lu périmé (1) →
+  chemin de réduction pris à tort → 2ᵉ fsin. **Fix** : ces helpers effacent C2 (bit 10) — notre libm
+  hôte gère toute plage, donc toujours « dans la plage » (C2=0). Réappliqué (commit `37eed79`).
+- **Vérifié par différentiel math EXHAUSTIF** (sin/cos/tan/sqrt/power/exp/log/asin/acos/atan/round sur
+  ~50 valeurs, imbriquées) = bit-identique à Wine. Le test étroit initial (`sin(0)`, où `sin(sin(0))=0`)
+  avait masqué le bug — **leçon** : différentiel large obligatoire pour les transcendantes.
+- **Garde permanente** : `bench/winecorpus/x87_trig.c` exerce `fsin`/`fcos` + le **contrat C2** explicite
+  (in-range ⇒ C2=0) sur le chemin runtime — rattraperait toute régression du double. **winediff 35→36.**
+- **Résultat** : le vrai `sqlite3.exe` MSVC exécute son moteur SQL **et toute sa math scalaire flottante**
+  nativement, bit-identique à Wine. (Seul `atan2` abort : appel indirect non récupéré `0x4e4a70` —
+  trou de récupération Phase 3 sans rapport avec le x87, sound.)
+- **Régression PASS** : difftest 271/271, transpile-diff 4/4 (hash inchangé), cargo, **winediff 36/36**,
+  CRUD/GROUP BY/avg/window inchangés.
+- **Leçon méta (principe sacré)** : le différentiel *large* contre Wine a d'abord rattrapé un faux
+  silencieux (→ révocation honnête), puis validé le vrai fix. La discipline « ne jamais présenter un
+  faux comme correct » a fonctionné de bout en bout, y compris contre ma propre hâte.
