@@ -51,8 +51,22 @@ c'est l'anti-« siècle binaire par binaire ».
 - Un `GetFileAttributesA` renvoie le bon résultat via l'implé native de Wine.
 
 Donc « réutiliser Wine pour les APIs » = **lier du natif**, cohérent avec la
-valeur #3. (L'intégration `winegcc`/Winelib demande un toolchain dédié — étape
-d'intégration **une fois**, pas par binaire.)
+valeur #3.
+
+**Preuve de concept end-to-end (2026-07-03, vérifiée)** : un programme C appelant
+`GetVersionExA`/`AreFileApisANSI`/`GetFileAttributesA`/`GetLastError`, compilé par
+**`winegcc -m32`**, produit un **`ELF 32-bit LSB shared object` natif** qui tourne
+et sort `ver=6.2 ansi=1 attr_ok=1 missing=1 lasterr=2` — **zéro émulateur CPU**.
+Notable : `lasterr=2` (`ERROR_FILE_NOT_FOUND`) = **exactement** la valeur qu'on
+avait codée à la main dans le fix `SetLastError` d'ARET → l'implé native de Wine
+**confirme** le comportement de notre shim. La couverture API « d'un coup, native »
+est donc **démontrée**, pas supposée.
+
+*Intégration* : brancher Winelib dans le pipeline ARET (router les imports de la
+sortie transpilée vers Winelib au lieu de `aret_hle`) est une **étape une fois**,
+pas par binaire. Le toolchain (`wine32-tools` + `libwine-dev:i386`) demande un env
+propre ; dans ce conteneur il a fallu extraire les `.deb` à la main (deps cassées),
+mais le mécanisme est prouvé.
 
 ## 5. Le seul vrai arbitrage : l'indépendance de la preuve (axe APIs)
 
