@@ -318,13 +318,9 @@ pub(crate) const FLOAT_HELPERS: &str = concat!(
     // (not `__x87_`) so the optimiser treats them as IMPURE (they mutate the
     // stack): never dropped or reordered. Per-TU state is sound because the x87
     // stack is empty at every call boundary (ABI). `st(0)` = s[p-1].
-    // Single SHARED stack (defined in aret_hle.c) — the runtime FPU stack is the
-    // real x87 stack: values a runtime-mode callee leaves in st(0) are visible to
-    // its runtime-mode caller, exactly as on hardware. So no per-function reset,
-    // and cross-chunk calls share it.
-    "extern long double __x87rt_s[16];\n",
-    "extern int __x87rt_p;\n",
-    "extern int __x87rt_rc;\n",
+    "static long double __x87rt_s[16] __attribute__((unused));\n",
+    "static int __x87rt_p __attribute__((unused))=0;\n",
+    "static int __x87rt_rc __attribute__((unused))=0;\n",
     // Bounds-checked slot access: `st(i)` = s[p-1-i]. An out-of-range access means
     // the runtime stack is inconsistent (e.g. a value an unrecognised callee left
     // in st(0) was never pushed) — TRAP rather than read stale data, keeping the
@@ -368,35 +364,6 @@ pub(crate) const FLOAT_HELPERS: &str = concat!(
     "static inline uint64_t __x87rt_reset(void){__x87rt_p=0;return 0;}\n",
     "static inline uint64_t __x87rt_pushret(void){__x87rt_psh(__aret_x87_ret);return 0;}\n",
     "static inline uint64_t __x87rt_retstore(void){if(__x87rt_p>0)__aret_x87_ret=__x87rt_s[--__x87rt_p];return 0;}\n",
-    "static inline uint64_t __x87rt_free(void){if(__x87rt_p>0)__x87rt_p--;return 0;}\n",
-    // ---- increment 2: comparisons, status word, transcendentals ----
-    "extern unsigned short __x87rt_sw;\n",
-    "static inline void __x87rt_setsw(long double a,long double b){int u=(a!=a||b!=b);__x87rt_sw=(unsigned short)(((((a<b)||u)?1:0)<<8)|((u?1:0)<<10)|((((a==b)||u)?1:0)<<14));}\n",
-    "static inline uint64_t __x87rt_com(int i,int pp){__x87rt_setsw(*__x87rt_at(0),*__x87rt_at(i));if(pp)__x87rt_p--;return 0;}\n",
-    "static inline uint64_t __x87rt_comm32(uint64_t a,int pp){__x87rt_setsw(*__x87rt_at(0),(long double)*(float*)(uintptr_t)a);if(pp)__x87rt_p--;return 0;}\n",
-    "static inline uint64_t __x87rt_comm64(uint64_t a,int pp){__x87rt_setsw(*__x87rt_at(0),(long double)*(double*)(uintptr_t)a);if(pp)__x87rt_p--;return 0;}\n",
-    "static inline uint64_t __x87rt_tst(void){__x87rt_setsw(*__x87rt_at(0),0.0L);return 0;}\n",
-    "static inline uint64_t __x87rt_fxam(void){long double x=*__x87rt_at(0);unsigned short s=0;if(__builtin_signbitl(x))s|=(1u<<9);if(__builtin_isnan(x))s|=(1u<<8);else if(__builtin_isinf(x))s|=(1u<<10)|(1u<<8);else if(x==0.0L)s|=(1u<<14);else if(__builtin_isnormal(x))s|=(1u<<10);else s|=(1u<<14)|(1u<<10);__x87rt_sw=s;return 0;}\n",
-    "static inline uint64_t __x87rt_getsw(void){return __x87rt_sw;}\n",
-    "static inline uint64_t __x87rt_lt(int i){return *__x87rt_at(0)<*__x87rt_at(i);}\n",
-    "static inline uint64_t __x87rt_eq(int i){return *__x87rt_at(0)==*__x87rt_at(i);}\n",
-    "static inline uint64_t __x87rt_un(int i){long double a=*__x87rt_at(0),b=*__x87rt_at(i);return a!=a||b!=b;}\n",
-    "static inline uint64_t __x87rt_cmov(int c,int i){if(c)*__x87rt_at(0)=*__x87rt_at(i);return 0;}\n",
-    "static inline uint64_t __x87rt_yl2x(void){long double* y=__x87rt_at(1);*y=*y*__builtin_log2l(*__x87rt_at(0));__x87rt_p--;return 0;}\n",
-    "static inline uint64_t __x87rt_yl2xp1(void){long double* y=__x87rt_at(1);*y=*y*__builtin_log2l(*__x87rt_at(0)+1.0L);__x87rt_p--;return 0;}\n",
-    "static inline uint64_t __x87rt_2xm1(void){long double* t=__x87rt_at(0);*t=__builtin_exp2l(*t)-1.0L;return 0;}\n",
-    "static inline uint64_t __x87rt_scale(void){long double* t=__x87rt_at(0);*t=__builtin_ldexpl(*t,(int)__builtin_truncl(*__x87rt_at(1)));return 0;}\n",
-    "static inline uint64_t __x87rt_sin(void){long double* t=__x87rt_at(0);*t=__builtin_sinl(*t);return 0;}\n",
-    "static inline uint64_t __x87rt_cos(void){long double* t=__x87rt_at(0);*t=__builtin_cosl(*t);return 0;}\n",
-    "static inline uint64_t __x87rt_sincos(void){long double x=*__x87rt_at(0);*__x87rt_at(0)=__builtin_sinl(x);__x87rt_psh(__builtin_cosl(x));return 0;}\n",
-    "static inline uint64_t __x87rt_ptan(void){long double* t=__x87rt_at(0);*t=__builtin_tanl(*t);__x87rt_psh(1.0L);return 0;}\n",
-    "static inline uint64_t __x87rt_patan(void){long double* y=__x87rt_at(1);*y=__builtin_atan2l(*y,*__x87rt_at(0));__x87rt_p--;return 0;}\n",
-    "static inline uint64_t __x87rt_prem(void){long double* t=__x87rt_at(0);*t=__builtin_fmodl(*t,*__x87rt_at(1));__x87rt_sw&=~(1u<<10);return 0;}\n",
-    "static inline uint64_t __x87rt_ldpi(void){__x87rt_psh(3.14159265358979323846L);return 0;}\n",
-    "static inline uint64_t __x87rt_ldl2e(void){__x87rt_psh(1.44269504088896340736L);return 0;}\n",
-    "static inline uint64_t __x87rt_ldl2t(void){__x87rt_psh(3.32192809488736234787L);return 0;}\n",
-    "static inline uint64_t __x87rt_ldlg2(void){__x87rt_psh(0.30102999566398119521L);return 0;}\n",
-    "static inline uint64_t __x87rt_ldln2(void){__x87rt_psh(0.69314718055994530942L);return 0;}\n",
 );
 
 /// The runtime-helper preamble, included only when the body references it.
