@@ -194,10 +194,14 @@ uint32_t aret_GetCurrentDirectoryA(uint32_t esp) {
 uint32_t aret_SetCurrentDirectoryA(uint32_t esp) { return (uint32_t)(chdir(WCS(0)) == 0); }
 uint32_t aret_GetTempPathA(uint32_t esp) {
     uint32_t size = WU(0); char *buf = WS(1);
-    const char *t = getenv("TMPDIR"); if (!t) t = "/tmp/";
-    uint32_t len = (uint32_t)strlen(t);
-    if (buf && size > len) { memcpy(buf, t, len + 1); return len; }
-    return len + 1;
+    const char *e = getenv("TMPDIR"); if (!e || !*e) e = "/tmp";
+    char t[4096]; size_t len = strlen(e);
+    if (len + 2 > sizeof t) return 0;
+    memcpy(t, e, len);
+    if (t[len - 1] != '/') t[len++] = '/';   /* Windows GetTempPath always ends in a sep */
+    t[len] = 0;
+    if (buf && size > len) { memcpy(buf, t, len + 1); return (uint32_t)len; }
+    return (uint32_t)len + 1;
 }
 
 /* OutputDebugStringA — route debug text to stderr. */

@@ -2700,3 +2700,22 @@ binaires MSVC, pas seulement strings.exe.
   regarder, le principe sacré dit *quoi expédier*. Prochain lot : `GetTempPathW`/`GetTempFileName`
   (fonctionnel), puis le cluster process/thread (`GetExitCodeProcess`/`CreateProcess`/`CreateThread` —
   vrai modèle), et évaluer `IsBadStringPtr` avec un sondage `/proc/self/maps`.
+
+### Shims — groupe temp-fichiers (GetTempPathW + GetTempFileNameA/W + _wremove) ✅
+- **2026-07-03 — lot suivant priorisé par la donnée** (winetest : `GetTempPathW` 78, `GetTempFileName*`
+  34/31 ; aussi dans le trou sqlite). `GetTempPathA` existait ; ajout de `GetTempPathW`,
+  `GetTempFileNameA`/`GetTempFileNameW` (`aret_hle.c`, avec `translate_path`/`aret_n2w`/`aret_w2n`) +
+  correctif `GetTempPathA` (garantie de séparateur final). `GetTempFileName` compose
+  `<dir>\<pre><hhhh>.TMP` et, si `unique==0`, **trouve un nom libre et CRÉE** le fichier vide
+  (`O_CREAT|O_EXCL`), créé à `translate_path(nom)` pour que la ré-ouverture par l'appelant tombe sur le
+  même fichier.
+- **Validation FONCTIONNELLE (le chemin natif diffère légitimement de Windows)** :
+  `bench/winecorpus/win32_tempfile.c` valide le **contrat**, pas la chaîne — chemin non vide finissant par
+  un séparateur, fichier temp créé/unique/inscriptible, round-trip write/read identique. Bit-à-bit avec
+  Wine. **winediff 39→40.**
+- **Attrapé en passant** : la garde utilisait `_wremove` (non shimé) → l'avertissement `aret_unimpl` (sur
+  **stderr**, vérifié — pas de pollution stdout) était capturé dans le bloc de sortie par `--run` →
+  divergence. Fix : shim `_wremove` (sibling wide de `remove()`, complète la couche fichier wide) —
+  légitime, pas une rustine.
+- **Gain MESURÉ** (367 modules winetest) : médiane **78 % → 79 %** ; `GetTempPathW` disparaît des trous.
+- **Régression** : cargo **54+2**, transpile-diff **4/4** (hash inchangé), **winediff 40/40**.

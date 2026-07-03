@@ -1095,6 +1095,88 @@ uint32_t aret_getpid(uint32_t esp) {
     return (uint32_t)getpid();
 }
 
+/* ---- temp directory / temp file names -------------------------------------
+ * The exact temp *path* legitimately differs from Windows (a native dir, not
+ * `C:\…\Temp\`), but the *contract* is honoured: the path ends in a separator,
+ * and GetTempFileName composes `<dir>\<pre><hhhh>.TMP` and — when unique==0 —
+ * finds a free name and CREATES the empty file (O_CREAT|O_EXCL), returning the
+ * value. The file is created at translate_path(returned name) so the caller
+ * re-opening that name lands on the same file. */
+static uint32_t aret_temp_dir(char *out, size_t cap) {
+    const char *t = getenv("TMPDIR");
+    if (!t || !*t) t = "/tmp";
+    size_t n = strlen(t);
+    if (n + 2 > cap) return 0;
+    memcpy(out, t, n);
+    if (n == 0 || out[n - 1] != '/') out[n++] = '/';
+    out[n] = 0;
+    return (uint32_t)n;
+}
+uint32_t aret_GetTempPathW(uint32_t esp) {
+    uint32_t size = arg(esp, 0);                        /* buffer size in WCHARs */
+    uint16_t *buf = (uint16_t *)(uintptr_t)arg(esp, 1);
+    char t[4096];
+    uint32_t len = aret_temp_dir(t, sizeof t);
+    if (buf && size > len) { aret_n2w(t, buf, size); return len; }
+    return len + 1;
+}
+/* Compose (and, if unique==0, create) a temp file name into `out`. Returns the
+ * 16-bit unique value, or 0 on failure. */
+static uint32_t aret_make_temp_name(const char *path, const char *prefix,
+                                    uint32_t unique, char *out, size_t outcap) {
+    char pre[4] = {0};
+    for (int i = 0; i < 3 && prefix && prefix[i]; i++) pre[i] = prefix[i];
+    char dir[3600];
+    size_t dl = path ? strlen(path) : 0;
+    if (dl + 2 >= sizeof dir) return 0;
+    if (path) memcpy(dir, path, dl);
+    if (dl == 0 || (dir[dl - 1] != '/' && dir[dl - 1] != '\\')) dir[dl++] = '/';
+    dir[dl] = 0;
+    uint32_t u = unique & 0xffffu;
+    if (u == 0) {
+        static uint32_t seed = 0;
+        if (!seed) seed = (uint32_t)getpid();
+        for (int tries = 0; tries < 65536; tries++) {
+            u = (++seed) & 0xffffu; if (!u) u = 1;
+            snprintf(out, outcap, "%s%s%04X.TMP", dir, pre, u);
+            char host[4096];
+            translate_path(out, host, sizeof host);
+            int fd = open(host, O_CREAT | O_EXCL | O_WRONLY, 0600);
+            if (fd >= 0) { close(fd); return u; }
+        }
+        return 0;
+    }
+    snprintf(out, outcap, "%s%s%04X.TMP", dir, pre, u);
+    return u;
+}
+uint32_t aret_GetTempFileNameA(uint32_t esp) {
+    const char *path = (const char *)(uintptr_t)arg(esp, 0);
+    const char *prefix = (const char *)(uintptr_t)arg(esp, 1);
+    char *out = (char *)(uintptr_t)arg(esp, 3);
+    if (!path || !out) return 0;
+    return aret_make_temp_name(path, prefix, arg(esp, 2), out, 4096);
+}
+uint32_t aret_GetTempFileNameW(uint32_t esp) {
+    char path[3200] = {0}, prefix[16] = {0}, out[4096];
+    const uint16_t *wp = (const uint16_t *)(uintptr_t)arg(esp, 0);
+    const uint16_t *wpre = (const uint16_t *)(uintptr_t)arg(esp, 1);
+    uint16_t *wout = (uint16_t *)(uintptr_t)arg(esp, 3);
+    if (!wp || !wout) return 0;
+    aret_w2n(wp, path, sizeof path);
+    if (wpre) aret_w2n(wpre, prefix, sizeof prefix);
+    uint32_t u = aret_make_temp_name(path, prefix, arg(esp, 2), out, sizeof out);
+    if (u) aret_n2w(out, wout, 4096);
+    return u;
+}
+/* _wremove(wpath) -> 0 / -1 (the wide sibling of remove(), completing the wide
+ * file layer). */
+uint32_t aret_wremove(uint32_t esp) {
+    char path[4096], host[4096];
+    aret_w2n((const uint16_t *)(uintptr_t)arg(esp, 0), path, sizeof path);
+    translate_path(path, host, sizeof host);
+    return (uint32_t)(remove(host) == 0 ? 0 : (uint32_t)-1);
+}
+
 uint32_t aret_SetFilePointer(uint32_t esp) {
     int fd = (int)arg(esp, 0);
     int32_t dist = (int32_t)arg(esp, 1);
