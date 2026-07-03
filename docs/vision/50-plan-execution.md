@@ -2403,3 +2403,35 @@ binaires MSVC, pas seulement strings.exe.
 - **Régression PASS** : cargo test (54+3+48+1+1), **difftest 271/271** (0 divergence), **transpile-diff
   4/4** (H=`19acad982194bf07`, O0–O3 cohérents), **cpudiff vert**, **winediff 35/35**. Fix HLE-only (le
   lifter n'est pas touché).
+
+### Phase 5 — Filet x87 runtime (fonctions qui bailent la profondeur) ✅ incrément 1 ; ⚠️ 2/3 révoqués
+- **2026-07-03 — le vrai chantier « robustesse passe x87 » attaqué par un filet runtime.**
+  Quand l'analyse statique de profondeur x87 abandonne sur une fonction (`x87_states`→None), ses ops
+  FPU tombaient en `Asm`→abort. Nouveau : les modéliser contre une **pile FPU runtime** (`__x87rt_*`,
+  `src/emit/mod.rs`), correcte par construction (la pile est un état runtime, plus besoin de profondeur
+  statique). Chaque op = un `CallStmt` **impur** (l'opt ne le supprime/réordonne jamais). C'est la
+  technique « compter à l'exécution » de Remill/QEMU, appliquée **chirurgicalement au seul FPU, en code
+  natif auto-contenu** (aucune dépendance runtime — respecte la contrainte « standalone »).
+- **Incrément 1 (commit `9898287`, CONSERVÉ) — SOUND, zéro régression.** load/store (f/fi 32/64/80),
+  constantes fld1/fldz, arithmétique (toutes formes reg/mem/entières via `__x87rt_ar`), fxch/fabs/fchs/
+  fsqrt/frndint, fldcw/fnstcw (mode d'arrondi runtime). Injection gatée **transpile-only** (`x87_rt =
+  x87.is_none() && shared_stack()`) et **purement additive** : le chemin statique (Lua, corpus) est
+  intact (transpile-diff hash `19acad982194bf07` **inchangé**). Soundness : accès pile **bornés →
+  `__builtin_trap`** sur under/overflow ; op non couverte → `Asm`→abort. **Jamais faux.** Effet mesuré
+  (sqlite3.exe MSVC) : `round`, division/format flottants qui abortaient tournent, bit-identiques à Wine.
+- **Incréments 2 et 3 (commits `315ebbd`/`96d94e6`) — RÉVOQUÉS (`77155e8`/`00f8163`).** Ajoutaient pile
+  partagée + compares/status word/**transcendantes** (fyl2x/f2xm1/fscale/fsin/fcos…) + fp-return des
+  appels indirects (drapeau `__aret_x87_ret_valid`). En apparence : `power`/`exp`/`log`/`sin(0)`/`sqrt`
+  bit-identiques à Wine. **MAIS un différentiel large a exposé un FAUX SILENCIEUX** : `sin(1)` →
+  `0.7456` = **`sin(sin(1))`** (double application ; idem `cos(1)`). Le bug était masqué dans mes tests
+  car je n'avais essayé que `sin(0)` (où `sin(sin(0))=0` = résultat correct par coïncidence). Cause non
+  encore élucidée (double application sur le chemin `fsin`/`fcos` de la CRT liftée — probable interaction
+  reconnaissance-fp-par-nom × calcul lifté). **Un faux présenté comme correct viole le principe sacré →
+  révoqué**, retour à l'incrément 1 (sound : `sin`/`sqrt` → abort propre, jamais faux).
+- **Leçon (le principe sacré en action)** : le différentiel **large** contre Wine (pas juste quelques
+  cas) est ce qui a rattrapé le faux silencieux **avant** qu'il ne soit cru. Un test trop étroit
+  (`sin(0)`) l'avait masqué. Le filet reste à compléter (transcendantes correctes) en session dédiée,
+  avec un différentiel math **exhaustif** comme garde. L'incrément 1 (arith/load/store/round) est acquis
+  et sound.
+- **Régression (état conservé, incrément 1)** : difftest 271/271, transpile-diff 4/4 (hash inchangé),
+  cargo, winediff 35/35.
