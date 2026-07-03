@@ -1027,13 +1027,25 @@ fn x87_depth_pass(
             // The rounding mode the surrounding control-word setup proves is
             // active (floor/ceil/truncate/nearest). `frndint` honours all four;
             // `fist`/`fistp` (but not the always-truncating `fisttp`) are only
-            // sound under truncation.
-            let mode = rounding_mode_active(&flat, pos[&insn.address], &joins);
+            // sound under truncation. `rounding_mode_active` returns `None` when a
+            // control word is loaded but its mode is unprovable.
+            let proven = rounding_mode_active(&flat, pos[&insn.address], &joins);
+            let is_frndint = ins.mnemonic() == Mnemonic::Frndint;
             let is_fist = matches!(ins.mnemonic(), Mnemonic::Fist | Mnemonic::Fistp);
-            if is_fist && mode != crate::ir::lift::RoundMode::Trunc {
+            // `frndint` computes a value under the active mode: an unprovable mode
+            // must NOT default to nearest (that ships a silent-wrong ceil/floor) —
+            // bail the whole function so it falls to the runtime x87 stack (which
+            // tracks the control word) or a sound inline-asm decompile.
+            if is_frndint && proven.is_none() {
+                x87dbg(func.entry, insn.address, "frndint with unprovable rounding mode");
+                return Err(X87Bail);
+            }
+            if is_fist && proven != Some(crate::ir::lift::RoundMode::Trunc) {
                 x87dbg(func.entry, insn.address, "fist without proven truncation");
                 return Err(X87Bail);
             }
+            // Ops other than frndint/fist ignore the mode; a placeholder is fine.
+            let mode = proven.unwrap_or(crate::ir::lift::RoundMode::Nearest);
             if !(0..=8).contains(&sp) {
                 x87dbg(func.entry, insn.address, "sp out of range (before op)");
                 return Err(X87Bail);
@@ -1076,46 +1088,30 @@ fn x87_depth_pass(
 
 /// The x87 rounding mode proven active at the op at flat index `idx`, from the
 /// control word the surrounding code installs before an `fldcw`: the `(int)x` /
-/// `floor` / `ceil` idiom does `fnstcw; or RC-bits; mov [X]; fldcw [X];
-/// frndint|fist`. The RC bits (10–11 of the control word, i.e. 0xc00, or 0x0c in
-/// the high byte) select the mode: 00 nearest, 01 down(floor), 10 up(ceil), 11
-/// truncate.
+/// `floor` / `ceil` idiom does `fnstcw; …set RC bits…; mov [X]; fldcw [X];
+/// frndint|fist`. The RC bits (10–11 of the control word) select the mode:
+/// 00 nearest, 01 down(floor), 10 up(ceil), 11 truncate.
+///
+/// Returns:
+/// - `Some(Nearest)` when no `fldcw` precedes the op — the default FPU mode,
+///   provably nearest (e.g. a bare `frndint`/`rint`).
+/// - `Some(mode)` when the control word an `fldcw` loads is provably `mode`.
+/// - `None` when an `fldcw` *is* present but the mode it installs cannot be
+///   proven. The caller MUST treat this as unprovable — for `frndint` that means
+///   bailing the whole function (a guessed mode is a silent-wrong `ceil`/`floor`),
+///   not defaulting to nearest.
 ///
 /// `flat` is the function's instruction stream in address order; `joins` is the
 /// set of block-start addresses with more than one predecessor. The scan walks
-/// backward only over straight-line fallthrough code: it stops at the first
-/// branch (the prior instruction does not fall through) or join (another path
-/// could install a different control word), returning `Nearest` — the sound
-/// default, which makes a dependent `fist` bail rather than guess.
+/// backward only over straight-line fallthrough code from the op to find its
+/// governing `fldcw`.
 fn rounding_mode_active(
     flat: &[&crate::disasm::Insn],
     idx: usize,
     joins: &std::collections::HashSet<u64>,
-) -> crate::ir::lift::RoundMode {
+) -> Option<crate::ir::lift::RoundMode> {
     use crate::ir::lift::RoundMode;
     use iced_x86::{Mnemonic, OpKind};
-    // RC field of an `or imm, (ah|cw)` that installs a rounding mode.
-    let rc_of = |ins: &iced_x86::Instruction| -> Option<RoundMode> {
-        if ins.mnemonic() != Mnemonic::Or
-            || !matches!(ins.op_kind(1), OpKind::Immediate8 | OpKind::Immediate8to16
-                | OpKind::Immediate8to32 | OpKind::Immediate16 | OpKind::Immediate32)
-        {
-            return None;
-        }
-        let imm = ins.immediate(1);
-        let hi_byte = matches!(
-            ins.op_register(0),
-            iced_x86::Register::AH | iced_x86::Register::BH
-                | iced_x86::Register::CH | iced_x86::Register::DH
-        );
-        let rc = if hi_byte { (imm >> 2) & 0x3 } else { (imm >> 10) & 0x3 };
-        Some(match rc {
-            0b01 => RoundMode::Down,
-            0b10 => RoundMode::Up,
-            0b11 => RoundMode::Trunc,
-            _ => RoundMode::Nearest,
-        })
-    };
     let mem_slot = |ins: &iced_x86::Instruction| (ins.memory_base(), ins.memory_displacement64());
     // The straight-line predecessor window [lo, idx]: extend back while each step
     // is a real fallthrough (prior insn falls through, target is not a join). The
@@ -1133,7 +1129,8 @@ fn rounding_mode_active(
             _ => break, // jump/return/indirect: prior insn does not fall through
         }
     }
-    // 1. The nearest preceding `fldcw [X]` — the control word this op uses.
+    // 1. The nearest preceding `fldcw [X]` — the control word this op uses. No
+    //    `fldcw` in the window ⇒ the default (nearest), provably.
     let mut fldcw_at = None;
     for j in (lo..idx).rev() {
         if flat[j].raw.mnemonic() == Mnemonic::Fldcw {
@@ -1141,33 +1138,179 @@ fn rounding_mode_active(
             break;
         }
     }
-    let Some(fj) = fldcw_at else { return RoundMode::Nearest };
+    let Some(fj) = fldcw_at else { return Some(RoundMode::Nearest) };
     let slot = mem_slot(&flat[fj].raw);
     // 2. Classify the value the `fldcw [X]` loads by inspecting *every* store
-    //    `mov [X], reg` in the function, each followed back to the `or` that built
-    //    the control word. The control-word slot is typically set up once before a
-    //    loop and the `fldcw`/op sit inside it (so the store is in a dominating
-    //    block, across a join), but it is loop-invariant: if every writer installs
-    //    the same rounding mode, the load provably yields that mode on every path.
-    //    A writer we cannot classify, or two that disagree, is unprovable → the
-    //    sound `Nearest` (which makes a dependent `fist` bail rather than guess).
-    //    Matching the *slot* keeps a function's floor (`or 0x4`→slotA) and ceil
-    //    (`or 0x8`→slotB) apart.
+    //    `mov [X], reg/imm` in the function and tracing the RC bits it installs.
+    //    The control-word slot is typically set up once (across a join) and the
+    //    `fldcw`/op sit inside a loop, but it is loop-invariant: if every writer
+    //    installs the same mode, the load provably yields that mode on every path.
+    //    A writer we cannot classify, two that disagree, or no writer at all is
+    //    unprovable → `None` (the caller must not guess).
     let mut agreed: Option<RoundMode> = None;
     for j in 0..flat.len() {
         let m = &flat[j].raw;
         if m.mnemonic() != Mnemonic::Mov || m.op0_kind() != OpKind::Memory || mem_slot(m) != slot {
             continue;
         }
-        let built = (j.saturating_sub(6)..j).rev().find_map(|k| rc_of(&flat[k].raw));
-        match (built, agreed) {
-            (None, _) => return RoundMode::Nearest, // a writer we can't prove
-            (Some(md), None) => agreed = Some(md),
-            (Some(md), Some(prev)) if md != prev => return RoundMode::Nearest, // disagree
+        let md = rc_installed_by_store(flat, j)?; // unprovable writer → None
+        match agreed {
+            None => agreed = Some(md),
+            Some(prev) if prev != md => return None, // writers disagree → unprovable
             _ => {}
         }
     }
-    agreed.unwrap_or(RoundMode::Nearest)
+    agreed // `None` if no writer to the slot was found → unprovable
+}
+
+/// Determine which x87 rounding mode the store `mov [cw_slot], reg/imm` at
+/// `flat[store_j]` installs, by abstractly interpreting the two RC bits (10, 11)
+/// of the value written. Handles the real MSVC `ceil`/`floor`/`trunc` idioms,
+/// which build the control word as `mov reg,IMM; or reg,[oldcw]; and reg,MASK`
+/// or `movzx reg,[oldcw]; or ah,IMM` — an `or`/`and` of the *live* old word, not
+/// a single `or imm`. Returns `None` when the installed bits cannot be proven
+/// (so the mode is unprovable and the caller refuses to guess).
+fn rc_installed_by_store(
+    flat: &[&crate::disasm::Insn],
+    store_j: usize,
+) -> Option<crate::ir::lift::RoundMode> {
+    use iced_x86::{Mnemonic, OpKind, Register};
+    // (low bit, width) of a GP register's byte range within its full 64-bit reg,
+    // and whether it covers control-word bits 10 and 11.
+    let sub = |r: Register| -> (u32, u32) {
+        let hi = matches!(r, Register::AH | Register::BH | Register::CH | Register::DH);
+        let low = if hi { 8 } else { 0 };
+        (low, (r.size() as u32) * 8)
+    };
+    let covers = |r: Register, b: u32| -> bool {
+        let (low, w) = sub(r);
+        b >= low && b < low + w
+    };
+    // Bit `b` (10 or 11) of an immediate as applied through register `r`.
+    let imm_bit = |r: Register, imm: u64, b: u32| -> Option<bool> {
+        let (low, _) = sub(r);
+        if !covers(r, b) {
+            return None;
+        }
+        Some(((imm >> (b - low)) & 1) != 0)
+    };
+    let rc_from = |b10: bool, b11: bool| -> crate::ir::lift::RoundMode {
+        use crate::ir::lift::RoundMode;
+        match ((b11 as u8) << 1) | (b10 as u8) {
+            0b01 => RoundMode::Down,
+            0b10 => RoundMode::Up,
+            0b11 => RoundMode::Trunc,
+            _ => RoundMode::Nearest,
+        }
+    };
+
+    let store = &flat[store_j].raw;
+    // Direct immediate store `mov [slot], imm` — RC bits read straight off.
+    if matches!(
+        store.op1_kind(),
+        OpKind::Immediate8 | OpKind::Immediate8to16 | OpKind::Immediate8to32
+            | OpKind::Immediate16 | OpKind::Immediate32
+    ) {
+        let imm = store.immediate(1);
+        return Some(rc_from((imm >> 10) & 1 != 0, (imm >> 11) & 1 != 0));
+    }
+    if store.op1_kind() != OpKind::Register {
+        return None;
+    }
+    let target = store.op_register(1).full_register();
+    let writes = |ins: &iced_x86::Instruction| -> bool {
+        ins.op0_kind() == OpKind::Register && ins.op_register(0).full_register() == target
+    };
+    // A definite initializer of the value: a `mov`/`movzx`/`movsx` into a
+    // sub-register that covers bits 10 and 11 (a low-byte `mov al,…` does not).
+    let is_init = |ins: &iced_x86::Instruction| -> bool {
+        writes(ins)
+            && matches!(ins.mnemonic(), Mnemonic::Mov | Mnemonic::Movzx | Mnemonic::Movsx)
+            && covers(ins.op_register(0), 10)
+            && covers(ins.op_register(0), 11)
+    };
+    // Walk back (bounded, straight-line) to the initializer of `target`.
+    let start = store_j.saturating_sub(24);
+    let mut init_k = None;
+    for k in (start..store_j).rev() {
+        if is_init(&flat[k].raw) {
+            init_k = Some(k);
+            break;
+        }
+    }
+    let init_k = init_k?;
+    // Initial RC-bit state from the initializer.
+    let (mut b10, mut b11): (Option<bool>, Option<bool>);
+    {
+        let ins = &flat[init_k].raw;
+        let r = ins.op_register(0);
+        if ins.mnemonic() == Mnemonic::Mov && matches!(
+            ins.op1_kind(),
+            OpKind::Immediate8 | OpKind::Immediate8to16 | OpKind::Immediate8to32
+                | OpKind::Immediate16 | OpKind::Immediate32
+        ) {
+            let imm = ins.immediate(1);
+            b10 = imm_bit(r, imm, 10);
+            b11 = imm_bit(r, imm, 11);
+        } else {
+            // mov reg,[mem] / mov reg,reg / movzx / movsx → old control word: unknown.
+            b10 = None;
+            b11 = None;
+        }
+    }
+    // Forward-interpret each write to `target` between the init and the store.
+    for k in (init_k + 1)..store_j {
+        let ins = &flat[k].raw;
+        if !writes(ins) {
+            continue;
+        }
+        let r = ins.op_register(0);
+        let imm_kind = matches!(
+            ins.op1_kind(),
+            OpKind::Immediate8 | OpKind::Immediate8to16 | OpKind::Immediate8to32
+                | OpKind::Immediate16 | OpKind::Immediate32
+        );
+        match ins.mnemonic() {
+            // OR with immediate: a 1 bit forces the RC bit to 1; a 0 leaves it.
+            Mnemonic::Or if imm_kind => {
+                let imm = ins.immediate(1);
+                if imm_bit(r, imm, 10) == Some(true) { b10 = Some(true); }
+                if imm_bit(r, imm, 11) == Some(true) { b11 = Some(true); }
+            }
+            // AND with immediate: a 0 bit forces the RC bit to 0; a 1 leaves it.
+            Mnemonic::And if imm_kind => {
+                let imm = ins.immediate(1);
+                if imm_bit(r, imm, 10) == Some(false) { b10 = Some(false); }
+                if imm_bit(r, imm, 11) == Some(false) { b11 = Some(false); }
+            }
+            // OR/AND with the (unknown) old word: OR keeps a known-1 else unknown;
+            // AND keeps a known-0 else unknown — for bits this operand covers.
+            Mnemonic::Or => {
+                if covers(r, 10) && b10 != Some(true) { b10 = None; }
+                if covers(r, 11) && b11 != Some(true) { b11 = None; }
+            }
+            Mnemonic::And => {
+                if covers(r, 10) && b10 != Some(false) { b10 = None; }
+                if covers(r, 11) && b11 != Some(false) { b11 = None; }
+            }
+            // Re-init mid-stream.
+            Mnemonic::Mov if imm_kind => {
+                let imm = ins.immediate(1);
+                if covers(r, 10) { b10 = imm_bit(r, imm, 10); }
+                if covers(r, 11) { b11 = imm_bit(r, imm, 11); }
+            }
+            Mnemonic::Mov | Mnemonic::Movzx | Mnemonic::Movsx => {
+                if covers(r, 10) { b10 = None; }
+                if covers(r, 11) { b11 = None; }
+            }
+            // Any other write to the value (add/xor/lea/…) is outside the idiom.
+            _ => return None,
+        }
+    }
+    match (b10, b11) {
+        (Some(x), Some(y)) => Some(rc_from(x, y)),
+        _ => None,
+    }
 }
 
 /// Fold a rip-relative load of read-only data into a literal. Without this,

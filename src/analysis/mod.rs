@@ -306,6 +306,71 @@ fn looks_like_func_start(prog: &Program, addr: u64, allow_leaf: bool) -> bool {
             && code.get(7) == Some(&0x85) && code.get(8) == Some(&0xc0))
         // mov reg, [esp+disp] (modrm rm=100=SIB, mod≠11; SIB=24 → base=esp).
         || (allow_leaf && b0 == 0x8b && (b1 & 0x07) == 0x04 && (b1 & 0xc0) != 0xc0 && b2 == 0x24)
+        // A tiny x87 math thunk (`fld [esp+d]; …; ret`) — the C `ceil`/`floor`/
+        // `trunc`/`atan2`/`fmod` a real MSVC CRT ships as leaf helpers, reached
+        // only through a data pointer (stored as a SQL function's user-data, an
+        // isolated slot — not a >=3 run that the table heuristic trusts). Their
+        // `fld m64,[esp+d]` prologue matches none of the shapes above, so without
+        // this the indirect call through the pointer lands on unrecovered code and
+        // aborts (a sound but needless `atan2`/`fmod`/`trunc` failure). The whole
+        // body is verified x87+glue ending in `ret`, so this is safe even for a
+        // bare data pointer (random data does not decode as a clean x87 leaf).
+        || is_x87_leaf_thunk(prog, addr)
+}
+
+/// Decode forward from `addr` and decide whether it is a small, self-contained
+/// x87 math leaf: it *starts* with an FPU load of a stack argument
+/// (`fld`/`fild [esp+disp]`) and is composed solely of FPU ops plus the integer
+/// glue such helpers use (stack adjust, control-word `mov`/`or`/`and`, `sahf`
+/// for an `fprem` completion loop), terminating at a `ret` within a tight bound,
+/// with no `call` and no branch leaving the body. This whole-body check is a far
+/// stronger signal than a prologue byte pattern — strong enough to seed a
+/// function from an isolated data pointer without risking interior-byte or
+/// random-data false positives.
+fn is_x87_leaf_thunk(prog: &Program, addr: u64) -> bool {
+    use iced_x86::Mnemonic::*;
+    let dis = Disassembler::new(prog.bitness);
+    // First instruction: an x87 load of a stack slot (`fld`/`fild [esp+…]`).
+    let Some(first) = dis.decode_at(prog, addr) else { return false };
+    if !matches!(first.raw.mnemonic(), Fld | Fild)
+        || first.raw.memory_base() != iced_x86::Register::ESP
+    {
+        return false;
+    }
+    let mut a = addr;
+    for _ in 0..40 {
+        let Some(ins) = dis.decode_at(prog, a) else { return false };
+        let m = ins.raw.mnemonic();
+        match ins.flow {
+            Flow::Return => return true, // clean leaf terminus
+            Flow::Call | Flow::Jump | Flow::Indirect | Flow::Interrupt => return false,
+            Flow::CondJump => {
+                // Only a backward branch that stays inside the body (the `fprem`
+                // completion loop `jp`); anything leaving the body disqualifies it.
+                // A validated local branch is allowed as-is (its mnemonic is a jcc,
+                // neither x87 nor integer glue), so skip the body-shape check below.
+                match ins.target {
+                    Some(t) if t >= addr && t <= a => {
+                        a = ins.next_addr();
+                        continue;
+                    }
+                    _ => return false,
+                }
+            }
+            Flow::Fallthrough => {}
+        }
+        let ok = crate::ir::lift::is_x87(&ins.raw)
+            || matches!(
+                m,
+                // integer glue the CRT math thunks use around the FPU core
+                Sub | Add | Mov | Movzx | Movsx | Or | And | Sahf | Lahf | Nop | Xchg | Lea | Test
+            );
+        if !ok {
+            return false;
+        }
+        a = ins.next_addr();
+    }
+    false // ran past the bound without a `ret` — not a tidy leaf
 }
 
 /// The immediate of a `push imm32` or `mov [esp+d], imm32` — a value being placed

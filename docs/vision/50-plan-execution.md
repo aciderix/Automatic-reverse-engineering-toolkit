@@ -2480,3 +2480,54 @@ binaires MSVC, pas seulement strings.exe.
   buter, aborteraient (jamais faux). **« Fonctionnel prouvé là où balayé + sound partout »**, pas « 100 % ».
 - **Leçon systématisée** : mesurer la surface d'un vrai binaire est désormais un **outil répétable**, pas
   un poke ad-hoc. À faire pour Lua/busybox aussi.
+
+### Résolution — x87 : mode d'arrondi prouvé (ceil/floor) + récupération des leaf-thunks (atan2/fmod/trunc) ✅
+- **2026-07-03 — le balayage large a rattrapé un faux silencieux ET des trous sound.** Le sweep
+  systématique + un différentiel math *exhaustif* (252 cas ceil/floor/trunc/mod/atan2/… × args aléatoires)
+  contre le vrai `sqlite3.exe` sous Wine a révélé **deux classes** de défaut restées invisibles aux tests
+  étroits :
+  1. **`ceil(3.2)=3.0` / `floor(3.8)=4.0` — FAUX SILENCIEUX (violation du principe sacré).** La CRT MSVC
+     implémente `ceil`/`floor`/`trunc` par `fld [esp+d]; fstcw; **mov reg,IMM; or reg,[cw]; and reg,MASK**;
+     fldcw; frndint; fldcw; ret` — le champ RC (bits 10-11) est **forcé** par l'immédiat du `or` (met un
+     bit) combiné à celui du `and` (efface l'autre). `rounding_mode_active` ne reconnaissait que la forme
+     `or imm, cw` (immédiat unique) ; l'idiome réel `or reg,[cw]` (or avec la **mémoire** vivante) n'était
+     pas prouvé → repli sur `Nearest` → `frndint` faisait un arrondi-au-plus-proche → **ceil qui n'arrondit
+     pas vers le haut**. Piège classique : `ceil(3.0)` (nearest et up coïncident sur les entiers) masquait
+     le bug ; seul un argument fractionnaire le révèle.
+     - **Fix (`src/ir/build.rs`)** : `rounding_mode_active` renvoie désormais `Option<RoundMode>` et
+       `rc_installed_by_store` **interprète abstraitement** les deux bits RC (10, 11) de la valeur écrite
+       dans le slot du control word — `mov reg,IMM` initialise, `or imm` force à 1, `and imm` force à 0,
+       `or/and [cw]|reg` (mot ancien inconnu) préserve un bit déjà connu sinon le rend inconnu. Gère les
+       sous-registres (`or ah,0xc` pour trunc). Les deux bits doivent finir **définis** sinon `None`.
+     - **Principe sacré recâblé** : un `frndint` dont le mode n'est **pas** prouvé (`None`) ne se rabat
+       **plus** sur nearest (ça *expédiait* un ceil faux) — il **fait échouer la fonction entière**
+       (`X87Bail`), qui bascule alors sur la pile x87 runtime (qui suit le control word) ou une décompile
+       inline-asm saine. Plus jamais de mode d'arrondi *deviné*.
+  2. **`atan2`/`fmod`/`trunc` — abort sound (trou de récupération, jamais faux).** Ces fonctions sont de
+     minuscules leaf-helpers CRT (`fld [esp+d]; …; fpatan|fprem|frndint; ret`) atteintes **uniquement** par
+     un pointeur isolé (user-data d'une fonction SQL — pas un run ≥3 que l'heuristique de table valide).
+     Leur prologue `fld m64,[esp+d]` ne matchait aucune forme de `looks_like_func_start` → le pointeur
+     restait de la donnée → l'appel indirect atterrissait sur du code non récupéré → **abort** (sound).
+     - **Fix (`src/analysis/mod.rs`)** : `is_x87_leaf_thunk` **décode tout le corps** depuis l'adresse — il
+       *commence* par un chargement x87 d'argument pile (`fld|fild [esp+d]`), n'est composé que d'ops FPU +
+       la colle entière que ces helpers utilisent (ajustement pile, manip du control word, `sahf`), avec
+       une seule branche conditionnelle **locale** (la boucle de complétion `fprem`), et se termine sur un
+       `ret` sous une borne serrée. Signal *corps entier* bien plus fort qu'un motif d'octets de prologue —
+       assez fort pour amorcer une fonction depuis un pointeur de donnée isolé sans risque de faux positif
+       (de la donnée aléatoire ne se décode pas en un leaf x87 propre finissant par `ret`).
+     - **Bug attrapé en cours** : une branche conditionnelle locale validée passait le test de flow puis
+       échouait le test de mnémonique (« x87 ou colle ») car un `jcc` n'est ni l'un ni l'autre → `fmod`
+       (seul helper avec la boucle `jp`) restait non récupéré. Corrigé : une `CondJump` locale validée est
+       acceptée telle quelle.
+- **Résultat mesuré** : `ceil`/`floor`/`trunc`/`atan2`/`fmod` = **bit-identiques à Wine**. **sqlite feature
+  sweep : ALL bit-identical** (29 aires + DDL/DML). **Différentiel math 252/252.** Plus aucun `<none>` ni
+  faux sur la math scalaire du vrai binaire.
+- **Garde permanente** : `bench/winecorpus/x87_round.c` reproduit l'idiome `mov reg,IMM; or reg,[cw]; and
+  reg,MASK; fldcw; frndint` en asm inline (mode d'arrondi à prouver) + `fpatan` + la boucle `fprem` —
+  rattraperait toute régression des deux classes. **winediff 36→37.**
+- **Régression PASS** : cargo (54+48+3), difftest **271/271**, transpile-diff **4/4** (hash inchangé),
+  winediff **37/37**, sqlite sweep **bit-identique**, math **252/252**.
+- **Réponse à « pourquoi ce balayage n'est pas fait d'office ? »** : il l'est désormais — `sqlite_sweep`
+  est le balayage large répétable, et c'est *précisément* lui (pas un poke étroit) qui a exposé ces deux
+  défauts. Le faux `ceil` prouve une fois de plus la leçon : la complétude se **mesure** contre la vérité
+  terrain sur un vrai binaire, elle ne s'**affirme** pas jalon par jalon.

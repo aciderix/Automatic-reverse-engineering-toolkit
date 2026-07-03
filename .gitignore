@@ -5,3 +5,6 @@ Cargo.lock.bak
 *.o
 *.obj
 .claude/settings.local.json
+
+# sqlite_sweep downloads/caches the real sqlite3.exe here (large, versioned online)
+bench/.cache/
