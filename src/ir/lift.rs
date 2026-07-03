@@ -2590,6 +2590,110 @@ fn x87_rt_try(insn: &Insn) -> Option<Vec<Stmt>> {
             vec![rt("__x87rt_stcw", vec![addr])]
         }
 
+        // comparisons setting EFLAGS (fcomi family).
+        Fcomi | Fcomip | Fucomi | Fucomip => {
+            let (r0, r1) = (ins.op_register(0), ins.op_register(1));
+            if !r0.is_st() || !r1.is_st() {
+                return None;
+            }
+            let i = konst(r1.number() as i128);
+            let un = x87call("__x87rt_un", vec![i.clone()]);
+            let mut v = vec![
+                set_flag(FlagKind::Cf, bin(BinOp::Or, x87call("__x87rt_lt", vec![i.clone()]), un.clone())),
+                set_flag(FlagKind::Zf, bin(BinOp::Or, x87call("__x87rt_eq", vec![i]), un.clone())),
+                set_flag(FlagKind::Pf, un),
+                set_flag(FlagKind::Sf, konst(0)),
+                set_flag(FlagKind::Of, konst(0)),
+            ];
+            if matches!(mn, Fcomip | Fucomip) {
+                v.push(rt("__x87rt_free", vec![]));
+            }
+            v
+        }
+        // status-word comparisons (fcom/fucom/ftst) — set C0/C2/C3, then `fnstsw`.
+        Ftst => vec![rt("__x87rt_tst", vec![])],
+        Fcom | Fcomp | Fcompp | Fucom | Fucomp | Fucompp => {
+            if matches!(mn, Fcompp | Fucompp) {
+                vec![rt("__x87rt_com", vec![konst(1), konst(1)]), rt("__x87rt_free", vec![])]
+            } else {
+                let pop = konst(matches!(mn, Fcomp | Fucomp) as i128);
+                if ins.op_count() >= 1 && ins.op_kind(0) == OpKind::Memory {
+                    if ins.segment_prefix() != Register::None {
+                        return None;
+                    }
+                    let (addr, _) = mem_addr(ins)?;
+                    let h = match ins.memory_size() {
+                        MemorySize::Float32 => "__x87rt_comm32",
+                        MemorySize::Float64 => "__x87rt_comm64",
+                        _ => return None,
+                    };
+                    vec![rt(h, vec![addr, pop])]
+                } else {
+                    let i = if ins.op_count() >= 1 && ins.op_register(0).is_st() {
+                        ins.op_register(0).number() as i128
+                    } else {
+                        1
+                    };
+                    vec![rt("__x87rt_com", vec![konst(i), pop])]
+                }
+            }
+        }
+        Fxam => vec![rt("__x87rt_fxam", vec![])],
+        Fnstsw | Fstsw => match ins.op_kind(0) {
+            OpKind::Register => {
+                let rax = Location::Reg(RegId(0));
+                vec![Stmt::Set {
+                    dst: rax.clone(),
+                    expr: combine_write(&rax, 16, x87call("__x87rt_getsw", vec![]), 64),
+                }]
+            }
+            OpKind::Memory => {
+                if ins.segment_prefix() != Register::None {
+                    return None;
+                }
+                let (addr, _) = mem_addr(ins)?;
+                vec![Stmt::Store { addr, value: x87call("__x87rt_getsw", vec![]), ty: Ty::int(16) }]
+            }
+            _ => return None,
+        },
+        Fcmovb | Fcmovbe | Fcmove | Fcmovu | Fcmovnb | Fcmovnbe | Fcmovne | Fcmovnu => {
+            let ri = ins.op_register(1);
+            if !ri.is_st() {
+                return None;
+            }
+            let cc = match mn {
+                Fcmovb => ConditionCode::b,
+                Fcmovbe => ConditionCode::be,
+                Fcmove => ConditionCode::e,
+                Fcmovu => ConditionCode::p,
+                Fcmovnb => ConditionCode::ae,
+                Fcmovnbe => ConditionCode::a,
+                Fcmovne => ConditionCode::ne,
+                _ => ConditionCode::np,
+            };
+            vec![Stmt::CallStmt(x87call(
+                "__x87rt_cmov",
+                vec![cc_to_cond(cc), konst(ri.number() as i128)],
+            ))]
+        }
+        // transcendentals & constant loads (host long double = the x87 IEEE ops).
+        Fyl2x => vec![rt("__x87rt_yl2x", vec![])],
+        Fyl2xp1 => vec![rt("__x87rt_yl2xp1", vec![])],
+        F2xm1 => vec![rt("__x87rt_2xm1", vec![])],
+        Fscale => vec![rt("__x87rt_scale", vec![])],
+        Fsin => vec![rt("__x87rt_sin", vec![])],
+        Fcos => vec![rt("__x87rt_cos", vec![])],
+        Fsincos => vec![rt("__x87rt_sincos", vec![])],
+        Fptan => vec![rt("__x87rt_ptan", vec![])],
+        Fpatan => vec![rt("__x87rt_patan", vec![])],
+        Fprem | Fprem1 => vec![rt("__x87rt_prem", vec![])],
+        Fldpi => vec![rt("__x87rt_ldpi", vec![])],
+        Fldl2e => vec![rt("__x87rt_ldl2e", vec![])],
+        Fldl2t => vec![rt("__x87rt_ldl2t", vec![])],
+        Fldlg2 => vec![rt("__x87rt_ldlg2", vec![])],
+        Fldln2 => vec![rt("__x87rt_ldln2", vec![])],
+        Fnclex | Fclex | Fnop | Wait | Finit | Fninit => vec![Stmt::Nop],
+
         _ => return None,
     })
 }

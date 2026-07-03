@@ -1051,6 +1051,18 @@ uint32_t aret_noop(uint32_t esp) { (void)esp; return 0; }
 /* The x87 fp return channel (st(0) across calls). One shared definition; the
  * __x87_retstore/__x87_retload helpers (emit::FLOAT_HELPERS) read/write it. */
 long double __aret_x87_ret;
+/* Set by any fp-channel writer (static ret, host libm), cleared by any consumer.
+ * Lets a runtime-mode caller tell, after an INDIRECT call, whether the callee
+ * returned an fp value via the channel (→ push it) or not. */
+int __aret_x87_ret_valid;
+
+/* The runtime x87 stack model (fallback for depth-bailed functions). ONE shared
+ * definition — it is the physical FPU stack, so a value one runtime-mode function
+ * leaves in st(0) is visible to its runtime-mode caller across chunk boundaries. */
+long double __x87rt_s[16];
+int __x87rt_p;
+int __x87rt_rc;
+unsigned short __x87rt_sw;
 
 /* ------------------------------------------------------------------ */
 /* setjmp/longjmp support.                                            */
