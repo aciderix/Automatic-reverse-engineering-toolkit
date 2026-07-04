@@ -683,6 +683,7 @@ mod tests {
             reg_params: vec![],
             frame_base_values: vec![],
             fp80_values: vec![],
+            entry_values: vec![],
             blocks: vec![Block {
                 id: 0,
                 addr: 0,

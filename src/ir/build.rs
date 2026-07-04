@@ -593,6 +593,7 @@ pub fn build_ir(prog: &Program, func: &Function) -> IrFunction {
         reg_params: Vec::new(),
         frame_base_values: Vec::new(),
         fp80_values: Vec::new(),
+        entry_values: Vec::new(),
         blocks,
         next_value: 0,
         next_temp: 0,

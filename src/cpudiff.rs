@@ -108,6 +108,12 @@ struct Interp {
     /// pushes the real return address) and are excluded from the memory diff — they
     /// are ABI plumbing, not a lift-correctness signal.
     ret_slots: Vec<u64>,
+    /// SSA value store (post-opt IR mode): `ValueId.0 → value`. A `Use(v)` reads
+    /// it; an `Assign` writes it. Empty in pre-SSA mode (no `Use` nodes exist).
+    vids: HashMap<u32, u64>,
+    /// The block we arrived from (post-opt IR mode), to resolve φ arguments by
+    /// predecessor position.
+    prev_block: Option<u32>,
 }
 
 /// A mapped memory region for whole-function differencing, mirrored byte-for-byte
@@ -138,6 +144,8 @@ impl Interp {
             xmm: s.xmm,
             regions: Vec::new(),
             ret_slots: Vec::new(),
+            vids: HashMap::new(),
+            prev_block: None,
         }
     }
 
@@ -197,6 +205,12 @@ impl Interp {
     fn eval(&self, e: &Expr) -> Option<u64> {
         Some(match e {
             Expr::Const(v, _) => *v as u64,
+            // Post-SSA read of a versioned value. Unbound (an entry version we did
+            // not seed, or a value the SSA interpreter never assigned) → skip.
+            Expr::Use(v) => match self.vids.get(&v.0) {
+                Some(&x) => x,
+                None => return None,
+            },
             Expr::Read(loc) => match loc {
                 Location::Reg(r) if (r.0 as usize) < 8 => self.regs[r.0 as usize],
                 // XMM lanes: low half is RegId(16+n), high half RegId(64+n)
@@ -437,6 +451,83 @@ impl Interp {
         let rv = self.run_closure(callee, ctx, depth + 1, budget)?;
         self.regs[4] = s.wrapping_add(pop as u64); // net: -4 (push) +4+N (ret N)
         Some(rv)
+    }
+
+    // ---- post-opt SSA interpreter (optimizer differential) ---------------
+
+    /// Seed the SSA value store with the entry (undef) versions of registers and
+    /// flags from the initial CPU state, so a `Use` of an entry version reads the
+    /// same input the pre-SSA interpreter read from `regs`/`flags`. Entry versions
+    /// of anything else (xmm/fp80/temp) are left unseeded — a `Use` of them then
+    /// returns `None` (skip), never a wrong value.
+    fn seed_entry_values(&mut self, irf: &IrFunction) {
+        for (loc, vid) in &irf.entry_values {
+            let v = match loc {
+                Location::Reg(r) if (r.0 as usize) < 8 => self.regs[r.0 as usize],
+                Location::Flag(f) => self.flags.get(f).copied().unwrap_or(0),
+                _ => continue, // xmm/fp80/temp/frame: unseeded → Use → skip
+            };
+            self.vids.insert(*vid, v);
+        }
+    }
+
+    /// Interpret a whole post-opt SSA function, following control flow to a
+    /// `Return` and returning its value. φ-nodes are resolved by the predecessor
+    /// we arrived from (`prev_block`). `None` (→ skip, never a false verdict) on
+    /// any unmodelled construct, an unbound value, an out-of-region access, an
+    /// over-budget run, or a φ reached with no known predecessor (entry-block φ).
+    ///
+    /// This is a leaf interpreter (calls are rejected by the caller's `is_leaf`
+    /// gate); the closure across calls is a later increment.
+    fn run_ssa(&mut self, irf: &IrFunction, budget: &mut u32) -> Option<u64> {
+        let mut cur = irf
+            .blocks
+            .iter()
+            .find(|b| b.addr == irf.entry)
+            .or_else(|| irf.blocks.first())?
+            .id;
+        self.prev_block = None;
+        loop {
+            *budget = budget.checked_sub(1)?;
+            let blk = irf.blocks.iter().find(|b| b.id == cur)?;
+            let mut next: Option<u32> = None;
+            for s in &blk.stmts {
+                match s {
+                    // φ: pick the argument for the predecessor we came from. Its
+                    // value is defined in that predecessor → already in `vids`.
+                    Stmt::Assign { dst, expr: Expr::Phi(args) } => {
+                        let prev = self.prev_block?;
+                        let idx = blk.pred.iter().position(|&p| p == prev)?;
+                        let arg = args.get(idx)?;
+                        let v = self.vids.get(&arg.0).copied()?;
+                        self.vids.insert(dst.0, v);
+                    }
+                    Stmt::Assign { dst, expr } => {
+                        let v = self.eval(expr)?;
+                        self.vids.insert(dst.0, v);
+                    }
+                    Stmt::Store { addr, value, ty } => {
+                        let a = self.eval(addr)?;
+                        let v = self.eval(value)?;
+                        self.mem_write(a, ty_bytes(ty)?, v)?;
+                    }
+                    Stmt::Branch { cond, taken, fallthrough } => {
+                        let c = self.eval(cond)?;
+                        next = Some(if c != 0 { taken.0 } else { fallthrough.0 });
+                    }
+                    Stmt::Jump(t) => next = Some(t.0),
+                    Stmt::Return(Some(e)) => return self.eval(e),
+                    Stmt::Return(None) => return None,
+                    Stmt::Nop => {}
+                    // A call/switch/asm: rejected by `is_leaf`; guard anyway.
+                    Stmt::Switch { .. } | Stmt::CallStmt(_) | Stmt::Asm(_) => return None,
+                    // Pre-SSA `Set` should not appear post-SSA; skip if it does.
+                    Stmt::Set { .. } => return None,
+                }
+            }
+            self.prev_block = Some(cur);
+            cur = next?;
+        }
     }
 }
 
@@ -1358,6 +1449,9 @@ pub static FUNCDIFF_SCORED: std::sync::atomic::AtomicUsize = std::sync::atomic::
 /// recovered callee — the signal that the *closure* path (not just leaf scoring)
 /// was exercised. A guard asserts this is non-zero across the fixture corpus.
 pub static FUNCDIFF_CALLS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+/// Count of iterations scored by the *optimizer* differential (pre-opt vs post-opt
+/// SSA both cleanly returned) — non-vacuity signal for that path.
+pub static FUNCDIFF_OPT_SCORED: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 
 const FN_STACK_BASE: u64 = 0x1000_0000;
 const FN_STACK_SIZE: usize = 0x1_0000;
@@ -1557,6 +1651,166 @@ fn compute_ret_pops(functions: &[crate::analysis::Function]) -> HashMap<u64, i64
         }
     }
     m
+}
+
+/// Does `e` contain a call anywhere (used to keep call-bearing functions out of
+/// the leaf-only optimizer differential)?
+fn expr_contains_call(e: &Expr) -> bool {
+    match e {
+        Expr::Call { .. } => true,
+        Expr::Unary(_, a) | Expr::Cast { expr: a, .. } => expr_contains_call(a),
+        Expr::Binary(_, a, b) => expr_contains_call(a) || expr_contains_call(b),
+        Expr::Load { addr, .. } => expr_contains_call(addr),
+        Expr::Select { cond, then_, else_ } => {
+            expr_contains_call(cond) || expr_contains_call(then_) || expr_contains_call(else_)
+        }
+        _ => false,
+    }
+}
+
+/// A function the SSA interpreter can attempt end-to-end: no call/switch/asm.
+/// (The optimizer differential is leaf-only for now — the SSA closure across
+/// calls, with its esp-through-values threading, is a later increment.)
+fn is_leaf(irf: &IrFunction) -> bool {
+    irf.blocks.iter().all(|b| {
+        b.stmts.iter().all(|s| match s {
+            Stmt::Switch { .. } | Stmt::Asm(_) | Stmt::CallStmt(_) => false,
+            Stmt::Set { expr, .. } | Stmt::Assign { expr, .. } => !expr_contains_call(expr),
+            Stmt::Store { addr, value, .. } => {
+                !expr_contains_call(addr) && !expr_contains_call(value)
+            }
+            Stmt::Branch { cond, .. } => !expr_contains_call(cond),
+            Stmt::Return(Some(e)) => !expr_contains_call(e),
+            _ => true,
+        })
+    })
+}
+
+/// Optimizer differential for one leaf function: run its **pre-opt** IR (the
+/// oracle — already validated bit-for-bit against Unicorn by `diff_function`) and
+/// its **post-opt SSA** IR (`to_ssa` + `optimize`) from an identical state, and
+/// compare the return value + all mapped memory. A divergence is a real bug in
+/// SSA construction or an optimizer pass.
+///
+/// Sound by construction: `optimize` never removes a `Store` (no alias analysis →
+/// all stores kept) and never mutates the CFG (it only folds expressions inside
+/// statements), so a correct optimizer yields byte-identical memory and an equal
+/// return value. Either interpreter returning `None` (unmodelled / out-of-region /
+/// over-budget) skips the state — never a false verdict.
+pub fn diff_function_opt(
+    prog: &crate::loader::Program,
+    pre_opt: &IrFunction,
+    iters: u32,
+    seed: &mut u64,
+) -> Vec<FnMismatch> {
+    let mut out = Vec::new();
+    if pre_opt.blocks.is_empty() || !is_leaf(pre_opt) {
+        return out;
+    }
+    // Post-opt form: SSA-construct and optimize a clone.
+    let mut post = pre_opt.clone();
+    crate::ssa::to_ssa(&mut post);
+    crate::opt::optimize(&mut post);
+
+    // One mirrored region over the whole PE image (same bounds as diff_function).
+    let lo = match prog.sections.iter().map(|s| s.address).min() {
+        Some(x) => x & !0xfff,
+        None => return out,
+    };
+    let hi = match prog.sections.iter().map(|s| s.address + s.data.len() as u64).max() {
+        Some(x) => (x + 0xfff) & !0xfff,
+        None => return out,
+    };
+    if hi <= lo || (hi - lo) > 0x400_0000 {
+        return out;
+    }
+    let mut img0 = vec![0u8; (hi - lo) as usize];
+    for s in &prog.sections {
+        let off = (s.address - lo) as usize;
+        img0[off..off + s.data.len()].copy_from_slice(&s.data);
+    }
+
+    let empty_funcs: HashMap<u64, &IrFunction> = HashMap::new();
+    let empty_pops: HashMap<u64, i64> = HashMap::new();
+    let ctx = ClosureCtx { funcs: &empty_funcs, ret_pops: &empty_pops };
+
+    for _ in 0..iters {
+        let mut next = || {
+            let mut x = *seed;
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            *seed = x;
+            x
+        };
+        let mut regs = [0u64; 8];
+        for r in 0..8 {
+            regs[r] = (next() as u32) as u64;
+        }
+        regs[4] = FN_STACK_BASE + (FN_STACK_SIZE as u64) / 2; // esp
+        let mut stack = vec![0u8; FN_STACK_SIZE];
+        for b in stack.iter_mut() {
+            *b = next() as u8;
+        }
+        let mut flags = HashMap::new();
+        for f in [FlagKind::Cf, FlagKind::Zf, FlagKind::Sf, FlagKind::Of, FlagKind::Pf, FlagKind::Af] {
+            flags.insert(f, next() & 1);
+        }
+        let state = CpuState { regs, flags: flags.clone(), xmm: [[0; 2]; 8] };
+        let regions = || {
+            vec![
+                Region { base: lo, data: img0.clone(), writable: true },
+                Region { base: FN_STACK_BASE, data: stack.clone(), writable: true },
+            ]
+        };
+
+        // ---- pre-opt IR (the oracle) ----
+        let mut a = Interp::new(&state, Vec::new());
+        a.regions = regions();
+        let mut budget_a = 500_000u32;
+        let a_ret = match a.run_closure(pre_opt, &ctx, 0, &mut budget_a) {
+            Some(v) => v,
+            None => continue,
+        };
+
+        // ---- post-opt SSA IR (under test) ----
+        let mut b = Interp::new(&state, Vec::new());
+        b.regions = regions();
+        b.seed_entry_values(&post);
+        let mut budget_b = 500_000u32;
+        let b_ret = match b.run_ssa(&post, &mut budget_b) {
+            Some(v) => v,
+            None => continue,
+        };
+
+        FUNCDIFF_OPT_SCORED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        if a_ret != b_ret {
+            out.push(FnMismatch {
+                func: pre_opt.entry,
+                what: "ret".to_string(),
+                lifted: b_ret,
+                unicorn: a_ret,
+            });
+        }
+        for (ri, base, label) in [(0usize, lo, "mem"), (1usize, FN_STACK_BASE, "stack")] {
+            let (da, db) = (&a.regions[ri].data, &b.regions[ri].data);
+            for i in 0..da.len() {
+                if da[i] != db[i] {
+                    out.push(FnMismatch {
+                        func: pre_opt.entry,
+                        what: format!("{label} {:#x}", base + i as u64),
+                        lifted: db[i] as u64,
+                        unicorn: da[i] as u64,
+                    });
+                    break;
+                }
+            }
+        }
+        if !out.is_empty() {
+            break; // one witness per function is enough
+        }
+    }
+    out
 }
 
 /// Run `iters` random states through one whole recovered function, comparing the
@@ -1767,9 +2021,87 @@ pub fn run_functions(path: &str, iters: u32) -> Result<Vec<FnMismatch>, String> 
     Ok(out)
 }
 
+/// Load a 32-bit PE, recover its functions, and run the **optimizer** differential
+/// (pre-opt vs post-opt SSA) over each leaf function. Returns all divergences —
+/// each a real bug in SSA construction or an optimizer pass.
+pub fn run_functions_opt(path: &str, iters: u32) -> Result<Vec<FnMismatch>, String> {
+    let data = std::fs::read(path).map_err(|e| e.to_string())?;
+    let prog = crate::loader::Program::load(&data).map_err(|e| e.to_string())?;
+    if prog.bitness.bits() != 32 {
+        return Ok(Vec::new());
+    }
+    let disasm = crate::disasm::Disassembler::new(prog.bitness);
+    let result = crate::analysis::analyze(&prog, &disasm, true);
+    let refs: Vec<&crate::analysis::Function> = result.functions.iter().collect();
+    crate::ir::build::set_noreturn(crate::ir::build::compute_noreturn(&refs));
+    crate::ir::build::set_fp_returning(crate::ir::build::compute_fp_returning(&prog, &refs));
+    crate::ir::build::set_call_clobbers(crate::ir::build::compute_call_clobbers(&refs));
+    let mut seed: u64 = 0x1234_5678_9abc_def1;
+    let mut out = Vec::new();
+    for f in &result.functions {
+        crate::ir::lift::set_frames_off(true); // build_ir resets it per call
+        let pre_opt = crate::ir::build::build_ir(&prog, f);
+        out.extend(diff_function_opt(&prog, &pre_opt, iters, &mut seed));
+    }
+    Ok(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    #[ignore] // diagnostic: `cargo test --features unpack opt_diff_busybox -- --ignored --nocapture`
+    fn opt_diff_busybox() {
+        let path = "bench/.cache/busybox-w32-FRP-5579-g5749feb35.exe";
+        if !std::path::Path::new(path).exists() {
+            eprintln!("SKIP (no busybox)");
+            return;
+        }
+        FUNCDIFF_OPT_SCORED.store(0, std::sync::atomic::Ordering::Relaxed);
+        let ms = run_functions_opt(path, 100).expect("opt diff");
+        let scored = FUNCDIFF_OPT_SCORED.load(std::sync::atomic::Ordering::Relaxed);
+        eprintln!("opt-diff busybox: {scored} scored iters, {} divergence(s)", ms.len());
+        let mut seen = std::collections::BTreeSet::new();
+        for m in ms.iter().filter(|m| seen.insert(m.func)).take(20) {
+            eprintln!("  fn {:#x} {}: post-opt={:#x} pre-opt={:#x}", m.func, m.what, m.lifted, m.unicorn);
+        }
+    }
+
+    /// The optimizer differential (pre-opt vs post-opt SSA) must find no divergence
+    /// on committed, known-good PEs -- SSA construction + every optimizer pass must
+    /// preserve semantics -- and must actually score functions (non-vacuous). A
+    /// divergence here is a real SSA/opt bug; a harness false-positive must be fixed.
+    #[test]
+    fn optimizer_preserves_semantics_on_fixtures() {
+        let dir = std::path::Path::new("tests/m1/fixtures");
+        if !dir.exists() {
+            return;
+        }
+        FUNCDIFF_OPT_SCORED.store(0, std::sync::atomic::Ordering::Relaxed);
+        let mut entries: Vec<_> = std::fs::read_dir(dir)
+            .unwrap()
+            .filter_map(|e| e.ok().map(|e| e.path()))
+            .filter(|p| p.extension().map(|x| x == "exe").unwrap_or(false))
+            .collect();
+        entries.sort();
+        let mut all = Vec::new();
+        for p in &entries {
+            all.extend(run_functions_opt(p.to_str().unwrap(), 100).expect("opt-diff harness"));
+        }
+        if !all.is_empty() {
+            let mut msg = format!("{} optimizer divergence(s):\n", all.len());
+            for m in all.iter().take(12) {
+                msg.push_str(&format!(
+                    "  fn {:#x} {}: post-opt={:#x} pre-opt={:#x}\n",
+                    m.func, m.what, m.lifted, m.unicorn
+                ));
+            }
+            panic!("{msg}");
+        }
+        let scored = FUNCDIFF_OPT_SCORED.load(std::sync::atomic::Ordering::Relaxed);
+        assert!(scored > 0, "optimizer differential scored 0 functions -- vacuous");
+    }
 
     #[test]
     fn lifter_matches_unicorn_over_random_states() {

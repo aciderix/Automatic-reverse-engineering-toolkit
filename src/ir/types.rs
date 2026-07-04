@@ -228,6 +228,11 @@ pub struct IrFunction {
     /// SSA values that live in an x87 FPU stack slot — emitted as `long double`
     /// (80-bit extended precision) rather than `uint64_t`. Populated by SSA.
     pub fp80_values: Vec<u32>,
+    /// Entry (undef) SSA versions: the value a register/flag/temp holds on
+    /// function entry, before any definition. `(Location, ValueId)` pairs. The
+    /// differential SSA interpreter (`cpudiff`) seeds these from the initial CPU
+    /// state; product lowering ignores them. Populated by SSA construction.
+    pub entry_values: Vec<(Location, u32)>,
     pub blocks: Vec<Block>,
     /// Next fresh SSA value id.
     pub next_value: u32,

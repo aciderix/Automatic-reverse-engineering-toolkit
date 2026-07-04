@@ -2984,3 +2984,35 @@ binaires MSVC, pas seulement strings.exe.
   faute de **SSA** n'y apparaît pas (l'interp ne modélise pas `Use(ValueId)`/`Phi`). **Prochaine frontière
   funcdiff** : différencier l'IR **post-opt** (interpréteur SSA) pour couvrir la couche où vivent
   probablement grep/cksum — incrément distinct et substantiel (à faire proprement, pas en fin de session).
+
+### Frontière SSA/opt — funcdiff différentie l'IR POST-OPT (le compilateur, pas juste le lifter) ✅
+- **2026-07-04 — la « prochaine frontière » identifiée par le run busybox est attaquée.** funcdiff-closure
+  différenciait le lift **pré-SSA** (`build_ir`) vs Unicorn ; les bugs profonds grep/cksum étaient donc soit
+  dans des fonctions skippées, soit **en aval** (construction SSA + passes d'opt). Ce couche est maintenant
+  couverte : un **interpréteur SSA** exécute l'IR **post-opt** (`to_ssa`+`optimize`) et la compare à l'IR
+  **pré-opt** — l'oracle déjà validé bit-à-bit contre Unicorn par funcdiff-closure. Une divergence = un vrai
+  bug de **construction SSA ou d'une passe d'optimisation**.
+- **Sain par construction (prouvé, pas supposé)** : deux invariants du compilateur rendent la comparaison
+  mémoire saine — (1) la **DCE ne supprime jamais un `Store`** (pas d'analyse d'alias → tous les stores
+  conservés ; seuls les `Assign` purs morts tombent) ; (2) `optimize` **ne touche pas le CFG** (il ne fait
+  que replier les *expressions* dans les statements — jamais `Branch`→`Jump`, jamais de bloc/arête retirés,
+  `succ`/`pred` intacts). Donc un opt correct ⇒ **mémoire byte-identique + valeur de retour égale** ; l'ordre
+  et l'ensemble des stores sont préservés, seul le *calcul* des valeurs change. Comparaison : valeur de
+  retour (l'expr `Return`, observable) + **toute** la mémoire mappée (image + pile). Pas besoin d'Unicorn
+  (le pré-opt est l'oracle). Leaf-only pour l'instant (la closure SSA — threading d'esp à travers les
+  *valeurs* — est un incrément suivant).
+- **Détails** : `IrFunction.entry_values` (Location→ValueId undef) exposé par `to_ssa` pour amorcer les
+  versions d'entrée (registres/flags) depuis l'état aléatoire ; l'interp SSA gère `Assign`/`Use`/`Phi`
+  (φ résolu par le prédécesseur d'arrivée `prev_block`), mémoire partagée avec l'interp pré-opt. Additif au
+  produit (le champ est ignoré à l'émission).
+- **Vérifié — sain ET sensible** : `optimizer_preserves_semantics_on_fixtures` = **0 divergence** sur tout
+  le corpus fixtures (fonctions à boucles/φ/mémoire : recursion, truncloop, two_switch, wide_carry…
+  scorées) + **busybox 600 itérations scorées, 0 divergence**. **Test de dents** : perturber la valeur de
+  retour post-opt de `^1` fait immédiatement apparaître des divergences « ret » (post-opt ≠ pré-opt) — la
+  garde n'est pas vacante. Non-vacuité assertée (`scored>0`). Test-only (`cfg unpack`).
+- **Régression** : IrFunction gagne un champ (produit) mais **transpile-diff 4/4 (hash `19acad982194bf07`
+  inchangé)** ⇒ émission byte-identique ; difftest 271/271 ; cargo test complet vert (dont les 3 gardes
+  funcdiff : per-instruction, closure, opt).
+- **Prochain** : (a) **closure SSA** (suivre les appels dans l'interp post-opt) pour couvrir les fonctions
+  à appels post-opt ; (b) lâcher sur un corpus plus large (winetest/sqlite/grep) — l'outil pointera
+  désormais un bug **d'opt/SSA** aussi précisément qu'un bug de lift.

@@ -279,6 +279,11 @@ pub fn to_ssa(func: &mut IrFunction) {
     fp80.sort_unstable();
     fp80.dedup();
     func.fp80_values = fp80;
+
+    // Entry (undef) versions: the incoming value of each register/flag/temp read
+    // before it is written. The differential SSA interpreter seeds these from the
+    // initial CPU state so a `Use` of an entry version reads the right input.
+    func.entry_values = undef.iter().map(|(l, v)| (l.clone(), v.0)).collect();
 }
 
 /// Rewrite all `Read(loc)` in an expression to `Use(version)`.
@@ -424,6 +429,7 @@ mod tests {
             reg_params: vec![],
             frame_base_values: vec![],
             fp80_values: vec![],
+            entry_values: vec![],
             blocks: vec![
                 blk(
                     0,
@@ -493,6 +499,7 @@ mod tests {
             reg_params: vec![],
             frame_base_values: vec![],
             fp80_values: vec![],
+            entry_values: vec![],
             blocks: vec![blk(
                 0,
                 vec![
