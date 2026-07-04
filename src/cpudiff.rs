@@ -206,6 +206,59 @@ impl Interp {
         Some(())
     }
 
+    /// Execute a modelled memory-effecting library call — the synthetic `memcpy`
+    /// the lifter emits for `rep movs` and the `__rep_stos*` it emits for
+    /// `rep stos` (each with explicit `dst`/`src`/`len` arguments). Unicorn runs
+    /// the equivalent string instruction, so a byte-exact model matches it; the
+    /// optimizer differential compares the same memory on both sides. `None`
+    /// (→ skip) on an out-of-region access or an implausibly large length (Unicorn
+    /// faults on the unmapped write / caps there, so skipping keeps both engines
+    /// consistent — never a false verdict).
+    fn do_memcall(&mut self, name: &str, args: &[Expr]) -> Option<()> {
+        FUNCDIFF_MEMCALLS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        const CAP: u64 = 0x10_0000; // 1 MiB — larger copies/fills skip
+        match name {
+            "memcpy" | "memmove" if args.len() == 3 => {
+                let dst = self.eval(&args[0])?;
+                let src = self.eval(&args[1])?;
+                let n = self.eval(&args[2])? & 0xffff_ffff;
+                if n > CAP {
+                    return None;
+                }
+                // Forward byte copy — exactly `rep movsb` (DF=0), including its
+                // propagating behaviour on a forward overlap.
+                for i in 0..n {
+                    let b = self.mem_read(src.wrapping_add(i), 1)?;
+                    self.mem_write(dst.wrapping_add(i), 1, b)?;
+                }
+                Some(())
+            }
+            "__rep_stos8" | "__rep_stos16" | "__rep_stos32" | "__rep_stos64"
+                if args.len() == 3 =>
+            {
+                let dst = self.eval(&args[0])?;
+                let val = self.eval(&args[1])?;
+                let count = self.eval(&args[2])? & 0xffff_ffff;
+                let elem: u64 = match name {
+                    "__rep_stos8" => 1,
+                    "__rep_stos16" => 2,
+                    "__rep_stos32" => 4,
+                    _ => 8,
+                };
+                let total = count.checked_mul(elem)?;
+                if total > CAP {
+                    return None;
+                }
+                for i in 0..total {
+                    let byte = (val >> (8 * (i % elem))) & 0xff;
+                    self.mem_write(dst.wrapping_add(i), 1, byte)?;
+                }
+                Some(())
+            }
+            _ => None,
+        }
+    }
+
     /// Evaluate an expression to a 64-bit value, or `None` if it uses something
     /// the integer interpreter does not model (width-bearing sign/zero-extension
     /// or truncate, a call, an SSA node, an out-of-page load, …).
@@ -422,8 +475,18 @@ impl Interp {
         depth: u32,
         budget: &mut u32,
     ) -> Option<u64> {
-        if let Expr::Call { target: CallTarget::Direct(t), .. } = e {
-            return self.call_direct(*t, ctx, depth, budget);
+        if let Expr::Call { target, args, .. } = e {
+            match target {
+                CallTarget::Direct(t) => return self.call_direct(*t, ctx, depth, budget),
+                // A modelled memory library call (`memcpy`/`__rep_stos*` from
+                // `rep movs`/`rep stos`): run its memory effect; its result (a
+                // returned pointer, ignored at the `rep` site) is 0.
+                CallTarget::Named(n) if is_modeled_memcall(n, args.len()) => {
+                    self.do_memcall(n, args)?;
+                    return Some(0);
+                }
+                _ => {}
+            }
         }
         self.eval(e)
     }
@@ -509,6 +572,14 @@ impl Interp {
                         let v = self.vids.get(&arg.0).copied()?;
                         self.vids.insert(dst.0, v);
                     }
+                    // A modelled memory library call whose result is bound
+                    // (`p = memcpy(...)`): run the memory op, bind 0.
+                    Stmt::Assign { dst, expr: Expr::Call { target: CallTarget::Named(n), args, .. } }
+                        if is_modeled_memcall(n, args.len()) =>
+                    {
+                        self.do_memcall(n, args)?;
+                        self.vids.insert(dst.0, 0);
+                    }
                     Stmt::Assign { dst, expr } => {
                         let v = self.eval(expr)?;
                         self.vids.insert(dst.0, v);
@@ -526,7 +597,14 @@ impl Interp {
                     Stmt::Return(Some(e)) => return self.eval(e),
                     Stmt::Return(None) => return None,
                     Stmt::Nop => {}
-                    // A call/switch/asm: rejected by `is_leaf`; guard anyway.
+                    // A modelled memory library call in statement position (the
+                    // `rep movs`/`rep stos` synthetic): run its memory effect.
+                    Stmt::CallStmt(Expr::Call { target: CallTarget::Named(n), args, .. })
+                        if is_modeled_memcall(n, args.len()) =>
+                    {
+                        self.do_memcall(n, args)?;
+                    }
+                    // Any other call/switch/asm: rejected by `is_leaf`; guard anyway.
                     Stmt::Switch { .. } | Stmt::CallStmt(_) | Stmt::Asm(_) => return None,
                     // Pre-SSA `Set` should not appear post-SSA; skip if it does.
                     Stmt::Set { .. } => return None,
@@ -1459,6 +1537,9 @@ pub static FUNCDIFF_CALLS: std::sync::atomic::AtomicUsize = std::sync::atomic::A
 /// Count of iterations scored by the *optimizer* differential (pre-opt vs post-opt
 /// SSA both cleanly returned) — non-vacuity signal for that path.
 pub static FUNCDIFF_OPT_SCORED: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+/// Count of modelled memory library calls (`memcpy`/`__rep_stos*`) actually
+/// executed — non-vacuity signal that `do_memcall` is exercised.
+pub static FUNCDIFF_MEMCALLS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 
 const FN_STACK_BASE: u64 = 0x1000_0000;
 const FN_STACK_SIZE: usize = 0x1_0000;
@@ -1495,6 +1576,17 @@ fn is_modeled_helper(name: &str) -> bool {
         || name.starts_with("__fp_")
 }
 
+/// A memory-effecting library call modelled by executing the memory op itself
+/// (`do_memcall`): the synthetic `memcpy`/`memmove` (from `rep movs`) and
+/// `__rep_stos*` (from `rep stos`), each with explicit `(dst, src/val, len)`.
+fn is_modeled_memcall(name: &str, argc: usize) -> bool {
+    argc == 3
+        && matches!(
+            name,
+            "memcpy" | "memmove" | "__rep_stos8" | "__rep_stos16" | "__rep_stos32" | "__rep_stos64"
+        )
+}
+
 /// Check every call inside `e` is closure-modelable, collecting the recovered
 /// direct-call targets. `None` if any call is indirect, an unmodelled named
 /// import, or a direct call to a function we cannot recover / whose `ret N` we
@@ -1515,7 +1607,7 @@ fn check_expr_calls(
                     targets.push(*t);
                 }
                 CallTarget::Named(n) => {
-                    if !is_modeled_helper(n) {
+                    if !is_modeled_helper(n) && !is_modeled_memcall(n, args.len()) {
                         return None;
                     }
                 }
@@ -1660,34 +1752,44 @@ fn compute_ret_pops(functions: &[crate::analysis::Function]) -> HashMap<u64, i64
     m
 }
 
-/// Does `e` contain a call anywhere (used to keep call-bearing functions out of
-/// the leaf-only optimizer differential)?
-fn expr_contains_call(e: &Expr) -> bool {
+/// Does `e` contain a call the SSA interpreter cannot model? A modelled pure
+/// helper (`__fp_*`/`__ix_*`/…) or a modelled memory call (`memcpy`/`__rep_stos*`)
+/// is fine (`eval`/`do_memcall` handle it); a direct/indirect call, or any other
+/// named import, is not (leaf-only — the SSA closure is a later increment).
+fn expr_has_unmodeled_call(e: &Expr) -> bool {
     match e {
-        Expr::Call { .. } => true,
-        Expr::Unary(_, a) | Expr::Cast { expr: a, .. } => expr_contains_call(a),
-        Expr::Binary(_, a, b) => expr_contains_call(a) || expr_contains_call(b),
-        Expr::Load { addr, .. } => expr_contains_call(addr),
+        Expr::Call { target, args, .. } => {
+            let modeled = matches!(target,
+                CallTarget::Named(n) if is_modeled_helper(n) || is_modeled_memcall(n, args.len()));
+            !modeled || args.iter().any(expr_has_unmodeled_call)
+        }
+        Expr::Unary(_, a) | Expr::Cast { expr: a, .. } => expr_has_unmodeled_call(a),
+        Expr::Binary(_, a, b) => expr_has_unmodeled_call(a) || expr_has_unmodeled_call(b),
+        Expr::Load { addr, .. } => expr_has_unmodeled_call(addr),
         Expr::Select { cond, then_, else_ } => {
-            expr_contains_call(cond) || expr_contains_call(then_) || expr_contains_call(else_)
+            expr_has_unmodeled_call(cond)
+                || expr_has_unmodeled_call(then_)
+                || expr_has_unmodeled_call(else_)
         }
         _ => false,
     }
 }
 
-/// A function the SSA interpreter can attempt end-to-end: no call/switch/asm.
-/// (The optimizer differential is leaf-only for now — the SSA closure across
-/// calls, with its esp-through-values threading, is a later increment.)
+/// A function the SSA interpreter can attempt end-to-end: no unmodelled call, no
+/// switch/asm. A modelled memory call (`memcpy`/`__rep_stos*` from `rep movs`/
+/// `rep stos`) or a modelled pure helper is allowed. (Direct calls into callees —
+/// the SSA closure, with its esp-through-values threading — are a later increment.)
 fn is_leaf(irf: &IrFunction) -> bool {
     irf.blocks.iter().all(|b| {
         b.stmts.iter().all(|s| match s {
-            Stmt::Switch { .. } | Stmt::Asm(_) | Stmt::CallStmt(_) => false,
-            Stmt::Set { expr, .. } | Stmt::Assign { expr, .. } => !expr_contains_call(expr),
+            Stmt::Switch { .. } | Stmt::Asm(_) => false,
+            Stmt::CallStmt(e) => !expr_has_unmodeled_call(e),
+            Stmt::Set { expr, .. } | Stmt::Assign { expr, .. } => !expr_has_unmodeled_call(expr),
             Stmt::Store { addr, value, .. } => {
-                !expr_contains_call(addr) && !expr_contains_call(value)
+                !expr_has_unmodeled_call(addr) && !expr_has_unmodeled_call(value)
             }
-            Stmt::Branch { cond, .. } => !expr_contains_call(cond),
-            Stmt::Return(Some(e)) => !expr_contains_call(e),
+            Stmt::Branch { cond, .. } => !expr_has_unmodeled_call(cond),
+            Stmt::Return(Some(e)) => !expr_has_unmodeled_call(e),
             _ => true,
         })
     })
@@ -2056,6 +2158,28 @@ pub fn run_functions_opt(path: &str, iters: u32) -> Result<Vec<FnMismatch>, Stri
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The modelled memory calls (`memcpy`/`__rep_stos*`, from `rep movs`/`rep
+    /// stos`) must match Unicorn byte-for-byte. `rep_movsb_copy.exe` copies a
+    /// fixed 16 bytes between two stack buffers, so the differential *scores* the
+    /// copy (in-region pointers, constant length) — proving `do_memcall` both runs
+    /// (non-vacuous) and agrees with the real `rep movsb`. A wrong model would be a
+    /// false positive against Unicorn, so this guards the model's soundness.
+    #[test]
+    fn memcall_model_matches_unicorn() {
+        let path = "tests/m1/fixtures/rep_movsb_copy.exe";
+        if !std::path::Path::new(path).exists() {
+            return;
+        }
+        FUNCDIFF_MEMCALLS.store(0, std::sync::atomic::Ordering::Relaxed);
+        let ms = run_functions(path, 300).expect("funcdiff");
+        if let Some(m) = ms.first() {
+            panic!("memcall model diverged from Unicorn: fn {:#x} {} lifted={:#x} unicorn={:#x}",
+                   m.func, m.what, m.lifted, m.unicorn);
+        }
+        let mc = FUNCDIFF_MEMCALLS.load(std::sync::atomic::Ordering::Relaxed);
+        assert!(mc > 0, "do_memcall never ran — the rep-movs fixture did not exercise the model");
+    }
 
     /// The optimizer differential (pre-opt vs post-opt SSA) must find no divergence
     /// on committed, known-good PEs — SSA construction + every optimizer pass must
