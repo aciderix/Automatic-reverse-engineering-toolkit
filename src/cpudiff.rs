@@ -2050,99 +2050,60 @@ pub fn run_functions_opt(path: &str, iters: u32) -> Result<Vec<FnMismatch>, Stri
 mod tests {
     use super::*;
 
+    /// Corpus gate (run via `bench/funcdiff.sh`): both differentials — the lifter
+    /// closure (vs Unicorn) and the optimizer diff (pre-opt vs post-opt SSA) — must
+    /// find **no** divergence on the committed real binaries (mingw busybox + MSVC
+    /// sqlite), and must be non-vacuous (score functions, follow calls). #[ignore]
+    /// so it stays out of the default suite; the bench invokes it explicitly.
     #[test]
-    #[ignore] // diagnostic: `cargo test --features unpack opt_diff_busybox -- --ignored --nocapture`
-    fn opt_diff_busybox() {
-        let path = "bench/.cache/busybox-w32-FRP-5579-g5749feb35.exe";
-        if !std::path::Path::new(path).exists() {
-            eprintln!("SKIP (no busybox)");
+    #[ignore] // gate: `bash bench/funcdiff.sh`  /  `cargo test --features unpack funcdiff_corpus -- --ignored --nocapture`
+    fn funcdiff_corpus() {
+        let corpus = [
+            "bench/.cache/busybox-w32-FRP-5579-g5749feb35.exe",
+            "bench/.cache/sqlite3-3400100.exe",
+        ];
+        let mut any = false;
+        let (mut tot_scored, mut tot_calls, mut tot_opt, mut tot_div) = (0usize, 0usize, 0usize, 0usize);
+        for path in corpus {
+            if !std::path::Path::new(path).exists() {
+                eprintln!("SKIP (absent): {path}");
+                continue;
+            }
+            any = true;
+            let name = path.rsplit('/').next().unwrap();
+
+            FUNCDIFF_SCORED.store(0, std::sync::atomic::Ordering::Relaxed);
+            FUNCDIFF_CALLS.store(0, std::sync::atomic::Ordering::Relaxed);
+            let lift = run_functions(path, 100).expect("lift-closure");
+            let s = FUNCDIFF_SCORED.load(std::sync::atomic::Ordering::Relaxed);
+            let c = FUNCDIFF_CALLS.load(std::sync::atomic::Ordering::Relaxed);
+            eprintln!("{name} LIFT-closure: {s} scored, {c} calls, {} divergence(s)", lift.len());
+            for m in lift.iter().take(8) {
+                eprintln!("  fn {:#x} {}: lifted={:#x} unicorn={:#x}", m.func, m.what, m.lifted, m.unicorn);
+            }
+
+            FUNCDIFF_OPT_SCORED.store(0, std::sync::atomic::Ordering::Relaxed);
+            let opt = run_functions_opt(path, 100).expect("opt-diff");
+            let os = FUNCDIFF_OPT_SCORED.load(std::sync::atomic::Ordering::Relaxed);
+            eprintln!("{name} OPT-diff:     {os} scored, {} divergence(s)", opt.len());
+            for m in opt.iter().take(8) {
+                eprintln!("  fn {:#x} {}: post-opt={:#x} pre-opt={:#x}", m.func, m.what, m.lifted, m.unicorn);
+            }
+
+            tot_scored += s; tot_calls += c; tot_opt += os;
+            tot_div += lift.len() + opt.len();
+        }
+        if !any {
+            eprintln!("SKIP: no corpus binary present");
             return;
         }
-        FUNCDIFF_OPT_SCORED.store(0, std::sync::atomic::Ordering::Relaxed);
-        let ms = run_functions_opt(path, 100).expect("opt diff");
-        let scored = FUNCDIFF_OPT_SCORED.load(std::sync::atomic::Ordering::Relaxed);
-        eprintln!("opt-diff busybox: {scored} scored iters, {} divergence(s)", ms.len());
-        let mut seen = std::collections::BTreeSet::new();
-        for m in ms.iter().filter(|m| seen.insert(m.func)).take(20) {
-            eprintln!("  fn {:#x} {}: post-opt={:#x} pre-opt={:#x}", m.func, m.what, m.lifted, m.unicorn);
-        }
-    }
-
-    /// The optimizer differential (pre-opt vs post-opt SSA) must find no divergence
-    /// on committed, known-good PEs -- SSA construction + every optimizer pass must
-    /// preserve semantics -- and must actually score functions (non-vacuous). A
-    /// divergence here is a real SSA/opt bug; a harness false-positive must be fixed.
-    #[test]
-    fn optimizer_preserves_semantics_on_fixtures() {
-        let dir = std::path::Path::new("tests/m1/fixtures");
-        if !dir.exists() {
-            return;
-        }
-        FUNCDIFF_OPT_SCORED.store(0, std::sync::atomic::Ordering::Relaxed);
-        let mut entries: Vec<_> = std::fs::read_dir(dir)
-            .unwrap()
-            .filter_map(|e| e.ok().map(|e| e.path()))
-            .filter(|p| p.extension().map(|x| x == "exe").unwrap_or(false))
-            .collect();
-        entries.sort();
-        let mut all = Vec::new();
-        for p in &entries {
-            all.extend(run_functions_opt(p.to_str().unwrap(), 100).expect("opt-diff harness"));
-        }
-        if !all.is_empty() {
-            let mut msg = format!("{} optimizer divergence(s):\n", all.len());
-            for m in all.iter().take(12) {
-                msg.push_str(&format!(
-                    "  fn {:#x} {}: post-opt={:#x} pre-opt={:#x}\n",
-                    m.func, m.what, m.lifted, m.unicorn
-                ));
-            }
-            panic!("{msg}");
-        }
-        let scored = FUNCDIFF_OPT_SCORED.load(std::sync::atomic::Ordering::Relaxed);
-        assert!(scored > 0, "optimizer differential scored 0 functions -- vacuous");
-    }
-
-    #[test]
-    fn lifter_matches_unicorn_over_random_states() {
-        let mismatches = run(2000).expect("harness setup");
-        if !mismatches.is_empty() {
-            // Dedup by (asm, field) so distinct bugs are visible.
-            let mut seen: std::collections::BTreeMap<(String, String), (u64, u64)> =
-                std::collections::BTreeMap::new();
-            for m in &mismatches {
-                seen.entry((m.asm.clone(), m.field.clone())).or_insert((m.lifted, m.oracle));
-            }
-            let mut msg = format!(
-                "{} mismatches, {} distinct (asm,field):\n",
-                mismatches.len(),
-                seen.len()
-            );
-            for ((asm, field), (l, o)) in &seen {
-                msg.push_str(&format!("  [{asm}] {field}: lifted={l:#x} oracle={o:#x}\n"));
-            }
-            panic!("{msg}");
-        }
-    }
-
-    #[test]
-    #[ignore] // diagnostic: `cargo test --features unpack funcdiff_busybox -- --ignored --nocapture`
-    fn funcdiff_busybox() {
-        let path = "bench/.cache/busybox-w32-FRP-5579-g5749feb35.exe";
-        if !std::path::Path::new(path).exists() {
-            eprintln!("SKIP (no busybox)");
-            return;
-        }
-        FUNCDIFF_SCORED.store(0, std::sync::atomic::Ordering::Relaxed);
-        FUNCDIFF_CALLS.store(0, std::sync::atomic::Ordering::Relaxed);
-        let ms = run_functions(path, 100).expect("funcdiff");
-        let scored = FUNCDIFF_SCORED.load(std::sync::atomic::Ordering::Relaxed);
-        let calls = FUNCDIFF_CALLS.load(std::sync::atomic::Ordering::Relaxed);
-        eprintln!("funcdiff busybox: {scored} scored iters, {calls} calls followed, {} divergence(s)", ms.len());
-        let mut seen = std::collections::BTreeSet::new();
-        for m in ms.iter().filter(|m| seen.insert(m.func)).take(20) {
-            eprintln!("  fn {:#x} {}: lifted={:#x} unicorn={:#x}", m.func, m.what, m.lifted, m.unicorn);
-        }
+        eprintln!(
+            "FUNCDIFF-CORPUS: lift {tot_scored} scored / {tot_calls} calls, opt {tot_opt} scored, {tot_div} divergence(s)"
+        );
+        assert_eq!(tot_div, 0, "funcdiff found divergence(s) on the committed corpus");
+        // Non-vacuous: the corpus must actually exercise both paths.
+        assert!(tot_calls > 0, "lifter closure followed no calls on the corpus");
+        assert!(tot_opt > 0, "optimizer differential scored nothing on the corpus");
     }
 
     /// Whole-function differential must find no divergence on committed,

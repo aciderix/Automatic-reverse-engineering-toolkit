@@ -44,6 +44,15 @@ out="$(bash bench/magicdiv.sh 2>&1 | tail -1)"
 echo "  $out"
 case "$out" in *EQUIVALENT) ok "magicdiv" ;; *) ko "magicdiv: $out" ;; esac
 
+step "funcdiff corpus (lift closure + optimizer diff, real binaries)"
+out="$(bash bench/funcdiff.sh 2>&1)"
+echo "$out" | grep -E "LIFT-closure:|OPT-diff:|FUNCDIFF-CORPUS:" | sed 's/^ */  /'
+case "$out" in
+  *"gate: PASS"*) ok "funcdiff corpus" ;;
+  *"SKIP"*)       echo "  SKIP  $(echo "$out" | grep SKIP | head -1)" ;;
+  *)              ko "funcdiff corpus"; echo "$out" | grep -E "FAIL|divergence|fn 0x" | head ;;
+esac
+
 step "SMT proofs (level 3)"
 if command -v "${Z3:-z3}" >/dev/null 2>&1; then
   res="$(bash bench/smt_rewrites.sh 2>&1)"

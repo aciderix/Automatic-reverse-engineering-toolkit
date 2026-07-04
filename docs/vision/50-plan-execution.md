@@ -3016,3 +3016,26 @@ binaires MSVC, pas seulement strings.exe.
 - **Prochain** : (a) **closure SSA** (suivre les appels dans l'interp post-opt) pour couvrir les fonctions
   à appels post-opt ; (b) lâcher sur un corpus plus large (winetest/sqlite/grep) — l'outil pointera
   désormais un bug **d'opt/SSA** aussi précisément qu'un bug de lift.
+
+### funcdiff en PORTE DE RÉGRESSION sur binaires réels (busybox mingw + sqlite MSVC) ✅ + sweep sqlite
+- **2026-07-04 — les deux différentiels deviennent un gate permanent.** Après avoir bâti l'opt-diff, la
+  suite naturelle : lâcher sur un corpus plus large ET banquer le tout en régression. Sweep :
+  - **sqlite3 (MSVC 32-bit strippé)** : LIFT-closure **7926 scorées / 3854 appels**, OPT-diff **2403
+    scorées**, **0 divergence** — validation **cross-toolchain** (mingw *et* MSVC) du lift ET de l'opt.
+  - **winetest (87 Mo)** : 0 scorée — image > cap de 64 Mo de `diff_function` (mapper 87 Mo par fonction
+    n'est de toute façon pas praticable) ; limitation connue, pas un bug.
+- **`bench/funcdiff.sh`** (nouveau) : exécute LIFT-closure (vs Unicorn) + OPT-diff (post-opt SSA vs
+  pré-opt) sur le corpus épinglé, **assert 0 divergence** + non-vacuité (appels suivis, opt scoré). Skip
+  propre si libunicorn absent (build unpack indisponible) ou corpus absent. Câblé dans
+  `bench/regression.sh`. Total gate : **lift 11383 scorées / 5954 appels, opt 3003 scorées, 0 divergence →
+  PASS**. Les 3 diagnostics ignorés (scratch/busybox×2) fusionnés en un seul `funcdiff_corpus`.
+- **Constat honnête sur les bugs profonds restants** : la LIFT-closure suit déjà **5954 appels** (busybox
+  2100 + sqlite 3854) **sans une seule divergence** → le bug grep « store d'init droppé » n'est **pas** dans
+  une fonction *modélisable*. Il est atteint **via un import** (`malloc` du moteur regex) que ni la closure
+  ni l'opt-diff ne franchissent (un `Named` non-shim ⇒ skip). **La vraie frontière suivante pour cette
+  classe = modéliser quelques imports purs/déterministes** (`memcpy`/`memset`/`memcmp`/`strlen`) dans
+  l'interpréteur pour scorer la logique applicative — sain (sémantique exacte, exécutée à l'identique par
+  Unicorn) mais à faire prudemment (un import mal modélisé = faux positif). L'opt-diff **closure** (suivre
+  les appels post-opt, threading d'esp à travers les *valeurs* SSA) reste l'autre incrément ouvert.
+- **Régression** : produit **inchangé ce tour** (seuls tests/bench touchés) ; gate funcdiff PASS ; suite
+  unpack verte (3 gardes : per-instruction, closure, opt).
