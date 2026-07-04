@@ -103,6 +103,11 @@ struct Interp {
     /// these regions and the scratch page above is unused. A read/write outside
     /// every region returns `None` → the state is skipped, never a false positive.
     regions: Vec<Region>,
+    /// Stack addresses at which a recursed call pushed a return-address sentinel
+    /// (closure mode). Those 4-byte slots hold different bytes than Unicorn (which
+    /// pushes the real return address) and are excluded from the memory diff — they
+    /// are ABI plumbing, not a lift-correctness signal.
+    ret_slots: Vec<u64>,
 }
 
 /// A mapped memory region for whole-function differencing, mirrored byte-for-byte
@@ -132,6 +137,7 @@ impl Interp {
             mem,
             xmm: s.xmm,
             regions: Vec::new(),
+            ret_slots: Vec::new(),
         }
     }
 
@@ -271,24 +277,30 @@ impl Interp {
         })
     }
 
+    /// Write a 64-bit value to a modelled location; `None` (→ skip) for a
+    /// `Frame`/`Mem` location the integer interpreter does not track.
+    fn write_loc(&mut self, dst: &Location, v: u64) -> Option<()> {
+        match dst {
+            Location::Reg(r) if (r.0 as usize) < 8 => self.regs[r.0 as usize] = v,
+            Location::Reg(r) if (16..24).contains(&r.0) => self.xmm[(r.0 - 16) as usize][0] = v,
+            Location::Reg(r) if (64..72).contains(&r.0) => self.xmm[(r.0 - 64) as usize][1] = v,
+            Location::Flag(f) => {
+                self.flags.insert(*f, v & 1);
+            }
+            Location::Temp(t) => {
+                self.temps.insert(*t, v);
+            }
+            _ => return None,
+        }
+        Some(())
+    }
+
     /// Execute one lifted statement; `None` if it touches the unmodelled world.
     fn exec(&mut self, s: &Stmt) -> Option<()> {
         match s {
             Stmt::Set { dst, expr } => {
                 let v = self.eval(expr)?;
-                match dst {
-                    Location::Reg(r) if (r.0 as usize) < 8 => self.regs[r.0 as usize] = v,
-                    Location::Reg(r) if (16..24).contains(&r.0) => self.xmm[(r.0 - 16) as usize][0] = v,
-                    Location::Reg(r) if (64..72).contains(&r.0) => self.xmm[(r.0 - 64) as usize][1] = v,
-                    Location::Flag(f) => {
-                        self.flags.insert(*f, v & 1);
-                    }
-                    Location::Temp(t) => {
-                        self.temps.insert(*t, v);
-                    }
-                    _ => return None,
-                }
-                Some(())
+                self.write_loc(dst, v)
             }
             Stmt::Store { addr, value, ty } => {
                 let a = self.eval(addr)?;
@@ -303,11 +315,22 @@ impl Interp {
     }
 
     /// Interpret a whole lifted function's blocks, following control flow to a
-    /// `Return`. `None` (→ skip the state, never a false positive) on any
-    /// construct not modelled faithfully: a call, a switch, an `Asm` safety
-    /// valve, an out-of-region memory access, a missing block, or an over-long
-    /// run (a suspected model-side infinite loop).
-    fn run_function(&mut self, irf: &IrFunction) -> Option<()> {
+    /// `Return` and *into* directly-called recovered callees (the closure). The
+    /// returned `Option<u64>` is the callee's combined return value on a clean
+    /// return, or `None` (→ skip the state, never a false positive) on any
+    /// construct not modelled faithfully: an indirect/unmodelled call, a switch,
+    /// an `Asm` safety valve, an out-of-region access, a missing block, an over-
+    /// budget run (suspected model-side infinite loop), or exceeded recursion.
+    ///
+    /// `depth` counts recursion (0 = the top-level function under test). `budget`
+    /// is shared across the whole recursion so total work stays bounded.
+    fn run_closure(
+        &mut self,
+        irf: &IrFunction,
+        ctx: &ClosureCtx,
+        depth: u32,
+        budget: &mut u32,
+    ) -> Option<u64> {
         // Entry block: the one at the function entry address, else the first.
         let mut cur = irf
             .blocks
@@ -315,9 +338,8 @@ impl Interp {
             .find(|b| b.addr == irf.entry)
             .or_else(|| irf.blocks.first())?
             .id;
-        let mut budget = 200_000u32;
         loop {
-            budget = budget.checked_sub(1)?;
+            *budget = budget.checked_sub(1)?;
             let blk = irf.blocks.iter().find(|b| b.id == cur)?;
             let mut next: Option<u32> = None;
             for s in &blk.stmts {
@@ -327,15 +349,102 @@ impl Interp {
                         next = Some(if c != 0 { taken.0 } else { fallthrough.0 });
                     }
                     Stmt::Jump(t) => next = Some(t.0),
-                    Stmt::Return(_) => return Some(()),
+                    // A tail call (`jmp target`, lifted `Return(Some(Call))`)
+                    // pushes no return address; the callee's own `ret` returns for
+                    // us. We only follow it at the top level (depth 0): nested, the
+                    // pop that the *entering* call must apply becomes the callee's
+                    // `ret N`, not this function's — ambiguous, so skip (sound).
+                    Stmt::Return(Some(Expr::Call { target: CallTarget::Direct(t), .. })) => {
+                        if depth != 0 {
+                            return None;
+                        }
+                        let callee = *ctx.funcs.get(t)?;
+                        return self.run_closure(callee, ctx, depth + 1, budget);
+                    }
+                    Stmt::Return(Some(e)) => return self.eval_or_call(e, ctx, depth, budget),
+                    Stmt::Return(None) => return None, // no modelled return value
+                    // A statement-position call: perform it for its side effects
+                    // (recursing into a recovered callee), ignoring the result.
+                    Stmt::CallStmt(e) => {
+                        self.eval_or_call(e, ctx, depth, budget)?;
+                    }
+                    Stmt::Set { dst, expr } => {
+                        // A post-call clobber `Set{ecx, Undef}` (and the SysV set)
+                        // is a conservative ABI model: correct code never reads a
+                        // caller-saved register across a call. Recursion already
+                        // left the callee's *real* value there (= Unicorn's), so
+                        // keep it — dropping the assignment is both sound and what
+                        // makes call-bearing functions scorable at all.
+                        if matches!(expr, Expr::Undef) {
+                            continue;
+                        }
+                        let v = self.eval_or_call(expr, ctx, depth, budget)?;
+                        self.write_loc(dst, v)?;
+                    }
                     // Unmodelled control/effects → skip the whole function.
-                    Stmt::Switch { .. } | Stmt::CallStmt(_) | Stmt::Asm(_) => return None,
+                    Stmt::Switch { .. } | Stmt::Asm(_) => return None,
                     other => self.exec(other)?,
                 }
             }
             cur = next?; // a block with no follow-able terminator → skip
         }
     }
+
+    /// Evaluate `e`, performing a *direct* call to a recovered callee if `e` is
+    /// one (returning its combined return value). Any other call form (indirect,
+    /// an unmodelled named import, or a call nested inside a larger expression)
+    /// falls through to `eval`, which returns `None` → skip.
+    fn eval_or_call(
+        &mut self,
+        e: &Expr,
+        ctx: &ClosureCtx,
+        depth: u32,
+        budget: &mut u32,
+    ) -> Option<u64> {
+        if let Expr::Call { target: CallTarget::Direct(t), .. } = e {
+            return self.call_direct(*t, ctx, depth, budget);
+        }
+        self.eval(e)
+    }
+
+    /// Recurse into a directly-called recovered callee, modelling the hardware
+    /// call/return stack discipline exactly so the shared memory + registers stay
+    /// byte-identical to Unicorn.
+    ///
+    /// At the call site `esp = S` (arguments already pushed by preceding stores).
+    /// The hardware `call` pushes the return address (`esp = S-4`); the callee
+    /// runs and restores `esp` to its entry value before `ret N`, which pops the
+    /// return address and `N` argument bytes (`esp = S+N`). We reproduce exactly
+    /// that net effect and record the sentinel slot for the memory diff to skip.
+    fn call_direct(
+        &mut self,
+        t: u64,
+        ctx: &ClosureCtx,
+        depth: u32,
+        budget: &mut u32,
+    ) -> Option<u64> {
+        if depth >= CLOSURE_DEPTH {
+            return None;
+        }
+        FUNCDIFF_CALLS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let callee = *ctx.funcs.get(&t)?; // must be a recovered function
+        let pop = *ctx.ret_pops.get(&t)?; // must have a known, unambiguous `ret N`
+        let s = self.regs[4];
+        let slot = s.wrapping_sub(4);
+        self.mem_write(slot, 4, FN_RET_SENTINEL)?; // must land in the stack region
+        self.ret_slots.push(slot);
+        self.regs[4] = slot; // callee entry esp (return address at [esp])
+        let rv = self.run_closure(callee, ctx, depth + 1, budget)?;
+        self.regs[4] = s.wrapping_add(pop as u64); // net: -4 (push) +4+N (ret N)
+        Some(rv)
+    }
+}
+
+/// Context for closure-mode interpretation: the recovered functions keyed by
+/// entry (to follow direct calls into) and their `ret N` pop counts.
+pub struct ClosureCtx<'a> {
+    funcs: &'a HashMap<u64, &'a IrFunction>,
+    ret_pops: &'a HashMap<u64, i64>,
 }
 
 fn bin(op: BinOp, a: u64, b: u64) -> Option<u64> {
@@ -1245,10 +1354,24 @@ pub fn run(iters_per_insn: u32) -> Result<Vec<Mismatch>, String> {
 /// Count of fully-scored (interp+Unicorn both cleanly returned) iterations —
 /// diagnostic, so a run can confirm it exercised functions rather than skipping.
 pub static FUNCDIFF_SCORED: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+/// Count of direct calls the closure interpreter actually followed into a
+/// recovered callee — the signal that the *closure* path (not just leaf scoring)
+/// was exercised. A guard asserts this is non-zero across the fixture corpus.
+pub static FUNCDIFF_CALLS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 
 const FN_STACK_BASE: u64 = 0x1000_0000;
 const FN_STACK_SIZE: usize = 0x1_0000;
 const FN_SENTINEL: u64 = 0xdead_0000; // unmapped return address: Unicorn stops here
+/// The return address the interpreter pushes for a *recursed* (closure) call.
+/// Deliberately unmapped (well above any image or the stack): a callee that
+/// derefs it (a get-pc thunk reading `[esp]`) faults `mem_read → None → skip`
+/// rather than diverging silently. Its stack slot is excluded from the memory
+/// comparison (Unicorn writes the real return address there); a residual leak
+/// into a compared register is caught by an explicit guard in `diff_function`.
+const FN_RET_SENTINEL: u64 = 0xdead_1000;
+/// Cap on interpreter call-recursion depth (guards the *harness's* Rust stack;
+/// exceeding it → skip, never a false verdict).
+const CLOSURE_DEPTH: u32 = 200;
 
 /// A per-function divergence between the lifted IR and Unicorn.
 pub struct FnMismatch {
@@ -1258,38 +1381,182 @@ pub struct FnMismatch {
     pub unicorn: u64,
 }
 
-fn expr_has_call(e: &Expr) -> bool {
-    match e {
-        Expr::Call { .. } => true,
-        Expr::Unary(_, a) => expr_has_call(a),
-        Expr::Binary(_, a, b) => expr_has_call(a) || expr_has_call(b),
-        Expr::Load { addr, .. } => expr_has_call(addr),
-        _ => false,
-    }
+/// The runtime helpers the interpreter models by value (see `helper_call`): the
+/// integer-division, packed-integer, packed-single and scalar-float families. A
+/// named call to anything else (an import shim, an x87 runtime helper, the `asm:`
+/// safety valve) has effects the interpreter cannot reproduce → its function is
+/// not closure-modelable. A prefix hit that `helper_call` does not actually model
+/// still returns `None` at runtime (skip), so this over-approximation is sound.
+fn is_modeled_helper(name: &str) -> bool {
+    name.starts_with("__ix_")
+        || name.starts_with("__pi_")
+        || name.starts_with("__ps_")
+        || name.starts_with("__fp_")
 }
 
-/// A function the interpreter can attempt end-to-end: no call/switch/asm and no
-/// call-valued expression. Others are skipped (sound).
-fn is_leaf_pure(irf: &IrFunction) -> bool {
+/// Check every call inside `e` is closure-modelable, collecting the recovered
+/// direct-call targets. `None` if any call is indirect, an unmodelled named
+/// import, or a direct call to a function we cannot recover / whose `ret N` we
+/// do not know.
+fn check_expr_calls(
+    e: &Expr,
+    funcs: &HashMap<u64, &IrFunction>,
+    ret_pops: &HashMap<u64, i64>,
+    targets: &mut Vec<u64>,
+) -> Option<()> {
+    match e {
+        Expr::Call { target, args, .. } => {
+            match target {
+                CallTarget::Direct(t) => {
+                    if !funcs.contains_key(t) || !ret_pops.contains_key(t) {
+                        return None;
+                    }
+                    targets.push(*t);
+                }
+                CallTarget::Named(n) => {
+                    if !is_modeled_helper(n) {
+                        return None;
+                    }
+                }
+                CallTarget::Indirect(_) => return None,
+            }
+            for a in args {
+                check_expr_calls(a, funcs, ret_pops, targets)?;
+            }
+        }
+        Expr::Unary(_, a) | Expr::Cast { expr: a, .. } => check_expr_calls(a, funcs, ret_pops, targets)?,
+        Expr::Binary(_, a, b) => {
+            check_expr_calls(a, funcs, ret_pops, targets)?;
+            check_expr_calls(b, funcs, ret_pops, targets)?;
+        }
+        Expr::Load { addr, .. } => check_expr_calls(addr, funcs, ret_pops, targets)?,
+        Expr::Select { cond, then_, else_ } => {
+            check_expr_calls(cond, funcs, ret_pops, targets)?;
+            check_expr_calls(then_, funcs, ret_pops, targets)?;
+            check_expr_calls(else_, funcs, ret_pops, targets)?;
+        }
+        _ => {}
+    }
+    Some(())
+}
+
+/// The recovered direct callees of `irf`, or `None` if `irf` contains a construct
+/// the closure interpreter cannot model (switch, `asm`, an unfollowable call).
+fn fn_local_targets(
+    irf: &IrFunction,
+    funcs: &HashMap<u64, &IrFunction>,
+    ret_pops: &HashMap<u64, i64>,
+) -> Option<Vec<u64>> {
+    if irf.blocks.is_empty() {
+        return None;
+    }
+    let mut targets = Vec::new();
     for b in &irf.blocks {
         for s in &b.stmts {
-            let bad = match s {
-                Stmt::CallStmt(_) | Stmt::Switch { .. } | Stmt::Asm(_) => true,
-                Stmt::Set { expr, .. } => expr_has_call(expr),
-                Stmt::Store { addr, value, .. } => expr_has_call(addr) || expr_has_call(value),
-                Stmt::Branch { cond, .. } => expr_has_call(cond),
-                // A tail-call (`jmp target` / `jmp [mem]`) is lifted as
-                // `Return(call)`: its callee has side effects Unicorn executes but
-                // the interpreter's `Return` ignores — reject so it is not scored.
-                Stmt::Return(Some(expr)) => expr_has_call(expr),
-                _ => false,
-            };
-            if bad {
-                return false;
+            match s {
+                Stmt::Switch { .. } | Stmt::Asm(_) => return None,
+                // A tail call needs only that its target is recovered (no pop is
+                // applied — the callee returns for us); followed at depth 0 only.
+                Stmt::Return(Some(Expr::Call { target: CallTarget::Direct(t), .. })) => {
+                    if !funcs.contains_key(t) {
+                        return None;
+                    }
+                    targets.push(*t);
+                }
+                Stmt::Return(Some(e)) | Stmt::CallStmt(e) | Stmt::Set { expr: e, .. } => {
+                    check_expr_calls(e, funcs, ret_pops, &mut targets)?;
+                }
+                Stmt::Store { addr, value, .. } => {
+                    check_expr_calls(addr, funcs, ret_pops, &mut targets)?;
+                    check_expr_calls(value, funcs, ret_pops, &mut targets)?;
+                }
+                Stmt::Branch { cond, .. } => check_expr_calls(cond, funcs, ret_pops, &mut targets)?,
+                _ => {}
             }
         }
     }
+    Some(targets)
+}
+
+/// A function whose whole direct-call closure the interpreter can attempt: every
+/// function reached is locally modelable (`fn_local_targets`). Others are skipped
+/// (sound). This is the static gate that keeps Unicorn setup off hopeless
+/// functions; the per-statement `None` in `run_closure` is the real safety net.
+fn is_closure_modelable(
+    entry: u64,
+    funcs: &HashMap<u64, &IrFunction>,
+    ret_pops: &HashMap<u64, i64>,
+) -> bool {
+    let mut seen = std::collections::HashSet::new();
+    let mut stack = vec![entry];
+    while let Some(a) = stack.pop() {
+        if !seen.insert(a) {
+            continue;
+        }
+        let irf = match funcs.get(&a) {
+            Some(f) => f,
+            None => return false,
+        };
+        match fn_local_targets(irf, funcs, ret_pops) {
+            Some(ts) => {
+                for t in ts {
+                    if !seen.contains(&t) {
+                        stack.push(t);
+                    }
+                }
+            }
+            None => return false,
+        }
+    }
     true
+}
+
+/// Per-function `ret N` pop count (0 for a plain `ret`), for the functions whose
+/// return is a single, unambiguous near return. A function with no such return
+/// (tail-jump / no-return only) or with conflicting `ret N` counts is absent —
+/// calls to it are then not followed (skip), never modelled with a wrong esp.
+fn compute_ret_pops(functions: &[crate::analysis::Function]) -> HashMap<u64, i64> {
+    use crate::disasm::Flow;
+    let mut m = HashMap::new();
+    for f in functions {
+        let mut pop: Option<i64> = None;
+        let mut ok = true;
+        let mut saw = false;
+        for b in f.blocks.values() {
+            if !matches!(b.terminator, Flow::Return) {
+                continue;
+            }
+            let last = match b.insns.last() {
+                Some(i) => i,
+                None => {
+                    ok = false;
+                    break;
+                }
+            };
+            // `ret N` carries the pop as its sole immediate operand; a bare `ret`
+            // has none (pop 0).
+            let n = if last.raw.op_count() > 0 {
+                last.raw.immediate(0) as i64
+            } else {
+                0
+            };
+            saw = true;
+            match pop {
+                None => pop = Some(n),
+                Some(p) if p == n => {}
+                Some(_) => {
+                    ok = false;
+                    break;
+                }
+            }
+        }
+        if ok && saw {
+            if let Some(n) = pop {
+                m.insert(f.entry, n);
+            }
+        }
+    }
+    m
 }
 
 /// Run `iters` random states through one whole recovered function, comparing the
@@ -1299,11 +1566,12 @@ fn is_leaf_pure(irf: &IrFunction) -> bool {
 pub fn diff_function(
     prog: &crate::loader::Program,
     irf: &IrFunction,
+    ctx: &ClosureCtx,
     iters: u32,
     seed: &mut u64,
 ) -> Vec<FnMismatch> {
     let mut out = Vec::new();
-    if !is_leaf_pure(irf) || irf.blocks.is_empty() {
+    if !is_closure_modelable(irf.entry, ctx.funcs, ctx.ret_pops) {
         return out;
     }
     // One mirrored region over the whole PE image.
@@ -1370,7 +1638,15 @@ pub fn diff_function(
             Region { base: lo, data: img0.clone(), writable: true },
             Region { base: FN_STACK_BASE, data: stack.clone(), writable: true },
         ];
-        if interp.run_function(irf).is_none() {
+        let mut budget = 500_000u32;
+        if interp.run_closure(irf, ctx, 0, &mut budget).is_none() {
+            continue;
+        }
+        // Soundness guard for closure mode: if the unmapped return-address
+        // sentinel leaked into a compared register (a get-pc thunk returning
+        // `[esp]`), we cannot trust the comparison — Unicorn holds the real return
+        // address there. Skip rather than risk a false positive.
+        if (0..8).any(|r| r != 4 && (interp.regs[r] as u32) == FN_RET_SENTINEL as u32) {
             continue;
         }
 
@@ -1426,8 +1702,13 @@ pub fn diff_function(
             }
             let mut ustk = vec![0u8; FN_STACK_SIZE];
             uc_mem_read(uc, FN_STACK_BASE, ustk.as_mut_ptr() as *mut c_void, FN_STACK_SIZE);
+            // Exclude the return-address slots the interpreter pushed for recursed
+            // calls: both engines wrote *something* there (Unicorn the real return
+            // address, the interpreter a sentinel) — ABI plumbing, not a lift
+            // signal. Comparing them would be a guaranteed false positive.
+            let is_ret_slot = |addr: u64| interp.ret_slots.iter().any(|&s| addr >= s && addr < s + 4);
             for i in 0..FN_STACK_SIZE {
-                if ustk[i] != interp.regions[1].data[i] {
+                if ustk[i] != interp.regions[1].data[i] && !is_ret_slot(FN_STACK_BASE + i as u64) {
                     out.push(FnMismatch { func: irf.entry, what: format!("stack +{i:#x}"), lifted: interp.regions[1].data[i] as u64, unicorn: ustk[i] as u64 });
                     break;
                 }
@@ -1457,11 +1738,31 @@ pub fn run_functions(path: &str, iters: u32) -> Result<Vec<FnMismatch>, String> 
     crate::ir::build::set_noreturn(crate::ir::build::compute_noreturn(&refs));
     crate::ir::build::set_fp_returning(crate::ir::build::compute_fp_returning(&prog, &refs));
     crate::ir::build::set_call_clobbers(crate::ir::build::compute_call_clobbers(&refs));
+
+    // Build every function's IR up front so the closure interpreter can follow a
+    // direct call into its callee. Force frame-pointer-omission (raw `[esp±d]` /
+    // `[ebp±d]` loads instead of named `Frame` slots): this is exactly what the
+    // transpiler — the shipped product — lowers, and it makes stack accesses
+    // interpretable against the mirrored stack region (a `Frame` slot is opaque
+    // to the interpreter → skip). Both engines read the same stack bytes, so it
+    // is the *more* faithful mode, not a shortcut.
+    crate::ir::lift::set_frames_off(true);
+    let irfs: Vec<IrFunction> = result
+        .functions
+        .iter()
+        .map(|f| {
+            crate::ir::lift::set_frames_off(true); // build_ir resets it per call
+            crate::ir::build::build_ir(&prog, f)
+        })
+        .collect();
+    let funcs: HashMap<u64, &IrFunction> = irfs.iter().map(|f| (f.entry, f)).collect();
+    let ret_pops = compute_ret_pops(&result.functions);
+    let ctx = ClosureCtx { funcs: &funcs, ret_pops: &ret_pops };
+
     let mut seed: u64 = 0x1234_5678_9abc_def1;
     let mut out = Vec::new();
-    for f in &result.functions {
-        let irf = crate::ir::build::build_ir(&prog, f);
-        out.extend(diff_function(&prog, &irf, iters, &mut seed));
+    for irf in &irfs {
+        out.extend(diff_function(&prog, irf, &ctx, iters, &mut seed));
     }
     Ok(out)
 }
@@ -1500,9 +1801,12 @@ mod tests {
             eprintln!("SKIP (no busybox)");
             return;
         }
+        FUNCDIFF_SCORED.store(0, std::sync::atomic::Ordering::Relaxed);
+        FUNCDIFF_CALLS.store(0, std::sync::atomic::Ordering::Relaxed);
         let ms = run_functions(path, 100).expect("funcdiff");
         let scored = FUNCDIFF_SCORED.load(std::sync::atomic::Ordering::Relaxed);
-        eprintln!("funcdiff busybox: {scored} scored iters, {} divergence(s)", ms.len());
+        let calls = FUNCDIFF_CALLS.load(std::sync::atomic::Ordering::Relaxed);
+        eprintln!("funcdiff busybox: {scored} scored iters, {calls} calls followed, {} divergence(s)", ms.len());
         let mut seen = std::collections::BTreeSet::new();
         for m in ms.iter().filter(|m| seen.insert(m.func)).take(20) {
             eprintln!("  fn {:#x} {}: lifted={:#x} unicorn={:#x}", m.func, m.what, m.lifted, m.unicorn);
@@ -1511,7 +1815,9 @@ mod tests {
 
     /// Whole-function differential must find no divergence on committed,
     /// known-good PEs (soundness of the funcdiff harness itself) — and must
-    /// actually exercise some functions (non-vacuous). A real lift bug here
+    /// actually exercise some functions (non-vacuous), *including* the closure
+    /// path (a call followed into a callee — `recursion.exe`'s `fib` recurses
+    /// through the interpreter and must match Unicorn). A real lift bug here
     /// would be a genuine finding; a harness false-positive must be fixed.
     #[test]
     fn functions_match_unicorn_on_fixtures() {
@@ -1520,6 +1826,7 @@ mod tests {
             return;
         }
         FUNCDIFF_SCORED.store(0, std::sync::atomic::Ordering::Relaxed);
+        FUNCDIFF_CALLS.store(0, std::sync::atomic::Ordering::Relaxed);
         let mut all = Vec::new();
         let mut entries: Vec<_> = std::fs::read_dir(dir)
             .unwrap()
@@ -1541,8 +1848,12 @@ mod tests {
             }
             panic!("{msg}");
         }
-        // Non-vacuous: at least one fixture must have scored a leaf function, or
-        // the "no divergence" verdict proves nothing.
+        // Non-vacuous: at least one fixture must have scored a function, or the
+        // "no divergence" verdict proves nothing.
         assert!(scored > 0, "funcdiff scored 0 functions — vacuous, harness not exercised");
+        // And the *closure* specifically must have followed at least one call
+        // into a callee — otherwise this only re-tests leaf functions.
+        let calls = FUNCDIFF_CALLS.load(std::sync::atomic::Ordering::Relaxed);
+        assert!(calls > 0, "funcdiff closure followed 0 calls — the closure path is vacuous");
     }
 }

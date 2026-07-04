@@ -2930,3 +2930,41 @@ binaires MSVC, pas seulement strings.exe.
   (store d'init droppé, moteur regex), cksum (table filltable=0), 7za (esp/frame SEH), plink (récup
   points-to). Le premier trois sont des bugs de lift/opt/data que funcdiff-closure devrait pointer ; plink
   est de la récupération (autre axe).
+### Accélérateur — funcdiff CLOSURE : l'oracle par fonction suit les appels (atteint les fonctions à appels) ✅
+- **2026-07-04 — l'extension promise par funcdiff v0 est faite.** v0 ne scorait que les fonctions
+  **feuilles** (`is_leaf_pure` rejetait tout appel) → il ne testait pas les fonctions **à appels**, là où
+  vivent les bugs profonds (moteur regex de grep, `filltable` de cksum). La closure **interprète
+  récursivement les callees directs récupérés** — Unicorn le fait déjà nativement en exécutant les octets ;
+  côté IR, on recurse dans l'IR liftée de la callee. Une divergence sur une fonction à appels = un vrai bug
+  de lift (dans le caller *à travers* l'appel, ou dans la callee).
+- **Modélisation EXACTE de la discipline call/ret (sinon faux positif mémoire)** : au site d'appel `esp=S`
+  (args déjà poussés), le `call` matériel empile l'adresse de retour (`esp=S-4`) ; la callee restaure `esp`
+  avant `ret N` qui dépile retour + N octets d'args (`esp=S+N`). `call_direct` reproduit exactement cet
+  effet net (`ret N` lu par `compute_ret_pops` depuis le bloc terminal ; pop ambigu/absent ⇒ appel non
+  suivi, skip). La valeur de retour = l'expr `Return` de la callee (paire `(edx<<32)|eax` 32-bit), rendue au
+  caller pour que son split edx:eax fonctionne. Le clobber `Set{ecx,Undef}` post-appel est **ignoré** (la
+  récursion a déjà laissé la vraie valeur = celle d'Unicorn ; c'est ce qui rend une fonction à appels
+  scorable, et c'est sain — nul code correct ne lit un registre caller-saved à travers un appel).
+- **Sain par construction (principe sacré, un oracle à faux positifs est pire que rien)** :
+  - **Adresse de retour** : sentinelle **non mappée** (`0xdead1000`) — une callee qui la déréférence
+    (thunk get-pc) faute → skip. Ses slots de pile sont **exclus** du diff mémoire (Unicorn y écrit la vraie
+    adresse — plomberie ABI, pas un signal de lift). Fuite résiduelle dans un registre comparé ⇒ **garde**
+    explicite qui skippe.
+  - **Frames OFF forcés** (comme le transpileur, le vrai produit) : `[esp±d]`/`[ebp±d]` deviennent des
+    loads bruts sur la pile miroir (un slot `Frame` nommé est opaque → skip) — mode *plus* fidèle à Unicorn,
+    pas un raccourci. Bonus : on teste exactement le lowering **shippé**.
+  - Appel indirect / import non modélisé / `switch` / `asm` / accès hors-région / dépassement de budget /
+    récursion trop profonde ⇒ **état skippé, jamais un verdict faux**. Pré-filtre statique
+    `is_closure_modelable` (BFS de la fermeture d'appels directs) + filet d'exécution `run_closure`
+    (`None` par-instruction).
+- **Vérifié (preuve que la closure s'exécute ET est saine)** : sur `recursion.exe` (fib), `call_direct` **a
+  suivi 11 600 appels** (fib récurse à travers l'interpréteur — args pile, valeur de retour, discipline
+  call/ret complète) avec **0 divergence** vs Unicorn ; `varied_o0.exe` : 6 200 appels, 0 divergence. La
+  garde de soundness `functions_match_unicorn_on_fixtures` **exige désormais `calls>0`** (la closure n'est
+  pas vacante) en plus de `scored>0` et 0 divergence — verte. Test-only (`#[cfg(feature=unpack)]`),
+  **produit inchangé**.
+- **Régression complète PASS** : cargo test (54 unit + intégration verts), cpudiff+funcdiff verts,
+  **difftest 271/271**, **transpile-diff 4/4 (hash `19acad982194bf07` inchangé)** ⇒ produit byte-identique.
+- **Prochain** : lâcher funcdiff-closure sur busybox/grep/cksum (corpus non caché sur cet hôte) pour
+  **pointer l'instruction mal-liftée** de la classe profonde (store d'init droppé du moteur regex, table
+  `filltable=0`) — « la machine pointe le bug » au lieu du forensics gdb manuel.
