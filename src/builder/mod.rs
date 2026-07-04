@@ -1082,8 +1082,13 @@ pub fn transpile(
     }
 
     let run_output = if run {
+        // Inherit the parent's stdin so a redirected/piped input (`aret --run <
+        // file`, or a shell pipeline) reaches the transpiled program. `.output()`
+        // otherwise hands the child a closed stdin → it reads immediate EOF, which
+        // silently zeroed every stdin-reading program run this way.
         let out = Command::new(&binary)
             .args(prog_args)
+            .stdin(std::process::Stdio::inherit())
             .output()
             .with_context(|| format!("failed to run {}", binary.display()))?;
         let mut s = String::from_utf8_lossy(&out.stdout).into_owned();

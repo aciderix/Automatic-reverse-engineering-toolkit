@@ -126,6 +126,28 @@ uint32_t aret_GetEnvironmentVariableA(uint32_t esp) {
     if (buf && size > len) { memcpy(buf, v, len + 1); return len; }
     return len + 1; /* required size incl. NUL */
 }
+/* GetEnvironmentVariableW(name(wide), buf(wide), size(WCHARs)) — wide sibling of
+ * the A variant. Narrows the UTF-16 name (ASCII/Latin-1, the CLI case) to look up
+ * via getenv, widens the value back. Returns WCHARs written excl. NUL, the
+ * required size incl. NUL if buf is too small, or 0 (not found). */
+uint32_t aret_GetEnvironmentVariableW(uint32_t esp) {
+    const uint16_t *wname = (const uint16_t *)WP(0);
+    uint16_t *buf = (uint16_t *)WP(1);
+    uint32_t size = WU(2);
+    if (!wname) return 0;
+    char name[256]; size_t i = 0;
+    for (; wname[i] && i + 1 < sizeof name; i++) name[i] = (char)(wname[i] & 0xffu);
+    name[i] = 0;
+    const char *v = getenv(name);
+    if (!v) return 0;
+    uint32_t len = (uint32_t)strlen(v);
+    if (buf && size > len) {
+        for (uint32_t j = 0; j < len; j++) buf[j] = (uint16_t)(unsigned char)v[j];
+        buf[len] = 0;
+        return len;
+    }
+    return len + 1; /* required size incl. NUL */
+}
 uint32_t aret_SetEnvironmentVariableA(uint32_t esp) {
     const char *name = WCS(0), *val = WCS(1);
     if (!name) return 0;
@@ -618,3 +640,46 @@ uint32_t aret_CoUninitialize(uint32_t esp) { (void)esp; if (aret_co_init_depth) 
 uint32_t aret_CoTaskMemAlloc(uint32_t esp)   { return (uint32_t)(uintptr_t)malloc((size_t)WU(0)); }
 uint32_t aret_CoTaskMemRealloc(uint32_t esp) { return (uint32_t)(uintptr_t)realloc((void *)(uintptr_t)WU(0), (size_t)WU(1)); }
 uint32_t aret_CoTaskMemFree(uint32_t esp)    { free((void *)(uintptr_t)WU(0)); return 0; }
+
+/* ---- advapi32 minimal: the legacy CryptoAPI RNG path -----------------------
+ * BusyBox-w32 (and much MSVC/mingw code) seeds its PRNG at startup via the
+ * classic CryptAcquireContext + CryptGenRandom + CryptReleaseContext triple.
+ * We model exactly what those callers use — a non-NULL provider token and a
+ * buffer filled with random bytes — not a real cryptographic provider (no key
+ * containers, no algorithms; a program needing real crypto strength needs a
+ * real provider, which stays long-tail). Without this, BusyBox's first
+ * applet-dispatch aborts ("applet not found") because RNG seeding fails at
+ * startup, so *every* applet is unreachable.
+ *
+ * The bytes come from a self-contained xorshift seeded from host entropy — good
+ * enough for seeding a CLI PRNG (this is not a security boundary). */
+static uint64_t aret_rng_next(void) {
+    static uint64_t s = 0;
+    if (!s) {
+        struct timespec ts; clock_gettime(CLOCK_REALTIME, &ts);
+        s = ((uint64_t)ts.tv_sec * 1000000000ull + (uint64_t)ts.tv_nsec)
+          ^ ((uint64_t)(uintptr_t)&s << 16) ^ (uint64_t)getpid();
+        if (!s) s = 0x9e3779b97f4a7c15ull;
+    }
+    s ^= s << 13; s ^= s >> 7; s ^= s << 17;
+    return s;
+}
+
+/* CryptAcquireContextA(phProv, container, provider, provtype, flags) -> BOOL.
+ * Return a non-NULL pseudo-handle; the only contract callers check is success
+ * plus a usable handle to pass on to CryptGenRandom/CryptReleaseContext. */
+uint32_t aret_CryptAcquireContextA(uint32_t esp) {
+    uint32_t *phProv = (uint32_t *)WP(0);
+    if (phProv) *phProv = 0x43525950u; /* 'CRYP' — an opaque non-zero token */
+    return 1;
+}
+/* CryptGenRandom(hProv, dwLen, pbBuffer) -> BOOL. Fill the buffer with bytes. */
+uint32_t aret_CryptGenRandom(uint32_t esp) {
+    uint32_t len = WU(1);
+    unsigned char *buf = (unsigned char *)WP(2);
+    if (!buf) return 0;
+    for (uint32_t i = 0; i < len; i++) buf[i] = (unsigned char)(aret_rng_next() & 0xffu);
+    return 1;
+}
+/* CryptReleaseContext(hProv, flags) -> BOOL. Nothing to release. */
+uint32_t aret_CryptReleaseContext(uint32_t esp) { (void)esp; return 1; }

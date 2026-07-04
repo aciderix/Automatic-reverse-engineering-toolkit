@@ -294,6 +294,33 @@ uint32_t aret_lseek(uint32_t esp) {
     off_t r = lseek((int)arg(esp, 0), (int32_t)arg(esp, 1), (int)arg(esp, 2));
     return (uint32_t)r;
 }
+/* _filbuf(FILE*) — the SVID buffer-refill primitive the getc/getchar macro falls
+ * back to (mingw inlines `--_cnt >= 0 ? *_ptr++ : _filbuf(f)`). Our synthetic
+ * _iob streams carry no buffer, so serve exactly one byte per call straight from
+ * the fd and leave _cnt at 0, so the next getc re-enters here (unbuffered but
+ * correct). Returns the byte (0..255), or EOF (-1) at end/error with the _IOEOF
+ * flag set so feof() stays truthful. Without this the weak stub returned 0
+ * forever and every stdin read loop (wc, sort, head, …) spun endlessly instead
+ * of stopping at EOF. A real host FILE* (fopen) defers to the host CRT. */
+uint32_t aret_filbuf(uint32_t esp) {
+    uint32_t file = arg(esp, 0);
+    int fd = iob_fd(file);
+    if (fd < 0) return (uint32_t)fgetc((FILE *)(uintptr_t)file);
+    uint8_t *f = (uint8_t *)(uintptr_t)file;
+    unsigned char b;
+    ssize_t n = read(fd, &b, 1);
+    *(int32_t *)(f + 4) = 0;             /* _cnt stays 0 -> next getc re-enters */
+    if (n <= 0) { *(int32_t *)(f + 12) |= 0x10; return 0xFFFFFFFFu; /* _IOEOF, EOF */ }
+    return (uint32_t)b;
+}
+/* getchar() — one byte from stdin. Some CRT builds inline it to the _filbuf
+ * macro (handled above); others import the library entry point directly, so
+ * shim it (else the weak stub returns 0 forever and the read loop hangs, like
+ * the _filbuf gap). getc/fgetc/ungetc (taking a FILE*) are defined below. */
+uint32_t aret_getchar(uint32_t esp) {
+    (void)esp; unsigned char b;
+    return read(0, &b, 1) == 1 ? (uint32_t)b : 0xFFFFFFFFu;
+}
 uint32_t aret_isatty(uint32_t esp) { return (uint32_t)isatty((int)arg(esp, 0)); }
 /* _setmode(fd, mode): text/binary distinction is meaningless on Linux. Report the
  * previous mode as binary (O_BINARY = 0x8000 in msvcrt) so callers see success. */
@@ -488,12 +515,32 @@ uint32_t aret_fopen(uint32_t esp) {
 }
 
 uint32_t aret_fclose(uint32_t esp) {
-    return (uint32_t)fclose((FILE *)(uintptr_t)arg(esp, 0));
+    uint32_t file = arg(esp, 0);
+    /* A synthetic _iob std stream is not a host FILE* — handing it to fclose()
+     * dereferences our 32-byte struct as a glibc FILE and segfaults (busybox's
+     * exit cleanup fclose()s stdin/stdout, e.g. `rev`, `nl`). Nothing to close:
+     * the std fds outlive the process. Same guard as aret_fwrite/aret_fputs. */
+    if (iob_fd(file) >= 0) return 0;
+    return (uint32_t)fclose((FILE *)(uintptr_t)file);
 }
 
 uint32_t aret_fread(uint32_t esp) {
     void *ptr = (void *)(uintptr_t)arg(esp, 0);
-    return (uint32_t)fread(ptr, arg(esp, 1), arg(esp, 2), (FILE *)(uintptr_t)arg(esp, 3));
+    uint32_t size = arg(esp, 1), nmemb = arg(esp, 2), file = arg(esp, 3);
+    /* A synthetic _iob std stream is not a host FILE*: read its fd directly (host
+     * fread would deref our 32-byte struct as a glibc FILE and crash — od/cksum —
+     * or read garbage, corrupting output — base64). Returns whole items read. */
+    int fd = iob_fd(file);
+    if (fd >= 0) {
+        size_t want = (size_t)size * nmemb, got = 0;
+        while (got < want) {
+            ssize_t n = read(fd, (char *)ptr + got, want - got);
+            if (n <= 0) break;
+            got += (size_t)n;
+        }
+        return (uint32_t)(size ? got / size : 0);
+    }
+    return (uint32_t)fread(ptr, size, nmemb, (FILE *)(uintptr_t)file);
 }
 
 uint32_t aret_fwrite(uint32_t esp) {

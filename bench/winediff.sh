@@ -68,11 +68,14 @@ for src in "$CORPUS"/*.c; do
   if [ -f "$CORPUS/$name.args" ]; then
     while IFS= read -r line || [ -n "$line" ]; do pargs+=("$line"); done < "$CORPUS/$name.args"
   fi
+  # Optional stdin: winecorpus/NAME.in is fed identically to both engines, so the
+  # CRT stdin path (getchar -> _filbuf refill, fclose(stdin) on exit) is exercised.
+  infile="$CORPUS/$name.in"; [ -f "$infile" ] || infile=/dev/null
   # Oracle: real PE under Wine. Run from the temp dir so any files land there.
-  oracle="$(cd "$TMP" && wine "$TMP/$name.exe" "${pargs[@]}" 2>/dev/null | norm)"
+  oracle="$(cd "$TMP" && wine "$TMP/$name.exe" "${pargs[@]}" <"$infile" 2>/dev/null | norm)"
   # ARET: transpile + run the same PE natively (args after `--`).
   rm -rf "$TMP/out"
-  got="$(cd "$TMP" && "$ARET" "$TMP/$name.exe" --mode transpile --out-dir "$TMP/out" --run -- "${pargs[@]}" 2>"$TMP/aerr" \
+  got="$(cd "$TMP" && "$ARET" "$TMP/$name.exe" --mode transpile --out-dir "$TMP/out" --run -- "${pargs[@]}" <"$infile" 2>"$TMP/aerr" \
         | extract_aret | norm)"
   if [ "$oracle" = "$got" ]; then
     pass=$((pass+1)); echo "  ok    $name"
