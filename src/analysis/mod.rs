@@ -448,6 +448,95 @@ fn abs_indirect_slot(insn: &iced_x86::Instruction) -> Option<u64> {
     }
 }
 
+/// The `(slot, imm)` of a `mov dword [disp32], imm32` — an immediate stored into a
+/// fixed absolute address. When `slot` is a proven indirect-call slot (used by a
+/// `call [slot]` elsewhere), the stored code `imm` is the *runtime* function
+/// pointer that the static `abs_indirect_slot` read misses (a `.data` slot reads
+/// 0 statically). Busybox `od` installs its default no-op handler (a bare `ret`)
+/// this way: `movl $handler, g ; … ; call [g]`.
+fn abs_store_imm(insn: &iced_x86::Instruction) -> Option<(u64, u64)> {
+    use iced_x86::{Mnemonic, OpKind, Register};
+    if insn.mnemonic() == Mnemonic::Mov
+        && insn.op0_kind() == OpKind::Memory
+        && insn.memory_base() == Register::None
+        && insn.memory_index() == Register::None
+        && matches!(insn.op1_kind(), OpKind::Immediate32 | OpKind::Immediate32to64)
+    {
+        Some((insn.memory_displacement64(), insn.immediate(1)))
+    } else {
+        None
+    }
+}
+
+/// A code immediate loaded into a register that is then used — before the register
+/// is overwritten — as an indirect `call`/`jmp` target: `mov ebp,imm ; … ; call
+/// *ebp`. The register-indirect call through the just-loaded pointer is definitive
+/// proof `imm` is a function entry, the same strength as a stack-arg callback or a
+/// `call [slot]`, so it bypasses the prologue heuristic (the callee may be a bare
+/// `ret` or an FPO body). Busybox `cksum` selects its CRC variant this way.
+///
+/// The forward scan stays on the *straight-line* block from the `mov` (it stops at
+/// the first address gap, a return, any reassignment of the register, or — for a
+/// caller-saved register — an intervening call that would clobber it), so it can
+/// never attribute an unrelated later value to the call.
+fn reg_imm_reaches_indirect_call(
+    global: &BTreeMap<u64, Insn>,
+    mov: &Insn,
+    in_exec: &dyn Fn(u64) -> bool,
+) -> Option<u64> {
+    use iced_x86::{FlowControl, InstructionInfoFactory, Mnemonic, OpAccess, OpKind, Register};
+    let r = &mov.raw;
+    if r.mnemonic() != Mnemonic::Mov
+        || r.op0_kind() != OpKind::Register
+        || !matches!(r.op1_kind(), OpKind::Immediate32 | OpKind::Immediate32to64)
+    {
+        return None;
+    }
+    let reg = r.op0_register().full_register();
+    let imm = r.immediate(1);
+    if !in_exec(imm) {
+        return None;
+    }
+    let caller_saved = matches!(reg, Register::RAX | Register::RCX | Register::RDX);
+    let mut factory = InstructionInfoFactory::new();
+    let mut expected = mov.next_addr();
+    let mut budget = 48u32;
+    for (&addr, si) in global.range(expected..) {
+        if addr != expected || budget == 0 {
+            break; // left the straight-line block, or scanned far enough
+        }
+        budget -= 1;
+        let s = &si.raw;
+        // Indirect call/jmp through the same register — proven function entry.
+        if matches!(s.flow_control(), FlowControl::IndirectCall | FlowControl::IndirectBranch)
+            && s.op0_kind() == OpKind::Register
+            && s.op0_register().full_register() == reg
+        {
+            return Some(imm);
+        }
+        // A call clobbers caller-saved registers → the value can no longer be proven.
+        if caller_saved && matches!(s.flow_control(), FlowControl::IndirectCall | FlowControl::Call) {
+            return None;
+        }
+        // Any write to the register → it was reassigned before any indirect call.
+        for ur in factory.info(s).used_registers() {
+            if ur.register().full_register() == reg
+                && matches!(
+                    ur.access(),
+                    OpAccess::Write | OpAccess::CondWrite | OpAccess::ReadWrite | OpAccess::ReadCondWrite
+                )
+            {
+                return None;
+            }
+        }
+        if matches!(s.flow_control(), FlowControl::Return) {
+            return None;
+        }
+        expected = si.next_addr();
+    }
+    None
+}
+
 fn global_decode(
     prog: &Program,
     disasm: &Disassembler,
@@ -621,6 +710,12 @@ fn global_decode(
                     }
                 }
             }
+            // Absolute slots used as an indirect call/jmp target (`call [g]`) — a
+            // proven function-pointer variable. A code immediate stored into one
+            // (`mov [g], imm`) is the runtime function pointer the static
+            // `abs_indirect_slot` read misses when the slot lives in writable data.
+            let icall_slots: BTreeSet<u64> =
+                global.values().filter_map(|i| abs_indirect_slot(&i.raw)).collect();
             for insn in global.values() {
                 for v in imm_code_ptrs(&insn.raw) {
                     // Code immediates: a by-value callback — allow the leaf shape.
@@ -651,6 +746,22 @@ fn global_decode(
                         if in_exec(v) && !global.contains_key(&v) {
                             cands.insert(v);
                         }
+                    }
+                }
+                // A code immediate stored into a proven indirect-call slot
+                // (`mov [g], imm` where `call [g]` occurs) — the runtime function
+                // pointer (busybox `od`'s default no-op `ret` handler).
+                if let Some((slot, imm)) = abs_store_imm(&insn.raw) {
+                    if icall_slots.contains(&slot) && in_exec(imm) && !global.contains_key(&imm) {
+                        cands.insert(imm);
+                    }
+                }
+                // A code immediate loaded into a register then indirect-called
+                // (`mov reg, imm ; … ; call *reg`) — a function pointer selected in
+                // code (busybox `cksum`'s CRC variant). Proven, bypasses prologue.
+                if let Some(v) = reg_imm_reaches_indirect_call(&global, insn, &in_exec) {
+                    if !global.contains_key(&v) {
+                        cands.insert(v);
                     }
                 }
             }

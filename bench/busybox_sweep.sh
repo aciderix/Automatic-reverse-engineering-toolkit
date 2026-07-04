@@ -147,17 +147,20 @@ check "$TEXT"  sha256sum
 check "$TEXT"  sha512sum
 check $'aGVsbG8K' base64 -d
 check "$TEXT"  od -c
+check "$TEXT"  od -An -tx1
 
 # --- KNOWN GAPS (excluded from the gate; deeper than the CRT/kernel32 layer) ---
 # These applets are NOT yet bit-identical and are left out so the gate stays a
 # true regression signal. They are recorded here (not hidden) as the next targets
-# — all in ARET's function-recovery / lifting domain, not the HLE shim layer:
-#   grep, sed            — SIGSEGV inside the lifted regex engine (sub_42f6d4).
-#   cksum, od -An -tx1   — abort: indirect call to an *unrecovered* function
-#                          (0x41abec / 0x42f160) — analysis missed a call target.
-#   base64 (encode)      — wrong output (a lifted-code defect; the fread fix
-#                          corrected the stream read but the encode path still
-#                          diverges).
+# — all in ARET's lifting / ABI domain now, not function recovery (the immediate→
+# indirect-call recovery fix landed od -An -tx1 above):
+#   grep, sed   — SIGSEGV inside the lifted regex engine (sub_42f6d4).
+#   cksum       — SIGSEGV: an indirect call to the (now recovered) regparm CRC
+#                 helper 0x41abec, which also takes a *stack* argument (the CRC
+#                 table); the indirect-dispatch ABI mis-passes it. Distinct from
+#                 recovery — cksum went from "unrecovered" abort to this crash.
+#   base64      — wrong output on encode (a lifted-code defect; the fread fix
+#                 corrected the stream read but the encode path still diverges).
 # Re-including any of these once fixed is a one-line change here.
 # --- constant system info ------------------------------------------------------
 check "$E" uname
