@@ -3039,3 +3039,27 @@ binaires MSVC, pas seulement strings.exe.
   les appels post-opt, threading d'esp à travers les *valeurs* SSA) reste l'autre incrément ouvert.
 - **Régression** : produit **inchangé ce tour** (seuls tests/bench touchés) ; gate funcdiff PASS ; suite
   unpack verte (3 gardes : per-instruction, closure, opt).
+
+### funcdiff — adresses 32 bits + modélisation memcpy/rep-stos (couverture ×3 de l'opt-diff) ✅
+- **2026-07-04 — deux fixes qui débloquent une grande part de la logique applicative** (chacun committé
+  séparément, sain, teeth-checké). *Note infra* : conteneur réinitialisé 2× cette session ; travail
+  non-committé perdu puis refait — désormais **commit après chaque incrément**.
+- **(1) Adresses effectives masquées à 32 bits** (`mem_read`/`mem_write`, mode fonction-entière = cible
+  32 bits). L'interp calculait les adresses en 64 bits sans wrap ; `[edi-1]` lifté `(edi&0xffffffff)+
+  0xffffffff` lisait à `edi+0xffffffff` (33 bits, hors région → skip parasite). Le matériel et Unicorn
+  wrappent mod 2³² ; masquer reproduit exactement ça — **plus correct, jamais un faux verdict**. Débloque
+  toute fonction à accès pile déplacement-négatif.
+- **(2) memcpy/rep-stos modélisés** (`do_memcall`). Le lifter émet un `memcpy(edi,esi,n)` synthétique pour
+  `rep movs` et `__rep_stos*` pour `rep stos` (args explicites). L'interp exécute l'effet mémoire exact ;
+  Unicorn exécute l'instruction string → **comparable octet-à-octet**. Les deux différentiels (LIFT-closure
+  ET OPT-diff) acceptent ces appels → les fonctions à copie/zéro-init de structures (très fréquentes)
+  deviennent scorables. Copie forward octet-à-octet = `rep movsb` exact ; hors-région ou > 1 MiB → skip.
+- **Effet combiné mesuré (corpus gate, 0 divergence)** : **OPT-diff 3003 → 10581 scorées (×3,5)**
+  (busybox 600→2919, sqlite 2403→7662) ; LIFT-closure 11383 → 12369 (5954→6584 appels). Tout **SOUND**.
+- **Vérifié sain ET sensible** : fixture `rep_movsb_copy.exe` (copie 16 octets fixes entre buffers pile →
+  scorée vs Unicorn) + test `memcall_model_matches_unicorn` (0 divergence, non-vacant). Teeth-check :
+  perturber la copie `^1` → divergence `reg r0` (0x33 vs 0x34). Garde opt-diff `optimizer_preserves_
+  semantics_on_fixtures` **restaurée** (supprimée par mégarde en 5714558). Produit inchangé (test-only).
+- **Reste ouvert** : imports **dynamiques** (msvcrt/IAT) — Unicorn faute dessus (DLL non mappée) donc non
+  comparables en LIFT-closure ; modélisables en OPT-diff (pas d'Unicorn) via la closure SSA. Et le moteur
+  regex de grep reste derrière `malloc` (état) — modélisation d'allocateur = frontière plus lourde.
