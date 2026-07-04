@@ -3112,3 +3112,24 @@ binaires MSVC, pas seulement strings.exe.
   **retour de fonction mal modélisé** (classe « valeur fausse silencieuse »). C'est le prochain pas de
   forensics ciblée (une fonction, dataflow d'un pointeur). NB : les `mov $0x0,%edx` répétés (zéro de la
   demi-haute 64-bit après chaque op 32-bit) sont un artefact de codegen à surveiller dans la trace.
+
+### cksum — ROOT CAUSE affiné : PAS « filltable=0 », mais un DÉCALAGE d'arg de +4 (valeur 32-bit modélisée 64-bit) 🎯🎯
+- **2026-07-04 (suite) — le diagnostic du journal (« crc32_filltable=0 ») est FAUX ; le vrai est plus
+  général.** Preuves runtime (gdb sur le binaire natif) :
+  - `crc32_filltable` = **`sub_41ac18`** (contient le polynôme CRC `0xedb88320`). Il **EST appelé** (par
+    `sub_416574`) et **retourne un pointeur VALIDE `0x8c2a400`** — pas 0.
+  - La struct/pile de contexte CRC (sur `aret_stack`) : `+0x8=0xffffffff` (init CRC), **`+0xc=0`** (lu comme
+    base de table → NULL → crash), **`+0x10=0x8c2a400`** (= le retour de filltable !).
+  - Donc la table est **écrite à `+0x10`** mais **lue à `+0xc`** → **décalage de 4 octets**.
+- **Qui a raison ?** L'ORIGINAL `sub_41abec` lit la table via `mov 0xc(%esp),%esi` (4ᵉ **argument pile**,
+  offset `+0xc`). Le transpilé lit aussi `+0xc` ⇒ **la LECTURE est correcte**. C'est donc l'**APPELANT**
+  (`sub_416574`) qui a poussé l'argument table à `+0x10` au lieu de `+0xc` — **sur-décalage de +4**.
+- **Mécanisme (forte hypothèse)** : la table (un pointeur **32-bit**) transite par des **paires 64-bit
+  `eax:edx`** dans le transpilé (`mov %eax,-0x230(ebp); mov %edx,-0x22c(ebp); mov $0x0,%edx; …` — la
+  demi-haute forcée à 0 partout). Un argument 32-bit modélisé **64-bit** occupe **8 octets** au lieu de 4
+  sur la pile machine partagée ⇒ décale l'argument suivant de +4. **Bug GÉNÉRAL** (même famille que le
+  « esp pointe dans le buffer » de 7za) — bénéficierait à tout binaire poussant un tel argument.
+- **Reste (le fix)** : dans le lift/build de l'ABI shared-stack, un argument/valeur 32-bit ne doit occuper
+  que **4 octets** à la poussée sur la pile machine (pas la paire 64-bit). Localiser la poussée d'arg dans
+  `sub_416574` avant l'`aret_call` vers `sub_41abec`, corriger la largeur, revérifier par régression
+  complète (difftest + transpile-diff + winediff) puis re-tester `busybox cksum` = `3733384285 12`.
