@@ -3133,3 +3133,24 @@ binaires MSVC, pas seulement strings.exe.
   que **4 octets** à la poussée sur la pile machine (pas la paire 64-bit). Localiser la poussée d'arg dans
   `sub_416574` avant l'`aret_call` vers `sub_41abec`, corriger la largeur, revérifier par régression
   complète (difftest + transpile-diff + winediff) puis re-tester `busybox cksum` = `3733384285 12`.
+
+### cksum — tentative de fix : repro minimale NON reproduite → esp-drift spécifique au driver CRC (honnête)
+- **2026-07-04 (suite) — le fix proprement dit n'est PAS trouvé ; voici l'état exact pour ne pas repartir
+  de zéro.** Méthodo plan §1 : construire une **fixture minimale** avant de toucher au produit.
+  - `push` est lifté correctement (esp-=4, store int(32)) — pas la source.
+  - Fixture 1 (struct `{uint32 crc; ptr table;}` + appels directs) : transpile → **correct** (r=10).
+  - Fixture 2 (appel **indirect** `f(0xffffffff, buf, len, table)`, table = 4ᵉ arg pile) : transpile →
+    **correct** (r=14). Donc le motif simple « arg pointeur 4ᵉ position + premier arg 0xffffffff » ne
+    suffit pas à déclencher le décalage.
+- **Ce que ça dit** : le drift de 4 octets n'est **pas** un push/arg simple — c'est une **dérive d'esp
+  spécifique à la chaîne du driver CRC** de busybox (`sub_416574` stocke la table dans un local `[esp+0x28]`
+  (vérifié sur l'original) puis appelle `0x4334dc` = driver, qui itère et appelle le handler `sub_41abec`
+  avec la table en arg). Runtime : la table (0x8c2a400) est bien en mémoire à `0x8c28cf4`, mais `sub_41abec`
+  lit `0x8c28cf0` (−4). L'esp du guest dérive de 4 quelque part **entre le stockage (416574) et la lecture
+  (41abec)**, à travers `0x4334dc` — un `push`/`pop`/`ret N` mal apparié sur un des appels de la chaîne.
+- **Prochain pas précis** (session dédiée) : tracer l'esp guest le long de `416574 → 4334dc → … → 41abec`
+  (watchpoint/print de l'esp modélisé à chaque frontière d'appel) pour localiser l'appel où esp dérive de
+  4 vs l'original ; OU élargir la fixture au motif « driver qui itère et appelle un handler par bloc avec
+  la table héritée d'un local ». Repro : `busybox cksum` doit rendre `3733384285 12` (obtient segfault).
+  **Acquis solide et committé** : filltable OK (retour valide), diagnostic « filltable=0 » réfuté, drift
+  localisé à ±4 dans la chaîne driver — reste l'isolation exacte de l'esp mal apparié.
