@@ -2898,3 +2898,35 @@ binaires MSVC, pas seulement strings.exe.
   lifter ». Ce n'est **pas infini** (mesurable, borné), mais le **rythme ralentit** : la maille devient
   « une session = un bug profond général », plus « un binaire = 10 bugs faciles ». La discipline
   « borner puis pivoter dès qu'un bug n'est pas généralisable rapidement » est ce qui garde ça fini.
+
+### Accélérateur — funcdiff v0 : différentiel par FONCTION entière vs Unicorn (le « moment cpudiff » des bugs profonds) ✅ socle
+- **2026-07-04 — attaquer la classe profonde par un OUTIL, pas du gdb manuel.** Diagnostic de grep : la
+  méthode pinpoint C `-O0 -g` localise vite (crash exact, champ null), mais le dernier maillon (quel store
+  d'init a disparu) devient un trace multi-couches **non-déterministe** (adresses d'alloc qui bougent) —
+  exactement ce que le manuel fait mal. La réponse : étendre l'oracle différentiel de l'INSTRUCTION à la
+  FONCTION, sur les fonctions du vrai binaire.
+- **`src/cpudiff.rs` funcdiff v0** : exécute les bytes d'une fonction récupérée dans **Unicorn** et son IR
+  liftée dans l'**interpréteur**, depuis un état registres+mémoire **identique** (image PE + pile miroir),
+  et compare registres finaux + toute la mémoire. **Une divergence = un vrai bug de LIFT** — notamment un
+  **store droppé au lift** (Unicorn l'exécute, l'IR ne l'a pas → mémoire différente) = précisément la classe
+  grep/cksum, trouvée **sans forensics manuelle**.
+- **Sain par construction (principe sacré)** : appel / switch / instruction non modélisée / accès hors-image
+  / faute Unicorn / non-retour ⇒ état **skippé**, jamais un faux verdict. Additif à `Interp` (mémoire
+  multi-régions ; le chemin per-instruction, régions vides, est inchangé). Test-only (`#[cfg(unpack)]`),
+  **zéro effet sur le produit**.
+- **Garde de soundness committée** (`functions_match_unicorn_on_fixtures`, 0 divergence + assert
+  non-vacuous) : elle a **immédiatement attrapé un faux positif du harness lui-même** — un tail-call
+  (`jmp [mem]` lifté `Return(call)`) dont l'interp ignorait les effets du callee ; corrigé. C'est le
+  principe en action : l'oracle se prouve sain avant de croire ses verdicts.
+- **v0 = fonctions LEAF** (un appel → skip). Mesuré : **600 itérations scorées sur busybox, 0 divergence**
+  (les fonctions de calcul leaf sont déjà blindées par le per-instruction). **La valeur vient avec
+  l'extension CLOSURE** : interpréter récursivement les callees (Unicorn le fait déjà) pour atteindre les
+  fonctions **à appels** — c'est là que vivent grep (moteur regex), cksum (filltable), etc. C'est le
+  **prochain incrément** ; il transformera « heures de forensics réactive » en « la machine pointe
+  l'instruction mal-liftée ».
+- **Régression** : suite unit complète verte (60 lib dont cpudiff+funcdiff), build produit inchangé (code
+  test-only). Commit `a1fb0b6`.
+- **État des 4 bloqueurs profonds** (diagnostiqués cette session, à cueillir par funcdiff-closure) : grep/sed
+  (store d'init droppé, moteur regex), cksum (table filltable=0), 7za (esp/frame SEH), plink (récup
+  points-to). Le premier trois sont des bugs de lift/opt/data que funcdiff-closure devrait pointer ; plink
+  est de la récupération (autre axe).
