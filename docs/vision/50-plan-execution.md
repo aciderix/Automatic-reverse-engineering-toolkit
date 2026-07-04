@@ -3154,3 +3154,27 @@ binaires MSVC, pas seulement strings.exe.
   la table héritée d'un local ». Repro : `busybox cksum` doit rendre `3733384285 12` (obtient segfault).
   **Acquis solide et committé** : filltable OK (retour valide), diagnostic « filltable=0 » réfuté, drift
   localisé à ±4 dans la chaîne driver — reste l'isolation exacte de l'esp mal apparié.
+
+### cksum — forensics exhaustive : mécanisme cerné, trigger NON isolé, fix NON shippé (principe sacré)
+- **2026-07-04 (fin) — investigation approfondie, honnête sur la limite.** Le décalage est **réel et
+  confirmé au runtime** mais son déclencheur exact résiste à la réduction en fixture.
+- **Confirmé** : `sub_41abec` = bloc CRC `FAST_FUNC` busybox = `__attribute__((regparm(3),stdcall))`
+  (args eax=crc/edx=buf/ecx=len + 1 arg pile = table à `[esp+4]`, **`ret $0x4`**), appelé **indirectement**
+  dans une boucle driver. Il lit la table via `[esp+0xc]` après `push esi;push ebx` (= `[entry_esp+4]`).
+  Runtime esp aux appels successifs : **#1=0x8c28cf0** (lit la table correctement à 0x8c28cf4), **#2/#3=
+  0x8c28cec** (−4, puis stable) → à partir de #2, lit `0x8c28cf0` (≠ table) = 0. Décalage **ponctuel de −4
+  entre le 1ᵉʳ et le 2ᵉ appel**, pas une accumulation linéaire.
+- **Ruled out (4 fixtures minimales, toutes CORRECTES au transpile)** : (1) struct `{u32;ptr}` + appels
+  directs ; (2) appel indirect `f(0xffffffff,buf,len,table)` arg pile ; (3) `__stdcall` `ret 4` indirect en
+  boucle (-O2 ET -O0) ; (4) **exactement** `FAST_FUNC` `regparm(3)+stdcall` `ret 4` indirect + driver.
+  Aucune ne reproduit → le bug dépend d'un détail spécifique à la **chaîne multi-hop réelle** de busybox
+  (`416574 → 4334dc → … → 41abec`) non capturé.
+- **Fait de code** : le pop `ret N` n'est modélisé que pour les **imports** (`stdcall_pops`, `build.rs`
+  L299) ; les fonctions internes `ret N` s'appuient sur la compensation `sub esp,N` du compilateur (vérifié
+  au désassemblage). Le cas simple marche ; le cas busybox dérive — l'interaction exacte reste à trouver.
+- **Décision (principe sacré)** : **pas de fix produit shippé** sans repro + vérification. Un patch deviné
+  sur l'esp/frame (zone la plus sujette aux régressions) casserait probablement difftest/transpile-diff/
+  winediff — pire que rien. **Prochain pas** : tracer l'esp guest à CHAQUE frontière d'appel de la chaîne
+  `416574→4334dc→…→41abec` (entre l'appel #1 et #2 de 41abec) pour trouver le −4 ponctuel exact, OU
+  reproduire le driver multi-hop complet. Acquis solide committé : diagnostic « filltable=0 » réfuté,
+  décalage localisé, 4 hypothèses éliminées, mécanisme FAST_FUNC identifié.
