@@ -2968,3 +2968,19 @@ binaires MSVC, pas seulement strings.exe.
 - **Prochain** : lâcher funcdiff-closure sur busybox/grep/cksum (corpus non caché sur cet hôte) pour
   **pointer l'instruction mal-liftée** de la classe profonde (store d'init droppé du moteur regex, table
   `filltable=0`) — « la machine pointe le bug » au lieu du forensics gdb manuel.
+
+### funcdiff-closure lâché sur busybox + corpus binaires épinglé (jamais perdu) ✅/🔬
+- **2026-07-04 — les binaires du corpus sont committés** (négations `.gitignore` sur `bench/.cache/*` +
+  `README.md` provenance/sha256) pour survivre au conteneur éphémère : **busybox-w32** (grep/sed/cksum,
+  613 Ko), **sqlite3** MSVC strippé (1,1 Mo), **winetest.exe** WineHQ daily (87 Mo, 143 imports). Plus de
+  re-téléchargement perdu entre sessions.
+- **funcdiff-closure sur busybox** : **3457 itérations scorées, 2100 appels suivis, 0 divergence** vs
+  Unicorn (v0 feuilles-seules : ~600 scorées, 0 appel). La closure multiplie ~×3,5 la surface et exerce
+  2100 vrais appels — **le lift `build_ir` brut est sain** sur toutes les fonctions scorées de busybox.
+- **Insight de ciblage (0 divergence ≠ pas de bug ; ça dit *où il n'est pas*)** : les bugs profonds
+  grep/cksum ne sont donc **PAS dans le lift brut** des fonctions scorées. Ils sont soit (a) dans des
+  fonctions **skippées** (le moteur regex appelle `malloc`/imports → non-closure-modelable), soit (b) **en
+  aval de `build_ir`** — funcdiff teste l'IR **pré-SSA** ; un store supprimé par la **DCE/opt** ou une
+  faute de **SSA** n'y apparaît pas (l'interp ne modélise pas `Use(ValueId)`/`Phi`). **Prochaine frontière
+  funcdiff** : différencier l'IR **post-opt** (interpréteur SSA) pour couvrir la couche où vivent
+  probablement grep/cksum — incrément distinct et substantiel (à faire proprement, pas en fin de session).
