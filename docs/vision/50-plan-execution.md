@@ -2837,3 +2837,32 @@ binaires MSVC, pas seulement strings.exe.
   bugs stdin généraux** qu'aucun test synthétique ni sweep statique n'avait révélé. Le harness est
   désormais **porte de régression verte + outil de découverte répétable** — la 3ᵉ cible (après sqlite/Lua)
   systématiquement mesurée contre Wine.
+
+### Phase 3a — Récupération : immédiat-code atteignant un appel indirect (busybox od) ✅
+- **2026-07-04 — 1er gap busybox du harness attaqué : `cksum`/`od -An -tx1` abortaient** sur « indirect
+  call to unrecovered function » (`0x41abec`/`0x42f160`). Diagnostic (objdump + scan des pointeurs) : les
+  deux cibles sont des pointeurs de fonction **matérialisés comme IMMÉDIATS** dans le code, puis appelés
+  indirectement — mais leur callee n'a **pas de prologue reconnu** (`0x42f160` = un `ret` nu, handler
+  no-op ; `0x41abec` = une fonction regparm débutant `add edx,ecx`), donc `looks_like_func_start` les
+  rejetait, et le seed d'immédiats ne couvrait que la forme **push/mov-vers-pile** (callback par valeur).
+- **Deux formes, deux preuves ajoutées** (même force que `stack_arg_code_imm`/`abs_indirect_slot`, donc
+  contournant l'heuristique de prologue) :
+  1. **`mov reg, imm ; … ; call *reg`** (registre) — `reg_imm_reaches_indirect_call` : scan straight-line
+     **borné et sûr** depuis le `mov` (s'arrête au 1er gap d'adresse, un `ret`, une réécriture du registre
+     via `InstructionInfoFactory`, ou — registre caller-saved — un `call` qui le clobbe). Ne peut jamais
+     attribuer une valeur ultérieure au call. (busybox `cksum` choisit sa variante CRC ainsi.)
+  2. **`mov [g], imm ; … ; call [g]`** (slot global écrit au **runtime**) — `abs_store_imm` + l'ensemble
+     `icall_slots` : `abs_indirect_slot` ne lit que le contenu **statique** du slot (0 pour un `.data`) ;
+     un immédiat-code stocké dans un slot prouvé cible de `call [g]` est le pointeur runtime. (busybox
+     `od` installe son handler `ret`-nu par défaut ainsi.)
+- **Effet** : **`od -An -tx1` bit-identique à Wine**, ajouté à la batterie gardée du sweep → **60/60**.
+  `cksum` **avance** d'abort « non récupéré » à un **segfault distinct** : l'ABI de dispatch indirect
+  d'une fonction **regparm + argument pile** (la fonction CRC `0x41abec`, désormais récupérée, lit la
+  table CRC en `[esp+0xc]`) mis-passe l'arg pile. Chantier séparé (lifting/ABI, pas récupération) —
+  documenté dans le harness. (Ni sortie fausse dans un cas : cksum reste en crash, jamais un faux CRC.)
+- **Sûreté (une fausse entrée tronquerait une vraie fonction → miscompile)** : **difftest 271/271**,
+  **transpile-diff 4/4** (hash `19acad982194bf07` **inchangé**), **cpudiff vert**, **sqlite sweep
+  bit-identique** (récupération du vrai binaire MSVC intacte), **busybox sweep 60/60**. Général : bénéficie
+  à tout binaire choisissant un pointeur de fonction par immédiat (dispatch par option, handler par
+  défaut). Garde : le `od -An -tx1` du sweep (une callee `ret`-nu atteinte uniquement par immédiat→`call
+  [g]` ne se reproduit pas fidèlement en C mingw, d'où le guard end-to-end plutôt qu'une fixture synthétique).
