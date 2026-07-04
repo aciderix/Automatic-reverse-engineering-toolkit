@@ -155,10 +155,14 @@ check "$TEXT"  od -An -tx1
 # — all in ARET's lifting / ABI domain now, not function recovery (the immediate→
 # indirect-call recovery fix landed od -An -tx1 above):
 #   grep, sed   — SIGSEGV inside the lifted regex engine (sub_42f6d4).
-#   cksum       — SIGSEGV: an indirect call to the (now recovered) regparm CRC
-#                 helper 0x41abec, which also takes a *stack* argument (the CRC
-#                 table); the indirect-dispatch ABI mis-passes it. Distinct from
-#                 recovery — cksum went from "unrecovered" abort to this crash.
+#   cksum       — SIGSEGV in the (now recovered) regparm CRC helper 0x41abec. The
+#                 indirect-dispatch ABI is NOT at fault (verified in the generated
+#                 C: the caller stores the CRC-table stack arg and esp-4/offsets
+#                 are correct). Root: the table itself is 0 — it comes from a DIRECT
+#                 call `crc32_filltable` (0x41ac18) whose result, stored to the
+#                 caller frame ([esp+0x28]), is 0 at runtime (filltable mis-lift or
+#                 a frame issue). A deeper cksum-specific trace, no general lesson
+#                 yet. cksum went from an "unrecovered" abort to this crash.
 #   base64      — wrong output on encode (a lifted-code defect; the fread fix
 #                 corrected the stream read but the encode path still diverges).
 # Re-including any of these once fixed is a one-line change here.
