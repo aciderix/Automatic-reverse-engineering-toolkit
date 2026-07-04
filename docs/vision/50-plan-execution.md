@@ -3063,3 +3063,25 @@ binaires MSVC, pas seulement strings.exe.
 - **Reste ouvert** : imports **dynamiques** (msvcrt/IAT) — Unicorn faute dessus (DLL non mappée) donc non
   comparables en LIFT-closure ; modélisables en OPT-diff (pas d'Unicorn) via la closure SSA. Et le moteur
   regex de grep reste derrière `malloc` (état) — modélisation d'allocateur = frontière plus lourde.
+
+### Frontière 2 — closure SSA (opt-diff à travers les appels) : TENTÉE, DIAGNOSTIQUÉE, RETIRÉE (principe sacré) 🔬
+- **2026-07-04 — un oracle à faux positifs est pire que rien : la tentative n'est PAS shippée.** Design :
+  exposer `value_regs` (vid→registre) depuis `to_ssa`, et faire tenir à `run_ssa` un **fichier de
+  registres fantôme** (`self.regs`, MàJ à chaque `Assign` versionnant un registre) pour, au `call
+  Direct`, réutiliser l'interpréteur **pré-opt** register-based (`call_direct`→`run_closure`) sur le
+  callee — l'oracle pré-opt étant déjà validé bit-à-bit contre Unicorn.
+- **Symptôme** : la garde `optimizer_preserves_semantics_on_fixtures` **échoue** sur du code connu-bon
+  (`address_taken_callback.exe`, `f(a,b)=g(a)+g(b)` avec `g=ret` nu) — divergences `ret` ET une octet de
+  pile au **slot d'adresse de retour** (`0x10007ff8`, post-opt=0xd0 vs pré-opt=0x00). Le callee ayant
+  écrit des octets différents ⇒ il a reçu un **état différent** : c'est un **bug du HARNESS** (l'`esp`
+  fantôme au site d'appel diverge de celui du côté pré-opt), pas un bug d'opt (une miscompile d'opt
+  donnerait une valeur fausse avec pile identique).
+- **Cause profonde (non résolue rapidement)** : l'inconsistance vit à la **frontière** entre l'exécution
+  vid-based de `run_ssa` et l'exécution register-based de `run_closure` du callee — au minimum l'`esp`
+  fantôme, possiblement aussi les flags/xmm non-threadés que le callee lit à l'entrée. Threader **tout**
+  l'état CPU (GP + flags + xmm + esp) proprement à travers cette frontière est un chantier à part.
+- **Décision** : **retirée** (revert complet ; Frontier 1 memcpy/rep-stos + fix adresses-32b conservés,
+  déjà committés/verts). Conforme à la discipline « borner puis pivoter dès qu'un incrément n'est pas
+  sûr » et au principe sacré. **Reste ouvert** : closure SSA = session dédiée (threader l'état CPU complet
+  au call, tester par la garde opt + teeth-check avant de croire un verdict). L'opt-diff reste **leaf +
+  memcpy/rep-stos**, sain (10581 scorées, 0 divergence).
