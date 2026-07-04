@@ -14,7 +14,7 @@
 //! for the dynamic unpacker). Run: `cargo test --features unpack cpudiff`.
 #![cfg(feature = "unpack")]
 
-use crate::ir::types::{BinOp, CallTarget, Expr, FlagKind, Location, Stmt, Ty, UnOp};
+use crate::ir::types::{BinOp, CallTarget, Expr, FlagKind, IrFunction, Location, Stmt, Ty, UnOp};
 use std::collections::HashMap;
 use std::os::raw::{c_int, c_void};
 
@@ -98,6 +98,20 @@ struct Interp {
     temps: HashMap<u32, u64>,
     mem: Vec<u8>,       // mirror of the scratch data page [DATA_ADDR, DATA_ADDR+DATA_SIZE)
     xmm: [[u64; 2]; 8], // XMM lanes, mirroring CpuState
+    /// Whole-function mode (funcdiff): the mapped address space mirrored into
+    /// Unicorn (PE image + a stack). When non-empty, `mem_read`/`mem_write` use
+    /// these regions and the scratch page above is unused. A read/write outside
+    /// every region returns `None` → the state is skipped, never a false positive.
+    regions: Vec<Region>,
+}
+
+/// A mapped memory region for whole-function differencing, mirrored byte-for-byte
+/// into Unicorn so both engines start identical.
+#[derive(Clone)]
+struct Region {
+    base: u64,
+    data: Vec<u8>,
+    writable: bool,
 }
 
 /// Byte width of an integer Ty (1/2/4/8), or `None` for non-integer.
@@ -117,23 +131,50 @@ impl Interp {
             temps: HashMap::new(),
             mem,
             xmm: s.xmm,
+            regions: Vec::new(),
         }
     }
 
-    /// Read `n` little-endian bytes from the scratch page, or `None` if out of it.
+    /// Index of the region containing `[addr, addr+n)` wholly, if any.
+    fn region_of(&self, addr: u64, n: usize) -> Option<usize> {
+        self.regions.iter().position(|r| {
+            addr >= r.base && (addr - r.base) as usize + n <= r.data.len()
+        })
+    }
+
+    /// Read `n` little-endian bytes. In whole-function mode reads the mapped
+    /// regions; otherwise the single-instruction scratch page. `None` (→ skip)
+    /// when the access falls outside every mapped span.
     fn mem_read(&self, addr: u64, n: usize) -> Option<u64> {
-        let off = addr.checked_sub(DATA_ADDR)? as usize;
-        if off + n > self.mem.len() {
-            return None;
-        }
+        let (buf, off) = if !self.regions.is_empty() {
+            let ri = self.region_of(addr, n)?;
+            (&self.regions[ri].data, (addr - self.regions[ri].base) as usize)
+        } else {
+            let off = addr.checked_sub(DATA_ADDR)? as usize;
+            if off + n > self.mem.len() {
+                return None;
+            }
+            (&self.mem, off)
+        };
         let mut v = 0u64;
         for i in 0..n {
-            v |= (self.mem[off + i] as u64) << (8 * i);
+            v |= (buf[off + i] as u64) << (8 * i);
         }
         Some(v)
     }
 
     fn mem_write(&mut self, addr: u64, n: usize, val: u64) -> Option<()> {
+        if !self.regions.is_empty() {
+            let ri = self.region_of(addr, n)?;
+            if !self.regions[ri].writable {
+                return None; // a store into read-only image memory: not modelled here
+            }
+            let off = (addr - self.regions[ri].base) as usize;
+            for i in 0..n {
+                self.regions[ri].data[off + i] = (val >> (8 * i)) as u8;
+            }
+            return Some(());
+        }
         let off = addr.checked_sub(DATA_ADDR)? as usize;
         if off + n > self.mem.len() {
             return None;
@@ -258,6 +299,41 @@ impl Interp {
             // A branch, call, asm, … — not part of a single-instruction
             // arithmetic test; bail so the case is skipped rather than mis-scored.
             _ => None,
+        }
+    }
+
+    /// Interpret a whole lifted function's blocks, following control flow to a
+    /// `Return`. `None` (→ skip the state, never a false positive) on any
+    /// construct not modelled faithfully: a call, a switch, an `Asm` safety
+    /// valve, an out-of-region memory access, a missing block, or an over-long
+    /// run (a suspected model-side infinite loop).
+    fn run_function(&mut self, irf: &IrFunction) -> Option<()> {
+        // Entry block: the one at the function entry address, else the first.
+        let mut cur = irf
+            .blocks
+            .iter()
+            .find(|b| b.addr == irf.entry)
+            .or_else(|| irf.blocks.first())?
+            .id;
+        let mut budget = 200_000u32;
+        loop {
+            budget = budget.checked_sub(1)?;
+            let blk = irf.blocks.iter().find(|b| b.id == cur)?;
+            let mut next: Option<u32> = None;
+            for s in &blk.stmts {
+                match s {
+                    Stmt::Branch { cond, taken, fallthrough } => {
+                        let c = self.eval(cond)?;
+                        next = Some(if c != 0 { taken.0 } else { fallthrough.0 });
+                    }
+                    Stmt::Jump(t) => next = Some(t.0),
+                    Stmt::Return(_) => return Some(()),
+                    // Unmodelled control/effects → skip the whole function.
+                    Stmt::Switch { .. } | Stmt::CallStmt(_) | Stmt::Asm(_) => return None,
+                    other => self.exec(other)?,
+                }
+            }
+            cur = next?; // a block with no follow-able terminator → skip
         }
     }
 }
@@ -1154,6 +1230,242 @@ pub fn run(iters_per_insn: u32) -> Result<Vec<Mismatch>, String> {
     Ok(all)
 }
 
+// ==== whole-function differential (funcdiff) ===============================
+//
+// Extends the per-instruction oracle to whole recovered FUNCTIONS of a real
+// binary: run the function's bytes in Unicorn and its lifted IR in the
+// interpreter from an identical register + memory state, and compare the final
+// registers and memory. A divergence is a real *lift* bug — e.g. a store dropped
+// at lift: Unicorn executes it, the IR lacks it, so the memory differs. Sound by
+// construction: a call / switch / unmodelled instruction / out-of-image access /
+// Unicorn fault / non-return all make the state skipped — never a false verdict.
+// Leaf functions only for now (a call → skip); the call-closure extension (to
+// reach functions like busybox's regex engine) is the documented next step.
+
+/// Count of fully-scored (interp+Unicorn both cleanly returned) iterations —
+/// diagnostic, so a run can confirm it exercised functions rather than skipping.
+pub static FUNCDIFF_SCORED: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+const FN_STACK_BASE: u64 = 0x1000_0000;
+const FN_STACK_SIZE: usize = 0x1_0000;
+const FN_SENTINEL: u64 = 0xdead_0000; // unmapped return address: Unicorn stops here
+
+/// A per-function divergence between the lifted IR and Unicorn.
+pub struct FnMismatch {
+    pub func: u64,
+    pub what: String,
+    pub lifted: u64,
+    pub unicorn: u64,
+}
+
+fn expr_has_call(e: &Expr) -> bool {
+    match e {
+        Expr::Call { .. } => true,
+        Expr::Unary(_, a) => expr_has_call(a),
+        Expr::Binary(_, a, b) => expr_has_call(a) || expr_has_call(b),
+        Expr::Load { addr, .. } => expr_has_call(addr),
+        _ => false,
+    }
+}
+
+/// A function the interpreter can attempt end-to-end: no call/switch/asm and no
+/// call-valued expression. Others are skipped (sound).
+fn is_leaf_pure(irf: &IrFunction) -> bool {
+    for b in &irf.blocks {
+        for s in &b.stmts {
+            let bad = match s {
+                Stmt::CallStmt(_) | Stmt::Switch { .. } | Stmt::Asm(_) => true,
+                Stmt::Set { expr, .. } => expr_has_call(expr),
+                Stmt::Store { addr, value, .. } => expr_has_call(addr) || expr_has_call(value),
+                Stmt::Branch { cond, .. } => expr_has_call(cond),
+                // A tail-call (`jmp target` / `jmp [mem]`) is lifted as
+                // `Return(call)`: its callee has side effects Unicorn executes but
+                // the interpreter's `Return` ignores — reject so it is not scored.
+                Stmt::Return(Some(expr)) => expr_has_call(expr),
+                _ => false,
+            };
+            if bad {
+                return false;
+            }
+        }
+    }
+    true
+}
+
+/// Run `iters` random states through one whole recovered function, comparing the
+/// lifted IR (interpreter) against Unicorn. Empty result = matched or wholly
+/// skipped. ESP is not compared (the IR `Return` does not model the `ret` pop);
+/// everything else — the 7 other GP registers and all mapped memory — is.
+pub fn diff_function(
+    prog: &crate::loader::Program,
+    irf: &IrFunction,
+    iters: u32,
+    seed: &mut u64,
+) -> Vec<FnMismatch> {
+    let mut out = Vec::new();
+    if !is_leaf_pure(irf) || irf.blocks.is_empty() {
+        return out;
+    }
+    // One mirrored region over the whole PE image.
+    let lo = match prog.sections.iter().map(|s| s.address).min() {
+        Some(x) => x & !0xfff,
+        None => return out,
+    };
+    let hi = match prog.sections.iter().map(|s| s.address + s.data.len() as u64).max() {
+        Some(x) => (x + 0xfff) & !0xfff,
+        None => return out,
+    };
+    if hi <= lo || (hi - lo) > 0x400_0000 {
+        return out;
+    }
+    let mut img0 = vec![0u8; (hi - lo) as usize];
+    for s in &prog.sections {
+        let off = (s.address - lo) as usize;
+        img0[off..off + s.data.len()].copy_from_slice(&s.data);
+    }
+
+    let mut uc: *mut uc_engine = std::ptr::null_mut();
+    unsafe {
+        if uc_open(UC_ARCH_X86, UC_MODE_32, &mut uc) != 0 {
+            return out;
+        }
+        if uc_mem_map(uc, lo, img0.len(), UC_PROT_ALL) != 0
+            || uc_mem_map(uc, FN_STACK_BASE, FN_STACK_SIZE, UC_PROT_ALL) != 0
+        {
+            uc_close(uc);
+            return out;
+        }
+    }
+
+    for _ in 0..iters {
+        let mut next = || {
+            let mut x = *seed;
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            *seed = x;
+            x
+        };
+        let mut regs = [0u64; 8];
+        for r in 0..8 {
+            regs[r] = (next() as u32) as u64;
+        }
+        let esp = FN_STACK_BASE + (FN_STACK_SIZE as u64) / 2;
+        regs[4] = esp;
+        let mut stack = vec![0u8; FN_STACK_SIZE];
+        for b in stack.iter_mut() {
+            *b = next() as u8;
+        }
+        let soff = (esp - FN_STACK_BASE) as usize;
+        stack[soff..soff + 4].copy_from_slice(&(FN_SENTINEL as u32).to_le_bytes());
+        let mut flags = HashMap::new();
+        for f in [FlagKind::Cf, FlagKind::Zf, FlagKind::Sf, FlagKind::Of, FlagKind::Pf, FlagKind::Af] {
+            flags.insert(f, next() & 1);
+        }
+        let state = CpuState { regs, flags: flags.clone(), xmm: [[0; 2]; 8] };
+
+        // ---- interpret the lifted IR ----
+        let mut interp = Interp::new(&state, Vec::new());
+        interp.regions = vec![
+            Region { base: lo, data: img0.clone(), writable: true },
+            Region { base: FN_STACK_BASE, data: stack.clone(), writable: true },
+        ];
+        if interp.run_function(irf).is_none() {
+            continue;
+        }
+
+        // ---- run Unicorn from the same state ----
+        unsafe {
+            uc_mem_write(uc, lo, img0.as_ptr() as *const c_void, img0.len());
+            uc_mem_write(uc, FN_STACK_BASE, stack.as_ptr() as *const c_void, FN_STACK_SIZE);
+            for r in 0..8 {
+                let v = regs[r] as u32;
+                uc_reg_write(uc, UC_GP[r], &v as *const u32 as *const c_void);
+            }
+            let mut eflags: u32 = 0x2;
+            for (f, bp) in [
+                (FlagKind::Cf, 0u32), (FlagKind::Pf, 2), (FlagKind::Af, 4),
+                (FlagKind::Zf, 6), (FlagKind::Sf, 7), (FlagKind::Of, 11),
+            ] {
+                if flags.get(&f).copied().unwrap_or(0) != 0 {
+                    eflags |= 1 << bp;
+                }
+            }
+            uc_reg_write(uc, UC_X86_REG_EFLAGS, &eflags as *const u32 as *const c_void);
+            // Bounded run; stop when the function returns into the sentinel.
+            let err = uc_emu_start(uc, irf.entry, FN_SENTINEL, 200_000, 100_000);
+            if err != 0 {
+                continue; // fault / unmapped access — not scored
+            }
+            let mut eip: u32 = 0;
+            uc_reg_read(uc, UC_X86_REG_EIP, &mut eip as *mut u32 as *mut c_void);
+            if eip as u64 != FN_SENTINEL {
+                continue; // hit the instruction cap mid-run — not a clean return
+            }
+            FUNCDIFF_SCORED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            // Compare the 7 GP registers other than ESP.
+            for r in 0..8 {
+                if r == 4 {
+                    continue;
+                }
+                let mut uv: u32 = 0;
+                uc_reg_read(uc, UC_GP[r], &mut uv as *mut u32 as *mut c_void);
+                let lv = (interp.regs[r] & 0xffff_ffff) as u32;
+                if uv != lv {
+                    out.push(FnMismatch { func: irf.entry, what: format!("reg r{r}"), lifted: lv as u64, unicorn: uv as u64 });
+                }
+            }
+            // Compare all mapped memory (image + stack).
+            let mut uimg = vec![0u8; img0.len()];
+            uc_mem_read(uc, lo, uimg.as_mut_ptr() as *mut c_void, img0.len());
+            for i in 0..img0.len() {
+                if uimg[i] != interp.regions[0].data[i] {
+                    out.push(FnMismatch { func: irf.entry, what: format!("mem {:#x}", lo + i as u64), lifted: interp.regions[0].data[i] as u64, unicorn: uimg[i] as u64 });
+                    break;
+                }
+            }
+            let mut ustk = vec![0u8; FN_STACK_SIZE];
+            uc_mem_read(uc, FN_STACK_BASE, ustk.as_mut_ptr() as *mut c_void, FN_STACK_SIZE);
+            for i in 0..FN_STACK_SIZE {
+                if ustk[i] != interp.regions[1].data[i] {
+                    out.push(FnMismatch { func: irf.entry, what: format!("stack +{i:#x}"), lifted: interp.regions[1].data[i] as u64, unicorn: ustk[i] as u64 });
+                    break;
+                }
+            }
+        }
+        if !out.is_empty() {
+            break; // one witness per function is enough
+        }
+    }
+    unsafe {
+        uc_close(uc);
+    }
+    out
+}
+
+/// Load a 32-bit PE, recover its functions, and run the whole-function
+/// differential over each. Returns all divergences found.
+pub fn run_functions(path: &str, iters: u32) -> Result<Vec<FnMismatch>, String> {
+    let data = std::fs::read(path).map_err(|e| e.to_string())?;
+    let prog = crate::loader::Program::load(&data).map_err(|e| e.to_string())?;
+    if prog.bitness.bits() != 32 {
+        return Ok(Vec::new());
+    }
+    let disasm = crate::disasm::Disassembler::new(prog.bitness);
+    let result = crate::analysis::analyze(&prog, &disasm, true);
+    let refs: Vec<&crate::analysis::Function> = result.functions.iter().collect();
+    crate::ir::build::set_noreturn(crate::ir::build::compute_noreturn(&refs));
+    crate::ir::build::set_fp_returning(crate::ir::build::compute_fp_returning(&prog, &refs));
+    crate::ir::build::set_call_clobbers(crate::ir::build::compute_call_clobbers(&refs));
+    let mut seed: u64 = 0x1234_5678_9abc_def1;
+    let mut out = Vec::new();
+    for f in &result.functions {
+        let irf = crate::ir::build::build_ir(&prog, f);
+        out.extend(diff_function(&prog, &irf, iters, &mut seed));
+    }
+    Ok(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1178,5 +1490,59 @@ mod tests {
             }
             panic!("{msg}");
         }
+    }
+
+    #[test]
+    #[ignore] // diagnostic: `cargo test --features unpack funcdiff_busybox -- --ignored --nocapture`
+    fn funcdiff_busybox() {
+        let path = "bench/.cache/busybox-w32-FRP-5579-g5749feb35.exe";
+        if !std::path::Path::new(path).exists() {
+            eprintln!("SKIP (no busybox)");
+            return;
+        }
+        let ms = run_functions(path, 100).expect("funcdiff");
+        let scored = FUNCDIFF_SCORED.load(std::sync::atomic::Ordering::Relaxed);
+        eprintln!("funcdiff busybox: {scored} scored iters, {} divergence(s)", ms.len());
+        let mut seen = std::collections::BTreeSet::new();
+        for m in ms.iter().filter(|m| seen.insert(m.func)).take(20) {
+            eprintln!("  fn {:#x} {}: lifted={:#x} unicorn={:#x}", m.func, m.what, m.lifted, m.unicorn);
+        }
+    }
+
+    /// Whole-function differential must find no divergence on committed,
+    /// known-good PEs (soundness of the funcdiff harness itself) — and must
+    /// actually exercise some functions (non-vacuous). A real lift bug here
+    /// would be a genuine finding; a harness false-positive must be fixed.
+    #[test]
+    fn functions_match_unicorn_on_fixtures() {
+        let dir = std::path::Path::new("tests/m1/fixtures");
+        if !dir.exists() {
+            return;
+        }
+        FUNCDIFF_SCORED.store(0, std::sync::atomic::Ordering::Relaxed);
+        let mut all = Vec::new();
+        let mut entries: Vec<_> = std::fs::read_dir(dir)
+            .unwrap()
+            .filter_map(|e| e.ok().map(|e| e.path()))
+            .filter(|p| p.extension().map(|x| x == "exe").unwrap_or(false))
+            .collect();
+        entries.sort();
+        for p in &entries {
+            all.extend(run_functions(p.to_str().unwrap(), 100).expect("funcdiff harness"));
+        }
+        let scored = FUNCDIFF_SCORED.load(std::sync::atomic::Ordering::Relaxed);
+        if !all.is_empty() {
+            let mut msg = format!("{} funcdiff divergence(s):\n", all.len());
+            for m in all.iter().take(12) {
+                msg.push_str(&format!(
+                    "  fn {:#x} {}: lifted={:#x} unicorn={:#x}\n",
+                    m.func, m.what, m.lifted, m.unicorn
+                ));
+            }
+            panic!("{msg}");
+        }
+        // Non-vacuous: at least one fixture must have scored a leaf function, or
+        // the "no divergence" verdict proves nothing.
+        assert!(scored > 0, "funcdiff scored 0 functions — vacuous, harness not exercised");
     }
 }
