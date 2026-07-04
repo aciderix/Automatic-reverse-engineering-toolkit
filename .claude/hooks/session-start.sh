@@ -10,6 +10,33 @@ fi
 
 cd "${CLAUDE_PROJECT_DIR:-.}"
 
+# Resync the checkout to origin BEFORE building, so a restored/stale container
+# never resumes on an old base (the ephemeral container can come back behind what
+# a later session already pushed). Safe by construction: it only fast-forwards a
+# CLEAN working tree that is a strict ancestor of origin. If there are local
+# commits not on origin, or uncommitted changes, it leaves everything untouched
+# and warns — it never discards local work.
+branch="$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo '')"
+if [ -n "$branch" ] && [ "$branch" != "HEAD" ]; then
+  git fetch origin "$branch" 2>/dev/null || true
+  if git rev-parse --verify "origin/$branch" >/dev/null 2>&1; then
+    if [ -n "$(git status --porcelain)" ]; then
+      echo "git: working tree has uncommitted changes — skipping auto-sync" >&2
+    else
+      local_head="$(git rev-parse HEAD)"
+      origin_head="$(git rev-parse "origin/$branch")"
+      if [ "$local_head" != "$origin_head" ]; then
+        if git merge-base --is-ancestor "$local_head" "$origin_head"; then
+          git checkout -B "$branch" "origin/$branch" >/dev/null 2>&1 \
+            && echo "git: resynced $branch to origin ($origin_head)"
+        else
+          echo "git: local $branch has commits not on origin — NOT auto-syncing (reconcile manually)" >&2
+        fi
+      fi
+    fi
+  fi
+fi
+
 # Build (cached after first run; warms the release binary used by the benches).
 cargo build --release
 
