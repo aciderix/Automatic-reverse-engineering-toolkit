@@ -2866,3 +2866,35 @@ binaires MSVC, pas seulement strings.exe.
   à tout binaire choisissant un pointeur de fonction par immédiat (dispatch par option, handler par
   défaut). Garde : le `od -An -tx1` du sweep (une callee `ret`-nu atteinte uniquement par immédiat→`call
   [g]` ne se reproduit pas fidèlement en C mingw, d'où le guard end-to-end plutôt qu'une fixture synthétique).
+
+### Infra + sonde multi-binaires (7za, plink, grep/sed, cksum) : le point d'inflexion des gains faciles ✅/🔬
+- **2026-07-04 — deux acquis concrets + un signal stratégique fort.**
+- **Infra (`.claude/hooks/session-start.sh`)** : le hook SessionStart **resynchronise le checkout sur
+  origin AVANT de builder** (le conteneur éphémère peut revenir sur une base locale périmée — vécu en
+  début de session : HEAD local `ec72102` alors qu'origin était à `1dfa372`). Sûr : n'avance qu'un arbre
+  PROPRE ancêtre strict d'origin ; commits locaux non poussés ou arbre modifié ⇒ avertit sans rien
+  détruire. (Ne protège pas le non-commité → commit+push fréquents restent la règle.)
+- **Fix général (`src/ir/stdcall_pops.rs`, commit `0c24822`)** : la famille locale kernel32
+  (`LCMapStringA/W`, `CompareStringA/W`, `GetStringTypeA/W`, `FoldStringW`) était **absente** de la table
+  `@N` → `ret N` non modélisé → dérive esp possible pour tout binaire les appelant. Ajoutés (@N MSDN
+  vérifiés ; le corpus winetest les classe haute-fréquence). Sûr : winediff 44/44 (locale_cp les exerce),
+  difftest 271/271, transpile-diff 4/4 (hash inchangé), `table_is_sorted` vert.
+- **Sonde de 4 vrais binaires (mesurer où on en est)** — chacun transpile proprement (**0 appel direct
+  non résolu**), mais bute sur un bloqueur **profond**, pas un shim/récupération facile :
+  - **cksum** (busybox) : dispatch indirect regparm+arg-pile OK (vérifié dans le C généré) ; la table CRC
+    vient d'un `call crc32_filltable` dont le **résultat = 0** au runtime (dataflow/lift spécifique).
+  - **grep/sed** (busybox) : SIGSEGV dans le moteur regex lifté (`sub_42f6d4` : `mov (eax),eax`, eax=0x38
+    = deref d'un champ `*(base+0x38)`, base≈0) — **miscompile profond**.
+  - **7za** (MSVC) : à un `LCMapStringW` d'une fonction SEH construisant une table de 256 chars, **esp
+    pointe dans le buffer** au lieu de la liste d'args — erreur de modélisation **esp/frame**.
+  - **plink** (MSVC/clang) : abort sur appel indirect vers `0x450058` non récupéré — un pointeur de
+    fonction **isolé, atteint par adresse calculée/indexée** (ni immédiat, ni `call [slot]`, ni run≥3) =
+    le cas de récupération le plus dur (points-to).
+- **Signal stratégique (réponse à « on ne tourne pas en rond ? »)** : les **victoires générales faciles**
+  (shims OS/CRT, `stdcall_pops`, récupération simple) sont **quasi épuisées** — elles ont fait converger
+  Lua/strings/sqlite/busybox vite. Ce qui reste sur ces 4 binaires est un **ensemble borné de problèmes
+  PROFONDS** (miscompiles lifter, modélisation esp/frame SEH, récupération points-to) — chacun une
+  **session dédiée de forensics**. On passe de la phase « largeur de shims » à la phase « profondeur
+  lifter ». Ce n'est **pas infini** (mesurable, borné), mais le **rythme ralentit** : la maille devient
+  « une session = un bug profond général », plus « un binaire = 10 bugs faciles ». La discipline
+  « borner puis pivoter dès qu'un bug n'est pas généralisable rapidement » est ce qui garde ça fini.
