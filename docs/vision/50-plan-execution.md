@@ -2795,3 +2795,45 @@ binaires MSVC, pas seulement strings.exe.
 - **Leçon** : un vrai binaire varié a immédiatement exposé un bug printf **général** qu'aucun test synthétique
   ni sweep statique n'avait révélé. C'est le meilleur révélateur de « où on en est ». À systématiser
   (harness busybox).
+
+### 🎯 Axe 1×2 — harness busybox systématisé (`busybox_sweep.sh`) → 5 bugs stdin/RNG généraux ✅
+- **2026-07-04 — la leçon de l'entrée précédente exécutée : « systématiser le harness busybox ».**
+  Nouveau `bench/busybox_sweep.sh` (modèle `sqlite_sweep`) : télécharge le vrai **BusyBox-w32** (MinGW
+  strippé, ~390 applets en un PE, versionné/sha256/caché), le transpile, et diffe une **batterie
+  DÉTERMINISTE** d'invocations d'applets — **stdout + stderr + code de sortie**, octet pour octet — contre
+  le MÊME binaire sous Wine. **59/59 bit-identiques.** SKIP propre si wine/réseau/aret absents.
+- **Deux invariants rendant ARET et Wine comparables** (documentés dans le script) : (1) `argv[0]` doit
+  commencer par `busybox` — sinon BusyBox prend le basename pour l'applet (« applet not found »), donc les
+  deux moteurs sont invoqués via un fichier nommé `busybox.exe` ; (2) **aucun métacaractère glob**
+  (`* ? [`) dans les args — BusyBox-w32 est bâti avec `CRT_glob`, donc sous Wine `*` est expansé contre le
+  cwd (non déterministe) alors que le transpilé ne globbe pas → pas une vérité terrain stable.
+- **5 bugs HLE GÉNÉRAUX trouvés par le harness et corrigés** (couche shim, réutilisables sur tout binaire
+  MSVC/MinGW) :
+  1. **`CryptAcquireContextA`/`CryptGenRandom`/`CryptReleaseContext`** (advapi32) : BusyBox amorce son PRNG
+     au démarrage ; sans ces shims **AUCUN applet ne se route** (« applet not found »). + `stdcall_pops`.
+  2. **`_filbuf`** : primitive de remplissage derrière la macro `getc`/`getchar` ; le stub faible renvoyait
+     0 sans fin → **toute lecture stdin (wc, sort, head…) bouclait à l'infini** au lieu de s'arrêter à EOF.
+  3. **`getchar`** : idem quand le CRT importe l'entrée directe au lieu d'inliner `_filbuf`.
+  4. **`fclose(stdin)`** : un flux `_iob` synthétique passé au `fclose()` hôte déréférence notre struct de
+     32 o comme un `FILE` glibc → **segfault** (BusyBox `rev`/`nl` à la sortie). Même garde `iob_fd` que
+     `fwrite`/`fputs`.
+  5. **`fread(stdin)`** : même piège → crash (`od`/`cksum`) ou lecture corrompue (`base64`). Lecture fd
+     directe.
+  \+ **`GetEnvironmentVariableW`** (jumeau large de la variante A, retire le bruit d'un import non shimé).
+- **Bug `--run` corrigé (général)** : `--mode transpile --run` utilisait `Command::output()`, qui **ferme
+  le stdin de l'enfant** → tout programme lisant stdin lancé ainsi voyait un EOF immédiat (silencieusement
+  vidé). Désormais `Stdio::inherit()` — un `--run < fichier` ou une pipe atteint le programme.
+- **Nouvelle garde synthétique + convention `NAME.in`** : `winediff.sh` alimente `winecorpus/NAME.in` à
+  l'identique aux deux moteurs ; `crt_stdin.c` exerce `getchar`→EOF (chemin `_filbuf`) + `fclose(stdin)` →
+  **verrouille les fixes stdin dans la porte rapide** (indépendant de busybox). winediff **43→44**.
+- **Gaps connus documentés dans le harness** (domaine récupération/lifting, PAS le HLE — prochaine cible) :
+  `grep`/`sed` (SIGSEGV dans le moteur regex lifté), `cksum`/`od -tx1` (abort : appel indirect vers une
+  fonction **non récupérée**), `base64` (encode encore divergent). Exclus de la porte pour qu'elle reste un
+  vrai signal de régression ; **consignés, pas cachés**.
+- **Régression complète PASS** : `cargo test`, **difftest 271/271**, **transpile-diff 4/4** (hash
+  `19acad982194bf07` inchangé — HLE + `--run` + table de pops, zéro dérive du lifting), **cpudiff vert**
+  (2000 états aléatoires), **winediff 44/44**, **busybox sweep 59/59**.
+- **Leçon** : comme prédit, un vrai binaire lancé de bout en bout a immédiatement exposé un **cluster de
+  bugs stdin généraux** qu'aucun test synthétique ni sweep statique n'avait révélé. Le harness est
+  désormais **porte de régression verte + outil de découverte répétable** — la 3ᵉ cible (après sqlite/Lua)
+  systématiquement mesurée contre Wine.
