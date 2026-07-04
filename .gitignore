@@ -6,5 +6,15 @@ Cargo.lock.bak
 *.obj
 .claude/settings.local.json
 
-# sqlite_sweep downloads/caches the real sqlite3.exe here (large, versioned online)
-bench/.cache/
+# sqlite_sweep downloads/caches the real sqlite3.exe here (large, versioned online).
+# Ignore the *contents* (glob, not the dir itself) so specific files below can be
+# re-included — a directory-level ignore cannot be negated per-file.
+bench/.cache/*
+# ...except the fixed corpus binaries we commit so they survive an ephemeral
+# container (funcdiff/regression targets — sources are third-party and versioned
+# online, but pinned here so a session never loses them). Keep this list in sync
+# with bench/.cache/README.md.
+!bench/.cache/README.md
+!bench/.cache/busybox-w32-FRP-5579-g5749feb35.exe
+!bench/.cache/sqlite3-3400100.exe
+!bench/.cache/winetest.exe
