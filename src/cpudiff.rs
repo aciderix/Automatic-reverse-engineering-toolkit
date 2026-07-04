@@ -161,6 +161,12 @@ impl Interp {
     /// when the access falls outside every mapped span.
     fn mem_read(&self, addr: u64, n: usize) -> Option<u64> {
         let (buf, off) = if !self.regions.is_empty() {
+            // Whole-function mode is a 32-bit target: effective addresses wrap at
+            // 2^32 exactly as the hardware (and Unicorn) compute them. Without the
+            // mask, `[edi-1]` — lifted as `(edi & 0xffffffff) + 0xffffffff` — reads
+            // at `edi + 0xffffffff` (a 33-bit value out of every region → a
+            // spurious skip) instead of `edi - 1`.
+            let addr = addr & 0xffff_ffff;
             let ri = self.region_of(addr, n)?;
             (&self.regions[ri].data, (addr - self.regions[ri].base) as usize)
         } else {
@@ -179,6 +185,7 @@ impl Interp {
 
     fn mem_write(&mut self, addr: u64, n: usize, val: u64) -> Option<()> {
         if !self.regions.is_empty() {
+            let addr = addr & 0xffff_ffff; // 32-bit effective-address wrap (see mem_read)
             let ri = self.region_of(addr, n)?;
             if !self.regions[ri].writable {
                 return None; // a store into read-only image memory: not modelled here
@@ -2049,6 +2056,41 @@ pub fn run_functions_opt(path: &str, iters: u32) -> Result<Vec<FnMismatch>, Stri
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The optimizer differential (pre-opt vs post-opt SSA) must find no divergence
+    /// on committed, known-good PEs — SSA construction + every optimizer pass must
+    /// preserve semantics — and must actually score functions (non-vacuous). A
+    /// divergence here is a real SSA/opt bug; a harness false-positive must be fixed.
+    #[test]
+    fn optimizer_preserves_semantics_on_fixtures() {
+        let dir = std::path::Path::new("tests/m1/fixtures");
+        if !dir.exists() {
+            return;
+        }
+        FUNCDIFF_OPT_SCORED.store(0, std::sync::atomic::Ordering::Relaxed);
+        let mut entries: Vec<_> = std::fs::read_dir(dir)
+            .unwrap()
+            .filter_map(|e| e.ok().map(|e| e.path()))
+            .filter(|p| p.extension().map(|x| x == "exe").unwrap_or(false))
+            .collect();
+        entries.sort();
+        let mut all = Vec::new();
+        for p in &entries {
+            all.extend(run_functions_opt(p.to_str().unwrap(), 100).expect("opt-diff harness"));
+        }
+        if !all.is_empty() {
+            let mut msg = format!("{} optimizer divergence(s):\n", all.len());
+            for m in all.iter().take(12) {
+                msg.push_str(&format!(
+                    "  fn {:#x} {}: post-opt={:#x} pre-opt={:#x}\n",
+                    m.func, m.what, m.lifted, m.unicorn
+                ));
+            }
+            panic!("{msg}");
+        }
+        let scored = FUNCDIFF_OPT_SCORED.load(std::sync::atomic::Ordering::Relaxed);
+        assert!(scored > 0, "optimizer differential scored 0 functions -- vacuous");
+    }
 
     /// Corpus gate (run via `bench/funcdiff.sh`): both differentials — the lifter
     /// closure (vs Unicorn) and the optimizer diff (pre-opt vs post-opt SSA) — must
