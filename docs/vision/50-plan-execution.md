@@ -3085,3 +3085,30 @@ binaires MSVC, pas seulement strings.exe.
   sûr » et au principe sacré. **Reste ouvert** : closure SSA = session dédiée (threader l'état CPU complet
   au call, tester par la garde opt + teeth-check avant de croire un verdict). L'opt-diff reste **leaf +
   memcpy/rep-stos**, sain (10581 scorées, 0 divergence).
+
+### Pivot cible réelle — cksum (busybox) : crash LOCALISÉ à l'instruction (base de table CRC = NULL) 🎯
+- **2026-07-04 — repro concrète depuis le busybox committé.** Décision : après la saturation de funcdiff
+  (0 divergence partout, bugs profonds derrière imports), pivot vers l'objectif nord (convertir un vrai
+  binaire). cksum = bloqueur le plus **borné** (« table CRC = 0 » du journal). Repro :
+  ```
+  aret --mode transpile --out-dir T busybox-w32-...exe      # OK (app 11 Mo)
+  cp T/app /tmp/busybox && printf 'hello world\n' | /tmp/busybox cksum
+  # attendu (wine)   : 3733384285 12
+  # obtenu           : SEGFAULT (rc=139)   ;  `busybox echo` marche (conversion OK par ailleurs)
+  ```
+  (Dispatch multi-appel : le binaire doit s'appeler `busybox*` — `basename(argv[0])` sélectionne le
+  multiplexeur ; sinon « applet not found ».)
+- **Localisation à l'instruction** (gdb sur le binaire natif) : SIGSEGV dans `sub_41abec+637`,
+  `mov (%eax),%eax` avec **`eax=0x2e0`**, atteint via 2 dispatches indirects
+  (`sub_45b0fc → [aret_call] sub_416574 → [aret_call] sub_41abec`). Contexte = **boucle CRC** :
+  `... and $0xff,%eax (index octet) ; shl $2,%eax (×4) ; add %esi,%eax (base table) ; mov (%eax),%eax
+  (= table[octet])`. Registres au crash : **`esi=0`** ⇒ base de la table CRC **NULLE** ⇒
+  `*(0 + 0xb8*4=0x2e0)` ⇒ segfault.
+- **Confirme le diagnostic « crc32_filltable = 0 » du journal, au niveau instruction.** `esi ←`
+  `mov %eax,%esi @822f2f0 ← eax = [ebp-0x38]` (pointeur de table, paire 64-bit avec demi-haute forcée à
+  0) **= 0**. La table CRC (globale remplie par `crc32_filltable`, ou son retour) n'est jamais posée.
+- **Reste (trace du root cause)** : remonter où `[ebp-0x38]` est stocké dans `sub_41abec` (paramètre, ou
+  retour d'un `call` à la fonction filltable) et pourquoi il vaut 0 — un **store d'init droppé** ou un
+  **retour de fonction mal modélisé** (classe « valeur fausse silencieuse »). C'est le prochain pas de
+  forensics ciblée (une fonction, dataflow d'un pointeur). NB : les `mov $0x0,%edx` répétés (zéro de la
+  demi-haute 64-bit après chaque op 32-bit) sont un artefact de codegen à surveiller dans la trace.
