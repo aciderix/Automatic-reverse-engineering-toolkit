@@ -3244,3 +3244,36 @@ binaires MSVC, pas seulement strings.exe.
 - **Bilan** : la frontière cksum est fermée proprement. Cause racine prouvée, fixe minimal et borné
   (direct N constant / indirect lookup runtime, gardé par `has_callee_pops`), repro committée, régression
   intégrale verte. Aucune sortie fausse présentée comme correcte ; le principe sacré est tenu.
+
+### busybox `wc` (+ sort/head/od/…) : FILE msvcrt-layout, fd-backed → getc/putc inlinés marchent ✅ FAIT
+- **2026-07-05 — crash SIGSEGV général sur les applets à stdio-fichier.** `busybox wc <fichier>`
+  segfaultait sur `movzbl (%eax),%eax` avec **`eax=0xfbad2488`** = le `_flags` `_IO_MAGIC` d'un **FILE
+  glibc**. Cause racine : le CRT msvcrt statique **inline `getc`/`putc`** en accès directs aux champs du
+  FILE (`--f->_cnt >= 0 ? *f->_ptr++ : _filbuf(f)` — `_ptr`@0, `_cnt`@4, layout msvcrt), mais `aret_fopen`
+  rendait un **FILE glibc hôte** (offset 0 = flags `0xfbad…`, pas `_ptr`) → le getc inliné déréférençait
+  la valeur de flags comme un pointeur → crash. Les flux `_iob` (stdin/out/err) étaient déjà en layout
+  msvcrt (d'où `wc < fichier` marchait), mais **pas** les fichiers `fopen`.
+- **Fix général (`runtime/aret_hle/aret_hle.c`)** : **tous** les FILE de la HLE sont désormais des structs
+  **msvcrt-layout** (32 o : `_ptr`/`_cnt`/`_base`/`_flag`/`_file`/pushback), **adossés à un fd** et
+  **non bufferisés** — on garde `_cnt ≤ 0` pour que le macro inliné défère toujours à `_filbuf`/`_flsbuf`,
+  qui font un `read`/`write` d'un octet sur le fd. `fopen`/`freopen`/`tmpfile`/`fdopen` allouent dans un
+  pool de FILE (fd via `open`) ; `file_fd()` reconnaît _iob **et** pool (fd à l'offset 16) ; toutes les
+  fonctions stdio (`fread`/`fwrite`/`fgets`/`fputs`/`getc`/`fgetc`/`ungetc`/`feof`/`ferror`/`fseek`/`ftell`/
+  `rewind`/`fflush`/`fclose`) opèrent sur le fd — **plus aucun FILE glibc hôte**. Ajout de `_flsbuf`
+  (fallback putc inliné), `_fdopen`, et une **pushback ungetc 1 octet** (offset 20, stockée `char+1` pour
+  qu'un slot zéro = vide) partagée par getc/fgets/fread. Bug annexe corrigé : **`putc`** importé par nom
+  (non inliné selon la version/opt du compilo) n'avait pas de shim (`aret_putc` = `aret_fputc`) → fichier
+  jamais écrit. Le modèle unifie _iob et fichiers : un seul chemin, testé.
+- **Effet** : `busybox wc` (fichier ET stdin) = **bit-identique à l'original sous wine** ; cat/head/sort/
+  nl/od/cksum/md5sum idem. Bénéficie à **tout** binaire msvcrt qui lit/écrit un fichier via getc/putc
+  inlinés (la classe entière des outils Unix-like statiquement liés msvcrt).
+- **Garde permanent** : nouveau programme corpus `bench/winecorpus/stdio_getc.c` — écrit un fichier par
+  `putc` en boucle (→ `_flsbuf`), le relit par `getc` (→ `_filbuf`), teste `ungetc`+`rewind`. Il **a
+  attrapé** le gap `putc`-non-shimé (que le test applet manuel avait manqué). = preuve d'indépendance +
+  CI permanent dans le dépôt.
+- **Régression complète PASS** : difftest 271/271, in-place 3/3, magicdiv 2³², funcdiff corpus (0
+  divergence), SMT 11/11, recompilabilité 100 %, **winediff 45/45** (les 44 existants + `stdio_getc`),
+  cargo test (dont fixture `file_io` fopen/fread/fseek) vert. cksum (fix précédent) inchangé.
+- *Reste (sweep, tâche suivante)* : `uniq <fichier>` lit stdin au lieu du fichier (argv/getopt, **pas**
+  stdio — `uniq < fichier` marche) ; `tac` sort correct mais imprime un message `ioctl` parasite sur
+  stderr (ENOTTY sur le fd fichier). Distincts du stdio, à traiter applet par applet.

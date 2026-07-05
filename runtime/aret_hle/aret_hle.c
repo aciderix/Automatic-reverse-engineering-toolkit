@@ -34,8 +34,8 @@ static inline uint64_t arg64(uint32_t esp, int i) {
 }
 
 /* stdio routing (defined with the CRT shims below; the file subsystem above uses
- * them to send writes to a synthetic `_iob` stream to the right fd). */
-static int iob_fd(uint32_t file);
+ * them to send writes to a synthetic stream to the right fd). */
+static int file_fd(uint32_t file);
 static void stdio_write(uint32_t file, const char *buf, size_t len);
 
 /* ------------------------------------------------------------------ */
@@ -215,28 +215,74 @@ uint32_t aret_printf(uint32_t esp) {
     return (uint32_t)o;
 }
 
-/* Synthetic msvcrt `_iob` (stdin/out/err FILE array). The CRT computes
- * `&_iob[idx]`; we only need the address arithmetic to recover idx -> fd. */
+/* Synthetic msvcrt `_iob` (stdin/out/err FILE array) + a pool for fopen'd files.
+ * Statically-linked msvcrt CRT code *inlines* getc/putc against the FILE's own
+ * fields (`--_cnt >= 0 ? *_ptr++ : _filbuf(f)`), so EVERY FILE the guest sees must
+ * have the msvcrt 32-bit layout — not a host glibc FILE (whose offset 0 holds the
+ * `_IO_MAGIC` flags word 0xfbad…, which the inlined getc would deref as `_ptr` and
+ * crash: BusyBox `wc`/`sort`/`head` on a real file). So fopen hands out one of our
+ * own msvcrt-layout structs, fd-backed and unbuffered (we keep `_cnt <= 0` so the
+ * inlined macro always defers to `_filbuf`/`_flsbuf`, which do a raw fd read/write).
+ * msvcrt FILE: { char* _ptr(0); int _cnt(4); char* _base(8); int _flag(12);
+ * int _file(16); int _charbuf(20); … }. We repurpose `_charbuf`(20) as a 1-byte
+ * ungetc pushback, stored as (char+1) so a zero-initialised slot means "empty". */
 #define ARET_FILE_SIZE 32
+#define ARET_F_CNT   4
+#define ARET_F_FLAG  12   /* _IOEOF=0x10, _IOERR=0x20 */
+#define ARET_F_FILE  16
+#define ARET_F_UNGOT 20   /* (pushback char + 1); 0 = none */
 static uint8_t aret_iob[3 * ARET_FILE_SIZE];
+#define ARET_NDYN 64
+static uint8_t aret_dynfile[ARET_NDYN * ARET_FILE_SIZE]; /* fopen/tmpfile/fdopen */
+static uint8_t aret_dyn_used[ARET_NDYN];
 
-/* fd for a FILE* that is one of our _iob entries, else -1 (a real FILE*). */
-static int iob_fd(uint32_t file) {
-    uintptr_t base = (uintptr_t)aret_iob, f = (uintptr_t)file;
-    if (f >= base && f < base + sizeof(aret_iob)) {
-        return (int)((f - base) / ARET_FILE_SIZE); /* 0/1/2 */
-    }
+/* fd for a FILE* that is one of our synthetic streams (std _iob or an fopen'd pool
+ * entry), else -1. std entries derive the fd from the array index (valid even
+ * before `__p__iob` runs); pool entries carry the real fd at `_file`(offset 16). */
+static int file_fd(uint32_t file) {
+    uintptr_t f = (uintptr_t)file, a = (uintptr_t)aret_iob, b = (uintptr_t)aret_dynfile;
+    if (f >= a && f < a + sizeof(aret_iob)) return (int)((f - a) / ARET_FILE_SIZE); /* 0/1/2 */
+    if (f >= b && f < b + sizeof(aret_dynfile)) return *(int32_t *)(uintptr_t)(f + ARET_F_FILE);
     return -1;
 }
 
-static void stdio_write(uint32_t file, const char *buf, size_t len) {
-    int fd = iob_fd(file);
-    if (fd >= 0) {
-        ssize_t w = write(fd, buf, len);
-        (void)w;
-    } else if (file) {
-        fwrite(buf, 1, len, (FILE *)(uintptr_t)file);
+/* Allocate an msvcrt-layout FILE bound to `fd` (unbuffered). 0 if the pool is full. */
+static uint32_t alloc_dynfile(int fd) {
+    for (int i = 0; i < ARET_NDYN; i++) {
+        if (!aret_dyn_used[i]) {
+            aret_dyn_used[i] = 1;
+            uint8_t *f = aret_dynfile + (size_t)i * ARET_FILE_SIZE;
+            memset(f, 0, ARET_FILE_SIZE);
+            *(int32_t *)(f + ARET_F_FILE) = fd;
+            return (uint32_t)(uintptr_t)f;
+        }
     }
+    return 0;
+}
+static void free_dynfile(uint32_t file) {
+    uintptr_t f = (uintptr_t)file, b = (uintptr_t)aret_dynfile;
+    if (f >= b && f < b + sizeof(aret_dynfile))
+        aret_dyn_used[(f - b) / ARET_FILE_SIZE] = 0;
+}
+
+/* One byte from a synthetic stream, honouring a pending ungetc pushback; -1 at
+ * EOF/error (sets _IOEOF so feof() stays truthful). The single primitive behind
+ * getc/fgetc/fgets/_filbuf, so ungetc composes with all of them. */
+static int pull_byte(uint32_t file) {
+    int fd = file_fd(file);
+    if (fd < 0) return -1;
+    uint8_t *f = (uint8_t *)(uintptr_t)file;
+    int32_t *ung = (int32_t *)(f + ARET_F_UNGOT);
+    if (*ung) { int c = *ung - 1; *ung = 0; return c; }
+    unsigned char b;
+    ssize_t n = read(fd, &b, 1);
+    if (n <= 0) { *(int32_t *)(f + ARET_F_FLAG) |= 0x10; return -1; }
+    return b;
+}
+
+static void stdio_write(uint32_t file, const char *buf, size_t len) {
+    int fd = file_fd(file);
+    if (fd >= 0) { ssize_t w = write(fd, buf, len); (void)w; }
 }
 
 uint32_t aret_vfprintf(uint32_t esp) {
@@ -273,8 +319,8 @@ uint32_t aret_p__iob(uint32_t esp) {
     return (uint32_t)(uintptr_t)aret_iob;
 }
 uint32_t aret_fileno(uint32_t esp) {
-    int fd = iob_fd(arg(esp, 0));
-    return fd >= 0 ? (uint32_t)fd : (uint32_t)fileno((FILE *)(uintptr_t)arg(esp, 0));
+    int fd = file_fd(arg(esp, 0));
+    return (uint32_t)fd;
 }
 uint32_t aret_write(uint32_t esp) {
     ssize_t r = write((int)arg(esp, 0), (const void *)(uintptr_t)arg(esp, 1), (size_t)arg(esp, 2));
@@ -304,13 +350,24 @@ uint32_t aret_lseek(uint32_t esp) {
  * of stopping at EOF. A real host FILE* (fopen) defers to the host CRT. */
 uint32_t aret_filbuf(uint32_t esp) {
     uint32_t file = arg(esp, 0);
-    int fd = iob_fd(file);
-    if (fd < 0) return (uint32_t)fgetc((FILE *)(uintptr_t)file);
+    int c = pull_byte(file);             /* honours ungetc, sets _IOEOF at end   */
     uint8_t *f = (uint8_t *)(uintptr_t)file;
-    unsigned char b;
-    ssize_t n = read(fd, &b, 1);
-    *(int32_t *)(f + 4) = 0;             /* _cnt stays 0 -> next getc re-enters */
-    if (n <= 0) { *(int32_t *)(f + 12) |= 0x10; return 0xFFFFFFFFu; /* _IOEOF, EOF */ }
+    if (file_fd(file) >= 0) *(int32_t *)(f + ARET_F_CNT) = 0; /* _cnt=0 -> re-enter */
+    return c < 0 ? 0xFFFFFFFFu : (uint32_t)c;
+}
+/* _flsbuf(c, FILE*) — the putc/putchar macro's write-side fallback (mingw inlines
+ * `--_cnt >= 0 ? *_ptr++ = c : _flsbuf(c, f)`). Unbuffered: write the byte straight
+ * to the fd and keep _cnt at 0 so the next putc re-enters here. Returns c, or EOF. */
+uint32_t aret_flsbuf(uint32_t esp) {
+    int c = (int)arg(esp, 0);
+    uint32_t file = arg(esp, 1);
+    int fd = file_fd(file);
+    if (fd < 0) return 0xFFFFFFFFu;
+    unsigned char b = (unsigned char)c;
+    ssize_t w = write(fd, &b, 1);
+    uint8_t *f = (uint8_t *)(uintptr_t)file;
+    *(int32_t *)(f + ARET_F_CNT) = 0;
+    if (w != 1) { *(int32_t *)(f + ARET_F_FLAG) |= 0x20; return 0xFFFFFFFFu; }
     return (uint32_t)b;
 }
 /* getchar() — one byte from stdin. Some CRT builds inline it to the _filbuf
@@ -341,6 +398,9 @@ uint32_t aret_fputc(uint32_t esp) {
     stdio_write(arg(esp, 1), &c, 1);
     return (uint8_t)c;
 }
+/* putc(c, stream) is fputc; _putc/_fputc are the same. When not inlined to the
+ * _flsbuf macro (compiler/opt-level dependent) the CRT imports it by name. */
+uint32_t aret_putc(uint32_t esp) { return aret_fputc(esp); }
 
 uint32_t aret_vprintf(uint32_t esp) {
     const char *fmt = (const char *)(uintptr_t)arg(esp, 0);
@@ -504,133 +564,154 @@ static int path_is_write_mode(const char *mode) {
     return mode && (strchr(mode, 'w') || strchr(mode, 'a') || strchr(mode, '+'));
 }
 
+/* Translate a POSIX-ish fopen mode string to open(2) flags. */
+static int fopen_mode_flags(const char *mode) {
+    if (!mode) return O_RDONLY;
+    int rw = 0, has_plus = strchr(mode, '+') != 0;
+    switch (mode[0]) {
+        case 'r': rw = has_plus ? O_RDWR : O_RDONLY; break;
+        case 'w': rw = (has_plus ? O_RDWR : O_WRONLY) | O_CREAT | O_TRUNC; break;
+        case 'a': rw = (has_plus ? O_RDWR : O_WRONLY) | O_CREAT | O_APPEND; break;
+        default:  rw = O_RDONLY; break;
+    }
+    return rw;
+}
+
 uint32_t aret_fopen(uint32_t esp) {
     const char *name = (const char *)(uintptr_t)arg(esp, 0);
     const char *mode = (const char *)(uintptr_t)arg(esp, 1);
     char path[1024];
     translate_path(name, path, sizeof path);
     if (path_is_write_mode(mode)) make_parents(path);
-    FILE *f = fopen(path, mode ? mode : "rb");
-    return (uint32_t)(uintptr_t)f;
+    int fd = open(path, fopen_mode_flags(mode), 0666);
+    if (fd < 0) return 0;                       /* NULL: fopen failed */
+    uint32_t f = alloc_dynfile(fd);
+    if (!f) { close(fd); return 0; }
+    return f;
 }
 
 uint32_t aret_fclose(uint32_t esp) {
     uint32_t file = arg(esp, 0);
-    /* A synthetic _iob std stream is not a host FILE* — handing it to fclose()
-     * dereferences our 32-byte struct as a glibc FILE and segfaults (busybox's
-     * exit cleanup fclose()s stdin/stdout, e.g. `rev`, `nl`). Nothing to close:
-     * the std fds outlive the process. Same guard as aret_fwrite/aret_fputs. */
-    if (iob_fd(file) >= 0) return 0;
-    return (uint32_t)fclose((FILE *)(uintptr_t)file);
+    int fd = file_fd(file);
+    if (fd > 2) close(fd);                       /* never close the std fds */
+    free_dynfile(file);                          /* no-op for the _iob entries */
+    return 0;
 }
 
 uint32_t aret_fread(uint32_t esp) {
-    void *ptr = (void *)(uintptr_t)arg(esp, 0);
+    char *ptr = (char *)(uintptr_t)arg(esp, 0);
     uint32_t size = arg(esp, 1), nmemb = arg(esp, 2), file = arg(esp, 3);
-    /* A synthetic _iob std stream is not a host FILE*: read its fd directly (host
-     * fread would deref our 32-byte struct as a glibc FILE and crash — od/cksum —
-     * or read garbage, corrupting output — base64). Returns whole items read. */
-    int fd = iob_fd(file);
-    if (fd >= 0) {
-        size_t want = (size_t)size * nmemb, got = 0;
-        while (got < want) {
-            ssize_t n = read(fd, (char *)ptr + got, want - got);
-            if (n <= 0) break;
-            got += (size_t)n;
-        }
-        return (uint32_t)(size ? got / size : 0);
+    int fd = file_fd(file);
+    if (fd < 0 || size == 0) return 0;
+    size_t want = (size_t)size * nmemb, got = 0;
+    /* honour a pending ungetc pushback before the bulk read */
+    if (got < want) { int c = pull_byte(file); if (c < 0) return 0; ptr[got++] = (char)c; }
+    while (got < want) {
+        ssize_t n = read(fd, ptr + got, want - got);
+        if (n <= 0) break;
+        got += (size_t)n;
     }
-    return (uint32_t)fread(ptr, size, nmemb, (FILE *)(uintptr_t)file);
+    return (uint32_t)(got / size);
 }
 
 uint32_t aret_fwrite(uint32_t esp) {
     const char *ptr = (const char *)(uintptr_t)arg(esp, 0);
     uint32_t size = arg(esp, 1), nmemb = arg(esp, 2), file = arg(esp, 3);
-    if (iob_fd(file) >= 0) { stdio_write(file, ptr, (size_t)size * nmemb); return nmemb; }
-    return (uint32_t)fwrite(ptr, size, nmemb, (FILE *)(uintptr_t)file);
+    if (file_fd(file) < 0 || size == 0) return 0;
+    stdio_write(file, ptr, (size_t)size * nmemb);
+    return nmemb;
 }
 
 uint32_t aret_fputs(uint32_t esp) {
     const char *s = (const char *)(uintptr_t)arg(esp, 0);
     uint32_t file = arg(esp, 1);
-    if (iob_fd(file) >= 0) { stdio_write(file, s, strlen(s)); return 0; }
-    return (uint32_t)fputs(s, (FILE *)(uintptr_t)file);
+    if (file_fd(file) < 0) return 0xFFFFFFFFu;
+    stdio_write(file, s, strlen(s));
+    return 0;
 }
 
 uint32_t aret_fgets(uint32_t esp) {
     char *buf = (char *)(uintptr_t)arg(esp, 0);
     int n = (int)arg(esp, 1);
     uint32_t file = arg(esp, 2);
-    /* stdin is a synthetic `_iob` handle, not a host FILE* — reading it via host
-     * fgets dereferences a bogus stream and segfaults (the sqlite3 shell reads
-     * its script from stdin this way). Read the underlying fd a byte at a time,
-     * matching fgets' semantics (up to n-1 chars, stop after '\n', NUL-end). */
-    int fd = iob_fd(file);
-    if (fd >= 0) {
-        if (n <= 0) return 0;
-        int i = 0;
-        while (i < n - 1) {
-            unsigned char c;
-            if (read(fd, &c, 1) != 1) break; /* EOF or error */
-            buf[i++] = (char)c;
-            if (c == '\n') break;
-        }
-        if (i == 0) return 0;                /* nothing read → NULL (EOF) */
-        buf[i] = '\0';
-        return (uint32_t)(uintptr_t)buf;
+    /* fgets over a synthetic stream: up to n-1 chars, stop after '\n', NUL-end. */
+    if (n <= 0 || file_fd(file) < 0) return 0;
+    int i = 0;
+    while (i < n - 1) {
+        int c = pull_byte(file);
+        if (c < 0) break;                        /* EOF or error */
+        buf[i++] = (char)c;
+        if (c == '\n') break;
     }
-    char *r = fgets(buf, n, (FILE *)(uintptr_t)file);
-    return r ? (uint32_t)(uintptr_t)buf : 0;
+    if (i == 0) return 0;                         /* nothing read → NULL (EOF) */
+    buf[i] = '\0';
+    return (uint32_t)(uintptr_t)buf;
 }
 
-/* Character input + stream state, used by Lua's lexer to read a script file or
- * stdin. For a real host FILE* (e.g. an fopen'd script) forward directly; for a
- * synthetic _iob stream read the underlying fd. EOF is -1. */
+/* Character input + stream state. All synthetic streams read their fd (honouring
+ * a pending ungetc); EOF is -1. */
 uint32_t aret_getc(uint32_t esp) {
-    uint32_t file = arg(esp, 0);
-    int fd = iob_fd(file);
-    if (fd >= 0) { unsigned char c; return read(fd, &c, 1) == 1 ? c : 0xFFFFFFFFu; }
-    return file ? (uint32_t)getc((FILE *)(uintptr_t)file) : 0xFFFFFFFFu;
+    int c = pull_byte(arg(esp, 0));
+    return c < 0 ? 0xFFFFFFFFu : (uint32_t)c;
 }
 uint32_t aret_fgetc(uint32_t esp) { return aret_getc(esp); }
 uint32_t aret_ungetc(uint32_t esp) {
+    int c = (int)arg(esp, 0);
     uint32_t file = arg(esp, 1);
-    if (iob_fd(file) >= 0) return arg(esp, 0); /* (no pushback on the raw fd path) */
-    return file ? (uint32_t)ungetc((int)arg(esp, 0), (FILE *)(uintptr_t)file) : 0xFFFFFFFFu;
+    if (file_fd(file) < 0 || c < 0) return 0xFFFFFFFFu;
+    uint8_t *f = (uint8_t *)(uintptr_t)file;
+    *(int32_t *)(f + ARET_F_UNGOT) = (c & 0xff) + 1;   /* one byte of pushback */
+    *(int32_t *)(f + ARET_F_FLAG) &= ~0x10;            /* clear _IOEOF          */
+    return (uint32_t)(c & 0xff);
 }
 uint32_t aret_feof(uint32_t esp) {
     uint32_t file = arg(esp, 0);
-    if (iob_fd(file) >= 0) return 0;            /* raw fd: EOF surfaces via getc==-1 */
-    return file ? (uint32_t)feof((FILE *)(uintptr_t)file) : 1;
+    if (file_fd(file) < 0) return 1;
+    return (*(int32_t *)(uintptr_t)((uint8_t *)(uintptr_t)file + ARET_F_FLAG) & 0x10) ? 1 : 0;
 }
 uint32_t aret_ferror(uint32_t esp) {
     uint32_t file = arg(esp, 0);
-    if (iob_fd(file) >= 0) return 0;
-    return file ? (uint32_t)ferror((FILE *)(uintptr_t)file) : 0;
+    if (file_fd(file) < 0) return 0;
+    return (*(int32_t *)(uintptr_t)((uint8_t *)(uintptr_t)file + ARET_F_FLAG) & 0x20) ? 1 : 0;
 }
 uint32_t aret_clearerr(uint32_t esp) {
     uint32_t file = arg(esp, 0);
-    if (file && iob_fd(file) < 0) clearerr((FILE *)(uintptr_t)file);
+    if (file_fd(file) >= 0)
+        *(int32_t *)(uintptr_t)((uint8_t *)(uintptr_t)file + ARET_F_FLAG) &= ~0x30;
     return 0;
 }
 
 uint32_t aret_fflush(uint32_t esp) {
-    uint32_t file = arg(esp, 0);
-    if (!file) { fflush(NULL); return 0; }      /* flush every host stream */
-    if (iob_fd(file) >= 0) return 0;            /* _iob: unbuffered write(), nothing to flush */
-    return (uint32_t)fflush((FILE *)(uintptr_t)file);
+    (void)esp;                                    /* unbuffered write()s: nothing to flush */
+    return 0;
 }
 
 uint32_t aret_fseek(uint32_t esp) {
-    return (uint32_t)fseek((FILE *)(uintptr_t)arg(esp, 0), (long)(int32_t)arg(esp, 1), (int)arg(esp, 2));
+    uint32_t file = arg(esp, 0);
+    int fd = file_fd(file);
+    if (fd < 0) return 0xFFFFFFFFu;
+    uint8_t *f = (uint8_t *)(uintptr_t)file;
+    *(int32_t *)(f + ARET_F_UNGOT) = 0;           /* drop pushback  */
+    *(int32_t *)(f + ARET_F_FLAG) &= ~0x10;       /* clear _IOEOF   */
+    off_t r = lseek(fd, (int32_t)arg(esp, 1), (int)arg(esp, 2));
+    return r < 0 ? 0xFFFFFFFFu : 0;
 }
 uint32_t aret_rewind(uint32_t esp) {
-    rewind((FILE *)(uintptr_t)arg(esp, 0));
+    uint32_t file = arg(esp, 0);
+    int fd = file_fd(file);
+    if (fd >= 0) {
+        uint8_t *f = (uint8_t *)(uintptr_t)file;
+        *(int32_t *)(f + ARET_F_UNGOT) = 0;
+        *(int32_t *)(f + ARET_F_FLAG) &= ~0x30;
+        lseek(fd, 0, SEEK_SET);
+    }
     return 0;
 }
 
 uint32_t aret_ftell(uint32_t esp) {
-    return (uint32_t)ftell((FILE *)(uintptr_t)arg(esp, 0));
+    int fd = file_fd(arg(esp, 0));
+    if (fd < 0) return 0xFFFFFFFFu;
+    return (uint32_t)lseek(fd, 0, SEEK_CUR);
 }
 
 uint32_t aret_remove(uint32_t esp) {
@@ -671,12 +752,37 @@ uint32_t aret_freopen(uint32_t esp) {
     char path[1024];
     translate_path(name, path, sizeof path);
     if (path_is_write_mode(mode)) make_parents(path);
-    FILE *f = fopen(path, mode ? mode : "rb");
-    if (f && iob_fd(stream) < 0 && stream) fclose((FILE *)(uintptr_t)stream);
-    return (uint32_t)(uintptr_t)f;
+    int fd = open(path, fopen_mode_flags(mode), 0666);
+    if (fd < 0) return 0;
+    int old = file_fd(stream);
+    if (old > 2) {                                /* rebind a std/pool stream's fd */
+        dup2(fd, old);
+        close(fd);
+        return stream;
+    }
+    /* std stream (0/1/2) or none: dup onto it if a std slot, else a fresh pool FILE */
+    if (old >= 0) { dup2(fd, old); close(fd); return stream; }
+    uint32_t f = alloc_dynfile(fd);
+    if (!f) { close(fd); return 0; }
+    return f;
 }
 
-uint32_t aret_tmpfile(uint32_t esp) { (void)esp; return (uint32_t)(uintptr_t)tmpfile(); }
+uint32_t aret_tmpfile(uint32_t esp) {
+    (void)esp;
+    char tmpl[] = "/tmp/aretXXXXXX";
+    int fd = mkstemp(tmpl);
+    if (fd < 0) return 0;
+    unlink(tmpl);                                 /* anonymous: removed on close/exit */
+    uint32_t f = alloc_dynfile(fd);
+    if (!f) { close(fd); return 0; }
+    return f;
+}
+/* _fdopen(fd, mode): wrap an existing fd in an msvcrt-layout FILE. */
+uint32_t aret_fdopen(uint32_t esp) {
+    int fd = (int)arg(esp, 0);
+    if (fd < 0) return 0;
+    return alloc_dynfile(fd);
+}
 
 /* setvbuf(stream, buf, mode, size): buffering is an optimization with no
  * observable effect on correct output; accept and report success. */
