@@ -431,4 +431,24 @@ Détail : **70 §6** (roadmap). Résumé :
   pourrait pointer un mislift. Intriqué → session dédiée ; alternative : host-backer sigaction/
   sigprocmask (FLIRT faible ici). *(Niche : seul m4 du corpus exerce ce chemin.)*
 
+### 2026-07-05 — [DEMO] busybox regex OK ; nouveau bug localisé : `sed -n` (auto-print) — breadcrumb
+- **Bonne nouvelle** : le SIGSEGV regex de busybox grep/sed (P4 du journal) **ne se reproduit
+  plus** — grep (`-i/-v/-c/-o/-E`, littéral, classes, `-o [A-Z][a-z]*`) et sed (`s///g`, `2d`,
+  `p`) = **bit-identiques à Wine**. Probablement résorbé par les fixes récup/SSA accumulés.
+- **Nouveau bug trouvé (concret, reproductible)** : **`sed -n` (suppression de l'auto-print) est
+  ignoré** → l'auto-print reste actif. `printf 'X\n' | busybox sed -n p` → ARET `X\nX\n` (2×),
+  Wine `X\n`. Toutes les variantes `-n`/`-ne`/`-n 2p`/`-n /re/p` échouent ; `sed p` (sans -n),
+  `sed 2d`, et **grep -q/-n** (même getopt32) marchent → **spécifique au flag `-n` de sed**.
+- **Localisé** (busybox_g `-g` + gdb) : l'auto-print est dans `sub_44f090` (sed process loop),
+  chunk_5.c:39215, gardé par `v217 = ([0x47a2f0]==0); if(v217==0) skip else autoprint`. Donc
+  **`[0x47a2f0]` = `be_quiet`** ; l'auto-print est sauté ssi `be_quiet != 0`. Watchpoint : ARET
+  n'écrit `[0x47a2f0]` **qu'une fois à 0** (init) et **jamais à 1** pour `-n` → auto-print actif.
+- **Reste à trouver** : le chemin qui convertit l'option `-n` (bit `OPT_n` de `option_mask32`,
+  posé par getopt32 — qui marche pour grep) en `be_quiet` (`[0x47a2f0]`). Les writers statiques
+  de 0x47a2f0 vus = `#n`-en-tête-de-script (`incl`, 0x40bdc1) et un chemin cleanup (`movb $1`,
+  0x4156b6), **pas** le handler `-n` CLI → soit ce handler n'est pas récupéré/atteint (control-flow
+  divergence, potentiellement **général**), soit un store `be_quiet=OPT_n` mislifté. Prochain pas :
+  trouver le read de `option_mask32 & OPT_n` dans sed_main et le store vers 0x47a2f0 ; vérifier
+  option_mask32 (grep OK → getopt32 OK). Repro : `printf 'X\n' | busybox sed -n p`.
+
 <!-- NOUVELLES ENTRÉES ICI (garder l'ordre chronologique, plus récent en bas) -->
