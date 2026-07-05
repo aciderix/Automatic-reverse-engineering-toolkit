@@ -332,13 +332,38 @@ uint32_t aret_read(uint32_t esp) {
 }
 uint32_t aret_close(uint32_t esp) {
     int fd = (int)arg(esp, 0);
-    if (fd <= 2) return 0; /* never close the std streams */
+    /* Honour close() faithfully, std fds included: the classic Unix idiom
+     * `close(0); open(file)` reopens the file *as* fd 0 (lowest free) so a tool
+     * can then read it through stdin (BusyBox `uniq FILE`, `tac`, …). Guarding
+     * fd<=2 made close(0) a no-op, so the reopen got fd 3 and the tool kept
+     * reading the real (empty) stdin. fclose() still protects the _iob structs
+     * (aret_fclose only closes fd>2); this is the raw descriptor call. */
+    if (fd < 0) return (uint32_t)-1;
     return (uint32_t)close(fd);
 }
 /* _lseek(fd, offset, origin) -> new offset. origin 0/1/2 == SEEK_SET/CUR/END. */
 uint32_t aret_lseek(uint32_t esp) {
     off_t r = lseek((int)arg(esp, 0), (int32_t)arg(esp, 1), (int)arg(esp, 2));
     return (uint32_t)r;
+}
+/* _lseeki64(fd, __int64 offset, int origin) -> __int64. The 64-bit offset is two
+ * stack slots (lo@1, hi@2); origin@3. Returns the new position in edx:eax (the
+ * builder declares this shim uint64_t). Used by tail/od/split on large files. */
+uint64_t aret_lseeki64(uint32_t esp) {
+    int fd = (int)arg(esp, 0);
+    int64_t off = (int64_t)(((uint64_t)arg(esp, 2) << 32) | arg(esp, 1));
+    int origin = (int)arg(esp, 3);
+    off_t r = lseek(fd, (off_t)off, origin);
+    return (uint64_t)r;
+}
+/* _telli64(fd) -> __int64 current position. */
+uint64_t aret_telli64(uint32_t esp) {
+    return (uint64_t)lseek((int)arg(esp, 0), 0, SEEK_CUR);
+}
+/* _ftelli64(FILE*) -> __int64 current position of one of our streams. */
+uint64_t aret_ftelli64(uint32_t esp) {
+    int fd = file_fd(arg(esp, 0));
+    return fd < 0 ? (uint64_t)-1 : (uint64_t)lseek(fd, 0, SEEK_CUR);
 }
 /* _filbuf(FILE*) — the SVID buffer-refill primitive the getc/getchar macro falls
  * back to (mingw inlines `--_cnt >= 0 ? *_ptr++ : _filbuf(f)`). Our synthetic
@@ -378,7 +403,17 @@ uint32_t aret_getchar(uint32_t esp) {
     (void)esp; unsigned char b;
     return read(0, &b, 1) == 1 ? (uint32_t)b : 0xFFFFFFFFu;
 }
-uint32_t aret_isatty(uint32_t esp) { return (uint32_t)isatty((int)arg(esp, 0)); }
+/* _isatty(fd): nonzero for a character device (console), 0 otherwise. Windows'
+ * _isatty does NOT report ENOTTY through errno for a regular file, but Linux
+ * isatty() does (via its TCGETS ioctl) — and BusyBox-w32 probes isatty() on every
+ * read, so a leaked ENOTTY makes the *next* errno check misfire (tac reported
+ * "Inappropriate ioctl for device" at EOF). Preserve errno to match Windows. */
+uint32_t aret_isatty(uint32_t esp) {
+    int saved = errno;
+    int r = isatty((int)arg(esp, 0));
+    errno = saved;
+    return (uint32_t)r;
+}
 /* _setmode(fd, mode): text/binary distinction is meaningless on Linux. Report the
  * previous mode as binary (O_BINARY = 0x8000 in msvcrt) so callers see success. */
 uint32_t aret_setmode(uint32_t esp) { (void)esp; return 0x8000; }

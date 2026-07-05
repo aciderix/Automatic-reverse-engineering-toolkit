@@ -3277,3 +3277,27 @@ binaires MSVC, pas seulement strings.exe.
 - *Reste (sweep, tâche suivante)* : `uniq <fichier>` lit stdin au lieu du fichier (argv/getopt, **pas**
   stdio — `uniq < fichier` marche) ; `tac` sort correct mais imprime un message `ioctl` parasite sur
   stderr (ENOTTY sur le fd fichier). Distincts du stdio, à traiter applet par applet.
+
+### busybox sweep : uniq/tac/tail réparés — close(std) fidèle, isatty sans ENOTTY, _lseeki64 ✅ FAIT
+- **2026-07-05 — sweep coreutils après le fix stdio.** Trois causes **générales** trouvées et corrigées
+  (uniq/tac/tail passent, 11 applets = bit-identiques à wine : cat/head/tail/sort/uniq/wc/od/nl/tac/cut/rev).
+- **1. `close()` des fds standard bloqué → idiome de réouverture cassé (uniq, tac).** busybox `uniq FILE`
+  fait `close(STDIN_FILENO); xopen(FILE, O_RDONLY)` — l'idiome Unix classique : refermer fd 0 puis rouvrir
+  le fichier, qui **réutilise fd 0** (le plus bas libre), pour ensuite lire le fichier **via stdin**. Or
+  `aret_close` refusait de fermer les fds ≤ 2 (`if (fd<=2) return 0`, garde « never close std streams ») →
+  `close(0)` no-op → la réouverture prenait fd 3 → uniq lisait le **vrai** stdin (vide) → sortie vide.
+  **Fix** : `aret_close` honore `close()` fidèlement (fds standard inclus, sémantique POSIX). `fclose()`
+  protège toujours les structs `_iob` séparément (`aret_fclose` ne ferme que fd>2). Bénéficie à tout outil
+  utilisant le motif close+réouverture (uniq, tac, …).
+- **2. `isatty()` fuyait `ENOTTY` dans errno → faux échec de lecture (tac).** busybox-w32 sonde
+  `isatty(fd)` à **chaque** `read`. Sous Linux `isatty` sur un fichier régulier fait un `ioctl(TCGETS)`
+  qui **pose `errno=ENOTTY`** ; le `_isatty` Windows ne touche pas errno. `aret_errno` rend le **même**
+  errno hôte au guest → à l'EOF, tac voyait `errno=ENOTTY` résiduel et imprimait « tac: FILE:
+  Inappropriate ioctl for device ». **Fix** : `aret_isatty` sauve/restaure errno (sémantique Windows).
+  Général : tout programme qui `_isatty` sur un non-tty puis teste errno.
+- **3. `_lseeki64` non implémenté (tail).** `tail` avertissait `unimplemented import: _lseeki64` (retombait
+  correctement mais bruyamment). Ajout `aret_lseeki64` (offset 64-bit lo@1/hi@2, origin@3, retour edx:eax
+  via `import_returns_u64`), + `_telli64`/`_ftelli64`. Général : tail/od/split sur gros fichiers.
+- **Vérifié** : 11 applets (uniq/uniq -c/tac/tail/cat/wc/head/sort/od/nl/rev) = **bit-identiques à wine** ;
+  **winediff 45/45** (close/isatty ne régressent pas stdin/pipe/console) ; wc/cksum inchangés. Régression
+  complète (difftest/transpile-diff/funcdiff/SMT/recompilabilité) : voir commit.
