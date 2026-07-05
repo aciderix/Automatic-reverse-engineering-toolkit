@@ -3357,3 +3357,27 @@ binaires MSVC, pas seulement strings.exe.
 - **Bilan** : Phase 3a (Lua strippé) est **close** côté justesse — le strippé tourne comme le symbolé. Ce
   qui reste est de la *complétude* de reconnaissance host-backed (cosmétique : verdict INCOMPLETE via
   quelques internes CRT partial, non atteints), pas un bug de frontière.
+
+### x87/awk — approfondissement : le dernier bloqueur est la cascade libm transcendantale (précisé)
+- **2026-07-05 (suite)** — tentative sérieuse de fixer `awk /` en poussant la robustesse x87. Progrès de
+  diagnostic, mais **fix non shippé** (cascade trop profonde, aucun bénéfice mesuré, zone critique).
+- **Chaîne exacte du bail de `evaluate` (0x428500)** avec le sous-fix fp-returning auto-récursif appliqué
+  (0x433c58/0x4082a0 correctement fp) : il ne reste **qu'un** join en pass final, **@0x429129 (1 vs 0)**.
+  Ce join est le **dispatch des built-ins math d'awk** (`fld arg; fstp [esp]; call 0x409c40|0x409a70|
+  0x409980; fstp [esp+0x28]`). Les trois callees (exp/log/… libm statique) doivent être fp-returning pour
+  que le join soit cohérent — or **ils abandonnent leur propre pass x87** : `0x409a70 @0x409b80 = fldl2e`
+  (**op transcendantale non modélisée** — famille `fldl2e`/`f2xm1`/`fscale`/`fyl2x` de l'exp/pow/log x87),
+  `0x409980`/`0x409c40` = sous-débordement interne. Ils finissent tous par `fld [mem]; ret` (donc
+  fp-returning par l'ABI), mais ont aussi des rets d'exception non-`fld`.
+- **Ce qui a été essayé et pourquoi ça ne suffit pas** : (a) fp-returning **auto-récursif** (retry en
+  supposant `f ∈ fp` si le pass bail) → correct, rescape 0x433c58, mais insuffisant seul. (b) **signal
+  structurel** « tout ret finit par `fld` ⇒ fp-returning » → trop strict (les libm ont des rets
+  d'exception sans `fld`) → aucun effet ; l'assouplir serait risqué. Dans les deux cas : **partial busybox
+  5 inchangé, `awk /` toujours cassé**. Réverté.
+- **Le vrai levier (session dédiée)** : soit **modéliser les ops transcendantales x87** (`fldl2e`/`f2xm1`/
+  `fscale`/`fyl2x`/`fsin`/`fcos`) à précision 80-bit (correctness-sensible), soit — plus dans l'esprit UBT
+  et recommandé — **reconnaître + host-backer** les exp/log/pow libm statiques de busybox (non vus par
+  FLIRT ici, autre version mingw) via leur **signature d'idiome x87**. L'un ou l'autre débloque le join
+  0x429129 → `evaluate` s'analyse → le compare `R_d == 0` du `/` devient correct. Note : les built-ins
+  `exp`/`sin`/`sqrt` d'awk **marchent déjà** (chemin distinct) ; seul l'opérateur `/`/`%` est cassé, et son
+  blocage est **entièrement** ce join libm. Diagnostic complet, pas de code deviné shippé.
