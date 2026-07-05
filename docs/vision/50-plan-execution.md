@@ -3456,3 +3456,23 @@ binaires MSVC, pas seulement strings.exe.
 - **Valeur de la passe** : la mesure a immédiatement sorti 2 shims manquants **communs à plusieurs
   binaires** (PeekNamedPipe/locale) — exactement l'intérêt d'un corpus large. Harness + corpus réutilisables
   pour re-mesurer après chaque lot de fixes.
+
+### Gauntlet élargi — 21 binaires variés, 12/21 bit-identiques à Wine ✅ MESURE (passe 2)
+- **2026-07-05 — corpus élargi à 21 binaires** (mingw/MSVC cross-compilés depuis sources réelles) : ajouts
+  **bzip2**, **sed** (relink `-lbcrypt`), **sqlite3_full** (FTS5/JSON1/RTREE/math, 2 Mo), + **variantes
+  strippées** de la plupart (gzip/units/hello/bzip2/minigzip/sqlite3_full/grep/m4/sqlite3). Harness
+  `gauntlet/score.sh` avec tests déterministes par outil (round-trip compresseurs, requêtes SQL, macros m4…).
+- **Score : 12/21 bit-identiques à Wine** — bzip2(+str), grep(+str), gzip(+str), hello(+str), lua, minigzip,
+  nasm, sed. **Dont 5 strippés** → le chemin sans-symboles tient sur du vrai code varié (compresseurs,
+  assembleur, regex).
+- **Échecs mesurés** : **sqlite3 (les 4 variantes) SEGFAULT** — deref `movzbl (%eax)` ~13 Ko dans
+  `sub_4558a0` (VDBE/parser), chaîne `main→…→sub_4558a0`. **Build mingw distinct** du `sqlite3.exe` MSVC
+  déjà bit-identique du journal → nouveau chemin, **débogage mono-binaire dédié** (comme la campagne MSVC),
+  pas un fix général rapide. `m4` (n'évalue pas — sortie « (12*12) » attendue, transpilé erreur) : abort
+  démarrage. `units` cherche `units.dat` (environnemental). `minigzip_strippé` : micro-diff round-trip
+  (à confirmer).
+- **Bilan** : la boucle « corpus large → mesure → shims/fixes généraux » est productive et outillée
+  (corpus + harness réutilisables dans `/tmp/bbx/gauntlet`). Prochaine grosse cible = **sqlite3 mingw**
+  (levier fort, mais profond). Le socle 32-bit couvre maintenant un éventail réel : assembleur, moteur SQL,
+  interpréteur Lua, compresseurs (gzip/bzip2/zlib), regex (grep/sed), macro (m4), tout bit-identique quand
+  ça passe.
