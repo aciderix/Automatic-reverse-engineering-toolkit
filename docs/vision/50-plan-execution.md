@@ -3331,3 +3331,29 @@ binaires MSVC, pas seulement strings.exe.
   divergentes aux joins au lieu d'abandonner toute la fonction ; (2) intégrer le fix fp-returning
   auto-récursif ci-dessus (prérequis prouvé, réutilisable) ; (3) résoudre le bail `0x402220` (dtoa).
   Délicat, une fonction à la fois, **difftest + cpudiff + winediff + un filet Lua à chaque pas**.
+
+### Phase 3a — Lua strippé : frontières VÉRIFIÉES saines (le trou « too many registers » est résorbé) ✅
+- **2026-07-05 — vérification propre du volet 3a resté ouvert** (Lua strippé, « quelques fonctions aux
+  frontières » mal récupérées → miscompile « function needs too many registers »). **Conclusion : le trou
+  ne se manifeste plus** — Lua strippé est **pleinement fonctionnel et correct**.
+- **Mesures** (mingw-13, `lua_stripped.exe` vs `lua.exe` symbolé) : strippé **833 fonctions** (755 lifted,
+  8 partial, 70 host-backed) vs symbolé **903** (804/8/91). **Les deux : 0 appel direct non résolu**, même
+  compte de partial (8). L'écart de 70 = surtout reconnaissance host-backed (le symbolé reconnaît 21
+  fonctions CRT de plus par symbole/FLIRT) + fonctions non atteintes.
+- **Preuve de justesse (2 batteries exigeantes + stress)** : closures/upvalues, métatables/POO,
+  coroutines, patterns `gmatch`+captures, `string.pack`/`utf8`, math/flottant, `table.sort`, `pcall`/error,
+  ops entières 64-bit (`1<<20`, `//`, `2^10`), varargs, `goto`, GC stress (5000+10000 objets), boucle
+  2M itérations. **Sortie strippé = symbolé (byte-exacte) = native** (seule différence : CRLF Windows vs
+  LF Unix = mode texte, correct pour un outil natif Linux).
+- **Frontières validées** : les 14 entrées présentes au strippé mais absentes du symbolé sont **toutes des
+  prologues valides** et de vraies cibles d'appel direct (ex. 0x429d90 : 12 sites d'appel) — des fonctions
+  CRT correctement bornées que le strippé **lifte** là où le symbolé les **shim** (différence de
+  host-backing, pas d'erreur de frontière). Les 63 entrées symbolé-seulement sont host-backed ou non
+  atteintes (0 appel direct non résolu au strippé le confirme).
+- **Cause de la résorption** : les correctifs de récupération accumulés dans cette lignée (address-taken
+  par immédiats/prologues feuilles, **bornes de table de saut**, tables de pointeurs NULL-tolérantes,
+  thunk `call [mem];ret` = `ff 15`, **FLIRT masquant les opérandes relocalisés**) ont éliminé les
+  faux-splits qui produisaient la miscompile. Aucune fonction *atteinte* n'est mal bornée.
+- **Bilan** : Phase 3a (Lua strippé) est **close** côté justesse — le strippé tourne comme le symbolé. Ce
+  qui reste est de la *complétude* de reconnaissance host-backed (cosmétique : verdict INCOMPLETE via
+  quelques internes CRT partial, non atteints), pas un bug de frontière.
