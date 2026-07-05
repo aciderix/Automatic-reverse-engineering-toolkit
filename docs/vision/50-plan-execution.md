@@ -3178,3 +3178,37 @@ binaires MSVC, pas seulement strings.exe.
   `416574→4334dc→…→41abec` (entre l'appel #1 et #2 de 41abec) pour trouver le −4 ponctuel exact, OU
   reproduire le driver multi-hop complet. Acquis solide committé : diagnostic « filltable=0 » réfuté,
   décalage localisé, 4 hypothèses éliminées, mécanisme FAST_FUNC identifié.
+
+### cksum — TRIGGER ISOLÉ + REPRODUIT (drift6.c), mécanisme prouvé par preuve runtime
+- **2026-07-05 — percée.** Le déclencheur exact est trouvé, réduit en fixture minimale qui **crashe au
+  transpile** (native `c=226`, transpilé **segfault**), et la cause racine est prouvée au niveau instruction.
+- **Preuve runtime (busybox transpilé instrumenté)** : `fprintf` avant chaque `aret_call` du driver CRC
+  `sub_416574` → `esp=v254` passe de `0x08c29260` (appel #0, table=`0x09809400` correcte) à `0x08c2925c`
+  (appel #1, **−4**, table=`0x00406f80` FAUSSE). La table est lue via `*[v254+0x28]` (slot esp-relatif) :
+  quand `v254` dérive de −4, `[v254+0x28]` pointe un autre slot → mauvaise table → sortie fausse/crash.
+- **Preuve désassemblage original** (`objdump` busybox, `sub_416574`) : `-fomit-frame-pointer` (ebp =
+  **pointeur de fonction**, pas frame pointer → tous les locaux esp-relatifs). Motif de la boucle :
+  `mov eax,[esp+0x28]` (recharge table) → `mov [esp],eax` → `call ebp` (`FAST_FUNC ret 4` → esp+=4) →
+  **`push edx`** (compensation gcc, esp−=4) → net **0** sur l'original. Le transpilé modélise le `push edx`
+  (esp−4) mais **pas** le pop `ret 4` du callee (+4) → net **−4/itération** = la dérive.
+- **Cause racine (définitive)** : un `call` interne/indirect est modélisé net-0 sur l'esp de l'appelant
+  (push+pop de l'adresse retour s'annulent), **mais le pop d'arguments d'un callee `ret N`
+  (stdcall/FAST_FUNC) n'est jamais appliqué à l'esp de l'appelant**. Le compilateur a émis sa compensation
+  (`push`/`sub esp,N`) en supposant que le callee pop N ; sans modéliser ce pop, net = −N/appel.
+- **Pourquoi 5 fixtures avaient échoué** : drift5 a bien la dérive (`call [slot];sub esp,4` en boucle) mais
+  la SEULE valeur esp-relative (la table, constante `mov [esp],0x408004`) est écrite ET lue au même esp
+  (dérivé) → auto-cohérente → sortie correcte. Ingrédient manquant = **une valeur spillée AVANT la boucle
+  et rechargée depuis un slot esp-relatif DANS la boucle** (le `[esp+0x28]` de busybox).
+- **drift6.c (repro minimale)** : FAST_FUNC `regparm(3)+stdcall ret 4` indirect via `slot` global ;
+  driver `-O2 -fomit-frame-pointer` qui spille `tp` au stack (`&tp` s'échappe via asm) puis recharge
+  `*tpp` (= `[esp+0x1c]`) à chaque itération. gcc émet exactement `mov [esp+0x1c],table` (avant boucle) /
+  `mov edx,[esp+0x1c]` (recharge) / `call [slot]` / `sub esp,0x4`. **native `c=226`, transpilé SEGFAULT.**
+  Généré (dt6/chunk_0.c `sub_401500`) : `v27` (esp) → `v45=v27−4` → `continue: v27=v45` (dérive −4/itér),
+  recharge `*[v27+0x1c]` corrompue dès l'itér 1.
+- **Le fix (à implémenter, vérifié + régression avant commit)** : modéliser le pop `ret N` du callee pour
+  les fonctions **internes** (pas seulement les imports) au site d'appel : après un call interne
+  direct/indirect vers un callee-pop, `esp += N`. Direct → N constant (scan du `ret N` du callee, `C2 imm16`
+  vs `C3` = 0, non ambigu). Indirect (`aret_call`) → lookup runtime `addr → N` (table analogue à
+  `stdcall_pops`). **Non-régression par construction** : les fonctions cdecl ont N=0 (no-op) ; seules les
+  fonctions callee-pop (déjà cassées aujourd'hui) reçoivent le +N. Garde-fou : `ret N` (`C2`) est le seul
+  encodage callee-pop, sans ambiguïté, donc pas de faux positif sur du cdecl.
