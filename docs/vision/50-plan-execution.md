@@ -3435,3 +3435,24 @@ binaires MSVC, pas seulement strings.exe.
   et sorties **inchangées** (la récup n'over-récupère pas). *Reste NASM* : `-f obj` (OMF) abort sur un stub
   `ret` nu (méthode no-op du `struct ofmt`) stocké en immédiat — récup vtable/points-to (Phase 4), différé ;
   les formats principaux marchent.
+
+### Test grandeur nature — gauntlet de 12 binaires variés + scorecard vs Wine ✅ MESURE
+- **2026-07-05 — grosse passe de mesure** (demande utilisateur). Corpus élargi cross-compilé mingw/MSVC
+  depuis sources réelles (ftp.gnu.org, nasm.us, zlib.net ; github bloqué par la policy) : **12 binaires**
+  — nasm (MSVC strippé), sqlite3 (mingw + strippé), lua, grep (+strippé), gzip, m4 (+strippé), units,
+  hello, minigzip. Harness `/tmp/bbx/gauntlet/score.sh` : transpile chacun, exécute une invocation
+  déterministe sous l'ELF transpilé **et** sous Wine, diffe (argv0/chemins normalisés).
+- **Score : 7/12 bit-identiques à Wine** (grep, grep_strippé, gzip, hello, lua, minigzip, nasm) — dont
+  2 strippés. (Avant les shims de cette passe : 3/12.)
+- **2 shims généraux découverts par le gauntlet et livrés** (`aret_win32.c`) : **`PeekNamedPipe`** (détection
+  pipe/stdin via `FIONREAD` — grep/m4 le sondent au démarrage ; stub 0 cassait grep) et **`GetThreadLocale`**
+  (+ `GetUserDefaultLCID`/`GetSystemDefaultLCID`/…, renvoient en-US 0x0409 — le CRT le lit pour la
+  classification locale). → grep et gzip passent MATCH. Régression : winediff 46/46, difftest 271/271,
+  transpile-diff 4/4.
+- **Restes mesurés (cibles générales suivantes)** : `m4` (abort au démarrage — locale/CRT plus profond) ;
+  **sqlite3 mingw** (segfault / pas de sortie sur `SELECT` — build **différent** du sqlite3.exe MSVC déjà
+  bit-identique du journal ; expose un chemin mingw distinct) ; `sqlite3_strippé` (abort récup : fonction
+  indirecte non récupérée) ; `units` (cherche son `units.dat` — environnemental, pas un bug de transpile).
+- **Valeur de la passe** : la mesure a immédiatement sorti 2 shims manquants **communs à plusieurs
+  binaires** (PeekNamedPipe/locale) — exactement l'intérêt d'un corpus large. Harness + corpus réutilisables
+  pour re-mesurer après chaque lot de fixes.

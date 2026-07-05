@@ -28,6 +28,7 @@
 #include <unistd.h>
 #include <sys/time.h>
 #include <sys/stat.h>
+#include <sys/ioctl.h>
 
 static inline uint32_t w32_arg(uint32_t esp, int i) {
     return ((const uint32_t *)(uintptr_t)esp)[i];
@@ -363,6 +364,31 @@ uint32_t aret_AreFileApisANSI(uint32_t esp) { (void)esp; return 1; }
 
 uint32_t aret_GetACP(uint32_t esp)   { (void)esp; return 1252; } /* Windows-1252 */
 uint32_t aret_GetOEMCP(uint32_t esp) { (void)esp; return 437; }
+/* Locale IDs: report en-US (LCID 0x0409) — the CRT reads GetThreadLocale for
+ * locale-dependent classification (GNU m4/grep query it at startup; a 0 stub made
+ * their locale setup misbehave and swallow output). */
+uint32_t aret_GetThreadLocale(uint32_t esp)          { (void)esp; return 0x0409; }
+uint32_t aret_GetUserDefaultLCID(uint32_t esp)       { (void)esp; return 0x0409; }
+uint32_t aret_GetSystemDefaultLCID(uint32_t esp)     { (void)esp; return 0x0409; }
+uint32_t aret_GetUserDefaultUILanguage(uint32_t esp) { (void)esp; return 0x0409; }
+uint32_t aret_SetThreadLocale(uint32_t esp)          { (void)esp; return 0x0409; }
+/* PeekNamedPipe(h, buf, size, *read, *avail, *left): CLI tools call it to see
+ * whether stdin has data / is a pipe. Our handle is a POSIX fd; use FIONREAD for
+ * the available-byte count. Non-pipe fds (a file/tty) fail as on Windows. A true
+ * peek (reading without consuming) is not needed by the callers — they only test
+ * `*avail`; report 0 read. Returns BOOL. */
+uint32_t aret_PeekNamedPipe(uint32_t esp) {
+    int fd = WI(0);
+    uint32_t *bytes_read = (uint32_t *)WP(3);
+    uint32_t *total_avail = (uint32_t *)WP(4);
+    uint32_t *left = (uint32_t *)WP(5);
+    int navail = 0;
+    if (ioctl(fd, FIONREAD, &navail) != 0) return 0; /* not a pipe -> FALSE */
+    if (bytes_read) *bytes_read = 0;
+    if (total_avail) *total_avail = (uint32_t)navail;
+    if (left) *left = (uint32_t)navail;
+    return 1;
+}
 uint32_t aret_IsValidCodePage(uint32_t esp) {
     switch (WU(0)) {
         case 437: case 850: case 852: case 866: case 874: case 932: case 936:
