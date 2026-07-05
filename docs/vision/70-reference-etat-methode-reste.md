@@ -316,10 +316,11 @@ recompilabilité **100 %** · WASM **7/7**.
   sweep **60/60**.
 - **WASM** : PE Windows → WebAssembly, **7/7** fixtures (pile, globals, indirects,
   CRT, x87, Win32, SHA-256).
-- **Corpus gauntlet** (`bench/gauntlet/`, 21 PE variés committés) : **16/21**
-  bit-identiques (bzip2/grep/gzip/hello/lua/minigzip/nasm/sed + **sqlite3 ×4** +
-  strippés). Restes : m4 (signaux, sound), units (units.dat environnemental),
-  minigzip_stripped (micro-diff à confirmer).
+- **Corpus gauntlet** (`bench/gauntlet/`, 21 PE variés committés) : **16/21** au
+  score (17 fonctionnels — `minigzip_stripped` est byte-identique, faux-DIFF du
+  harness). MATCH : bzip2/grep/gzip/hello/lua/minigzip/nasm/sed + **sqlite3 ×4** +
+  strippés. Vrais restes : **m4 ×2** (abort sound dans le bookkeeping signaux mingw,
+  cf. 71) et **units ×2** (cherche `units.dat` — environnemental, pas un bug).
 
 ---
 
