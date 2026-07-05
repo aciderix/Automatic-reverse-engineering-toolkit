@@ -1295,6 +1295,87 @@ uint32_t aret_fstati64(uint32_t esp) {
     aret_fill_stati64(buf, &st);
     return 0;
 }
+/* _wstati64 / _wstat64(wpath, struct _stati64*) — wide-char path stat. */
+uint32_t aret_wstati64(uint32_t esp) {
+    char name[1024], path[1024];
+    aret_w2n((const uint16_t *)(uintptr_t)arg(esp, 0), name, sizeof name);
+    translate_path(name, path, sizeof path);
+    uint8_t *buf = (uint8_t *)(uintptr_t)arg(esp, 1);
+    struct stat st;
+    if (!buf || stat(path, &st) != 0) return (uint32_t)-1;
+    aret_fill_stati64(buf, &st);
+    return 0;
+}
+uint32_t aret_wstat(uint32_t esp) {
+    char name[1024], path[1024];
+    aret_w2n((const uint16_t *)(uintptr_t)arg(esp, 0), name, sizeof name);
+    translate_path(name, path, sizeof path);
+    uint8_t *buf = (uint8_t *)(uintptr_t)arg(esp, 1);
+    struct stat st;
+    if (!buf || stat(path, &st) != 0) return (uint32_t)-1;
+    aret_fill_stat32(buf, &st);
+    return 0;
+}
+/* _wfopen(wpath, wmode) — wide-char fopen; returns one of our msvcrt-layout FILEs
+ * (see aret_fopen). NASM opens its output file through this. */
+uint32_t aret_wfopen(uint32_t esp) {
+    char name[1024], mode[32], path[1024];
+    aret_w2n((const uint16_t *)(uintptr_t)arg(esp, 0), name, sizeof name);
+    aret_w2n((const uint16_t *)(uintptr_t)arg(esp, 1), mode, sizeof mode);
+    translate_path(name, path, sizeof path);
+    if (path_is_write_mode(mode)) make_parents(path);
+    int fd = open(path, fopen_mode_flags(mode), 0666);
+    if (fd < 0) return 0;
+    uint32_t f = alloc_dynfile(fd);
+    if (!f) { close(fd); return 0; }
+    return f;
+}
+/* _waccess(wpath, mode) — wide-char access(2). */
+uint32_t aret_waccess(uint32_t esp) {
+    char name[1024], path[1024];
+    aret_w2n((const uint16_t *)(uintptr_t)arg(esp, 0), name, sizeof name);
+    translate_path(name, path, sizeof path);
+    return (uint32_t)access(path, (int)arg(esp, 1));
+}
+/* _filelengthi64(fd) -> __int64 file length (edx:eax; import_returns_u64). */
+uint64_t aret_filelengthi64(uint32_t esp) {
+    struct stat st;
+    if (fstat((int)arg(esp, 0), &st) != 0) return (uint64_t)-1;
+    return (uint64_t)st.st_size;
+}
+/* _filelength(fd) -> long (32-bit length). */
+uint32_t aret_filelength(uint32_t esp) {
+    struct stat st;
+    if (fstat((int)arg(esp, 0), &st) != 0) return (uint32_t)-1;
+    return (uint32_t)st.st_size;
+}
+/* _chsize(fd, size) -> 0 / -1 (truncate/extend). */
+uint32_t aret_chsize(uint32_t esp) {
+    return (uint32_t)(ftruncate((int)arg(esp, 0), (off_t)(int32_t)arg(esp, 1)) == 0 ? 0 : (uint32_t)-1);
+}
+/* fgetpos/fsetpos(FILE*, fpos_t*) — msvcrt fpos_t is __int64 (byte offset). */
+uint32_t aret_fgetpos(uint32_t esp) {
+    int fd = file_fd(arg(esp, 0));
+    int64_t *pos = (int64_t *)(uintptr_t)arg(esp, 1);
+    if (fd < 0 || !pos) return (uint32_t)-1;
+    *pos = (int64_t)lseek(fd, 0, SEEK_CUR);
+    return 0;
+}
+uint32_t aret_fsetpos(uint32_t esp) {
+    int fd = file_fd(arg(esp, 0));
+    const int64_t *pos = (const int64_t *)(uintptr_t)arg(esp, 1);
+    if (fd < 0 || !pos) return (uint32_t)-1;
+    return (uint32_t)(lseek(fd, (off_t)*pos, SEEK_SET) < 0 ? (uint32_t)-1 : 0);
+}
+/* perror(s): "s: <errno string>\n" to stderr (fd 2). */
+uint32_t aret_perror(uint32_t esp) {
+    const char *s = (const char *)(uintptr_t)arg(esp, 0);
+    const char *e = strerror(errno);
+    if (s && *s) { ssize_t w = write(2, s, strlen(s)); (void)w; w = write(2, ": ", 2); (void)w; }
+    ssize_t w = write(2, e, strlen(e)); (void)w; w = write(2, "\n", 1); (void)w;
+    return 0;
+}
+
 /* _mkdir(path) -> 0 / -1 (msvcrt takes only the path; mode is implied 0777). */
 uint32_t aret_mkdir(uint32_t esp) {
     char path[1024];
@@ -1865,6 +1946,40 @@ uint32_t aret_GetCommandLineW(uint32_t esp) {
     }
     return (uint32_t)(uintptr_t)wcmd;
 }
+
+/* __p__acmdln / __p__wcmdln: msvcrt exposes the raw command line as `char* _acmdln`
+ * / `wchar_t* _wcmdln`; a statically-linked CRT parses it into argv/wargv before
+ * main. Return the address of a pointer to our rebuilt command line (same content
+ * as GetCommandLineA). Returning 0 (weak stub) left the CRT with no command line,
+ * so it built an empty argv and the program saw no arguments (NASM printed nothing
+ * for `-v`, every file argument was lost). */
+uint32_t aret_p__acmdln(uint32_t esp) {
+    (void)esp;
+    static char cmd[8192];
+    static char *ptr;
+    static int built = 0;
+    if (!built) { built = 1; aret_build_cmdline(cmd, sizeof cmd); ptr = cmd; }
+    return (uint32_t)(uintptr_t)&ptr;
+}
+uint32_t aret_p__wcmdln(uint32_t esp) {
+    (void)esp;
+    static uint16_t wcmd[8192];
+    static uint16_t *ptr;
+    static int built = 0;
+    if (!built) {
+        built = 1;
+        char tmp[8192];
+        aret_build_cmdline(tmp, sizeof tmp);
+        size_t i = 0;
+        for (; tmp[i] && i < sizeof(wcmd) / sizeof(wcmd[0]) - 1; i++) wcmd[i] = (unsigned char)tmp[i];
+        wcmd[i] = 0;
+        ptr = wcmd;
+    }
+    return (uint32_t)(uintptr_t)&ptr;
+}
+/* __lconv_init: CRT locale-conv table init. Under our HLE the C locale is fixed
+ * ("C"), so there is nothing to initialise — a no-op (return 0) is correct. */
+uint32_t aret_lconv_init(uint32_t esp) { (void)esp; return 0; }
 
 /* msvcrt internal globals exposed as pointer-returning functions. Names match
  * sanitize_import() (leading underscores stripped), so the generator's call to

@@ -448,6 +448,30 @@ fn abs_indirect_slot(insn: &iced_x86::Instruction) -> Option<u64> {
     }
 }
 
+/// Table-base VA of an indexed indirect call `call [idx*4 + disp32]` — a dispatch
+/// through an image-fixed **function-pointer table** (a statically-linked CRT
+/// init/atexit array walked by `call [ebx*4 + base]`, e.g. NASM's initializer
+/// thunks). Its code-pointer entries are functions reached by no direct call, so
+/// otherwise invisible to recovery. Requires no base register (a base register
+/// means a stack/heap array, not an image table) and a dword (scale-4) index.
+fn indexed_call_table_base(insn: &iced_x86::Instruction) -> Option<u64> {
+    use iced_x86::{FlowControl, Register};
+    // Only a `call` — a `jmp [idx*4+base]` is a switch jump table whose entries are
+    // case bodies (interior code), not function entries (handled by resolve_jump_table).
+    if insn.flow_control() != FlowControl::IndirectCall {
+        return None;
+    }
+    if insn.op0_kind() == iced_x86::OpKind::Memory
+        && insn.memory_base() == Register::None
+        && insn.memory_index() != Register::None
+        && insn.memory_index_scale() == 4
+    {
+        Some(insn.memory_displacement64())
+    } else {
+        None
+    }
+}
+
 /// The `(slot, imm)` of a `mov dword [disp32], imm32` — an immediate stored into a
 /// fixed absolute address. When `slot` is a proven indirect-call slot (used by a
 /// `call [slot]` elsewhere), the stored code `imm` is the *runtime* function
@@ -746,6 +770,37 @@ fn global_decode(
                         if in_exec(v) && !global.contains_key(&v) {
                             cands.insert(v);
                         }
+                    }
+                }
+                // Indexed indirect call `call [idx*4 + base]`: `base` is a
+                // function-pointer table (a CRT init/atexit/callback array). Harvest
+                // its code-pointer entries — reached by no direct call, so invisible
+                // otherwise (NASM's initializer thunk aborted here). Scan dwords from
+                // `base`: `0` ends the table, `0xffffffff` is a count/sentinel (skip),
+                // an in-image function-start pointer is harvested, and any other value
+                // ends the table — bounded to avoid runaway scans of unrelated data.
+                if let Some(base) = indexed_call_table_base(&insn.raw) {
+                    let mut a = base;
+                    for _ in 0..256 {
+                        let Some(v) = prog.read_u32(a).map(u64::from) else { break };
+                        if v == 0 {
+                            break; // null terminator ends the table
+                        } else if v == 0xffff_ffff {
+                            // count marker / sentinel — keep scanning
+                        } else if in_exec(v) && looks_like_func_start(prog, v, true) {
+                            // A `call [idx*4+base]` is definitive proof `v` is a
+                            // function. If the linear sweep already absorbed it into a
+                            // preceding function, force the boundary (re-split) as with
+                            // the >=3-pointer table case; else seed it fresh.
+                            if global.contains_key(&v) {
+                                forced.insert(v);
+                            } else {
+                                cands.insert(v);
+                            }
+                        } else {
+                            break; // a plain data value ends the table
+                        }
+                        a += 4;
                     }
                 }
                 // A code immediate stored into a proven indirect-call slot

@@ -3407,3 +3407,31 @@ binaires MSVC, pas seulement strings.exe.
   bug de lifter tractable, pas la « session dédiée joins » redoutée. (Leçon : vérifier si le fallback
   runtime est actif AVANT de conclure à un abandon x87 statique — l'entrée précédente supposait à tort
   l'asm no-op.)
+
+### Corpus élargi — NASM 2.16.01 (assembleur MSVC strippé 1,5 Mo) → ELF natif, sortie bit-identique ✅ JALON
+- **2026-07-05 — nouveau vrai binaire tiré du corpus élargi** (github bloqué par la policy ; sources/binaires
+  via ftp.gnu.org / nasm.us / curl.se / zlib.net, tous joignables). **NASM 2.16.01 win32** (PE i386 **strippé**,
+  MSVC/PDB, 745 fonctions) : `nasm -v`, `-f elf`, `-f win32`, `-f bin` = **bit-identiques à Wine** (objets
+  assemblés octet pour octet). 3 familles de fixes **généraux** :
+- **1. Récupération : table de pointeurs de fonctions appelée par index `call [idx*4+base]`** (`analysis`).
+  NASM initialise via une table `__xi`-style à `0x452610` (`{-1, thunk, 0}`) walkée par
+  `call [ebx*4+0x452610]`. La seule entrée code (un thunk `jmp` vers la vraie fonction) n'était **pas
+  récupérée** : `abs_indirect_slot` exige *pas* d'index, et le scan de table de pointeurs exige ≥3 pointeurs
+  (ici 1 parmi des sentinelles). Fix : `indexed_call_table_base` (call **uniquement**, pas jmp = switch) +
+  scan borné de la table depuis `base` (0 termine, `0xffffffff` = sentinelle, entrée in-image
+  `looks_like_func_start` = récoltée). Absorbée par le sweep → **forcée** en frontière (re-split), comme le
+  cas table-≥3. Général : toute table init/atexit/callback dispatché par `call [idx*4+base]`.
+- **2. CRT : ligne de commande + init locale** (`aret_hle.c`). `__p__acmdln`/`__p__wcmdln` renvoient
+  l'adresse d'un pointeur vers la ligne de commande reconstruite (comme `GetCommandLineA`) — le stub à 0
+  laissait le CRT statique construire un argv **vide** (NASM ne voyait aucun argument). `__lconv_init` =
+  no-op (locale C fixe). Général : tout MSVC statique parsant `_acmdln`.
+- **3. CRT : E/S fichier large + divers** (`aret_hle.c`). `_wfopen`/`_wstati64`/`_wstat`/`_waccess`
+  (wide→narrow via `aret_w2n` + réutilisation des cœurs narrow), `_filelengthi64` (edx:eax,
+  `import_returns_u64`) / `_filelength`, `_chsize` (ftruncate), `_fgetpos`/`_fsetpos` (fpos_t = __int64),
+  `perror`. NASM ouvre son fichier de sortie par `_wfopen` → sans lui « unable to open output file ».
+- **Vérifié** : `nasm -v`/`-f elf`/`-f win32`/`-f bin` = Wine (objets identiques) ; `-h` ne diffère que par
+  `argv[0]` (`./app` vs chemin Windows = environnemental). **Régression complète PASS** (difftest 271/271,
+  funcdiff corpus 0 divergence, SMT 11/11, recompilabilité 100 %), **winediff 46/46**, busybox/Lua classes
+  et sorties **inchangées** (la récup n'over-récupère pas). *Reste NASM* : `-f obj` (OMF) abort sur un stub
+  `ret` nu (méthode no-op du `struct ofmt`) stocké en immédiat — récup vtable/points-to (Phase 4), différé ;
+  les formats principaux marchent.
