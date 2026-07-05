@@ -416,10 +416,19 @@ Détail : **70 §6** (roadmap). Résumé :
   `mov 0x461de0,%eax` (ancien handler du signal 13/SIGPIPE) ; `cmp $0x42a2c0,%eax`
   (`_blocked_handler`) ; `jne .cold → abort()`. L'ancienne valeur lue ≠ `_blocked_handler`
   alors que sous Wine elle l'est → **divergence d'un state signal en amont**.
-- **Nature** : ce sont des fonctions **statiquement liées** (pas des imports), donc ARET les
-  lifte/exécute ; la divergence = un state signal mal construit (mislift en amont probable, à
-  bissecter — funcdiff sur les fonctions signal, ou tracer l'écriture de `[0x461de0]`). Abort
-  **sound** (aucune sortie fausse). Intriqué (émulation signaux mingw) → session dédiée.
-  Alternative doctrinale : reconnaître + host-backer `sigaction`/`sigprocmask` (FLIRT faible ici).
+- **Nature** : fonctions **statiquement liées** (pas des imports) → ARET les lifte/exécute ;
+  divergence de state signal. Abort **sound** (aucune sortie fausse).
+- **Précisé (2026-07-05)** : `[0x461de0]` = slot spécial du handler SIGPIPE (signal 13). Il a un
+  writer **`movl $0x42a2c0,0x461de0`** (constante = `_blocked_handler`) au chemin **block** de
+  `_sigprocmask` (0x42a5bd) — mais un **watchpoint (après mapping) ne le voit qu'UNE fois**, au
+  chemin `esi`-store (0x42a4ed), jamais le block direct. Donc **le chemin block de sigprocmask
+  n'exécute pas** dans ARET → `[0x461de0]` reste 0 → le chemin assert (`mov 0x461de0,%eax; cmp
+  $0x42a2c0,%eax; jne .cold→abort` à 0x42a4f3) échoue. **NON causé par auto-main** (l'entrée CRT
+  complète `--entry 0x4013e0` abort au même endroit → les ctors ne sont pas en cause).
+- **Prochain pas** : comparer le `how` de sigprocmask (regparm : eax/edx) et le **flot de contrôle
+  de `_sigprocmask`** ARET vs Wine — pourquoi le chemin block (`cmp $edx,1/2` en tête) n'est pas
+  pris. Soit `how` mal lifté, soit une branche divergente. funcdiff sur `_sigprocmask`/`_sigaction`
+  pourrait pointer un mislift. Intriqué → session dédiée ; alternative : host-backer sigaction/
+  sigprocmask (FLIRT faible ici). *(Niche : seul m4 du corpus exerce ce chemin.)*
 
 <!-- NOUVELLES ENTRÉES ICI (garder l'ordre chronologique, plus récent en bas) -->
