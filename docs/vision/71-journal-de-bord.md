@@ -35,6 +35,7 @@
 | Tag | Domaine | Fiche |
 |-----|---------|-------|
 | `[LIFT]` | sémantique par-instruction (drapeaux, entiers, SSE, chaînes, divers) | §2.1 |
+| `[SSA]` | construction SSA / structureur (φ, split d'entrée, opt-diff) | §2.1 + entrées |
 | `[X87]` | pile FPU : passe de profondeur + filet runtime + libm | §2.2 |
 | `[ABI]` | pile partagée, esp/ebp, appels, callee-pop, frame helpers | §2.3 |
 | `[RECOV]` | récupération de fonctions, tables de saut/pointeurs | §2.4 |
@@ -351,17 +352,34 @@ Détail : **70 §6** (roadmap). Résumé :
   (grille `n%23`/`n/23`/`%7`/`%3`/`%365`, magics bit-31, = Wine). Régression : **difftest
   271/271, transpile-diff 4/4 (hash inchangé), funcdiff 0 divergence, magicdiv 2³², SMT 11/11,
   recompilabilité 100 %, winediff 47/47, cpudiff 0 fail**.
-- **Reste sqlite3 mingw — 2ᵉ bug DIAGNOSTIQUÉ (non corrigé), prochaine cible** : le **CRUD**
-  (`CREATE TABLE`/`INSERT`) segfaulte dans `sub_429330=sqlite3ExprAffinity` (via
-  `sqlite3Select→findConstInWhere→constInsert`). Cause racine cernée : la fonction est une
-  boucle `while(1){ v9=*(u8*)v8; if(v9==0xa7)break; … }` où `v8` = l'Expr courant (walk
-  `pExpr=pExpr->pLeft`), assigné sur les back-edges (`v8=v141/v168/v176; goto L0`). **L'en-tête
-  de boucle `L0` EST le bloc d'entrée** (l'original lit `movzbl (%eax)` d'emblée, eax=pExpr),
-  donc la **valeur d'entrée du φ de `v8` = le registre-paramètre eax (`v201`) est perdue** →
-  `v8=0` à la 1ʳᵉ itération → deref null. L'arg `v201` n'est **jamais lu** dans le corps C.
-  = **bug SSA/structureur** : un registre à la fois **paramètre live-in ET variable de boucle**
-  quand l'en-tête de boucle coïncide avec le bloc d'entrée → l'edge d'entrée du φ n'est pas
-  seedé. Zone `src/ssa/` (risquée) → session dédiée, valider par funcdiff opt-diff + régression
-  complète. `[LIFT]`/structure, pas émission.
+- **Reste sqlite3 mingw** : voir l'entrée [LIFT][SSA] ci-dessous (2ᵉ bug — RÉSOLU).
+
+### 2026-07-05 — [LIFT][SSA] Split du bloc d'entrée = en-tête de boucle (sqlite3 mingw CRUD)
+- **Cible/symptôme** : sqlite3 mingw `CREATE TABLE`/`INSERT` segfaultait/bouclait (après le fix
+  imul). `sub_429330=sqlite3ExprAffinity` deref `Expr*` null, via `sqlite3Select→findConstInWhere
+  →constInsert`.
+- **Cause racine** (`src/ssa/mod.rs::to_ssa`) : quand le **bloc d'entrée de la fonction EST un
+  en-tête de boucle** (atteint par un back-edge — cas des fonctions **regparm** dont le param
+  arrive en registre et est la variable de boucle, lue d'emblée sans pre-header), la φ placée à
+  l'en-tête pour ce registre n'avait **pas de prédécesseur pour l'edge d'entrée** → ses args ne
+  couvraient que les back-edges → la **valeur initiale (le paramètre) était perdue** → la
+  variable d'induction n'avançait jamais (boucle infinie / valeur fausse ; l'arg n'était jamais
+  relu). `preds[entry]` = back-edges seulement.
+- **Fix** : **split du bloc d'entrée** — si `blocks[entry].pred` non vide, insérer un pre-header
+  vide qui **reprend la VA `func.entry`** et `jmp` vers l'ancien en-tête (qui reçoit une adresse
+  synthétique unique). L'en-tête a alors un edge d'entrée propre (depuis le pre-header) → sa φ
+  gagne un slot initial seedé avec la valeur du paramètre. Construction SSA standard. `id==index`
+  préservé (pre-header appended à l'index n). Ne se déclenche **que** si l'entrée a des préds
+  (0 régression sur le cas normal — hash transpile inchangé).
+- **Distinction** avec le self-tail-call (2026-07-03) : celui-ci gère `jmp entry` **inconditionnel**
+  (→ tail-call, param passé frais) ; ce fix gère le back-edge **conditionnel** vers l'entrée
+  (→ vraie boucle, φ à seeder).
+- **Vérifié** : sqlite3 mingw **CRUD/index/CTE/window/IN bit-identiques à Wine**. Fixture
+  permanente `tests/m1/fixtures/loop_header_entry.{c,exe}` (walk asm : entrée=en-tête, back-edge
+  conditionnel `jne _walk`, param regparm eax ; `7 7 7 0`) + test `loop_header_is_entry_block_phi_
+  seeded`. Pré-fix : boucle infinie ; post-fix : `7 7 7 0`. Régression : **difftest 271/271,
+  transpile-diff 4/4 (hash inchangé), funcdiff OPT-diff 10581 scored 0 divergence** (gate SSA sur
+  busybox+sqlite réels), magicdiv 2³², SMT 11/11, recompilabilité 100 %, winediff 47/47.
+- **sqlite3 mingw = fonctionnel** (scalaire + CRUD + agrégats + jointures + index + CTE + window).
 
 <!-- NOUVELLES ENTRÉES ICI (garder l'ordre chronologique, plus récent en bas) -->

@@ -17,7 +17,7 @@
 
 **Comment un agent trouve une info** : `grep` le tag de sous-système dans **71**
 (tags définis en tête du 71 : `[X87]`, `[ABI]`, `[RECOV]`, `[HLE-STDIO]`,
-`[HLE-FILE]`, `[HLE-WIN32]`, `[LIFT]`, `[ORACLE]`, `[RECOMPILE]`, `[64BIT]`,
+`[HLE-FILE]`, `[HLE-WIN32]`, `[LIFT]`, `[SSA]`, `[ORACLE]`, `[RECOMPILE]`, `[64BIT]`,
 `[THREAD]`, `[GUI]`, `[DEMO]`, `[INFRA]`). Chaque fiche 71 pointe vers la (les)
 section(s) du 50 pour l'historique complet.
 
@@ -212,6 +212,13 @@ recompilabilité **100 %** · WASM **7/7**.
   `signed_cast`/`emit_sign_extend` la sign-étendent depuis `int_bits(ty)` (sinon
   zéro-étendue → `mulhs` faux → `%N` faux). Invisible à cpudiff (bug d'**émission**,
   pas d'IR). Débloqué sqlite3 **mingw**. Garde `signed_magicdiv.c`.
+- **SSA — split du bloc d'entrée = en-tête de boucle** (`src/ssa/to_ssa`) : quand
+  l'entrée d'une fonction est elle-même un en-tête de boucle (back-edge vers
+  l'entrée ; typique d'un param **regparm** qui est la variable de boucle), la φ de
+  l'en-tête n'avait pas de prédécesseur pour l'edge d'entrée → **valeur initiale
+  (le param) perdue** → var d'induction jamais avancée (boucle infinie/valeur
+  fausse). Fix : insérer un **pre-header** qui reprend la VA `func.entry`. Gardé par
+  funcdiff opt-diff + fixture `loop_header_entry`. Débloqué sqlite3 mingw **CRUD**.
 
 ### 4.2 x87 (deux mécanismes : statique + filet runtime)
 - **Passe de profondeur statique** (`x87_depth_pass`) : compte la pile FPU
@@ -319,16 +326,17 @@ recompilabilité **100 %** · WASM **7/7**.
 > **borné** de problèmes **profonds**, chacun ≈ une session dédiée de forensics.
 > On passe de « largeur de shims » à « profondeur lifter ». Fini, mais plus lent.
 
-### P1 — sqlite3 mingw (levier fort, profond) 🎯 *en cours*
-- **1er bug RÉSOLU (2026-07-05)** : le crash `SELECT` était un bug d'**émission**
-  (`imul` 1-op signé × const magic zéro-étendu → `% 23` négatif → OOB). Corrigé
-  (cf. §4.1 + 71 `[LIFT][RECOMPILE]`). sqlite3 mingw scalaire = **bit-identique à Wine**.
-- **RESTE — 2ᵉ bug diagnostiqué, prochaine cible (SSA/structureur)** : le **CRUD**
-  segfaulte dans `sqlite3ExprAffinity` (deref `Expr*` null). Cause cernée : une boucle
-  dont **l'en-tête = le bloc d'entrée** et dont la variable est un **registre-paramètre**
-  (eax=pExpr) → la **valeur d'entrée du φ est perdue** (l'arg n'est jamais relu) → var=0.
-  Zone `src/ssa/` (risquée) → session dédiée, garde funcdiff opt-diff + régression complète.
-  Détail : 71 (entrée [LIFT] 2026-07-05). Repro `/tmp/g/sqlite3.exe` via `bench/gauntlet/`.
+### P1 — sqlite3 mingw ✅ FONCTIONNEL (2026-07-05)
+**2 bugs généraux résolus, sqlite3 mingw = bit-identique à Wine** (scalaire, CRUD,
+agrégats, jointures, index, CTE, window, IN) :
+1. **Émission `imul` 1-op signé × const magic** zéro-étendu → `%23` négatif → OOB
+   (crash `SELECT`). Cf. §4.1 + 71 `[LIFT][RECOMPILE]`.
+2. **SSA split du bloc d'entrée = en-tête de boucle** (φ entry value perdue pour un
+   param regparm variable de boucle) → boucle infinie (crash `CREATE TABLE`). Cf.
+   §4.1 + 71 `[LIFT][SSA]`.
+*Reste (mesure future)* : passer le `gauntlet/score.sh` complet + le sweep sqlite
+sur le build mingw pour re-mesurer la surface (FTS/RTREE non balayés → abort sound
+s'ils butent).
 
 ### P2 — Robustesse x87 : réconciliation des joins ambigus (session dédiée)
 La **vraie difficulté récurrente** (Lua `intarith`/`forprep`, busybox `seq`, le

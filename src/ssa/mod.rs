@@ -44,12 +44,47 @@ fn fresh(counter: &mut u32) -> ValueId {
 
 /// Transform `func` into SSA form in place.
 pub fn to_ssa(func: &mut IrFunction) {
-    let n = func.blocks.len();
-    if n == 0 {
+    if func.blocks.is_empty() {
         return;
     }
     // Block ids are assumed to equal their index; entry is the block at the
     // function entry address (fall back to index 0).
+    let entry0 = func
+        .blocks
+        .iter()
+        .position(|b| b.addr == func.entry)
+        .unwrap_or(0);
+
+    // --- entry-block splitting -------------------------------------------
+    // If the entry block has predecessors, it is a loop header (every pred of
+    // the entry is a back-edge — the entry dominates the whole function). A
+    // loop-header phi needs an argument for the *entry edge* carrying the
+    // initial (parameter/undef) value; but the entry block has no predecessor
+    // block for that edge, so the phi would be built with back-edge args only
+    // and the initial value is lost (the induction variable — often a
+    // register parameter, e.g. `eax` in a regparm function like sqlite3's
+    // `sqlite3ExprAffinity` — never advances → wrong value / infinite loop).
+    // Fix: insert an empty pre-header that takes over the entry VA and jumps to
+    // the old header. The header now has a clean entry edge (from the
+    // pre-header), so its phis get a proper initial-value argument. Standard
+    // SSA construction on an irreducible-looking entry.
+    if !func.blocks[entry0].pred.is_empty() {
+        let ph_idx = func.blocks.len() as u32; // id == index
+        // Give the old header a fresh synthetic address (guaranteed unique and
+        // != func.entry) so `addr == func.entry` now resolves to the pre-header.
+        let synth = func.blocks.iter().map(|b| b.addr).max().unwrap_or(0) + 1;
+        func.blocks[entry0].addr = synth;
+        func.blocks[entry0].pred.push(ph_idx);
+        func.blocks.push(Block {
+            id: ph_idx,
+            addr: func.entry,
+            stmts: vec![Stmt::Jump(BlockId(entry0 as u32))],
+            succ: vec![entry0 as u32],
+            pred: vec![],
+        });
+    }
+
+    let n = func.blocks.len();
     let entry = func
         .blocks
         .iter()

@@ -286,6 +286,25 @@ fn internal_stdcall_callee_pop_esp() {
 }
 
 #[test]
+fn loop_header_is_entry_block_phi_seeded() {
+    if !has_m32() {
+        eprintln!("skipping loop-header-entry test: `cc -m32` unavailable (install gcc-multilib)");
+        return;
+    }
+    // The function entry block is itself a loop header reached by a conditional
+    // back-edge, and the induction variable is a register parameter (regparm).
+    // SSA must seed the header phi's entry edge with the parameter's initial
+    // value — else the induction variable never advances (infinite loop / wrong
+    // result). Minimized sqlite3-mingw `sqlite3ExprAffinity` (CREATE TABLE hung
+    // before the fix). Must now match native ("7 7 7 0").
+    let out = transpile_and_run("loop_header_entry.exe");
+    assert!(
+        out.contains("7 7 7 0"),
+        "entry-block loop-header phi entry value dropped:\n{out}"
+    );
+}
+
+#[test]
 fn teb_synthetic_process_environment() {
     if !has_m32() {
         eprintln!("skipping TEB test: `cc -m32` unavailable (install gcc-multilib)");
