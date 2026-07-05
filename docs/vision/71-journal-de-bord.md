@@ -351,9 +351,17 @@ Détail : **70 §6** (roadmap). Résumé :
   (grille `n%23`/`n/23`/`%7`/`%3`/`%365`, magics bit-31, = Wine). Régression : **difftest
   271/271, transpile-diff 4/4 (hash inchangé), funcdiff 0 divergence, magicdiv 2³², SMT 11/11,
   recompilabilité 100 %, winediff 47/47, cpudiff 0 fail**.
-- **Reste sqlite3 mingw** : le **CRUD** (`CREATE TABLE`/`INSERT`) segfaulte encore, bug
-  **distinct plus profond** : `sub_429330=sqlite3ExprAffinity` deref Expr null, via
-  `sqlite3Select→findConstInWhere→constInsert` (optimisation WHERE const-propagation). Prochaine
-  cible.
+- **Reste sqlite3 mingw — 2ᵉ bug DIAGNOSTIQUÉ (non corrigé), prochaine cible** : le **CRUD**
+  (`CREATE TABLE`/`INSERT`) segfaulte dans `sub_429330=sqlite3ExprAffinity` (via
+  `sqlite3Select→findConstInWhere→constInsert`). Cause racine cernée : la fonction est une
+  boucle `while(1){ v9=*(u8*)v8; if(v9==0xa7)break; … }` où `v8` = l'Expr courant (walk
+  `pExpr=pExpr->pLeft`), assigné sur les back-edges (`v8=v141/v168/v176; goto L0`). **L'en-tête
+  de boucle `L0` EST le bloc d'entrée** (l'original lit `movzbl (%eax)` d'emblée, eax=pExpr),
+  donc la **valeur d'entrée du φ de `v8` = le registre-paramètre eax (`v201`) est perdue** →
+  `v8=0` à la 1ʳᵉ itération → deref null. L'arg `v201` n'est **jamais lu** dans le corps C.
+  = **bug SSA/structureur** : un registre à la fois **paramètre live-in ET variable de boucle**
+  quand l'en-tête de boucle coïncide avec le bloc d'entrée → l'edge d'entrée du φ n'est pas
+  seedé. Zone `src/ssa/` (risquée) → session dédiée, valider par funcdiff opt-diff + régression
+  complète. `[LIFT]`/structure, pas émission.
 
 <!-- NOUVELLES ENTRÉES ICI (garder l'ordre chronologique, plus récent en bas) -->

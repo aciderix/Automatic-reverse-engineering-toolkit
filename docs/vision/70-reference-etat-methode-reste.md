@@ -323,11 +323,12 @@ recompilabilité **100 %** · WASM **7/7**.
 - **1er bug RÉSOLU (2026-07-05)** : le crash `SELECT` était un bug d'**émission**
   (`imul` 1-op signé × const magic zéro-étendu → `% 23` négatif → OOB). Corrigé
   (cf. §4.1 + 71 `[LIFT][RECOMPILE]`). sqlite3 mingw scalaire = **bit-identique à Wine**.
-- **RESTE (prochaine cible)** : le **CRUD** (`CREATE TABLE`/`INSERT`) segfaulte
-  encore — bug **distinct plus profond**. `sub_429330=sqlite3ExprAffinity` deref un
-  `Expr*` null, via `sqlite3Select→findConstInWhere→constInsert` (optimisation WHERE
-  const-propagation). Repro : `bench/gauntlet/` (`/tmp/g/sqlite3.exe`), méthode C
-  `-O0 -g` + gdb + watchpoint (voir 71 pour le workflow qui a cracké le 1er bug).
+- **RESTE — 2ᵉ bug diagnostiqué, prochaine cible (SSA/structureur)** : le **CRUD**
+  segfaulte dans `sqlite3ExprAffinity` (deref `Expr*` null). Cause cernée : une boucle
+  dont **l'en-tête = le bloc d'entrée** et dont la variable est un **registre-paramètre**
+  (eax=pExpr) → la **valeur d'entrée du φ est perdue** (l'arg n'est jamais relu) → var=0.
+  Zone `src/ssa/` (risquée) → session dédiée, garde funcdiff opt-diff + régression complète.
+  Détail : 71 (entrée [LIFT] 2026-07-05). Repro `/tmp/g/sqlite3.exe` via `bench/gauntlet/`.
 
 ### P2 — Robustesse x87 : réconciliation des joins ambigus (session dédiée)
 La **vraie difficulté récurrente** (Lua `intarith`/`forprep`, busybox `seq`, le
