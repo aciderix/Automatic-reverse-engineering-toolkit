@@ -423,6 +423,40 @@ fn emit_dispatch(internal: &[u64], host: &[(u64, String)], iat: &[(u64, String)]
 \x20   return 0;\n\
 }\n",
     );
+    // Callee-pops-args (`ret N`) table for INDIRECT calls: an internal VA that is a
+    // __stdcall/FAST_FUNC callee maps to the bytes it pops. After an indirect
+    // `call`, the lifted code raises esp by `__aret_callee_pop(target_va)` (see
+    // ir::build::callee_pop_adjust) — without which esp drifts N low per call
+    // (a real BusyBox `cksum` crash on the indirectly dispatched CRC handler).
+    let mut pops: Vec<(u64, u16)> = internal
+        .iter()
+        .filter_map(|&va| {
+            let n = crate::ir::build::callee_pop_bytes(va);
+            (n > 0).then_some((va, n))
+        })
+        .collect();
+    pops.sort_by_key(|(va, _)| *va);
+    if pops.is_empty() {
+        s.push_str("uint32_t __aret_callee_pop(uint32_t va){ (void)va; return 0; }\n");
+    } else {
+        s.push_str("struct aret_pe { uint32_t va; uint16_t pop; };\n");
+        s.push_str("static const struct aret_pe aret_poptab[] = {\n");
+        for (va, n) in &pops {
+            let _ = writeln!(s, "    {{ 0x{va:x}u, {n} }},");
+        }
+        s.push_str("};\n");
+        s.push_str(
+            "uint32_t __aret_callee_pop(uint32_t va) {\n\
+\x20   long lo = 0, hi = (long)(sizeof(aret_poptab)/sizeof(aret_poptab[0])) - 1;\n\
+\x20   while (lo <= hi) {\n\
+\x20       long m = (lo + hi) / 2;\n\
+\x20       if (aret_poptab[m].va == va) return aret_poptab[m].pop;\n\
+\x20       if (aret_poptab[m].va < va) lo = m + 1; else hi = m - 1;\n\
+\x20   }\n\
+\x20   return 0;\n\
+}\n",
+        );
+    }
     s
 }
 
@@ -711,6 +745,11 @@ pub fn transpile(
     // preserves ecx must not discard the caller's live ecx (GCC -O2 relies on
     // this for static functions; blanket clobbering corrupts e.g. BusyBox).
     ir::build::set_call_clobbers(ir::build::compute_call_clobbers(funcs));
+    // Per-callee `ret N` pop bytes: a call to a __stdcall/FAST_FUNC internal
+    // function (which pops its own stack args) must raise the caller's esp by N,
+    // or esp drifts N low per call (BusyBox `cksum` crashes on the indirectly
+    // called FAST_FUNC CRC handler). Empty unless the program has such a function.
+    ir::build::set_callee_pops(ir::build::compute_callee_pops(funcs));
 
     std::fs::create_dir_all(out_dir)
         .with_context(|| format!("failed to create {}", out_dir.display()))?;

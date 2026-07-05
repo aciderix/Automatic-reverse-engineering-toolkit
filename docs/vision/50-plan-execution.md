@@ -3212,3 +3212,35 @@ binaires MSVC, pas seulement strings.exe.
   `stdcall_pops`). **Non-régression par construction** : les fonctions cdecl ont N=0 (no-op) ; seules les
   fonctions callee-pop (déjà cassées aujourd'hui) reçoivent le +N. Garde-fou : `ret N` (`C2`) est le seul
   encodage callee-pop, sans ambiguïté, donc pas de faux positif sur du cdecl.
+
+### cksum — FIX LIVRÉ, vérifié, régression complète PASS (fermeture propre)
+- **2026-07-05 — le fix est implémenté, vérifié bout-en-bout, et toute la régression passe.**
+- **Le fix** : modéliser le pop `ret N` du callee pour les fonctions **internes** (pas seulement les
+  imports). `compute_callee_pops(funcs)` scanne chaque fonction pour un `ret imm16` (opcode `C2`, encodage
+  callee-pop non ambigu ; `C3`/cdecl = 0) → map `entry → N`. Au site d'appel (`ir::build`,
+  `callee_pop_adjust`) : après un `call` interne vers un callee-pop, `esp += N`.
+  - **Direct** : `N` constant (`callee_pop_bytes(target)`), no-op si cdecl.
+  - **Indirect** : `esp += __aret_callee_pop(target_va)` — table runtime (générée dans `aret_dispatch.c`,
+    binary-search VA→pop), capturée AVANT l'appel dans un temp (cible possiblement dans un registre
+    caller-saved). Injecté seulement si le programme a ≥1 fonction callee-pop (`has_callee_pops`) → les
+    autres binaires restent **byte-identiques**.
+  - **Pourquoi net-0** : le compilo a émis sa compensation (`sub esp,N`/`push`) en supposant le pop ;
+    `+N` (nouveau) `−N` (compensation existante) = 0. cdecl (N=0) → aucune injection → zéro régression.
+- **Repro minimale committée** : `tests/m1/fixtures/indirect_stdcall_pop.{c,exe}` (drift6) — FAST_FUNC
+  `regparm(3)+stdcall ret 4` indirect + driver `-O2 -fomit-frame-pointer` qui recharge la table depuis
+  `[esp+0x1c]`. Pré-fix : **segfault**. Post-fix : `c=226` (= native). Test `internal_stdcall_callee_pop_esp`
+  dans `tests/m1_transpile.rs`.
+- **Vérification bout-en-bout** :
+  - busybox `cksum in.txt` (12 o) : pré-fix `3690874878 3096396776` (FAUX) → post-fix **`3733384285 12`**
+    (= `cksum` système = busybox sous wine). Vérifié aussi sur 5000 o : `2522930177 5000` (= référence).
+  - busybox `md5sum`/`sha1sum`/`echo`/`sort`/`wc` : inchangés (wc segfaultait DÉJÀ avant le fix — bug
+    pré-existant distinct, hors périmètre ; baseline construit et comparé pour le prouver).
+- **Régression complète (principe sacré) — TOUT PASS** :
+  - `bench/regression.sh` : difftest **271/271**, in-place 3/3, magicdiv 2³², funcdiff corpus (busybox+
+    sqlite, **0 divergence**), SMT 11/11, recompilabilité gzip/ls/cat 100 % → **REGRESSION GATE: PASS**.
+  - `bench/winediff.sh` : **44/44** programmes (sortie = ground truth Wine).
+  - `bench/difftest_transpile.sh` : **4/4** niveaux d'opt (H=19acad982194bf07).
+  - `cargo test` (défaut + `--features unpack`) : tout vert, funcdiff 0 divergence.
+- **Bilan** : la frontière cksum est fermée proprement. Cause racine prouvée, fixe minimal et borné
+  (direct N constant / indirect lookup runtime, gardé par `has_callee_pops`), repro committée, régression
+  intégrale verte. Aucune sortie fausse présentée comme correcte ; le principe sacré est tenu.

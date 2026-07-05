@@ -267,6 +267,25 @@ fn indirect_call_dispatch_through_function_pointer() {
 }
 
 #[test]
+fn internal_stdcall_callee_pop_esp() {
+    if !has_m32() {
+        eprintln!("skipping callee-pop test: `cc -m32` unavailable (install gcc-multilib)");
+        return;
+    }
+    // A __stdcall/FAST_FUNC internal function (`ret N`, callee pops its stack args)
+    // called INDIRECTLY in a loop: the compiler compensates with `sub esp,N`, so the
+    // transpiler must also model the callee's pop or esp drifts N per iteration and a
+    // reloaded esp-relative local (here the table pointer) is read from the wrong
+    // slot. This is the minimized BusyBox `cksum` crash — it segfaulted before the
+    // fix; it must now compute the same value as native.
+    let out = transpile_and_run("indirect_stdcall_pop.exe");
+    assert!(
+        out.contains("c=226"),
+        "internal callee-pop esp not modelled (esp drift):\n{out}"
+    );
+}
+
+#[test]
 fn teb_synthetic_process_environment() {
     if !has_m32() {
         eprintln!("skipping TEB test: `cc -m32` unavailable (install gcc-multilib)");

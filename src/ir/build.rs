@@ -290,6 +290,10 @@ pub fn build_ir(prog: &Program, func: &Function) -> IrFunction {
             if is_call_rt {
                 stmts.push(crate::ir::lift::x87rt_stmt("__x87rt_precall"));
             }
+            // Internal callee-pops-args (`ret N`) support: capture the pop before the
+            // call (indirect target may sit in a caller-saved reg), apply it after.
+            let (pop_pre, pop_post) = callee_pop_adjust(&s, insn, bits);
+            stmts.extend(pop_pre);
             stmts.extend(s);
             // stdcall import ABI: a __stdcall callee pops its own arguments. ARET's
             // shim does not, so model the pop by raising esp by `@N` after the call —
@@ -310,6 +314,8 @@ pub fn build_ir(prog: &Program, func: &Function) -> IrFunction {
                 },
                 None => {}
             }
+            // Internal callee-pops-args (`ret N`): raise esp by N after the call.
+            stmts.extend(pop_post);
             // A call to a fp-returning function leaves its result in st(0): recover
             // it from the fp return channel into the slot the depth analysis says
             // it lands in, so subsequent x87 ops read the real value (not undef).
@@ -633,11 +639,143 @@ thread_local! {
     /// changed. A function absent from the map clobbers both (the safe default).
     static CALL_CLOBBERS: std::cell::RefCell<HashMap<u64, u8>> =
         std::cell::RefCell::new(HashMap::new());
+
+    /// Entry address -> bytes of stack arguments the function pops on return
+    /// (`ret N`, the callee-pops-args ABI of 32-bit `__stdcall`/GCC `FAST_FUNC`).
+    /// A cdecl callee (plain `ret`, N=0) is absent. A call site must raise the
+    /// caller's esp by N after the call, since the compiler emitted a compensating
+    /// `sub esp,N`/dummy `push` assuming the callee cleaned up (a real BusyBox
+    /// `cksum` crash otherwise). Installed once per transpile by `set_callee_pops`;
+    /// empty for verify/decompile (those never inject the adjustment).
+    static CALLEE_POPS: std::cell::RefCell<HashMap<u64, u16>> =
+        std::cell::RefCell::new(HashMap::new());
 }
 
 /// Install the per-function ecx/edx clobber masks for this thread.
 pub fn set_call_clobbers(m: HashMap<u64, u8>) {
     CALL_CLOBBERS.with(|c| *c.borrow_mut() = m);
+}
+
+/// Install the per-function `ret N` pop-byte map for this thread.
+pub fn set_callee_pops(m: HashMap<u64, u16>) {
+    CALLEE_POPS.with(|c| *c.borrow_mut() = m);
+}
+
+/// Bytes a *direct* internal callee pops on return (`ret N`); 0 for cdecl or an
+/// unknown target — so a cdecl call injects no adjustment (unchanged behaviour).
+pub(crate) fn callee_pop_bytes(target: u64) -> u16 {
+    CALLEE_POPS.with(|c| c.borrow().get(&target).copied().unwrap_or(0))
+}
+
+/// Does this program contain any callee-pops-args (`ret N`) internal function?
+/// When it does not, indirect calls need no pop lookup — keeping such programs
+/// byte-for-byte identical to the prior pipeline (zero blast radius).
+pub(crate) fn has_callee_pops() -> bool {
+    CALLEE_POPS.with(|c| !c.borrow().is_empty())
+}
+
+/// Scan every recovered function for a terminal `ret N` (`ret imm16`, opcode
+/// `C2` — the unambiguous callee-pops-args encoding) and map its entry to N.
+/// Plain `ret` (`C3`, N=0) and non-returning functions are omitted, so only
+/// genuine `__stdcall`/`FAST_FUNC` callees ever get a pop modelled.
+pub fn compute_callee_pops(funcs: &[&Function]) -> HashMap<u64, u16> {
+    use iced_x86::Mnemonic;
+    let mut m = HashMap::new();
+    for f in funcs {
+        let mut pop = 0u16;
+        for b in f.blocks.values() {
+            for insn in &b.insns {
+                let ins = &insn.raw;
+                if ins.mnemonic() == Mnemonic::Ret && ins.op_count() > 0 {
+                    pop = pop.max(ins.immediate16());
+                }
+            }
+        }
+        if pop > 0 {
+            m.insert(f.entry, pop);
+        }
+    }
+    m
+}
+
+/// The target of the (first) `call` expression lifted into `stmts`, if any — used
+/// to decide whether a call site needs a callee-pop esp adjustment.
+fn lifted_call_target(stmts: &[Stmt]) -> Option<CallTarget> {
+    fn in_expr(e: &Expr) -> Option<CallTarget> {
+        match e {
+            Expr::Call { target, .. } => Some(target.clone()),
+            Expr::Binary(_, a, b) => in_expr(a).or_else(|| in_expr(b)),
+            Expr::Unary(_, x) | Expr::Cast { expr: x, .. } => in_expr(x),
+            Expr::Load { addr, .. } => in_expr(addr),
+            Expr::Select { cond, then_, else_ } => {
+                in_expr(cond).or_else(|| in_expr(then_)).or_else(|| in_expr(else_))
+            }
+            _ => None,
+        }
+    }
+    for s in stmts {
+        let found = match s {
+            Stmt::Set { expr, .. } | Stmt::Assign { expr, .. } | Stmt::CallStmt(expr) => {
+                in_expr(expr)
+            }
+            Stmt::Store { addr, value, .. } => in_expr(addr).or_else(|| in_expr(value)),
+            _ => None,
+        };
+        if found.is_some() {
+            return found;
+        }
+    }
+    None
+}
+
+/// For an internal `call` (direct or indirect) to a callee-pops-args (`ret N`)
+/// function, the statements that raise the caller's esp by N: the callee removed
+/// N bytes of stack arguments on return, and the compiler emitted a compensating
+/// `sub esp,N`/dummy `push` assuming it — so without this esp drifts N low per call
+/// (BusyBox `cksum`: the FAST_FUNC CRC handler, `ret 4`, is called indirectly in a
+/// loop, and the crc-table local, reloaded from the drifting esp slot, is read from
+/// the wrong address → crash). `.0` runs *before* the call (so an indirect target
+/// held in a caller-saved register is read while still live), `.1` after. Empty for
+/// cdecl (`ret`, N=0), for imports/`Named` calls (handled by `stdcall_pops`), and
+/// for 64-bit (register args, no callee stack cleanup).
+fn callee_pop_adjust(s: &[Stmt], insn: &Insn, bits: u32) -> (Vec<Stmt>, Vec<Stmt>) {
+    if bits != 32 {
+        return (Vec::new(), Vec::new());
+    }
+    let Some(target) = lifted_call_target(s) else {
+        return (Vec::new(), Vec::new());
+    };
+    let esp = Location::Reg(RegId(4));
+    let raise = |amt: Expr| Stmt::Set {
+        dst: esp.clone(),
+        expr: Expr::Binary(BinOp::Add, Box::new(Expr::Read(esp.clone())), Box::new(amt)),
+    };
+    match target {
+        CallTarget::Direct(t) => {
+            let n = callee_pop_bytes(t);
+            if n > 0 {
+                (Vec::new(), vec![raise(Expr::Const(n as i128, Ty::int(32)))])
+            } else {
+                (Vec::new(), Vec::new())
+            }
+        }
+        // Indirect target: N is only known at runtime (the fn pointer's VA), so look
+        // it up in the dispatch's pop table. Skipped entirely when the program has no
+        // callee-pop function (the lookup would always be 0) — keeps those byte-identical.
+        CallTarget::Indirect(e) if has_callee_pops() => {
+            let tmp = Location::Temp((insn.address as u32).wrapping_mul(4).wrapping_add(3));
+            let lookup = Expr::Call {
+                target: CallTarget::Named("__aret_callee_pop".to_string()),
+                args: vec![*e],
+                ret: Ty::int(32),
+            };
+            (
+                vec![Stmt::Set { dst: tmp.clone(), expr: lookup }],
+                vec![raise(Expr::Read(tmp))],
+            )
+        }
+        _ => (Vec::new(), Vec::new()),
+    }
 }
 
 /// The ecx/edx clobber mask of a *direct* call target: which scratch registers

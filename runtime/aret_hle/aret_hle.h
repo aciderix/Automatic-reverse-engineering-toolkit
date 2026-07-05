@@ -96,6 +96,12 @@ uint32_t __aret_gs(void);
  * transpiled `sub_<va>` (generated table in aret_dispatch.c). */
 uint64_t aret_call(uint32_t va, uint64_t esp, uint64_t a, uint64_t c, uint64_t d, uint64_t b);
 
+/* Bytes of stack arguments the internal function at code VA `va` pops on return
+ * (`ret N`, the __stdcall/FAST_FUNC callee-pops-args ABI); 0 for cdecl/unknown.
+ * After an indirect `call`, the caller raises esp by this so the callee's own
+ * cleanup is modelled (generated table in aret_dispatch.c). */
+uint32_t __aret_callee_pop(uint32_t va);
+
 /* Register a transpiled callback (its code VA) to run at process exit; shared by
  * the atexit and _onexit shims. */
 void aret_register_atexit(uint32_t va);
