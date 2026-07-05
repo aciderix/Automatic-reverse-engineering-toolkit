@@ -3301,3 +3301,33 @@ binaires MSVC, pas seulement strings.exe.
 - **Vérifié** : 11 applets (uniq/uniq -c/tac/tail/cat/wc/head/sort/od/nl/rev) = **bit-identiques à wine** ;
   **winediff 45/45** (close/isatty ne régressent pas stdin/pipe/console) ; wc/cksum inchangés. Régression
   complète (difftest/transpile-diff/funcdiff/SMT/recompilabilité) : voir commit.
+
+### x87 robustesse — awk `/` cerné : cascade fp-returning + joins ambigus (diagnostic, pas de fix shippé)
+- **2026-07-05 — cible concrète trouvée : busybox `awk` `22/7` → « Division by zero »** (wine : 3.14286).
+  `+`/`*` sont **constant-foldés au parse** (marchent), mais `/`/`%` sont évalués au **runtime** dans
+  `evaluate` (0x428500), dont l'analyse de profondeur x87 **abandonne** → le compare `if (R_d == 0)`
+  (idiome `fldz; fxch; fucom; fnstsw; sahf; jp/jne`) devient asm no-op → drapeaux indéfinis → branche
+  div-par-zéro toujours prise. (dc : abort sur fonction non récupérée 0x4119cc — distinct, recovery.)
+- **Cascade fp-returning diagnostiquée** : `evaluate` → `call 0x433c58` (= parse-nombre, renvoie un
+  `double` en st(0)) → `0x4082a0` (renvoie double) → `0x402220` (dtoa, **bail propre**). Pour que le
+  `fstp`/`fucom` après `call 0x433c58` ne sous-déborde pas, `0x433c58` doit être **fp-returning**.
+- **Sous-bug RÉEL trouvé (et fix correct identifié, non shippé)** : `compute_fp_returning` ne pouvait
+  pas marquer une fonction fp-returning **auto-récursive** (`0x433c58` s'appelle elle-même puis fait un
+  `ftst` sur le résultat) — poule-et-œuf : l'analyse de profondeur a besoin de savoir la fonction
+  fp-returning pour compter le `+1` de l'appel récursif, mais le point-fixe ne l'ajoute qu'après. Fix
+  identifié : si `x87_depth_pass` **bail**, réessayer en **supposant** `f ∈ fp` (assumption coinductive) ;
+  accepter seulement si tous les rets restent à profondeur 1 (une fonction pure-entier analyse proprement
+  à profondeur 0 → jamais l'assumption → pas de faux positif). **Vérifié** que ce fix marque correctement
+  `0x433c58`/`0x4082a0` fp-returning.
+- **Pourquoi NON shippé (principe sacré)** : le fix, bien que **correct et sûr**, ne change **rien
+  d'observable** — partial busybox **5** et sqlite **14 inchangés**, et `awk /` reste cassé. Le vrai
+  bloqueur est ailleurs : `evaluate` abandonne sur des **joins de profondeur ambigus** (« 1 vs 0 »,
+  « 1 vs 2 » à 0x4285ac/0x4285ed/0x429129) **et** la cascade dépend de `0x402220` (dtoa) qui a son propre
+  bail. Livrer un changement sans bénéfice mesuré dans une zone **critique pour la justesse x87** viole la
+  discipline (risque sans récompense). Réverté ; diagnostic conservé ici.
+- **Ce que la session dédiée x87 doit faire** (dans l'ordre) : (1) **réconciliation des joins ambigus** —
+  la vraie difficulté récurrente (Lua `intarith`/`forprep`, busybox `awk`/`seq`) : suivre les valeurs
+  conservées par `fstp st(i)`/`fxch` dans les idiomes de comparaison NaN, réconcilier les profondeurs
+  divergentes aux joins au lieu d'abandonner toute la fonction ; (2) intégrer le fix fp-returning
+  auto-récursif ci-dessus (prérequis prouvé, réutilisable) ; (3) résoudre le bail `0x402220` (dtoa).
+  Délicat, une fonction à la fois, **difftest + cpudiff + winediff + un filet Lua à chaque pas**.
