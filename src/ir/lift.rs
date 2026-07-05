@@ -2629,8 +2629,17 @@ fn x87_rt_try(insn: &Insn) -> Option<Vec<Stmt>> {
                     };
                     vec![rt(h, vec![addr, pop])]
                 } else {
-                    let i = if ins.op_count() >= 1 && ins.op_register(0).is_st() {
-                        ins.op_register(0).number() as i128
+                    // The compared register is the LAST operand: iced models
+                    // `fucom st(i)` as two operands — the implicit ST0 accumulator
+                    // (op0) plus ST(i) (op1) — so reading op0 always yields ST0
+                    // (i=0), comparing st(0) with itself (always equal, C3=1) and
+                    // making every `x == 0` test succeed (BusyBox awk's `a/b` then
+                    // always raised "Division by zero"). A bare `fucom`/`fucompp`
+                    // (op_count 0) is an implicit st(1). Mirrors the static x87_try.
+                    let i = if ins.op_count() >= 1
+                        && ins.op_register(ins.op_count() - 1).is_st()
+                    {
+                        ins.op_register(ins.op_count() - 1).number() as i128
                     } else {
                         1
                     };

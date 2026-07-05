@@ -3381,3 +3381,29 @@ binaires MSVC, pas seulement strings.exe.
   0x429129 → `evaluate` s'analyse → le compare `R_d == 0` du `/` devient correct. Note : les built-ins
   `exp`/`sin`/`sqrt` d'awk **marchent déjà** (chemin distinct) ; seul l'opérateur `/`/`%` est cassé, et son
   blocage est **entièrement** ce join libm. Diagnostic complet, pas de code deviné shippé.
+
+### x87/awk — CAUSE RÉELLE trouvée : opérande de `fucom st(i)` dans le fallback runtime ✅ FAIT
+- **2026-07-05 — mon diagnostic « cascade fp-returning / host-backing » était FAUX.** En cherchant à
+  host-backer, j'ai vu que `evaluate` (0x428500) utilise en fait le **fallback x87 runtime** (`__x87rt_*`,
+  pas d'asm no-op) — d'où `awk exp/sqrt/+/*` **marchent déjà**. Le bug de `/` est donc **spécifique** à
+  l'idiome compare-à-zéro dans le lifter runtime, **pas** un problème de complétude x87 ni de host-backing.
+- **Cause racine (une ligne)** : dans `lift_x87_runtime` (`Fcom|Fucom` registre), l'opérande comparé était
+  lu via `op_register(0)`. Or iced modélise `fucom st(1)` en **deux opérandes** (ST0 accumulateur implicite
+  + ST1) → `op_register(0)` = **ST0** → `__x87rt_com(0,0)` = compare st(0) avec **lui-même** → toujours
+  égal → **C3=1** → tout test `x == 0` réussit → `a/b` levait toujours « Division by zero ». Le chemin
+  **statique** (`x87_try`) était déjà correct (il lit `op_count()-1`, le dernier opérande) — seul le
+  runtime avait le bug. Fix : lire `op_register(op_count()-1)` (dernier opérande ST), comme le statique et
+  comme le cas `Fcomi/Fucomi` voisin (déjà correct).
+- **Effet** : `awk 22/7=3.14286`, `10/3=3.33333`, `100/8=12.5`, `355/113=3.14159`, `22%7=1`, `3.5/0`→
+  « Division by zero » (vrai zéro) — **bit-identiques à wine**. Général : toute fonction en fallback x87
+  runtime faisant un `fcom/fucom st(i≥1)` (compare flottant via `fnstsw;sahf`).
+- **Garde permanent** : `bench/winecorpus/x87_fcom_runtime.c` — émet exactement l'idiome
+  `fldl2e(non modélisé→force le runtime); fldz; fxch st(1); fucom st(1); fnstsw; sahf; sete` ; avec le bug
+  il rendait `is_zero(7)=1`, corrigé `is_zero(7)=0`. Le C généré passe de `__x87rt_com(0,0)` à
+  `__x87rt_com(1,0)`.
+- **Régression complète PASS** : difftest 271/271, in-place 3/3, magicdiv 2³², funcdiff corpus (0
+  divergence), SMT 11/11, recompilabilité 100 %, **winediff 46/46** (+ `x87_fcom_runtime`), cargo test vert,
+  Lua batterie inchangée, busybox seq/printf floats OK. **La tâche x87/awk est close** — c'était un vrai
+  bug de lifter tractable, pas la « session dédiée joins » redoutée. (Leçon : vérifier si le fallback
+  runtime est actif AVANT de conclure à un abandon x87 statique — l'entrée précédente supposait à tort
+  l'asm no-op.)
