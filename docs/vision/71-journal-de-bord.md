@@ -152,9 +152,11 @@ Deux mécanismes complémentaires :
   abs computed-goto (`resolve_abs_jump_table`) ; forme -O0 étagée ; **run ≥3× d'une
   valeur = switch, pas vtable** ; post-élagage des cibles (un corps de case ≠ entrée).
 - **Re-split** : fonction absorbée après un appel **noreturn** (pas d'analyse noreturn
-  au balayage) → **forcée** frontière quand une table de pointeurs/index la pointe.
-  `compute_noreturn` = point-fixe **sound** (may_return si un succ n'est pas interne &
-  pas noreturn ; jamais deviné).
+  au balayage) → **forcée** frontière quand une preuve la pointe : table de pointeurs
+  (≥3), table `call [idx*4+base]`, **callback par valeur `stack_arg_code_imm`** (atexit/
+  qsort), ou **slot `abs_indirect_slot`** (`call/jmp [slot]`). Gardé par
+  `looks_like_func_start` (exclut les corps de case). `compute_noreturn` = point-fixe
+  **sound** (may_return si un succ n'est pas interne & pas noreturn ; jamais deviné).
 - **x87 leaf-thunk** (`is_x87_leaf_thunk`) : décode tout le corps (fld arg→ops FPU→ret)
   → amorce atan2/fmod/trunc atteints par pointeur isolé.
 - **FLIRT** (`src/flirt.rs`) : opérandes **relocalisés wildcardés** (`.reloc`,
@@ -381,5 +383,43 @@ Détail : **70 §6** (roadmap). Résumé :
   transpile-diff 4/4 (hash inchangé), funcdiff OPT-diff 10581 scored 0 divergence** (gate SSA sur
   busybox+sqlite réels), magicdiv 2³², SMT 11/11, recompilabilité 100 %, winediff 47/47.
 - **sqlite3 mingw = fonctionnel** (scalaire + CRUD + agrégats + jointures + index + CTE + window).
+
+### 2026-07-05 — [RECOV] Callback atexit absorbé par un noreturn → re-split forcé (sqlite strippé)
+- **Cible/symptôme** : `sqlite3_stripped` + `sqlite3_full_stripped` (gauntlet) abortaient sur
+  `indirect call to unrecovered function 0x40c600`.
+- **Cause racine** (`src/analysis/mod.rs`) : `0x40c600 = _sayAbnormalExit`, enregistré par
+  `atexit` (`movl $0x40c600,(%esp)` = callback par valeur, atteint par appel indirect au exit).
+  Il suit immédiatement `call _shell_out_of_memory` (**noreturn**) + padding NOP → le balayage
+  linéaire (noreturn non détecté) l'**absorbe** dans `_save_err_msg`. Le seed
+  `stack_arg_code_imm` ne prend un candidat que si `!global.contains_key` → 0x40c600 déjà
+  décodé → skippé → appel indirect vers fonction non récupérée → abort. (`looks_like_func_start`
+  le reconnaît pourtant : prologue `mov eax,[moffs32]; test eax,eax`, opcode `a1`.)
+- **Fix** : étendre le **re-split forcé** (déjà en place pour les tables de pointeurs ≥3 et les
+  tables `call [idx*4+base]`) aux cibles **`stack_arg_code_imm`** ET **`abs_indirect_slot`**
+  absorbées : si `global.contains_key(v) && looks_like_func_start(v)`, `forced.insert(v)` (au
+  lieu de skip). La position de callback/le contenu du slot prouvent que `v` est une fonction ;
+  `looks_like_func_start` (qui exclut les corps de case de jump-table) garde le re-split sûr.
+- **Portée** : général — tout binaire strippé enregistrant un callback (`atexit`/`qsort`/vtable
+  via slot) placé juste après un appel noreturn (`*_and_die`/`exit`/`abort`). Même classe que le
+  fix table-de-pointeurs (2026-07-02) mais pour un callback **isolé**.
+- **Vérifié** : `sqlite3_stripped` (`42|323535;14`) + `sqlite3_full_stripped` (`2|3|x,y`)
+  **bit-identiques à Wine** (scalaire + CRUD). Régression : transpile-diff 4/4 (hash inchangé),
+  + difftest/funcdiff/winediff/sqlite-sweep (voir commit). *(Note : la cause profonde reste
+  l'absence d'analyse noreturn au balayage — on la rattrape par la preuve callback, comme les
+  autres cas.)*
+- **Gauntlet** : 14/21 → **16/21** (sqlite : 4/4 variantes MATCH).
+
+### 2026-07-05 — [HLE?/LIFT?] m4 mingw : abort dans le bookkeeping signaux (DIAGNOSTIQUÉ, non corrigé)
+- **Symptôme** : m4 (gauntlet) ne sort **rien** (même `--version`) puis **abort** (SIGABRT).
+- **Localisation** : `main → _sigaction (0x42a0d0) → _sigprocmask (0x42a420)`. Dans le
+  bookkeeping de blocage de signaux mingw statique, une assertion `.cold` échoue :
+  `mov 0x461de0,%eax` (ancien handler du signal 13/SIGPIPE) ; `cmp $0x42a2c0,%eax`
+  (`_blocked_handler`) ; `jne .cold → abort()`. L'ancienne valeur lue ≠ `_blocked_handler`
+  alors que sous Wine elle l'est → **divergence d'un state signal en amont**.
+- **Nature** : ce sont des fonctions **statiquement liées** (pas des imports), donc ARET les
+  lifte/exécute ; la divergence = un state signal mal construit (mislift en amont probable, à
+  bissecter — funcdiff sur les fonctions signal, ou tracer l'écriture de `[0x461de0]`). Abort
+  **sound** (aucune sortie fausse). Intriqué (émulation signaux mingw) → session dédiée.
+  Alternative doctrinale : reconnaître + host-backer `sigaction`/`sigprocmask` (FLIRT faible ici).
 
 <!-- NOUVELLES ENTRÉES ICI (garder l'ordre chronologique, plus récent en bas) -->

@@ -263,8 +263,10 @@ recompilabilité **100 %** · WASM **7/7**.
   partagés) ; abs computed-goto ; forme -O0 étagée ; tables de pointeurs
   **NULL-tolérantes** ; **run ≥3× d'une même valeur = switch, pas vtable**.
 - **Re-split** : une fonction absorbée après un appel *noreturn* (pas d'analyse
-  noreturn au balayage) est **forcée** frontière quand une table de pointeurs/index
-  la pointe. `compute_noreturn` = point-fixe **sound** (jamais deviné noreturn).
+  noreturn au balayage) est **forcée** frontière quand une preuve la pointe : table de
+  pointeurs/index, **callback par valeur** (`stack_arg_code_imm`, atexit/qsort) ou
+  **slot `call/jmp [slot]`** (`abs_indirect_slot`) — gardé par `looks_like_func_start`.
+  `compute_noreturn` = point-fixe **sound** (jamais deviné noreturn).
 - **x87 leaf-thunk** (`is_x87_leaf_thunk`) : décode tout le corps (fld arg → ops FPU
   → ret) → amorce atan2/fmod/trunc atteints par pointeur isolé.
 - **FLIRT** : opérandes **relocalisés wildcardés** (`.reloc`) ; **thunks jamais
@@ -314,8 +316,10 @@ recompilabilité **100 %** · WASM **7/7**.
   sweep **60/60**.
 - **WASM** : PE Windows → WebAssembly, **7/7** fixtures (pile, globals, indirects,
   CRT, x87, Win32, SHA-256).
-- **Corpus gauntlet** (`bench/gauntlet/`, 21 PE variés committés) : **12/21**
-  bit-identiques (bzip2/grep/gzip/hello/lua/minigzip/nasm/sed + strippés).
+- **Corpus gauntlet** (`bench/gauntlet/`, 21 PE variés committés) : **16/21**
+  bit-identiques (bzip2/grep/gzip/hello/lua/minigzip/nasm/sed + **sqlite3 ×4** +
+  strippés). Restes : m4 (signaux, sound), units (units.dat environnemental),
+  minigzip_stripped (micro-diff à confirmer).
 
 ---
 

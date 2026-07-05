@@ -754,8 +754,19 @@ fn global_decode(
                 // has, so accept it without the prologue heuristic. (A resolved
                 // jump-table target caught this way is pruned after the fixpoint.)
                 if let Some(v) = stack_arg_code_imm(&insn.raw) {
-                    if in_exec(v) && !global.contains_key(&v) {
-                        cands.insert(v);
+                    if in_exec(v) {
+                        if !global.contains_key(&v) {
+                            cands.insert(v);
+                        } else if looks_like_func_start(prog, v, true) {
+                            // Absorbed into the preceding function by falling through
+                            // a *noreturn* call (e.g. `atexit(sayAbnormalExit)` sits
+                            // right after a `call _shell_out_of_memory` that never
+                            // returns). The by-value callback position proves `v` is a
+                            // function; force the boundary re-split (guarded by
+                            // `looks_like_func_start`, which excludes jump-table case
+                            // bodies, since this truncates an existing function).
+                            forced.insert(v);
+                        }
                     }
                 }
                 // Absolute-indirect `call/jmp [slot]`: the pointer stored at the
@@ -767,8 +778,14 @@ fn global_decode(
                 if let Some(slot) = abs_indirect_slot(&insn.raw) {
                     let target = if ptr == 8 { prog.read_u64(slot) } else { prog.read_u32(slot).map(u64::from) };
                     if let Some(v) = target {
-                        if in_exec(v) && !global.contains_key(&v) {
-                            cands.insert(v);
+                        if in_exec(v) {
+                            if !global.contains_key(&v) {
+                                cands.insert(v);
+                            } else if looks_like_func_start(prog, v, true) {
+                                // Same noreturn-absorption case as above; the slot's
+                                // pointer proves `v` is a function → force re-split.
+                                forced.insert(v);
+                            }
                         }
                     }
                 }

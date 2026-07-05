@@ -305,6 +305,25 @@ fn loop_header_is_entry_block_phi_seeded() {
 }
 
 #[test]
+fn atexit_callback_absorbed_after_noreturn_is_recovered() {
+    if !has_m32() {
+        eprintln!("skipping atexit-callback test: `cc -m32` unavailable (install gcc-multilib)");
+        return;
+    }
+    // An atexit handler laid out right after a *noreturn* call is absorbed into
+    // the preceding function by the linear sweep, so it is never recovered as its
+    // own function -> the atexit indirect dispatch aborts on an unrecovered
+    // function. The by-value callback position proves it is a function, so
+    // recovery force-splits the boundary. Minimized sqlite3-mingw stripped
+    // `_sayAbnormalExit`. Must run to completion ("cleanup 1"), not abort.
+    let out = transpile_and_run("atexit_callback_after_noreturn.exe");
+    assert!(
+        out.contains("cleanup 1") && !out.contains("unmodelled") && !out.contains("aborting"),
+        "absorbed atexit callback not recovered (force re-split):\n{out}"
+    );
+}
+
+#[test]
 fn teb_synthetic_process_environment() {
     if !has_m32() {
         eprintln!("skipping TEB test: `cc -m32` unavailable (install gcc-multilib)");
