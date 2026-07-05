@@ -5,6 +5,11 @@
 > les pièges connus et les prochaines étapes. Lis ensuite `ROADMAP.md` (le plan
 > technique détaillé) et `README.md` (vue utilisateur).
 >
+> 📌 **RÉFÉRENCE D'ÉTAT (à lire en premier pour récupérer le contexte) :**
+> [`docs/vision/70-reference-etat-methode-reste.md`](docs/vision/70-reference-etat-methode-reste.md)
+> — synthèse état / méthode / reste-à-faire / tips. Remplace les ex-docs 50
+> (journal, désormais archive) et 60 (doctrine, absorbée).
+>
 > 🧭 **Objectif « convertir un binaire en natif d'un autre système / WASM » :**
 > l'état des lieux consolidé (acquis / perfectible / manque) est dans
 > **[`docs/vision/40-etat-des-lieux-conversion.md`](docs/vision/40-etat-des-lieux-conversion.md)**.

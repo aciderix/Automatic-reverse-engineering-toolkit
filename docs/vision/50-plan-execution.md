@@ -1,5 +1,11 @@
 # Plan d'exécution & suivi — compléter l'objectif de conversion universelle
 
+> ⚠️ **ARCHIVE (depuis 2026-07-05).** La référence à lire en premier est désormais
+> [`70-reference-etat-methode-reste.md`](70-reference-etat-methode-reste.md) — état,
+> méthode, reste-à-faire et tips y sont synthétisés. Ce document reste le **journal
+> chronologique détaillé append-only** : on y ajoute encore le récit de chaque fix,
+> mais on ne le relit **plus en entier** pour récupérer le contexte (utiliser le 70).
+>
 > **Document vivant.** Sert de **repère, contexte et suivi**, y compris après
 > compression du contexte. Mis à jour à chaque étape (journal §4). Lire d'abord
 > [`40-etat-des-lieux-conversion.md`](40-etat-des-lieux-conversion.md) (acquis /

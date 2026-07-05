@@ -1,5 +1,10 @@
 # Doctrine ARET — réutilisation vérifiée (rester soi-même sans passer des siècles binaire par binaire)
 
+> ⚠️ **ABSORBÉ dans [`70-reference-etat-methode-reste.md`](70-reference-etat-methode-reste.md) §1** (2026-07-05).
+> Le 70 est la référence unique. Ce document est conservé pour l'historique ; son
+> contenu (doctrine, fait établi Wine-natif, arbitrage, limite dure) vit désormais
+> dans le 70.
+>
 > **Boussole stratégique.** Répond à une question de fond : peut-on couvrir
 > *n'importe quel* programme sans travail manuel sans fin, tout en gardant la
 > philosophie ARET (safety, rigueur) ? **Oui — à condition de comprendre où vit
