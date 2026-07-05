@@ -1,14 +1,31 @@
 # 70 — Référence ARET (état, méthode, reste-à-faire, tips)
 
-> **Document de référence unique.** Remplace le 50 (journal append-only, 3500
-> lignes — conservé comme archive détaillée) et absorbe le 60 (doctrine).
-> **À lire en premier** pour récupérer le contexte après compression. Le
-> `HANDOFF.md` (architecture détaillée, pièges) et le `40-etat-des-lieux` restent
-> valables en complément. Le journal `50` ne sert plus qu'à retrouver le *détail*
-> d'un fix précis ; tout l'essentiel est ici.
->
-> **Convention** : ce doc est **vivant mais synthétique**. Le récit chronologique
-> continue dans le 50 (append-only) ; ici on **met à jour l'état**, pas on empile.
+> **Document de référence unique — à lire en premier** pour récupérer le contexte
+> après compression. Il **remplace** le 50 (ex-journal) et le 60 (doctrine, absorbée
+> §1). Il se veut **complet mais synthétique** : tout l'essentiel est ici ; le
+> **détail exhaustif** vit dans le journal structuré (doc **71-journal-de-bord**).
+
+## Système documentaire (où aller chercher)
+
+| Doc | Rôle | Quand l'ouvrir |
+|-----|------|----------------|
+| **70** (ici) | **Référence d'état** : objectif, règles, architecture, FAIT, RESTE, tips, roadmap complète | **Toujours en premier** (contexte après compression) |
+| **71-journal-de-bord** | **Journal structuré & cherchable** : fiches par sous-système + entrées datées, détail technique complet de chaque fix | Pour **retrouver une info précise** (grep par tag/sous-système) |
+| **50-plan-execution** | **Archive** : journal chronologique append-only historique (3500 l.) | Uniquement pour le récit détaillé d'un vieux fix non encore migré en 71 |
+| **00 / 01 / 30** | **Vision stratégique** : roadmap UBT, design, intégration briques (Wine/DXVK/LLVM) | Résumé intégré ici §6 ; ouvrir pour la vision d'origine |
+| **HANDOFF / 40** | Architecture détaillée, pièges, état des lieux | Complément |
+
+**Comment un agent trouve une info** : `grep` le tag de sous-système dans **71**
+(tags définis en tête du 71 : `[X87]`, `[ABI]`, `[RECOV]`, `[HLE-STDIO]`,
+`[HLE-FILE]`, `[HLE-WIN32]`, `[LIFT]`, `[ORACLE]`, `[RECOMPILE]`, `[64BIT]`,
+`[THREAD]`, `[GUI]`, `[DEMO]`, `[INFRA]`). Chaque fiche 71 pointe vers la (les)
+section(s) du 50 pour l'historique complet.
+
+**Protocole de mise à jour (obligatoire pour chaque agent)** : après un incrément,
+(1) **résumer l'état** ici dans le 70 (§4 FAIT / §5 RESTE / §3 chiffres régression —
+on **met à jour**, on n'empile pas) ; (2) **écrire l'entrée détaillée** dans le
+**71** (journal, datée + taguée) ; (3) commit + push. Le 70 reste **mince** ; le
+détail grossit dans le 71.
 
 ---
 
@@ -80,7 +97,9 @@ propre).
 1. **Une tâche à la fois**, méthodique. Pas de big-bang.
 2. Par tâche : (a) comprendre/**reproduire** → (b) **fixture minimale testable**
    (mieux qu'un gros binaire) → (c) implémenter → (d) **vérifier** → (e) **commit
-   descriptif** → (f) **journal 50 mis à jour** + **état ici** si ça change l'état.
+   descriptif** → (f) **doc** : entrée détaillée datée+taguée dans le **71**
+   (journal) **et** mise à jour de l'**état ici** (70 §4/§5/§3). *(Le 50 n'est plus
+   alimenté ; il reste l'archive historique.)*
 3. **Ne jamais casser la régression.** Portes (voir §3) : `difftest.sh` +
    `difftest_transpile.sh` obligatoires pour tout changement lift/structure ;
    lifter ⇒ **en plus** `cpudiff` + `funcdiff.sh` ; large ⇒ `regression.sh` +
@@ -343,20 +362,110 @@ Tentée, **retirée** (faux positif : `esp` fantôme incohérent à la frontièr
 run_ssa↔run_closure). À reprendre en **threadant tout l'état CPU** (GP+flags+xmm+esp)
 proprement au call, testé par la garde opt + teeth-check avant de croire un verdict.
 
-### P7 — Chantiers longs (sur demande / quand un binaire mesuré l'exige)
-- **Threads** : TEB + last-error **thread-locaux** (`__thread`), pile machine par
-  thread dans `CreateThread`, sync réelle (CRITICAL_SECTION→pthread_mutex récursif,
-  Event→cond/join). Les démonstrateurs actuels sont mono-thread → complétude, pas
-  déblocage.
-- **Phase 6** — inférence de types (largeur/signe/ptr, agrégats `obj->field`).
-- **Phase 7** — Winelib / USER32 (couverture API d'un coup — cf. doctrine §1).
-- **Phase 8** — lift 64-bit (REX, registres 64-bit) → ELF ARM ; le contrôle de
-  débordement `div`/`idiv` 64-bit software y est rattaché.
-- **Phase 9/10** — macOS (Mach-O), graphique (DXVK/vkd3d). Le « mur » des jeux.
+### P7 — Chantiers longs : couverture « n'importe quel programme »
+> Détaillé au **§6** (roadmap complète M5→M7 + 64-bit + threads + GUI + graphisme +
+> macOS). Résumé de l'ordre : **types (Phase 6)** → **threads** → **64-bit
+> (Phase 8)** → **USER32/GUI (Phase 7 / M7)** → **graphisme DXVK (M7)** →
+> **macOS**. À lancer sur demande ou quand un binaire mesuré l'exige (pas
+> spéculativement) — les démonstrateurs actuels (CLI console) n'en dépendent pas.
 
 ---
 
-## 6. TIPS — astuces & découvertes (accès rapide)
+## 6. Roadmap complète — « faire tourner N'IMPORTE QUEL programme »
+
+> Intègre en détail les milestones UBT (ex-doc 00), le design (ex-doc 01) et la
+> stratégie d'intégration des briques (ex-doc 30). **Principe directeur : réutiliser
+> les projets matures (Wine, DXVK, LLVM) comme back-ends vérifiés, ARET = le chef
+> d'orchestre + la colle + la couche de soundness.** Viser leur union d'un bloc =
+> ne rien livrer ; on avance par **tranches qui tournent de bout en bout**.
+
+### 8.1 Milestones (tranches livrables — chacune = une classe de binaires qui tourne)
+| # | Tranche | Classe débloquée | État |
+|---|---------|------------------|------|
+| M1 | Interception d'API → shims HLE natifs, recompile ELF | PE freestanding (kernel32) | ✅ |
+| M2 | Imports indirects via registre + Memory Layout Mapper (globals à leur VA) | PE multi-réf données globales | ✅ |
+| M3 | Pile machine partagée (args pile stdcall/cdecl + registres regparm/fastcall) | Win32 multi-fonctions | ✅ |
+| M4 | Shims CRT msvcrt (printf variadique, malloc, mem*/str*) | .exe console CRT | ✅ |
+| FS | Sous-système fichiers + traduction de chemins | prog. lisant/écrivant | ✅ |
+| LLVM | Backend LLVM IR chunké (passe à l'échelle : 44k fn → 221 `.ll` → ELF) | mêmes binaires via LLVM (multi-arch futur) | ✅ |
+| CRT+/W32 | Vrai CRT (forward libc) + Win32 native (kernel32→POSIX) | prog. C large + Win32 hors-GUI | ✅ |
+| UNPACK | Déballage dynamique Unicorn (émule stub → OEP → dump) | packers non-VM | ✅ |
+| M6 | Cible **WebAssembly** (`--target wasm`, wasmtime) | cible universelle | ✅ (7/7) |
+| **M7** | **GUI / graphisme** (X11/USER32, puis DXVK/vkd3d) | applis fenêtrées, puis **jeux** | ⬜ |
+
+> **Règle** : on ne s'engage pas sur M_n+1 tant que M_n ne tourne pas proprement ;
+> chaque palier = un artefact démontrable + un test de non-régression.
+
+### 8.2 Phase 6 — Inférence de types (LISIBILITÉ + JUSTESSE)
+Largeur/signe/pointeur à partir de l'usage des registres, puis agrégats
+(`obj->field_8`). *Critère* : types affichés, **jamais** au prix de la sémantique
+(casts explicites conservés). Non bloquant pour l'exécution ; améliore la lisibilité
+du C généré et peut aider les autres passes.
+
+### 8.3 Multithreading (chantier dédié — modèle actuel mono-thread)
+**Blocage de fond** : `ebp`/`last-error`/TEB/PEB sont **globaux**, la pile machine
+est **une région unique partagée** ⇒ modèle **fondamentalement mono-thread**
+aujourd'hui. Les registres sont des variables C locales (thread-safe), mais l'état
+partagé ne l'est pas. Chemin **clair et mesuré** (à faire dans l'ordre) :
+1. **TEB + last-error thread-locaux** (`__thread`) — la fondation.
+2. **Pile machine par thread** dans `CreateThread` (malloc 32-bit, `__esp` initial au
+   sommet) + dispatch `aret_call(startAddr, esp, param)` (ABI stdcall du thread-proc).
+3. **Sync réelle** : `CRITICAL_SECTION` → `pthread_mutex` **récursif** ;
+   `CreateEvent`/`SetEvent`/`WaitForSingleObject`/`WaitForMultipleObjects` →
+   `pthread` cond/join. (Aujourd'hui : CriticalSection = no-op *correct sans
+   concurrence*, WaitForSingleObject = WAIT_OBJECT_0 immédiat — **sound en
+   mono-thread**, à remplacer par du réel en MT.)
+4. **Validation MT vs Wine** : N threads + compteur sous section critique → somme
+   déterministe ; signalisation d'événement → déterministe.
+*Frontière dure* : `CreateProcessA/W` (lancer un `.exe` enfant) — pas de Windows pour
+l'exécuter ; reste **échec sound**, pas simulé. `CreatePipe` (anonyme) est déjà fidèle
+(`pipe()`).
+
+### 8.4 Phase 8 — Lift 64-bit (multi-arch réel)
+Porter le lifter/modèle en **64-bit** : préfixes **REX**, registres 64-bit
+(rax..r15), ABI SysV/Win64 (args en registres), tailles de pointeur 8 o. Débloque les
+binaires 64-bit **et** l'émission d'ELF **ARM** (le backend LLVM est déjà multi-cible).
+Rattaché : le contrôle de **débordement de quotient `div`/`idiv` 64-bit** (chemin
+software `-m32` aujourd'hui non vérifié — noté en commentaire dans `emit`). *Gros
+chantier* ; le socle 32-bit (axe 1 blindé) est le prérequis prouvé.
+
+### 8.5 Phase 7 / M7 — Couche OS élargie : Winelib / USER32 (vers la GUI)
+Deux voies (cf. doctrine §1, arbitrage indépendance de la preuve) :
+- **Winelib** : router les imports de la sortie transpilée vers les implés **natives
+  de Wine** (kernel32/user32/gdi32…) au lieu de `aret_hle`. **Étape une fois, pas par
+  binaire** ; mécanisme **prouvé** (un `winegcc -m32` produit un ELF natif, zéro
+  émulateur CPU). Toolchain (`wine32-tools` + `libwine-dev:i386`) demande un env
+  propre. Couvre la surface Win32/USER32 **d'un coup**.
+- **Voie médiane** : auto-générer la **tuyauterie** des shims (ABI, `@N` stdcall)
+  depuis **win32metadata**, garder le **comportement** vérifié contre un oracle
+  indépendant (moins « tout d'un coup », indépendance totale de la preuve).
+*Critère M7 (fenêtré)* : une appli Win32 GUI (USER32 : CreateWindowEx/DefWindowProc/
+message loop) s'affiche sous X11 via Winelib. C'est la **1ʳᵉ marche graphique**.
+
+### 8.6 M7 (suite) — Graphisme / jeux (DXVK / vkd3d)
+**Ne pas réécrire DirectX → rediriger vers DXVK/vkd3d** (D3D→Vulkan, natif). ARET
+lifte le **code propre** du jeu ; les appels D3D sont **branchés sur DXVK**, la GUI
+sur USER32/Winelib, le CPU tourne **natif** (pas d'émulateur). C'est **le « mur » des
+jeux** — le plus lourd, documenté, non prioritaire. Note honnête : pour *jouer* tout
+de suite, Wine+DXVK suffit ; l'intérêt ARET est le **code natif ré-exécutable** (mods,
+serveurs, portage) sans émulation CPU.
+
+### 8.7 Phase 9/10 — macOS (Mach-O) & au-delà
+Charger/émettre du **Mach-O**, HLE macOS (BSD syscalls, Cocoa minimal), cible
+ARM64. Chantier long, après le socle 64-bit. Packaging cible (`.app`, `.apk`+JNI)
+= design d'origine (doc 01), non amorcé.
+
+### 8.8 Ce que la réutilisation vérifiée atteint réellement (rappel doctrine)
+Le trio « **tout** binaire + 100 % fonctionnel + 100 % natif pur » est **prouvé
+impossible** (indécidabilité). Atteignable : **vrai logiciel compilé → pleinement
+fonctionnel** ; le résidu (obfusqué/fait-main) **se signale** (abort), ne ment
+jamais. Chaque brique lourde (Wine, DXVK, Unicorn, WASI) se **branche** derrière la
+couche de vérification d'ARET — la finalité et les garanties sont inchangées, seule
+la **vitesse** change.
+
+---
+
+## 7. TIPS — astuces & découvertes (accès rapide)
 
 ### Environnement / conteneur
 - **Le conteneur est éphémère et peut revenir à un état antérieur.** Au démarrage :
@@ -447,7 +556,7 @@ proprement au call, testé par la garde opt + teeth-check avant de croire un ver
 
 ---
 
-## 7. Oracles différentiels (le cœur de la garantie)
+## 8. Oracles différentiels (le cœur de la garantie)
 
 | Oracle | Ce qu'il prouve | Commande |
 |--------|-----------------|----------|
@@ -465,7 +574,7 @@ Une divergence = un bug **prouvé** ; une correspondance = une correction **prou
 
 ---
 
-## 8. Limite dure (honnêteté)
+## 9. Limite dure (honnêteté)
 
 Le trio **« tout binaire + 100 % fonctionnel + 100 % natif pur »** est **prouvé
 impossible** en toute généralité (indécidabilité, famille de l'arrêt). Ce qu'ARET

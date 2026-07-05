@@ -1,10 +1,10 @@
 # Plan d'exécution & suivi — compléter l'objectif de conversion universelle
 
-> ⚠️ **ARCHIVE (depuis 2026-07-05).** La référence à lire en premier est désormais
-> [`70-reference-etat-methode-reste.md`](70-reference-etat-methode-reste.md) — état,
-> méthode, reste-à-faire et tips y sont synthétisés. Ce document reste le **journal
-> chronologique détaillé append-only** : on y ajoute encore le récit de chaque fix,
-> mais on ne le relit **plus en entier** pour récupérer le contexte (utiliser le 70).
+> ⚠️ **ARCHIVE (figée au 2026-07-05).** Référence = [`70`](70-reference-etat-methode-reste.md)
+> (état/méthode/reste/tips/roadmap) ; détail go-forward = [`71`](71-journal-de-bord.md)
+> (journal structuré cherchable). Ce document n'est **plus alimenté** : il reste
+> l'**historique chronologique** (grep par titre de section pour retrouver un vieux
+> fix — les fiches du 71 pointent ici). Ne pas le relire en entier.
 >
 > **Document vivant.** Sert de **repère, contexte et suivi**, y compris après
 > compression du contexte. Mis à jour à chaque étape (journal §4). Lire d'abord
