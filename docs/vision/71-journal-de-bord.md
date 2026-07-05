@@ -443,12 +443,20 @@ Détail : **70 §6** (roadmap). Résumé :
   chunk_5.c:39215, gardé par `v217 = ([0x47a2f0]==0); if(v217==0) skip else autoprint`. Donc
   **`[0x47a2f0]` = `be_quiet`** ; l'auto-print est sauté ssi `be_quiet != 0`. Watchpoint : ARET
   n'écrit `[0x47a2f0]` **qu'une fois à 0** (init) et **jamais à 1** pour `-n` → auto-print actif.
-- **Reste à trouver** : le chemin qui convertit l'option `-n` (bit `OPT_n` de `option_mask32`,
-  posé par getopt32 — qui marche pour grep) en `be_quiet` (`[0x47a2f0]`). Les writers statiques
-  de 0x47a2f0 vus = `#n`-en-tête-de-script (`incl`, 0x40bdc1) et un chemin cleanup (`movb $1`,
-  0x4156b6), **pas** le handler `-n` CLI → soit ce handler n'est pas récupéré/atteint (control-flow
-  divergence, potentiellement **général**), soit un store `be_quiet=OPT_n` mislifté. Prochain pas :
-  trouver le read de `option_mask32 & OPT_n` dans sed_main et le store vers 0x47a2f0 ; vérifier
-  option_mask32 (grep OK → getopt32 OK). Repro : `printf 'X\n' | busybox sed -n p`.
+- **Approfondi (2026-07-05) — cause = getopt32 (compteur `-n`)** :
+  - **`0x47a2f0` = be_quiet CONFIRMÉ** : forcer `set *(u8*)0x47a2f0=1` à l'entrée du process loop
+    supprime l'auto-print (`sed -n p` → `X` au lieu de `X X`).
+  - **sed_main (`sub_45c1f4` = 0x45c1f4)** passe **`&be_quiet` (`movl $0x47a2f0,0x18(%esp)`)** à
+    **getopt32 (`0x433500`)**. Chaîne d'options sed = **`^i::rEne:*f:*`** (`-n` = **bit 3**, `-i`
+    bit 0, `-r` bit 1, `-E` bit 2). Le `^` = *opt_complementary* embarqué → **`-n` est un COMPTEUR**
+    (getopt32 incrémente `*be_quiet`), pas un simple bit.
+  - **Symptôme runtime** : après getopt32, `option_mask32 (0x47a1b0)` = **0x2 constant** quel que
+    soit `-n/-r/-nn/-rn`, et `be_quiet (0x47a2f0)` reste **0**. → **getopt32 ne fait pas
+    l'incrément compteur** de `-n`. getopt32 marche pour **grep** (pas de compteur `^`) → c'est le
+    **chemin compteur/opt_complementary de getopt32** qui est mal lifté.
+  - **Prochain pas** : diaguer `getopt32` (0x433500) — le code qui, pour une option marquée
+    compteur dans la chaîne `^…`, écrit `(*ptr)++`. Candidats : mislift d'un store indirect via un
+    pointeur vararg, ou une branche du parseur de la chaîne complementary. funcdiff peu utile
+    (dépend de l'argv/opts précis). Repro : `printf 'X\n' | busybox sed -n p` (ARET `X X`, Wine `X`).
 
 <!-- NOUVELLES ENTRÉES ICI (garder l'ordre chronologique, plus récent en bas) -->
