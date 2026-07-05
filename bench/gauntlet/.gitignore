@@ -1,0 +1,4 @@
+# Extraction / run scratch — the corpus lives in gauntlet-bins.tar.gz (tracked).
+bins/
+out/
+src/
