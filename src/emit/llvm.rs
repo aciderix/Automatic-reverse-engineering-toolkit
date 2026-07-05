@@ -434,6 +434,24 @@ fn emit_expr(cx: &mut Ctx, e: &Expr) -> String {
 /// Sign-extend an operand to i64, recovering the source width from the value it
 /// wraps: an `and`-mask (`x & 0xff/0xffff/0xffffffff`) or a sub-word memory load.
 fn emit_sign_extend(cx: &mut Ctx, e: &Expr) -> String {
+    // A bare constant carries its width in its type: sign-extend from it (the
+    // optimizer folds `const & 0xffffffff` → `const`, dropping the mask the arm
+    // below keys on). Without this a 32-bit magic constant with bit 31 set is a
+    // large positive i64 in a signed `imul` — same silent miscompile as the C
+    // backend (sqlite mingw `h % 23` giving a negative bucket index).
+    if let Expr::Const(c, ty) = e {
+        let w = int_bits(ty);
+        if (1..64).contains(&w) {
+            let m = (1u128 << w) - 1;
+            let v = (*c as u128) & m;
+            let signed: i128 = if (v >> (w - 1)) & 1 == 1 {
+                v as i128 - (1i128 << w)
+            } else {
+                v as i128
+            };
+            return format!("{}", signed as i64);
+        }
+    }
     // `x & mask` -> sext from the mask's width.
     if let Expr::Binary(BinOp::And, x, m) = e {
         if let Expr::Const(c, _) = m.as_ref() {

@@ -667,6 +667,26 @@ pub(crate) fn value_decls(values: &BTreeSet<u32>, frame_base: &[u32], fp80: &[u3
 /// number — otherwise signed comparisons of negative 32-bit values are wrong.
 fn signed_cast(e: &Expr) -> String {
     match e {
+        // A bare constant carries its width in its type: sign-extend from it. The
+        // optimizer folds `const & 0xffffffff` → `const` (dropping the mask that
+        // the `Binary(And, …)` arm below keys on), so without this a 32-bit
+        // constant with bit 31 set (e.g. a signed-division magic like 0xb21642c9)
+        // would be read as a large *positive* 64-bit value in a signed `imul`,
+        // flipping the product's high word — a silent miscompile of magic-number
+        // modulo (found via sqlite mingw: `h % 23` gave a negative bucket index).
+        Expr::Const(c, ty) => {
+            let w = int_bits(ty);
+            if (1..64).contains(&w) {
+                let m = (1u128 << w) - 1;
+                let v = (*c as u128) & m;
+                let signed: i128 = if (v >> (w - 1)) & 1 == 1 {
+                    v as i128 - (1i128 << w)
+                } else {
+                    v as i128
+                };
+                return format!("(int64_t)({})", signed);
+            }
+        }
         // A value masked to a sub-word width is sign-extended from that width.
         Expr::Binary(BinOp::And, x, m) => {
             if let Expr::Const(c, _) = m.as_ref() {

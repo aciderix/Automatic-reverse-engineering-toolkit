@@ -326,4 +326,34 @@ Détail : **70 §6** (roadmap). Résumé :
   (état) **et** 71 (détail).
 - **Réf 50** : « Corpus gauntlet sécurisé » (dernière entrée avant refonte).
 
+### 2026-07-05 — [LIFT][RECOMPILE] imul 1-opérande : sign-extension d'un opérande constant (sqlite3 mingw)
+- **Cible/symptôme** : `sqlite3.exe` **mingw** (gauntlet) segfaultait sur toute requête
+  (`SELECT 6*7;` → SIGSEGV). Deref `movzbl (%eax)` dans `sub_4558a0=sqlite3FindFunction`,
+  chaîne `sqlite3_open_v2→openDatabase→sqlite3_overload_function→FindFunction`.
+- **Forensics** (watchpoints) : FindFunction("MATCH") non-trouvé → `findElementWithHash`
+  renvoie `&nullElement` (0x533160, sentinelle censée `{0,0,0,0}`), mais `nullElement.data`
+  = 0x4f88a8 (FuncDef garbage) → walk du chain pNext → deref code → crash. `nullElement`
+  corrompu par `sqlite3InsertBuiltinFuncs` (`a[h]=pDef` avec **h=0xffffff52** négatif →
+  `[h*4+0x533420]` wrappe dans `nullElement`). h = `hash % 23` par division magique.
+- **Cause racine** (`src/emit/mod.rs::signed_cast`, idem `emit/llvm.rs::emit_sign_extend`) :
+  l'`imul` 1-opérande (signé) est lifté `sext(eax)*sext(r/m)`. Le magic `0xb21642c9` (bit 31
+  set) arrive sous `SignExtend` comme **`Const` nue** (l'optimiseur folde `const & 0xffffffff
+  → const`, `fold_binary` type `Ty::int(32)`). `signed_cast` ne gérait que `x & mask` et les
+  loads sous-mot → la Const nue tombait sur `(int64_t)(0xb21642c9ULL)` = **zéro-étendu**
+  (positif) au lieu de sign-étendu (négatif) → `mulhs` faux → `% 23` faux → h négatif → OOB.
+- **Fix** : `signed_cast`/`emit_sign_extend` gèrent `Expr::Const(c, ty)` en sign-étendant
+  depuis `int_bits(ty)` (< 64) — comme `signed_cast_w` le fait déjà avec une largeur explicite.
+- **Portée** : bug **backend d'émission** (invisible à cpudiff qui teste l'IR, pas le C ;
+  invisible à difftest/transpile-diff car le corpus n'exerce pas `imul const` haut-bit). Touche
+  tout binaire avec division/modulo signé par constante (magic-multiply) — très courant.
+- **Vérifié** : sqlite3 mingw `SELECT 6*7,hex(255),length,abs` = **bit-identique à Wine**
+  (scalaire, variantes full/stripped). Fixture permanente `bench/winecorpus/signed_magicdiv.c`
+  (grille `n%23`/`n/23`/`%7`/`%3`/`%365`, magics bit-31, = Wine). Régression : **difftest
+  271/271, transpile-diff 4/4 (hash inchangé), funcdiff 0 divergence, magicdiv 2³², SMT 11/11,
+  recompilabilité 100 %, winediff 47/47, cpudiff 0 fail**.
+- **Reste sqlite3 mingw** : le **CRUD** (`CREATE TABLE`/`INSERT`) segfaulte encore, bug
+  **distinct plus profond** : `sub_429330=sqlite3ExprAffinity` deref Expr null, via
+  `sqlite3Select→findConstInWhere→constInsert` (optimisation WHERE const-propagation). Prochaine
+  cible.
+
 <!-- NOUVELLES ENTRÉES ICI (garder l'ordre chronologique, plus récent en bas) -->

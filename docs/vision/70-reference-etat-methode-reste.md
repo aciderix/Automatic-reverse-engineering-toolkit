@@ -165,7 +165,7 @@ bash bench/regression.sh    # PORTE unifiée : difftest 271/271, in-place 3/3,
                             # recompilabilité gzip/ls/cat 100%
 bash bench/difftest.sh              # décompile O0→O3
 bash bench/difftest_transpile.sh    # transpile (hash 19acad982194bf07)
-bash bench/winediff.sh              # axe 2 vs Wine (46/46)
+bash bench/winediff.sh              # axe 2 vs Wine (47/47)
 bash bench/funcdiff.sh              # lift-closure + opt-diff vs Unicorn (0 div)
 # Sweeps de vrais binaires (téléchargent + comparent à Wine) :
 bash bench/sqlite_sweep.sh   bash bench/busybox_sweep.sh   bash bench/corpus_sweep.sh
@@ -179,7 +179,7 @@ aret <exe> --mode imports           # couverture statique d'imports (axe 2 a-pri
 
 ### État régression (référence — doit rester vert)
 difftest **271/271** · transpile-diff **4/4** (H=`19acad982194bf07`) · winediff
-**46/46** · cpudiff vert · funcdiff corpus **0 divergence** (lift ~12k scorées /
+**47/47** · cpudiff vert · funcdiff corpus **0 divergence** (lift ~12k scorées /
 ~6k appels, opt ~10k scorées) · SMT **11/11** · in-place **3/3** · magicdiv **2³²** ·
 recompilabilité **100 %** · WASM **7/7**.
 
@@ -206,6 +206,12 @@ recompilabilité **100 %** · WASM **7/7**.
 - **Divers** : `cpuid`/`xgetbv` (host réel, **AVX/SSE4.2 masqués** → chemins SSE2
   liftables), `bt/bts/btr/btc` (reg + `[mem],imm`), `stmxcsr`/`ldmxcsr`,
   `cmov/setcc`, `xchg` high-byte.
+- **Émission (backend) — `imul` 1-opérande signé × opérande constant** : le magic
+  d'une division/modulo signé par constante (bit 31 set, ex. `%23`→`0xb21642c9`)
+  arrive sous `SignExtend` comme `Const` nue (opt folde `const & 0xffffffff`) ;
+  `signed_cast`/`emit_sign_extend` la sign-étendent depuis `int_bits(ty)` (sinon
+  zéro-étendue → `mulhs` faux → `%N` faux). Invisible à cpudiff (bug d'**émission**,
+  pas d'IR). Débloqué sqlite3 **mingw**. Garde `signed_magicdiv.c`.
 
 ### 4.2 x87 (deux mécanismes : statique + filet runtime)
 - **Passe de profondeur statique** (`x87_depth_pass`) : compte la pile FPU
@@ -313,12 +319,15 @@ recompilabilité **100 %** · WASM **7/7**.
 > **borné** de problèmes **profonds**, chacun ≈ une session dédiée de forensics.
 > On passe de « largeur de shims » à « profondeur lifter ». Fini, mais plus lent.
 
-### P1 — sqlite3 mingw (levier fort, profond) 🎯 *prochaine cible*
-Segfault `movzbl (%eax)` ~13 Ko dans **`sub_4558a0`** (VDBE/parseur), chaîne
-`main→…→sub_4558a0`. **Build mingw distinct** du sqlite3 MSVC déjà bit-identique →
-nouveau chemin de code. Débogage mono-binaire dédié (repro dans `bench/gauntlet/`
-via `score.sh`). Méthode : recompiler le C généré `-O0 -g`, localiser le champ/
-pointeur nul, remonter le dataflow (store d'init droppé ? retour mal modélisé ?).
+### P1 — sqlite3 mingw (levier fort, profond) 🎯 *en cours*
+- **1er bug RÉSOLU (2026-07-05)** : le crash `SELECT` était un bug d'**émission**
+  (`imul` 1-op signé × const magic zéro-étendu → `% 23` négatif → OOB). Corrigé
+  (cf. §4.1 + 71 `[LIFT][RECOMPILE]`). sqlite3 mingw scalaire = **bit-identique à Wine**.
+- **RESTE (prochaine cible)** : le **CRUD** (`CREATE TABLE`/`INSERT`) segfaulte
+  encore — bug **distinct plus profond**. `sub_429330=sqlite3ExprAffinity` deref un
+  `Expr*` null, via `sqlite3Select→findConstInWhere→constInsert` (optimisation WHERE
+  const-propagation). Repro : `bench/gauntlet/` (`/tmp/g/sqlite3.exe`), méthode C
+  `-O0 -g` + gdb + watchpoint (voir 71 pour le workflow qui a cracké le 1er bug).
 
 ### P2 — Robustesse x87 : réconciliation des joins ambigus (session dédiée)
 La **vraie difficulté récurrente** (Lua `intarith`/`forprep`, busybox `seq`, le
