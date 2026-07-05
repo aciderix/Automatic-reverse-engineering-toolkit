@@ -3476,3 +3476,16 @@ binaires MSVC, pas seulement strings.exe.
   (levier fort, mais profond). Le socle 32-bit couvre maintenant un éventail réel : assembleur, moteur SQL,
   interpréteur Lua, compresseurs (gzip/bzip2/zlib), regex (grep/sed), macro (m4), tout bit-identique quand
   ça passe.
+
+### Corpus gauntlet sécurisé dans git (2026-07-05)
+
+Le corpus grandeur-nature ne vivait que dans `/tmp/bbx/gauntlet` → perdu à chaque reset de
+conteneur. Sécurisé sous `bench/gauntlet/` :
+- `gauntlet-bins.tar.gz` (6.2 Mo, 21 PE i686) — commité, survit au reset.
+- `score.sh` — chemins repo-relatifs, auto-extrait le tarball + build ARET si besoin.
+- `build.sh` — reproduit les cross-builds mingw depuis les tarballs source amont.
+- `README.md` — provenance par binaire (URL amont, commande de build), sha256, note de licence.
+- `.gitignore` local — `bins/ out/ src/` restent des scratch non suivis.
+
+`bench/gauntlet/score.sh` rejoue donc la passe complète depuis un clone frais. Prochaine cible
+inchangée : **sqlite3 mingw** (crash `movzbl (%eax)` profond dans sub_4558a0, VDBE/parseur).
