@@ -131,6 +131,13 @@ Deux mécanismes complémentaires :
   **`call reg`** d'un import stdcall → pop `@N` (`stdcall_pop_for_regcall`).
 - **Frame helpers MSVC** : `_EH_prolog` **inliné** au site d'appel (détecté par `lea
   ebp,[esp+K]` K>0) ; `_chkstk`/`_alloca` = `esp -= eax` (détecté `xchg esp,eax`).
+- **`___chkstk_ms` (GCC/mingw) = no-op** (`is_chkstk_probe`, prologue `push ecx;push eax;cmp
+  eax,0x1000;lea ecx,[esp+…]`) : sonde de guard-pages **pure** (save/restore ecx+eax, esp inchangé, le
+  caller fait son propre `sub esp,eax`) → **préserve tous les registres GP**. Sans ça, le modèle de clobber
+  d'appel (ecx caller-saved) perdait la longueur d'un `memset` posée en ecx avant l'appel (idiome
+  `mov ecx,len;call ___chkstk_ms;sub esp,eax;rep stos` = alloca+memset) → tableau non zéroé, terminateur
+  manquant (getopt32 long-options busybox → `sed -n` cassé). edx échappait au bug (préservé par le split
+  edx:eax du retour). Distinct de la variante MSVC `xchg esp,eax`.
 - **self tail-call** : `jmp func.entry` = tail-call frais (pas boucle) → passe les
   reg-args à jour (whereSplit sqlite).
 - **auto-main** : sas CRT + `main` distinct ⇒ démarre au main (frame cdecl
@@ -292,8 +299,8 @@ Deux mécanismes complémentaires :
   (:memory: + on-disk).
 - **NASM 2.16.01** (MSVC strippé) : `-v`/`-f elf`/`-f win32`/`-f bin` = objets
   identiques. Reste `-f obj` (points-to).
-- **busybox-w32** (mingw strippé) : sweep **60/60** + awk `/`, cksum, wc, uniq/tac/tail…
-  Reste grep/sed (regex, P4), m4 (P5).
+- **busybox-w32** (mingw strippé) : sweep **60/60** + awk `/`, cksum, wc, uniq/tac/tail, **grep/sed
+  (dont `sed -n`)**. Reste m4 (P5).
 - **WASM** : **7/7** fixtures. **Gauntlet** : **12/21** (`bench/gauntlet/`).
 - Note : seule diff légitime = CRLF↔LF (mode texte) et `argv[0]` (environnemental).
 
@@ -458,5 +465,45 @@ Détail : **70 §6** (roadmap). Résumé :
     compteur dans la chaîne `^…`, écrit `(*ptr)++`. Candidats : mislift d'un store indirect via un
     pointeur vararg, ou une branche du parseur de la chaîne complementary. funcdiff peu utile
     (dépend de l'argv/opts précis). Repro : `printf 'X\n' | busybox sed -n p` (ARET `X X`, Wine `X`).
+
+### 2026-07-09 — [ABI][DEMO] `___chkstk_ms` (mingw) préserve les registres → `sed -n` RÉSOLU
+- **Cible/symptôme** : busybox `sed -n` (suppression auto-print) **ignoré** → `printf 'X\n' | sed -n p`
+  sortait `X\nX\n` (ARET) au lieu de `X\n` (Wine). `sed p` correct. Spécifique au flag compteur `-n`.
+- **Forensics** (busybox transpilé instrumenté, `fprintf` aux sites clés de `vgetopt32` = `sub_46d5ac`) :
+  1. Le compteur `on_off->counter = va_arg(p, int*)` **s'exécute** (garde `if(c==*s)` correcte) mais lit
+     **0** au lieu de `&be_quiet` (0x47a2f0). Trace du curseur va_list : les 3 va_arg des options courtes
+     (`&opt_i/&opt_e/&opt_f`) sont OK, puis la **boucle LONG_OPTS consomme 2 va_arg parasites** — le 1er
+     vole `&be_quiet` (destiné au compteur) → curseur 8 o trop loin → compteur lit 0 → `counter=NULL` →
+     `(*counter)++` sauté → `be_quiet` reste 0 → auto-print jamais supprimé.
+  2. Les 2 va_arg parasites viennent de long-opts **garbage** ajoutés par `for(l_o=long_options; l_o->name;
+     l_o++)` : le tableau `long_options` (alloca'd) est **rempli correctement** (7 entrées i/r/n/n/e/f/b) mais
+     **son terminateur NUL manque** → la boucle de parcours court au-delà, lit du garbage (`name≠0`), croit à
+     de vrais long-opts et consomme leur `va_arg`.
+  3. Terminateur manquant = `memset(long_options, 0, count*sizeof)` lifté **`__rep_stos8(dst, 0, undef)`** :
+     **longueur 0**.
+- **Cause racine** (`src/ir/lift.rs` modèle de clobber d'appel + `src/ir/build.rs`) : le code compilé est
+  `mov ecx, count*16 ; call ___chkstk_ms ; sub esp, eax ; rep stosb` (alloca puis memset, longueur en **ecx**).
+  `___chkstk_ms` (0x40a5c8, helper GCC/mingw de sonde de guard-pages) fait **`push ecx`/`pop ecx`,
+  `push eax`/`pop eax`** et **ne modifie pas esp** (le caller fait son propre `sub esp,eax`) → il **préserve
+  tous les registres GP**. Mais ARET modèle un `call` comme clobbering le caller-saved **ecx** (`lift.rs`
+  §2210 : `preserves_ecx` via `call_clobber_mask`, sinon `ecx=Undef` ; edx est préservé par le split edx:eax,
+  d'où le biais ecx-only). `___chkstk_ms` n'était **pas reconnu** : la détection `is_stack_alloc_helper`
+  cherche `xchg esp,eax` (variante MSVC `_chkstk`/`_alloca_probe` qui abaisse esp elle-même) — absente ici.
+  → `call` normal → ecx clobbé → longueur du memset `undef` → 0.
+- **Fix** (`src/ir/build.rs`) : nouveau détecteur **`is_chkstk_probe`** (prologue à 4 insns non ambigu
+  `push ecx ; push eax ; cmp eax,0x1000 ; lea ecx,[esp+…]`) → le `call ___chkstk_ms` est modélisé
+  **no-op** (aucun stmt émis) : esp inchangé, tous les registres GP préservés, la sonde de pages inutile sur
+  la pile plate native. La taille dans `eax`/`ecx` survit au `sub esp,eax` / `rep stos` suivant.
+- **Portée** : **général** — tout binaire mingw utilisant `alloca`/VLA/grande frame via `___chkstk_ms`
+  suivi de l'usage d'un registre caller-saved posé avant l'appel (idiome alloca+memset très courant). Distinct
+  de la variante MSVC `xchg esp,eax` (toujours modélisée `esp -= eax`).
+- **Vérifié** : `sed -n p/-nn/-ne/-n Np/-n /re/p` + combos `-rn` = **bit-identiques à Wine** (12/12 batterie
+  sed/grep). Fixture permanente `tests/m1/fixtures/chkstk_ms_preserves_ecx.{c,exe}` (inline-asm : stage
+  `0x1234` en ecx à travers `call ___chkstk_ms`, relit ecx ; pré-fix `LOST`/0, post-fix `OK`) + test
+  `chkstk_ms_probe_preserves_registers`. Régression : **difftest 271/271, transpile-diff 4/4
+  (hash `19acad982194bf07` inchangé), winediff 47/47, funcdiff 0 divergence, busybox sweep 60/60, cargo test
+  vert**.
+- **Reste** : `sed -i` bute sur des imports Win32 non implémentés (`GetFileInformationByHandle`, `_mktemp`…)
+  — indépendant, non lié au compteur.
 
 <!-- NOUVELLES ENTRÉES ICI (garder l'ordre chronologique, plus récent en bas) -->

@@ -246,6 +246,10 @@ recompilabilité **100 %** · WASM **7/7**.
 - **stdcall pop sur `call reg`** (import chargé en registre puis appelé).
 - **Helpers ABI MSVC à réécriture de frame** : `_EH_prolog` **inliné** au site
   d'appel ; `_chkstk`/`_alloca` modélisés `esp -= eax` (détectés par `xchg esp,eax`).
+- **`___chkstk_ms` (GCC/mingw) modélisé no-op** : sonde de guard-pages pure qui
+  **préserve tous les registres GP** (save/restore ecx+eax, esp inchangé). Le modèle de clobber d'appel
+  (ecx caller-saved) perdait sinon la longueur d'un `memset` posée en ecx avant l'appel (idiome alloca
+  `mov ecx,len;call ___chkstk_ms;sub esp,eax;rep stos`) → débloqué busybox `sed -n` (getopt32 long-options).
 - **self tail-call** (`jmp func.entry`) = tail-call frais (pas une boucle) → passe
   correctement les registres-args mis à jour (whereSplit sqlite).
 - **auto-main** : si l'entrée PE est un sas CRT et qu'un `main`/`_main` distinct
@@ -312,7 +316,7 @@ recompilabilité **100 %** · WASM **7/7**.
 - **NASM 2.16.01** (**MSVC strippé**, 1,5 Mo) → `nasm -v`/`-f elf`/`-f win32`/`-f
   bin` = objets **bit-identiques à Wine**.
 - **busybox-w32** (mingw strippé) : cksum/md5sum/sha1sum/echo/sort/wc/cat/head/tail/
-  uniq/tac/od/nl/cut/rev/expr/**awk** (÷)/seq/basename/tr/pwd/… bit-identiques ;
+  uniq/tac/od/nl/cut/rev/expr/**awk** (÷)/seq/basename/tr/pwd/**grep**/**sed** (dont `-n`)/… bit-identiques ;
   sweep **60/60**.
 - **WASM** : PE Windows → WebAssembly, **7/7** fixtures (pile, globals, indirects,
   CRT, x87, Win32, SHA-256).
@@ -369,13 +373,13 @@ chaque pas.**
 - Vrai **C++ g++** (exceptions, RTTI, thiscall) : non testable sur l'hôte (pas de
   mingw g++) ; le **dispatch vtable lui-même fonctionne** (fixture validée).
 
-### P4 — busybox regex (grep/sed) : miscompile profond derrière `malloc`
-SIGSEGV dans le moteur regex lifté (`sub_42f6d4` : `mov (eax),eax`, base≈0 = store
-d'init droppé). funcdiff-closure suit déjà 6000 appels **sans divergence** → le bug
-est **derrière un import** (`malloc`, non franchi par la closure). Frontière
-suivante : **modéliser quelques imports purs** (`memcpy`/`memset`/`memcmp`/`strlen`
-— *déjà partiellement fait pour memcpy/rep-stos*) dans l'interpréteur funcdiff pour
-scorer la logique applicative (sain, mais un import mal modélisé = faux positif).
+### P4 — busybox grep/sed ✅ FONCTIONNEL (regex + `sed -n` résolus)
+Le SIGSEGV regex ancien **ne se reproduit plus** (résorbé par les fixes récup/SSA). Le dernier bug concret,
+**`sed -n` (compteur `-n`) ignoré**, est **RÉSOLU (2026-07-09)** : cause = `___chkstk_ms` (mingw) traité
+comme clobbering ecx alors qu'il **préserve les registres** → longueur de `memset` perdue → tableau
+long-options de getopt32 non zéroé (cf. §4.3 + 71 `[ABI][DEMO]`). grep/sed (`-i/-v/-c/-o/-E`, classes,
+`s///g`, `Nd`, `-n p/Np//re/p`) = **bit-identiques à Wine** (12/12 batterie). *Reste* : `sed -i` bute sur des
+imports Win32 non implémentés (`GetFileInformationByHandle`, `_mktemp`…) — indépendant.
 
 ### P5 — m4 (mingw) : abort au démarrage (locale/CRT plus profond). units cherche
 `units.dat` (**environnemental**, pas un bug).

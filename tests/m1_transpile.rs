@@ -305,6 +305,28 @@ fn loop_header_is_entry_block_phi_seeded() {
 }
 
 #[test]
+fn chkstk_ms_probe_preserves_registers() {
+    if !has_m32() {
+        eprintln!("skipping chkstk_ms test: `cc -m32` unavailable (install gcc-multilib)");
+        return;
+    }
+    // mingw's `___chkstk_ms` only probes guard pages: it saves/restores ecx and
+    // leaves esp untouched (the caller does its own `sub esp, eax`). A value
+    // staged in caller-saved ecx before the call is therefore still live after
+    // it. The default call model clobbers ecx, which drops the `memset` length in
+    // the `mov ecx,len; call ___chkstk_ms; sub esp,eax; rep stos` alloca idiom
+    // (BusyBox getopt32's long-options table was left un-zeroed -> its NUL
+    // terminator missing -> `sed -n` counter arg stolen). ARET must model the
+    // probe as a no-op. The fixture stages 0x1234 in ecx across the call and
+    // reads it back; pre-fix it comes back 0 ("LOST").
+    let out = transpile_and_run("chkstk_ms_preserves_ecx.exe");
+    assert!(
+        out.contains("ecx=0x1234 OK"),
+        "___chkstk_ms probe clobbered a caller-saved register:\n{out}"
+    );
+}
+
+#[test]
 fn atexit_callback_absorbed_after_noreturn_is_recovered() {
     if !has_m32() {
         eprintln!("skipping atexit-callback test: `cc -m32` unavailable (install gcc-multilib)");
