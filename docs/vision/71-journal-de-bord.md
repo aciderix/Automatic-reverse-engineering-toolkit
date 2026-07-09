@@ -196,6 +196,10 @@ Deux mécanismes complémentaires :
 ### 2.6 `[HLE-FILE]` — fichiers, stat, chemins, mmap, wide
 - **I/O** : open/read/write/close/lseek/**_lseeki64**/_telli64/_ftelli64, `_access`/
   `_chmod`/`_mkdir`/`_unlink`/`_getpid`, `SetEndOfFile`(=ftruncate)/`_chsize`.
+- **Info par handle** : `GetFileSize(Ex)`/`GetFileType`/`GetFileTime`/**`GetFileInformationByHandle`**
+  (fstat sur le fd → `BY_HANDLE_FILE_INFORMATION` 52 o : attrs, 3 FILETIMEs, dwVolumeSerialNumber=st_dev,
+  taille 64-bit, nNumberOfLinks, nFileIndex=inode 64-bit). Handles = fds (modèle mono-proc). Gardé par
+  winecorpus `win32_fileinfo` vs Wine. Requis par la CRT mingw (fstat/isatty) et m4.
 - **Famille stat ABI-exacte** : `_stat`(36o)/`_stati64`(48o)/`_fstat`/`_fstati64` —
   layout Windows **fixe** (`__int64 st_size` aligné 8 → écriture à **offsets d'octets
   explicites**, sinon décalage silencieux). `st_mode` POSIX→msvcrt (`_S_IFDIR/REG/CHR`).
@@ -253,7 +257,7 @@ Deux mécanismes complémentaires :
   CFG). memcpy/rep-stos modélisés ; adresses masquées 32-bit. **`0 divergence`
   ≠ pas de bug** : dit *où il n'est pas* (bugs profonds derrière imports/skips).
 - **Portes** : difftest (décompile O0→O3, **271/271**), transpile-diff (produit, **4/4**,
-  hash **`19acad982194bf07`**), winediff (Wine, **46/46**), sweeps (sqlite/busybox/
+  hash **`19acad982194bf07`**), winediff (Wine, **48/48**), sweeps (sqlite/busybox/
   gauntlet), SMT (Z3, 11/11), magicdiv (2³²), in-place (3/3), recompilabilité (100%).
 - **`--mode imports`** : couverture d'imports **statique a-priori** (borne supérieure
   du trou runtime). Prioriser par la donnée, **filtrer par fidélité**.
@@ -505,5 +509,21 @@ Détail : **70 §6** (roadmap). Résumé :
   vert**.
 - **Reste** : `sed -i` bute sur des imports Win32 non implémentés (`GetFileInformationByHandle`, `_mktemp`…)
   — indépendant, non lié au compteur.
+
+### 2026-07-09 — [HLE-FILE][DEMO] `GetFileInformationByHandle` (fstat) + statut m4 précisé
+- **Cible** : m4 (gauntlet), après le fix `___chkstk_ms`, abortait sur `unimplemented import:
+  GetFileInformationByHandle` (aussi requis par `sed -i` et la CRT mingw `fstat`/`isatty`).
+- **Fix** (`runtime/aret_hle/aret_hle.c`) : `aret_GetFileInformationByHandle(h, BY_HANDLE_FILE_INFORMATION*)`
+  = `fstat(fd)` → remplit les 52 o (attrs via S_ISDIR/!S_IWUSR ; 3 FILETIMEs via `aret_ts_to_ft` ;
+  dwVolumeSerialNumber=st_dev ; taille 64-bit ; nNumberOfLinks=st_nlink ; nFileIndex=inode 64-bit). Handles
+  = fds (comme GetFileSize/GetFileTime). Erreur → `g_last_error=6` (INVALID_HANDLE), retourne 0. Reconnu
+  auto par le scan `aret_X(uint32_t` du builder ; `@8` déjà dans `stdcall_pops`.
+- **Vérifié** : winecorpus `win32_fileinfo.c` (écrit 16 o, ouvre, interroge → `size=16 dir=0 links=1`)
+  **bit-identique à Wine**. **winediff 48/48** (47→48). Additif pur : difftest/transpile-hash/funcdiff
+  inchangés.
+- **Statut m4 mis à jour** : ne bloque **plus** sur cet import → retombe sur l'abort **pré-existant**
+  (P5) **confirmé** dans `_sigprocmask` (`sub_42a420`) ← `_sigaction` (`sub_42a0d0`) ← main (backtrace gdb :
+  `aret_abort` = assertion `.cold` de m4). L'abort du bookkeeping signaux reste la vraie frontière m4
+  (session dédiée, cf. entrée `[HLE?/LIFT?] m4` du 2026-07-05). **Abort sound**, aucune sortie fausse.
 
 <!-- NOUVELLES ENTRÉES ICI (garder l'ordre chronologique, plus récent en bas) -->

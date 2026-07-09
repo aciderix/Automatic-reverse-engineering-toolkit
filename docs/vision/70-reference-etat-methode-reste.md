@@ -165,7 +165,7 @@ bash bench/regression.sh    # PORTE unifiée : difftest 271/271, in-place 3/3,
                             # recompilabilité gzip/ls/cat 100%
 bash bench/difftest.sh              # décompile O0→O3
 bash bench/difftest_transpile.sh    # transpile (hash 19acad982194bf07)
-bash bench/winediff.sh              # axe 2 vs Wine (47/47)
+bash bench/winediff.sh              # axe 2 vs Wine (48/48)
 bash bench/funcdiff.sh              # lift-closure + opt-diff vs Unicorn (0 div)
 # Sweeps de vrais binaires (téléchargent + comparent à Wine) :
 bash bench/sqlite_sweep.sh   bash bench/busybox_sweep.sh   bash bench/corpus_sweep.sh
@@ -179,7 +179,7 @@ aret <exe> --mode imports           # couverture statique d'imports (axe 2 a-pri
 
 ### État régression (référence — doit rester vert)
 difftest **271/271** · transpile-diff **4/4** (H=`19acad982194bf07`) · winediff
-**47/47** · cpudiff vert · funcdiff corpus **0 divergence** (lift ~12k scorées /
+**48/48** · cpudiff vert · funcdiff corpus **0 divergence** (lift ~12k scorées /
 ~6k appels, opt ~10k scorées) · SMT **11/11** · in-place **3/3** · magicdiv **2³²** ·
 recompilabilité **100 %** · WASM **7/7**.
 
@@ -285,6 +285,8 @@ recompilabilité **100 %** · WASM **7/7**.
   (idiome close+réouverture uniq/tac), `isatty` sans fuite ENOTTY.
 - **Fichier** : open/read/write/close/lseek/**_lseeki64**/_telli64, famille **stat
   msvcrt ABI-exacte** (`_stat`/`_fstat`/`_stati64`, offsets d'octets explicites),
+  `GetFileSize(Ex)`/`GetFileTime`/**`GetFileInformationByHandle`** (fstat → attrs +
+  3 FILETIMEs + serial + taille 64-bit + nlink + file-index=inode),
   `_access`/`_chmod`/`_mkdir`/`_unlink`, mapping mémoire (`CreateFileMapping`/
   `MapViewOfFile` → mmap, `#ifndef __wasm__`), **wide** (`_wfopen`/`CreateFileW`/
   `GetFileAttributesExW`/`GetFullPathNameW`…). **Chemins Unix absolus `/…`
@@ -379,10 +381,15 @@ Le SIGSEGV regex ancien **ne se reproduit plus** (résorbé par les fixes récup
 comme clobbering ecx alors qu'il **préserve les registres** → longueur de `memset` perdue → tableau
 long-options de getopt32 non zéroé (cf. §4.3 + 71 `[ABI][DEMO]`). grep/sed (`-i/-v/-c/-o/-E`, classes,
 `s///g`, `Nd`, `-n p/Np//re/p`) = **bit-identiques à Wine** (12/12 batterie). *Reste* : `sed -i` bute sur des
-imports Win32 non implémentés (`GetFileInformationByHandle`, `_mktemp`…) — indépendant.
+imports Win32 non implémentés (`_mktemp`, `GetCompressedFileSizeA`, `OpenProcessToken`…) — indépendant.
 
-### P5 — m4 (mingw) : abort au démarrage (locale/CRT plus profond). units cherche
-`units.dat` (**environnemental**, pas un bug).
+### P5 — m4 (mingw) : abort dans le bookkeeping signaux (`_sigprocmask`). units cherche `units.dat`
+m4 ne bloque **plus** sur `GetFileInformationByHandle` (implémenté 2026-07-09) : l'abort restant est
+**confirmé** dans `_sigprocmask` (`sub_42a420`) via `_sigaction` (`sub_42a0d0`) — l'assertion `.cold`
+(`cmp $0x42a2c0,%eax; jne→abort`, slot handler SIGPIPE 0x461de0 jamais écrit car le chemin *block* de
+sigprocmask n'exécute pas). **Abort sound**, aucune sortie fausse. Cf. 71 `[HLE?/LIFT?] m4`. Session dédiée :
+comparer le flot de `_sigprocmask` ARET vs Wine, ou host-backer sigaction/sigprocmask. units = **environnemental**
+(`units.dat` absent, pas un bug ; message d'erreur diffère de Wine).
 
 ### P6 — Outillage funcdiff : closure SSA (opt-diff à travers les appels)
 Tentée, **retirée** (faux positif : `esp` fantôme incohérent à la frontière

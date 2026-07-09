@@ -1522,6 +1522,35 @@ uint32_t aret_GetFileTime(uint32_t esp) {
     if (wt) aret_ts_to_ft(st.st_mtime, 0, wt);
     return 1;
 }
+/* GetFileInformationByHandle(h, BY_HANDLE_FILE_INFORMATION*): fstat the fd and
+ * fill the 52-byte record — attrs, 3 FILETIMEs, volume serial, 64-bit size,
+ * link count, and the 64-bit file index (inode). Handles are fds in this model
+ * (as in GetFileSize/GetFileTime). Used by mingw CRT `fstat`/`isatty` paths and
+ * tools that dedup by (volume, file index) — e.g. GNU m4. */
+uint32_t aret_GetFileInformationByHandle(uint32_t esp) {
+    int fd = (int)arg(esp, 0);
+    uint32_t *out = (uint32_t *)(uintptr_t)arg(esp, 1);
+    struct stat st;
+    if (!out || fstat(fd, &st) != 0) { g_last_error = 6u; /* ERROR_INVALID_HANDLE */ return 0; }
+    uint32_t attr = 0;
+    if (S_ISDIR(st.st_mode)) attr |= 0x10u;      /* FILE_ATTRIBUTE_DIRECTORY */
+    if (!(st.st_mode & S_IWUSR)) attr |= 0x01u;  /* FILE_ATTRIBUTE_READONLY */
+    if (attr == 0) attr = 0x80u;                 /* FILE_ATTRIBUTE_NORMAL */
+    uint64_t sz = (uint64_t)st.st_size;
+    uint64_t ino = (uint64_t)st.st_ino;
+    out[0] = attr;                               /* dwFileAttributes     @0  */
+    aret_ts_to_ft(st.st_ctime, 0, out + 1);      /* ftCreationTime       @4  */
+    aret_ts_to_ft(st.st_atime, 0, out + 3);      /* ftLastAccessTime     @12 */
+    aret_ts_to_ft(st.st_mtime, 0, out + 5);      /* ftLastWriteTime      @20 */
+    out[7] = (uint32_t)st.st_dev;                /* dwVolumeSerialNumber @28 */
+    out[8] = (uint32_t)(sz >> 32);               /* nFileSizeHigh        @32 */
+    out[9] = (uint32_t)sz;                        /* nFileSizeLow         @36 */
+    out[10] = (uint32_t)st.st_nlink;             /* nNumberOfLinks       @40 */
+    out[11] = (uint32_t)(ino >> 32);             /* nFileIndexHigh       @44 */
+    out[12] = (uint32_t)ino;                      /* nFileIndexLow        @48 */
+    g_last_error = 0;
+    return 1;
+}
 /* Local<->UTC FILETIME: a constant shift by the *current* timezone bias (Windows
  * uses the current bias, not the historical one). tm_gmtoff is seconds east of
  * UTC; under a UTC timezone (the differential harness) this is the identity. */
