@@ -492,6 +492,45 @@ fn abs_store_imm(insn: &iced_x86::Instruction) -> Option<(u64, u64)> {
     }
 }
 
+/// The code immediate of a `mov [base+…], imm32` that writes a **code pointer**
+/// into a struct/object field through a base register (`mov [ebx], method`, `mov
+/// [obj+8], handler`). Storing a `.text` address into a pointed-to object is an
+/// address-taken function pointer — the same strength of proof as a by-value
+/// stack-arg callback — so `imm` names a function whatever prologue the callee
+/// uses. NASM's OMF backend installs a bare-`ret` no-op method into its `struct
+/// ofmt` this way and later dispatches it through `call [obj+disp]`; without
+/// recovering it the indirect call aborts on unrecovered code (the isolated
+/// method is reached by no direct call and sits behind a computed address, so no
+/// other heuristic sees it). A base register is required, so a `mov [disp32],
+/// imm` to a fixed slot (handled as an indirect-call-slot store) is not
+/// double-counted, and so a scalar constant stored to a fixed scalar global is
+/// not mistaken for a method table.
+fn mem_store_code_imm(insn: &iced_x86::Instruction) -> Option<u64> {
+    use iced_x86::{Mnemonic, OpKind, Register};
+    if insn.mnemonic() == Mnemonic::Mov
+        && insn.op0_kind() == OpKind::Memory
+        && insn.memory_base() != Register::None
+        && matches!(insn.op1_kind(), OpKind::Immediate32 | OpKind::Immediate32to64)
+    {
+        Some(insn.immediate(1))
+    } else {
+        None
+    }
+}
+
+/// Whether `addr` begins a **bare-`ret` stub** — a `ret`/`ret imm16` as the very
+/// first instruction (optionally after a `mov edi,edi` hot-patch pad). Such a
+/// no-op is a legitimate function body that `looks_like_func_start` rejects (no
+/// prologue). Only trusted for an *address-taken* code pointer (a stored/pushed
+/// function pointer), never for a linear-scan seed, so alignment/padding `ret`
+/// bytes are not turned into spurious functions. NASM's OMF `struct ofmt` uses
+/// one as a do-nothing method (`cleanup`/`filename`), dispatched indirectly.
+fn is_bare_ret_stub(prog: &Program, addr: u64) -> bool {
+    let dis = Disassembler::new(prog.bitness);
+    let Some(first) = dis.decode_at(prog, addr) else { return false };
+    matches!(first.raw.mnemonic(), iced_x86::Mnemonic::Ret | iced_x86::Mnemonic::Retf)
+}
+
 /// A code immediate loaded into a register that is then used — before the register
 /// is overwritten — as an indirect `call`/`jmp` target: `mov ebp,imm ; … ; call
 /// *ebp`. The register-indirect call through the just-loaded pointer is definitive
@@ -765,6 +804,30 @@ fn global_decode(
                             // function; force the boundary re-split (guarded by
                             // `looks_like_func_start`, which excludes jump-table case
                             // bodies, since this truncates an existing function).
+                            forced.insert(v);
+                        }
+                    }
+                }
+                // A code pointer written into a struct/object field through a base
+                // register (`mov [ebx], method`) — a method installed into an
+                // object, address-taken and later dispatched via `call [obj+disp]`.
+                // Like the stack-arg callback, the store proves `v` is a function;
+                // accept the bare-`ret` no-op stub NASM's OMF backend installs
+                // (which `looks_like_func_start` rejects) in addition to any normal
+                // prologue. Only through this address-taken store, never a linear
+                // seed, so padding `ret`s are not turned into functions.
+                if let Some(v) = mem_store_code_imm(&insn.raw) {
+                    if in_exec(v) {
+                        if !global.contains_key(&v) {
+                            // Fresh, unclaimed target: accept a normal prologue or the
+                            // bare-`ret` no-op stub (seeding unclaimed space is safe).
+                            if looks_like_func_start(prog, v, true) || is_bare_ret_stub(prog, v) {
+                                cands.insert(v);
+                            }
+                        } else if looks_like_func_start(prog, v, true) {
+                            // Absorbed into a preceding function; only a real prologue
+                            // forces the re-split — a bare `ret` interior to a function
+                            // must never truncate it.
                             forced.insert(v);
                         }
                     }

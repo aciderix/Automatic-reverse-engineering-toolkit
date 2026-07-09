@@ -261,8 +261,10 @@ recompilabilité **100 %** · WASM **7/7**.
 - Prologue scan + **address-taken** : scan de données (pointeurs de code alignés),
   **immédiats** (`push imm`/`mov [esp],imm` = callback par valeur), `mov reg,imm;…;
   call *reg` (`reg_imm_reaches_indirect_call`), `mov [g],imm;…;call [g]`
-  (`abs_store_imm`), **`call/jmp [disp32]`** (`abs_indirect_slot`, contenu du slot),
-  **`call [idx*4+base]`** (`indexed_call_table_base`, tables init/atexit NASM).
+  (`abs_store_imm`), **`mov [reg+d],imm`** (`mem_store_code_imm` = pointeur de méthode dans un objet,
+  accepte le stub `ret` nu via `is_bare_ret_stub` — NASM OMF `struct ofmt`), **`call/jmp [disp32]`**
+  (`abs_indirect_slot`, contenu du slot), **`call [idx*4+base]`** (`indexed_call_table_base`, tables
+  init/atexit NASM).
 - **Tables de saut** : bornées par `cmp idx,N;ja` ; doublons préservés (cases
   partagés) ; abs computed-goto ; forme -O0 étagée ; tables de pointeurs
   **NULL-tolérantes** ; **run ≥3× d'une même valeur = switch, pas vtable**.
@@ -316,7 +318,8 @@ recompilabilité **100 %** · WASM **7/7**.
   bit-identique à Wine : CRUD, JOIN, GROUP BY, window functions, CTE, index, JSON,
   dates, triggers. Sweep **30/30** (:memory: + on-disk). Toute la math scalaire.
 - **NASM 2.16.01** (**MSVC strippé**, 1,5 Mo) → `nasm -v`/`-f elf`/`-f win32`/`-f
-  bin` = objets **bit-identiques à Wine**.
+  bin`/**`-f obj`** = objets **bit-identiques à Wine** (`-f obj` débloqué par `mem_store_code_imm`,
+  cf. §4.4/§5 P3 ; gardé dans le gauntlet).
 - **busybox-w32** (mingw strippé) : cksum/md5sum/sha1sum/echo/sort/wc/cat/head/tail/
   uniq/tac/od/nl/cut/rev/expr/**awk** (÷)/seq/basename/tr/pwd/**grep**/**sed** (dont `-n`)/… bit-identiques ;
   sweep **60/60**.
@@ -366,11 +369,15 @@ Délicat : **une fonction à la fois, difftest + cpudiff + winediff + filet Lua 
 chaque pas.**
 
 ### P3 — Récupération points-to (Phase 4 vtables / dispatch calculé)
-- **NASM `-f obj` (OMF)** : abort sur un stub `ret` nu (méthode no-op d'un `struct
-  ofmt`) stocké en immédiat et appelé par **adresse calculée/indexée** (ni immédiat
-  simple, ni `call [slot]`, ni run≥3) — le cas de récup **le plus dur**.
+- **NASM `-f obj` (OMF) ✅ RÉSOLU (2026-07-09)** : le stub `ret` nu (méthode no-op d'un
+  `struct ofmt`) est **stocké via `mov [reg], imm`** (pointeur de méthode dans un objet pointé par
+  registre) puis appelé par `call [obj+disp]`. `imm_code_ptrs` captait déjà l'immédiat mais
+  `looks_like_func_start` rejetait le `ret` nu. Fix : détecteur **`mem_store_code_imm`** (`mov [base+…],
+  code_imm`) + acceptation du stub `ret` nu (`is_bare_ret_stub`) **uniquement** via cette preuve
+  address-taken (jamais en balayage linéaire → pas de faux positif sur du padding). `nasm -f obj` =
+  **bit-identique à Wine** (cf. §4.4 + 71 `[RECOV]`).
 - **plink** (MSVC/clang) : abort sur `0x450058`, même classe (pointeur isolé atteint
-  par adresse calculée).
+  par adresse calculée) — **à re-mesurer** (peut être couvert par `mem_store_code_imm`).
 - Vrai **C++ g++** (exceptions, RTTI, thiscall) : non testable sur l'hôte (pas de
   mingw g++) ; le **dispatch vtable lui-même fonctionne** (fixture validée).
 

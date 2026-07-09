@@ -166,6 +166,12 @@ Deux mécanismes complémentaires :
   **sound** (may_return si un succ n'est pas interne & pas noreturn ; jamais deviné).
 - **x87 leaf-thunk** (`is_x87_leaf_thunk`) : décode tout le corps (fld arg→ops FPU→ret)
   → amorce atan2/fmod/trunc atteints par pointeur isolé.
+- **`mem_store_code_imm`** (`mov [base+d], code_imm`) : pointeur de méthode écrit dans un objet pointé
+  par registre puis appelé via `call [obj+d]`. Address-taken (même force qu'un callback stack-arg) →
+  amorce la fonction quel que soit son prologue, **y compris un stub `ret` nu** (`is_bare_ret_stub`).
+  Accepté **uniquement** via ce store (jamais en balayage linéaire → padding non seedé) ; force-resplit
+  d'une cible absorbée réservé aux vrais prologues (un `ret` interne ne tronque pas). Débloque NASM
+  `-f obj` (méthode no-op du `struct ofmt`).
 - **FLIRT** (`src/flirt.rs`) : opérandes **relocalisés wildcardés** (`.reloc`,
   `Program::base_relocs`) ; **thunks jamais signaturés** (résolus par `import_thunk`) ;
   glue reconnue élargit `looks_like_func_start`. ⚠️ **FLIRT = cosmétique** (code de
@@ -306,8 +312,8 @@ Deux mécanismes complémentaires :
   comprise), exit 0.
 - **sqlite3.exe** (MSVC strippé, 2958 fn) : moteur SQL complet, sweep **30/30**
   (:memory: + on-disk).
-- **NASM 2.16.01** (MSVC strippé) : `-v`/`-f elf`/`-f win32`/`-f bin` = objets
-  identiques. Reste `-f obj` (points-to).
+- **NASM 2.16.01** (MSVC strippé) : `-v`/`-f elf`/`-f win32`/`-f bin`/**`-f obj`** = objets
+  bit-identiques à Wine (`-f obj` débloqué 2026-07-09 par `mem_store_code_imm`).
 - **busybox-w32** (mingw strippé) : sweep **60/60** + awk `/`, cksum, wc, uniq/tac/tail, **grep/sed
   (dont `sed -n`)**.
 - **m4 (GNU M4 1.4.19, mingw)** : macros/eval/translit/ifelse/récursion/`--version` **bit-identiques à Wine**.
@@ -556,5 +562,27 @@ Détail : **70 §6** (roadmap). Résumé :
   Fixture winecorpus `win32_signal.c` (`p1_dfl=1 p2_h1=1 p3_dfl=1`) ; **winediff 49/49**. Additif pur.
 - **Reste** : la CRLF de m4 (stdout `_O_TEXT`) est normalisée par le harness (`tr -d '\r'`) — diff texte
   légitime, pas un bug.
+
+### 2026-07-09 — [RECOV] `mem_store_code_imm` : pointeur de méthode `ret` nu (NASM `-f obj`)
+- **Cible/symptôme** : `nasm -f obj` **abortait** (`indirect call to unrecovered function 0x43e0b0`) —
+  Wine sort un `.obj` de 108 o, ARET rien. 0x43e0b0 = **`ret` nu** (méthode no-op du `struct ofmt` OMF).
+- **Cause racine** (`src/analysis/mod.rs`) : 0x43e0b0 est installé par `mov DWORD PTR [ebx], 0x43e0b0`
+  (pointeur de méthode dans un objet pointé par **registre**) puis appelé via `call [obj+disp]`. Atteint
+  par **aucun** call direct, dans un trou du balayage linéaire. `imm_code_ptrs` captait déjà l'immédiat,
+  mais le seul chemin de seed (ligne 746) exige `looks_like_func_start`, qui **rejette le `ret` nu** (0xc3
+  ne matche aucun prologue). Les détecteurs existants ne couvraient que `mov [global],imm` (`abs_store_imm`,
+  base=None) ou les stack-args (`stack_arg_code_imm`, base=esp) — pas `mov [reg],imm` (base registre).
+- **Fix** : détecteur **`mem_store_code_imm`** (`mov [base+…], code_imm`, base register) → seed la cible
+  via `looks_like_func_start` **OU** `is_bare_ret_stub` (première insn = `ret`/`retf`). Accepté seulement
+  sur espace **non réclamé** (`!global.contains_key`) ; force-resplit d'une cible absorbée réservé aux
+  vrais prologues (un `ret` nu interne ne doit jamais tronquer une fonction). Address-taken = preuve forte,
+  comme le callback stack-arg. **Général** : tout objet/struct-de-pointeurs initialisé par `mov [reg],method`.
+- **Vérifié** : `nasm -f obj` (simple + data/labels/externs/relocations) **bit-identique à Wine**
+  (`cmp` = 0). Guard : `-f obj` ajouté au cas nasm du gauntlet (assemble + `od` de l'.obj sur stdout).
+  Régression : **difftest 271/271, transpile-diff 4/4 (hash `19acad982194bf07` inchangé), funcdiff 0
+  divergence (12467 lift / 10688 opt scorées — plus de fonctions récupérées dans busybox/sqlite, toutes
+  correctes), winediff 49/49, busybox sweep 60/60, gauntlet 19/21**. Fixture C minimale non retenue (le
+  balayage linéaire absorbe un stub adjacent → ne reproduit pas ; NASM garde le vrai cas isolé).
+- **Reste** : **plink** (`0x450058`, même classe) à re-mesurer — peut être couvert par ce fix.
 
 <!-- NOUVELLES ENTRÉES ICI (garder l'ordre chronologique, plus récent en bas) -->

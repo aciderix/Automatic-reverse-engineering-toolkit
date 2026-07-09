@@ -27,7 +27,9 @@ norm(){ tr -d '\r' | sed -E 's#[A-Za-z]:\\[^ ]*##g; s#\./app##g; s#/tmp/[^ ]*##g
 # invoke a binary ($2 = runner cmd prefix e.g. "./app" or "wine /path"); prints normalized output
 invoke(){ local b="$1" R="$2"; local IN='the quick brown fox 42 times'
   case "$b" in
-    nasm) $R -v 2>&1 ;;
+    nasm) printf 'section .text\nglobal _start\n_start:\n mov eax,1\n xor ebx,ebx\n ret\n' > _g.asm
+          $R -f obj _g.asm -o _g.obj 2>&1; od -An -tx1 _g.obj 2>/dev/null; rm -f _g.asm _g.obj
+          $R -v 2>&1 ;;
     lua) $R -e "print(6*7, math.floor(2.5), ('ab'):rep(3), 355/113)" 2>&1 ;;
     sqlite3|sqlite3_stripped|sqlite3_full|sqlite3_full_stripped)
         $R :memory: "SELECT 6*7, hex(255), length('abcde'), abs(-9);" 2>&1 ;;
