@@ -2035,7 +2035,24 @@ uint32_t aret_amsg_exit(uint32_t esp) { _exit((int)arg(esp, 0)); return 0; }
 uint32_t aret_cexit(uint32_t esp) { (void)esp; return 0; }
 uint32_t aret_lock(uint32_t esp) { (void)esp; return 0; }
 uint32_t aret_unlock(uint32_t esp) { (void)esp; return 0; }
-uint32_t aret_signal(uint32_t esp) { (void)esp; return 0; }
+/* signal(sig, handler) — msvcrt/C89 semantics: record the new disposition and
+ * return the PREVIOUS one (SIG_DFL == 0 initially). We do not *deliver* signals
+ * (the shared-stack model has no async delivery — unchanged from the old stub),
+ * but faithfully returning the prior handler is what the mingw/gnulib
+ * signal-blocking bookkeeping requires: it installs a `_blocked_handler` on
+ * block and, on unblock, calls signal() again and asserts the return equals the
+ * handler it last set. The old stub always returned 0, breaking that invariant
+ * (GNU m4 aborted in `_sigprocmask`). SIG_ERR (-1) for an out-of-range signal. */
+#define ARET_NSIG 64
+static uint32_t aret_sig_handlers[ARET_NSIG]; /* 0 = SIG_DFL */
+uint32_t aret_signal(uint32_t esp) {
+    uint32_t sig = arg(esp, 0);
+    uint32_t handler = arg(esp, 1);
+    if (sig >= ARET_NSIG) return 0xFFFFFFFFu; /* SIG_ERR */
+    uint32_t prev = aret_sig_handlers[sig];
+    aret_sig_handlers[sig] = handler;
+    return prev;
+}
 /* atexit: the registered callbacks are transpiled sub_<va> using the machine-
  * stack ABI, so dispatch them through aret_call (like the qsort trampoline) from
  * a single host atexit handler. LIFO order, as C requires. */

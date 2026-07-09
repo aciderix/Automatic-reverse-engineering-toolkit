@@ -165,7 +165,7 @@ bash bench/regression.sh    # PORTE unifiée : difftest 271/271, in-place 3/3,
                             # recompilabilité gzip/ls/cat 100%
 bash bench/difftest.sh              # décompile O0→O3
 bash bench/difftest_transpile.sh    # transpile (hash 19acad982194bf07)
-bash bench/winediff.sh              # axe 2 vs Wine (48/48)
+bash bench/winediff.sh              # axe 2 vs Wine (49/49)
 bash bench/funcdiff.sh              # lift-closure + opt-diff vs Unicorn (0 div)
 # Sweeps de vrais binaires (téléchargent + comparent à Wine) :
 bash bench/sqlite_sweep.sh   bash bench/busybox_sweep.sh   bash bench/corpus_sweep.sh
@@ -179,7 +179,7 @@ aret <exe> --mode imports           # couverture statique d'imports (axe 2 a-pri
 
 ### État régression (référence — doit rester vert)
 difftest **271/271** · transpile-diff **4/4** (H=`19acad982194bf07`) · winediff
-**48/48** · cpudiff vert · funcdiff corpus **0 divergence** (lift ~12k scorées /
+**49/49** · cpudiff vert · funcdiff corpus **0 divergence** (lift ~12k scorées /
 ~6k appels, opt ~10k scorées) · SMT **11/11** · in-place **3/3** · magicdiv **2³²** ·
 recompilabilité **100 %** · WASM **7/7**.
 
@@ -322,11 +322,10 @@ recompilabilité **100 %** · WASM **7/7**.
   sweep **60/60**.
 - **WASM** : PE Windows → WebAssembly, **7/7** fixtures (pile, globals, indirects,
   CRT, x87, Win32, SHA-256).
-- **Corpus gauntlet** (`bench/gauntlet/`, 21 PE variés committés) : **16/21** au
-  score (17 fonctionnels — `minigzip_stripped` est byte-identique, faux-DIFF du
-  harness). MATCH : bzip2/grep/gzip/hello/lua/minigzip/nasm/sed + **sqlite3 ×4** +
-  strippés. Vrais restes : **m4 ×2** (abort sound dans le bookkeeping signaux mingw,
-  cf. 71) et **units ×2** (cherche `units.dat` — environnemental, pas un bug).
+- **Corpus gauntlet** (`bench/gauntlet/`, 21 PE variés committés) : **19/21** au
+  score (**21/21 fonctionnels**). MATCH : bzip2/grep/gzip/hello/lua/minigzip/nasm/
+  sed + **sqlite3 ×4** + **m4 ×2** + strippés. Seul reste : **units ×2** (cherche
+  `units.dat` — **environnemental**, pas un bug ; message d'erreur diffère de Wine).
 
 ---
 
@@ -383,13 +382,13 @@ long-options de getopt32 non zéroé (cf. §4.3 + 71 `[ABI][DEMO]`). grep/sed (`
 `s///g`, `Nd`, `-n p/Np//re/p`) = **bit-identiques à Wine** (12/12 batterie). *Reste* : `sed -i` bute sur des
 imports Win32 non implémentés (`_mktemp`, `GetCompressedFileSizeA`, `OpenProcessToken`…) — indépendant.
 
-### P5 — m4 (mingw) : abort dans le bookkeeping signaux (`_sigprocmask`). units cherche `units.dat`
-m4 ne bloque **plus** sur `GetFileInformationByHandle` (implémenté 2026-07-09) : l'abort restant est
-**confirmé** dans `_sigprocmask` (`sub_42a420`) via `_sigaction` (`sub_42a0d0`) — l'assertion `.cold`
-(`cmp $0x42a2c0,%eax; jne→abort`, slot handler SIGPIPE 0x461de0 jamais écrit car le chemin *block* de
-sigprocmask n'exécute pas). **Abort sound**, aucune sortie fausse. Cf. 71 `[HLE?/LIFT?] m4`. Session dédiée :
-comparer le flot de `_sigprocmask` ARET vs Wine, ou host-backer sigaction/sigprocmask. units = **environnemental**
-(`units.dat` absent, pas un bug ; message d'erreur diffère de Wine).
+### P5 — m4 (mingw) ✅ FONCTIONNEL (2026-07-09). units = environnemental
+**m4 = bit-identique à Wine** (macros, eval, translit, ifelse, récursion, `--version`). Cause du blocage
+historique : `signal()` (`aret_signal`) était un **stub retournant 0** ; le bookkeeping mingw/gnulib de
+blocage de signaux installe `_blocked_handler` puis, au déblocage, rappelle `signal()` en **assertant qu'il
+rend l'ancien handler** — le 0 du stub faisait échouer l'assert `.cold` de `_sigprocmask` → abort. Fix :
+table de handlers par signal (retourne l'ancien, stocke le nouveau ; pas de délivrance = inchangé). Cf. §4.5
++ 71 `[HLE-WIN32] signal`. units = **environnemental** (`units.dat` absent, pas un bug).
 
 ### P6 — Outillage funcdiff : closure SSA (opt-diff à travers les appels)
 Tentée, **retirée** (faux positif : `esp` fantôme incohérent à la frontière

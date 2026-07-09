@@ -227,6 +227,11 @@ Deux mécanismes complémentaires :
   CriticalSection/WaitForSingleObject = no-op/immédiat **sound sans concurrence** ;
   `CreateThread`/`CreateProcess`/`OpenProcess` = **échec sound** (pas simulé —
   frontière dure, cf. chantier threads §2.12).
+- **`signal(sig,handler)`** (`aret_hle.c`) : table de handlers par signal (`aret_sig_handlers[64]`),
+  retourne **l'ancien** (SIG_DFL=0 au départ), stocke le nouveau ; SIG_ERR si hors bornes. **Pas de
+  délivrance** async (modèle shared-stack) mais le retour fidèle est requis par le bookkeeping mingw/gnulib
+  de blocage de signaux (installe `_blocked_handler`, puis au déblocage rappelle `signal()` en assertant
+  qu'il rend l'ancien). Ex-stub `return 0` → abort `.cold` de `_sigprocmask` (m4). Gardé winecorpus `win32_signal`.
 - **Find/dir** : FindFirstFile(A/W)+fnmatch case-fold, CreateDirectory/RemoveDirectory.
 - **version-info** : GetFileVersionInfo(Size)A/VerQueryValueA (parse VS_VERSIONINFO par
   signature `0xFEEF04BD`, rétrécit UTF-16→ANSI in place).
@@ -257,7 +262,7 @@ Deux mécanismes complémentaires :
   CFG). memcpy/rep-stos modélisés ; adresses masquées 32-bit. **`0 divergence`
   ≠ pas de bug** : dit *où il n'est pas* (bugs profonds derrière imports/skips).
 - **Portes** : difftest (décompile O0→O3, **271/271**), transpile-diff (produit, **4/4**,
-  hash **`19acad982194bf07`**), winediff (Wine, **48/48**), sweeps (sqlite/busybox/
+  hash **`19acad982194bf07`**), winediff (Wine, **49/49**), sweeps (sqlite/busybox/
   gauntlet), SMT (Z3, 11/11), magicdiv (2³²), in-place (3/3), recompilabilité (100%).
 - **`--mode imports`** : couverture d'imports **statique a-priori** (borne supérieure
   du trou runtime). Prioriser par la donnée, **filtrer par fidélité**.
@@ -304,8 +309,9 @@ Deux mécanismes complémentaires :
 - **NASM 2.16.01** (MSVC strippé) : `-v`/`-f elf`/`-f win32`/`-f bin` = objets
   identiques. Reste `-f obj` (points-to).
 - **busybox-w32** (mingw strippé) : sweep **60/60** + awk `/`, cksum, wc, uniq/tac/tail, **grep/sed
-  (dont `sed -n`)**. Reste m4 (P5).
-- **WASM** : **7/7** fixtures. **Gauntlet** : **12/21** (`bench/gauntlet/`).
+  (dont `sed -n`)**.
+- **m4 (GNU M4 1.4.19, mingw)** : macros/eval/translit/ifelse/récursion/`--version` **bit-identiques à Wine**.
+- **WASM** : **7/7** fixtures. **Gauntlet** : **19/21** MATCH (21/21 fonctionnels ; reste units ×2 = `units.dat` absent, environnemental).
 - Note : seule diff légitime = CRLF↔LF (mode texte) et `argv[0]` (environnemental).
 
 ### 2.12 `[64BIT]`/`[THREAD]`/`[GUI]` — chantiers ouverts
@@ -525,5 +531,30 @@ Détail : **70 §6** (roadmap). Résumé :
   (P5) **confirmé** dans `_sigprocmask` (`sub_42a420`) ← `_sigaction` (`sub_42a0d0`) ← main (backtrace gdb :
   `aret_abort` = assertion `.cold` de m4). L'abort du bookkeeping signaux reste la vraie frontière m4
   (session dédiée, cf. entrée `[HLE?/LIFT?] m4` du 2026-07-05). **Abort sound**, aucune sortie fausse.
+
+### 2026-07-09 — [HLE-WIN32][DEMO] `signal()` retourne l'ancien handler → m4 FONCTIONNEL (gauntlet 19/21)
+- **Cible/symptôme** : GNU m4 (gauntlet) abortait (SIGABRT) au démarrage, même sur input vide. Backtrace
+  gdb : `aret_abort` ← `_sigprocmask` (`sub_42a420`) ← `_sigaction` (`sub_42a0d0`) ← main. (Après le fix
+  `GetFileInformationByHandle` du même jour, qui avait levé un abort d'import antérieur.)
+- **Forensics** (m4 transpilé instrumenté, `fprintf` dans `sub_42a420`) : trace des appels sigprocmask :
+  appel 1 `how=0` (BLOCK) bloque 0x7fffbf → écrit bien `[0x461de0]=_blocked_handler` (SIGPIPE) ; appel 2
+  `how=1` (UNBLOCK) → l'assert `.cold` (`cmp eax,0x42a2c0; jne→abort`) **échoue avec eax=0**. Clé : pour les
+  signaux **non-SIGPIPE** débloqués, l'asm fait `call _signal(sig, saved); jmp <assert>` avec **eax = retour
+  de signal()**, et **asserte que signal() rend `_blocked_handler` (0x42a2c0)** = le handler installé au
+  blocage. (Corrige l'hypothèse du 2026-07-05 « le chemin block n'exécute pas » : il exécute bien ; le vrai
+  bug est le **retour de signal()**.)
+- **Cause racine** (`runtime/aret_hle/aret_hle.c`) : `aret_signal` était un **stub `{ return 0; }`**. Le
+  bookkeeping mingw/gnulib de blocage installe `signal(sig, _blocked_handler)` au blocage puis, au déblocage,
+  rappelle `signal(sig, saved)` et **asserte que le retour == le handler précédent** (`_blocked_handler`). Le
+  stub rendant 0, l'assert échouait → abort.
+- **Fix** : table `aret_sig_handlers[64]` — `signal()` retourne l'**ancien** handler (SIG_DFL=0 au départ),
+  stocke le nouveau ; SIG_ERR (-1) si sig hors bornes. **Pas de délivrance** async (inchangé vs stub ; modèle
+  shared-stack sans signaux async), mais le retour fidèle rend le bookkeeping cohérent. **Sound** : strictement
+  mieux que le stub (qui provoquait un faux abort).
+- **Vérifié** : m4 macros (`sq(12)`→`(12*12)`), eval/translit/ifelse/récursion, `--version` **bit-identiques
+  à Wine**. **Gauntlet 16→19/21** (m4 ×2 MATCH ; 21/21 fonctionnels, reste units ×2 = environnemental).
+  Fixture winecorpus `win32_signal.c` (`p1_dfl=1 p2_h1=1 p3_dfl=1`) ; **winediff 49/49**. Additif pur.
+- **Reste** : la CRLF de m4 (stdout `_O_TEXT`) est normalisée par le harness (`tr -d '\r'`) — diff texte
+  légitime, pas un bug.
 
 <!-- NOUVELLES ENTRÉES ICI (garder l'ordre chronologique, plus récent en bas) -->
