@@ -36,6 +36,11 @@ pub enum FlagKind {
     Cf,
     Pf,
     Af,
+    /// Direction flag (EFLAGS bit 10). Set by `std`, cleared by `cld`; consumed
+    /// only by the string instructions to choose forward (0) / backward (1)
+    /// element advance. Not produced by arithmetic and not read by any `setcc`/
+    /// `jcc`, so it never enters the condition-code machinery.
+    Df,
 }
 
 /// An abstract storage location, before SSA renaming.

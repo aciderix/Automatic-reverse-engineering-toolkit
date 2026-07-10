@@ -301,7 +301,7 @@ Deux mécanismes complémentaires :
   CFG). memcpy/rep-stos modélisés ; adresses masquées 32-bit. **`0 divergence`
   ≠ pas de bug** : dit *où il n'est pas* (bugs profonds derrière imports/skips).
 - **Portes** : difftest (décompile O0→O3, **271/271**), transpile-diff (produit, **4/4**,
-  hash **`19acad982194bf07`**), winediff (Wine, **54/54**), sweeps (sqlite/busybox/
+  hash **`19acad982194bf07`**), winediff (Wine, **55/55**), sweeps (sqlite/busybox/
   gauntlet), SMT (Z3, 11/11), magicdiv (2³²), in-place (3/3), recompilabilité (100%).
 - **`--mode imports`** : couverture d'imports **statique a-priori** (borne supérieure
   du trou runtime). Prioriser par la donnée, **filtrer par fidélité**.
@@ -918,5 +918,26 @@ Détail : **70 §6** (roadmap). Résumé :
   RMW + dump tableau) = **bit-identique à Wine**. cpudiff per-instruction (forme registre) **inchangé/vert**.
 - **Effet mesuré** : `bt`/`bts` (formes mémoire) **éliminés des 41 Win95**.
 - **Vérifié** : hash transpile **inchangé** `19acad982194bf07`, difftest 271/271, cpudiff vert, winediff **54/54**.
+
+### 2026-07-10 — [LIFT] Drapeau de direction (DF) : `std`/`cld` + chaîne bidirectionnelle
+- **Contexte** : top instruction Win95 après les précédents = **`std`** (14 binaires). Mesure des sites :
+  vrai usage backward — `std;repne scasb` (strrchr) et `std;…;rep movs` (memmove overlap). `std` était abort,
+  DF=0 assumé partout. **Tout-ou-rien** : modéliser DF partiellement = **unsound** (std→DF=1 mais une op qui
+  ignore DF irait en avant = corruption mémoire silencieuse).
+- **Fait** : `FlagKind::Df` (EFLAGS bit 10) ajouté (matches génériques → 0 ripple ; `flag_bit` cpudiff = 10).
+  `cld`→DF=0, `std`→DF=1 (plus des no-op/abort). **Chaque op de chaîne lit DF** : non-rep avance de pas
+  **signé** `size*(1-2·DF)` ; rep movs/stos/scas/cmps → helpers `__rep_*` prennent un flag **`back`** (0 avant,
+  1 arrière) et walk `p±=1` ; registres avancés du total signé ; dernier élément (scas/cmps) à `reg−step`.
+  `rep movs` : passe de `memcpy` à `__rep_movs{8,16,32,64}` (memcpy = avant seulement). cpudiff `do_memcall` +
+  `is_modeled_memcall` mis à jour (movs/stos 4 args ; back≠0 → skip, testé end-to-end). **DF=0 à l'entrée** :
+  `value_decls` initialise tout SSA à 0 → un DF lu-avant-écrit = 0 = convention ABI ⇒ code sans `cld` = avant.
+- **Oracle** : `winecorpus/str_direction.c` — inline-asm des 2 sens (backward movsb overlap, stosb, repne scasb
+  strrchr, repe cmpsb, non-rep lods/stos) = **bit-identique à Wine**. (Piège attrapé : bug de fixture double-
+  offset écrivant hors zone → UB pile non-init divergente ; corrigé, pas un bug de lift.)
+- **Effet mesuré** : `std` + toutes les ops de chaîne **éliminés des 41 Win95**.
+- **Vérifié (gros changement, tout passé)** : hash transpile **inchangé** `19acad982194bf07` (le corpus des 58
+  fns ne change pas : DF folde à 0 en avant), difftest 271/271, **busybox sweep bit-identique** (usage chaîne
+  intensif en avant intact), **cpudiff 6/6** (per-instruction non-rep + memcall `__rep_movs`/`__rep_stos` +
+  funcdiff), winediff **55/55**.
 
 <!-- NOUVELLES ENTRÉES ICI (garder l'ordre chronologique, plus récent en bas) -->

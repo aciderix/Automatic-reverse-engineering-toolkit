@@ -301,26 +301,36 @@ pub(crate) const FLOAT_HELPERS: &str = concat!(
     "extern int __aret_x87_ret_valid;\n",
     "static inline uint64_t __x87_retstore(long double v){__aret_x87_ret=v;__aret_x87_ret_valid=1;return 0;}\n",
     "static inline long double __x87_retload(void){__aret_x87_ret_valid=0;return __aret_x87_ret;}\n",
-    // `rep stos`: fill `n` elements at `d` with the low bytes of `v` (forward, DF=0).
-    "static inline uint64_t __rep_stos8(uint64_t d,uint64_t v,uint64_t n){uint8_t* p=(uint8_t*)(uintptr_t)d;for(uint64_t i=0;i<n;i++)p[i]=(uint8_t)v;return 0;}\n",
-    "static inline uint64_t __rep_stos16(uint64_t d,uint64_t v,uint64_t n){uint16_t* p=(uint16_t*)(uintptr_t)d;for(uint64_t i=0;i<n;i++)p[i]=(uint16_t)v;return 0;}\n",
-    "static inline uint64_t __rep_stos32(uint64_t d,uint64_t v,uint64_t n){uint32_t* p=(uint32_t*)(uintptr_t)d;for(uint64_t i=0;i<n;i++)p[i]=(uint32_t)v;return 0;}\n",
-    "static inline uint64_t __rep_stos64(uint64_t d,uint64_t v,uint64_t n){uint64_t* p=(uint64_t*)(uintptr_t)d;for(uint64_t i=0;i<n;i++)p[i]=v;return 0;}\n",
+    // `rep movs`: copy `n` elements from `s` to `d`, element by element, matching
+    // hardware `rep movs` exactly. `back` = DF: 0 forward (low→high), 1 backward
+    // (high→low, the `std; rep movs` overlap-copy idiom). Not `memcpy` (which is
+    // forward only). The caller advances edi/esi by the signed total.
+    "static inline uint64_t __rep_movs8(uint64_t d,uint64_t s,uint64_t n,uint64_t back){uint8_t* p=(uint8_t*)(uintptr_t)d;const uint8_t* q=(const uint8_t*)(uintptr_t)s;long st=back?-1:1;for(uint64_t i=0;i<n;i++){*p=*q;p+=st;q+=st;}return 0;}\n",
+    "static inline uint64_t __rep_movs16(uint64_t d,uint64_t s,uint64_t n,uint64_t back){uint16_t* p=(uint16_t*)(uintptr_t)d;const uint16_t* q=(const uint16_t*)(uintptr_t)s;long st=back?-1:1;for(uint64_t i=0;i<n;i++){*p=*q;p+=st;q+=st;}return 0;}\n",
+    "static inline uint64_t __rep_movs32(uint64_t d,uint64_t s,uint64_t n,uint64_t back){uint32_t* p=(uint32_t*)(uintptr_t)d;const uint32_t* q=(const uint32_t*)(uintptr_t)s;long st=back?-1:1;for(uint64_t i=0;i<n;i++){*p=*q;p+=st;q+=st;}return 0;}\n",
+    "static inline uint64_t __rep_movs64(uint64_t d,uint64_t s,uint64_t n,uint64_t back){uint64_t* p=(uint64_t*)(uintptr_t)d;const uint64_t* q=(const uint64_t*)(uintptr_t)s;long st=back?-1:1;for(uint64_t i=0;i<n;i++){*p=*q;p+=st;q+=st;}return 0;}\n",
+    // `rep stos`: fill `n` elements at `d` with the low bytes of `v`. `back` = DF
+    // (0 forward, 1 backward). The fill value is identical everywhere, so only the
+    // covered region — and the resulting edi — differ by direction.
+    "static inline uint64_t __rep_stos8(uint64_t d,uint64_t v,uint64_t n,uint64_t back){uint8_t* p=(uint8_t*)(uintptr_t)d;long st=back?-1:1;for(uint64_t i=0;i<n;i++){*p=(uint8_t)v;p+=st;}return 0;}\n",
+    "static inline uint64_t __rep_stos16(uint64_t d,uint64_t v,uint64_t n,uint64_t back){uint16_t* p=(uint16_t*)(uintptr_t)d;long st=back?-1:1;for(uint64_t i=0;i<n;i++){*p=(uint16_t)v;p+=st;}return 0;}\n",
+    "static inline uint64_t __rep_stos32(uint64_t d,uint64_t v,uint64_t n,uint64_t back){uint32_t* p=(uint32_t*)(uintptr_t)d;long st=back?-1:1;for(uint64_t i=0;i<n;i++){*p=(uint32_t)v;p+=st;}return 0;}\n",
+    "static inline uint64_t __rep_stos64(uint64_t d,uint64_t v,uint64_t n,uint64_t back){uint64_t* p=(uint64_t*)(uintptr_t)d;long st=back?-1:1;for(uint64_t i=0;i<n;i++){*p=v;p+=st;}return 0;}\n",
     // rep(ne) scas: scan `n` elements at `p` for `v`, returning the count consumed.
     // `repe` (1) stops on the first mismatch, `repne` (0) on the first match; both
-    // stop when the count runs out. (edi/ecx updates and flags are applied by the
-    // caller from this count.)
-    "static inline uint64_t __rep_scas8(uint64_t d,uint64_t v,uint64_t n,uint64_t repe){const uint8_t* p=(const uint8_t*)(uintptr_t)d;uint8_t x=(uint8_t)v;uint64_t k=0;while(n!=0){int eq=(p[k]==x);k++;n--;if(repe?!eq:eq)break;}return k;}\n",
-    "static inline uint64_t __rep_scas16(uint64_t d,uint64_t v,uint64_t n,uint64_t repe){const uint16_t* p=(const uint16_t*)(uintptr_t)d;uint16_t x=(uint16_t)v;uint64_t k=0;while(n!=0){int eq=(p[k]==x);k++;n--;if(repe?!eq:eq)break;}return k;}\n",
-    "static inline uint64_t __rep_scas32(uint64_t d,uint64_t v,uint64_t n,uint64_t repe){const uint32_t* p=(const uint32_t*)(uintptr_t)d;uint32_t x=(uint32_t)v;uint64_t k=0;while(n!=0){int eq=(p[k]==x);k++;n--;if(repe?!eq:eq)break;}return k;}\n",
+    // stop when the count runs out. `back` = DF (0 forward, 1 backward). (edi/ecx
+    // updates and flags are applied by the caller from this count.)
+    "static inline uint64_t __rep_scas8(uint64_t d,uint64_t v,uint64_t n,uint64_t repe,uint64_t back){const uint8_t* p=(const uint8_t*)(uintptr_t)d;uint8_t x=(uint8_t)v;long st=back?-1:1;uint64_t k=0;while(n!=0){int eq=(*p==x);p+=st;k++;n--;if(repe?!eq:eq)break;}return k;}\n",
+    "static inline uint64_t __rep_scas16(uint64_t d,uint64_t v,uint64_t n,uint64_t repe,uint64_t back){const uint16_t* p=(const uint16_t*)(uintptr_t)d;uint16_t x=(uint16_t)v;long st=back?-1:1;uint64_t k=0;while(n!=0){int eq=(*p==x);p+=st;k++;n--;if(repe?!eq:eq)break;}return k;}\n",
+    "static inline uint64_t __rep_scas32(uint64_t d,uint64_t v,uint64_t n,uint64_t repe,uint64_t back){const uint32_t* p=(const uint32_t*)(uintptr_t)d;uint32_t x=(uint32_t)v;long st=back?-1:1;uint64_t k=0;while(n!=0){int eq=(*p==x);p+=st;k++;n--;if(repe?!eq:eq)break;}return k;}\n",
     // rep(ne) cmps: compare `n` elements at [esi] vs [edi], returning the count
     // consumed. `repe` (1, F3 — the memcmp/strcmp idiom) stops on the first
     // mismatch, `repne` (0, F2) on the first match; both stop when the count runs
-    // out. (esi/edi/ecx updates and flags are applied by the caller from this
-    // count.) Forward (DF=0) assumed, as for rep movs/scas.
-    "static inline uint64_t __rep_cmps8(uint64_t s,uint64_t d,uint64_t n,uint64_t repe){const uint8_t* a=(const uint8_t*)(uintptr_t)s;const uint8_t* b=(const uint8_t*)(uintptr_t)d;uint64_t k=0;while(n!=0){int eq=(a[k]==b[k]);k++;n--;if(repe?!eq:eq)break;}return k;}\n",
-    "static inline uint64_t __rep_cmps16(uint64_t s,uint64_t d,uint64_t n,uint64_t repe){const uint16_t* a=(const uint16_t*)(uintptr_t)s;const uint16_t* b=(const uint16_t*)(uintptr_t)d;uint64_t k=0;while(n!=0){int eq=(a[k]==b[k]);k++;n--;if(repe?!eq:eq)break;}return k;}\n",
-    "static inline uint64_t __rep_cmps32(uint64_t s,uint64_t d,uint64_t n,uint64_t repe){const uint32_t* a=(const uint32_t*)(uintptr_t)s;const uint32_t* b=(const uint32_t*)(uintptr_t)d;uint64_t k=0;while(n!=0){int eq=(a[k]==b[k]);k++;n--;if(repe?!eq:eq)break;}return k;}\n",
+    // out. `back` = DF (0 forward, 1 backward). (esi/edi/ecx updates and flags are
+    // applied by the caller from this count.)
+    "static inline uint64_t __rep_cmps8(uint64_t s,uint64_t d,uint64_t n,uint64_t repe,uint64_t back){const uint8_t* a=(const uint8_t*)(uintptr_t)s;const uint8_t* b=(const uint8_t*)(uintptr_t)d;long st=back?-1:1;uint64_t k=0;while(n!=0){int eq=(*a==*b);a+=st;b+=st;k++;n--;if(repe?!eq:eq)break;}return k;}\n",
+    "static inline uint64_t __rep_cmps16(uint64_t s,uint64_t d,uint64_t n,uint64_t repe,uint64_t back){const uint16_t* a=(const uint16_t*)(uintptr_t)s;const uint16_t* b=(const uint16_t*)(uintptr_t)d;long st=back?-1:1;uint64_t k=0;while(n!=0){int eq=(*a==*b);a+=st;b+=st;k++;n--;if(repe?!eq:eq)break;}return k;}\n",
+    "static inline uint64_t __rep_cmps32(uint64_t s,uint64_t d,uint64_t n,uint64_t repe,uint64_t back){const uint32_t* a=(const uint32_t*)(uintptr_t)s;const uint32_t* b=(const uint32_t*)(uintptr_t)d;long st=back?-1:1;uint64_t k=0;while(n!=0){int eq=(*a==*b);a+=st;b+=st;k++;n--;if(repe?!eq:eq)break;}return k;}\n",
     // ---- Runtime x87 FPU-stack model: the fallback used for functions whose
     // static depth analysis bailed. The stack is ordinary runtime state, so no
     // compile-time depth is needed — correct by construction. Named `__x87rt_`

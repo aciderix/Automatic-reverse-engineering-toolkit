@@ -839,18 +839,26 @@ pub fn lift(insn: &Insn, bits: u32) -> Vec<Stmt> {
         return asm();
     }
 
-    // `rep movs` is a forward `memcpy(rdi, rsi, rcx*size)` that leaves rdi/rsi
-    // advanced and rcx = 0. Handled here because the string `movsd` shares its
-    // mnemonic with the SSE scalar move — the rep prefix disambiguates. (Backward
-    // copies via DF=1 are not modelled; gcc emits forward `rep movs`.)
+    // `rep movs`/`rep stos`: block copy / fill of `rcx` elements, leaving the
+    // pointer(s) advanced and rcx = 0. Direction from DF (`__rep_movs`/`__rep_stos`
+    // take a `back` flag: 0 forward, 1 backward = the `std; rep movs` overlap-copy
+    // and reverse-fill idioms). The register advance is the *signed* total
+    // `bytes * (1 - 2*DF)`. Handled here because the string `movsd` shares its
+    // mnemonic with the SSE scalar move — the rep prefix disambiguates.
     if ins.has_rep_prefix() {
         use Mnemonic::*;
-        let sz: i128 = match ins.mnemonic() {
-            Movsb => 1,
-            Movsw => 2,
-            Movsd => 4,
-            Movsq => 8,
-            _ => 0,
+        // signed total displacement `bytes*(1-2*DF)` = bytes - 2*DF*bytes.
+        let df = || Expr::Read(Location::Flag(FlagKind::Df));
+        let signed = |bytes: &Expr| {
+            bin(BinOp::Sub, bytes.clone(),
+                bin(BinOp::Mul, bin(BinOp::Mul, konst(2), df()), bytes.clone()))
+        };
+        let (sz, mhelper): (i128, &str) = match ins.mnemonic() {
+            Movsb => (1, "__rep_movs8"),
+            Movsw => (2, "__rep_movs16"),
+            Movsd => (4, "__rep_movs32"),
+            Movsq => (8, "__rep_movs64"),
+            _ => (0, ""),
         };
         if sz != 0 {
             let rdi = Location::Reg(RegId(7));
@@ -858,18 +866,15 @@ pub fn lift(insn: &Insn, bits: u32) -> Vec<Stmt> {
             let rcx = Location::Reg(RegId(1));
             let bytes = bin(BinOp::Mul, rep_count(bits), konst(sz));
             return vec![
-                Stmt::CallStmt(Expr::Call {
-                    target: CallTarget::Named("memcpy".into()),
-                    args: vec![Expr::Read(rdi.clone()), Expr::Read(rsi.clone()), bytes.clone()],
-                    ret: Ty::int(64),
-                }),
-                Stmt::Set { dst: rdi.clone(), expr: bin(BinOp::Add, Expr::Read(rdi), bytes.clone()) },
-                Stmt::Set { dst: rsi.clone(), expr: bin(BinOp::Add, Expr::Read(rsi), bytes) },
+                Stmt::CallStmt(fcall(
+                    mhelper,
+                    vec![Expr::Read(rdi.clone()), Expr::Read(rsi.clone()), rep_count(bits), df()],
+                )),
+                Stmt::Set { dst: rdi.clone(), expr: bin(BinOp::Add, Expr::Read(rdi), signed(&bytes)) },
+                Stmt::Set { dst: rsi.clone(), expr: bin(BinOp::Add, Expr::Read(rsi), signed(&bytes)) },
                 Stmt::Set { dst: rcx, expr: konst(0) },
             ];
         }
-        // `rep stos`: forward fill of `rcx` elements at `rdi` with the low bytes of
-        // the accumulator (al/ax/eax/rax). Leaves rdi advanced and rcx = 0.
         let (ssz, helper): (i128, &str) = match ins.mnemonic() {
             Stosb => (1, "__rep_stos8"),
             Stosw => (2, "__rep_stos16"),
@@ -885,9 +890,9 @@ pub fn lift(insn: &Insn, bits: u32) -> Vec<Stmt> {
             return vec![
                 Stmt::CallStmt(fcall(
                     helper,
-                    vec![Expr::Read(rdi.clone()), Expr::Read(rax), rep_count(bits)],
+                    vec![Expr::Read(rdi.clone()), Expr::Read(rax), rep_count(bits), df()],
                 )),
-                Stmt::Set { dst: rdi.clone(), expr: bin(BinOp::Add, Expr::Read(rdi), bytes) },
+                Stmt::Set { dst: rdi.clone(), expr: bin(BinOp::Add, Expr::Read(rdi), signed(&bytes)) },
                 Stmt::Set { dst: rcx, expr: konst(0) },
             ];
         }
@@ -918,25 +923,28 @@ pub fn lift(insn: &Insn, bits: u32) -> Vec<Stmt> {
             // repe (F3) stops on the first mismatch; repne (F2) on the first match.
             let repe: i128 = if ins.has_repne_prefix() { 0 } else { 1 };
             let al = bin(BinOp::And, Expr::Read(rax), konst(mask(w)));
+            // Signed per-element step (DF): +size forward, -size backward.
+            let df = || Expr::Read(Location::Flag(FlagKind::Df));
+            let step = || bin(BinOp::Sub, konst(scsz), bin(BinOp::Mul, konst(2 * scsz), df()));
             // Elements scanned (a pure read); stash in a per-instruction temp so
             // the edi/ecx updates and the flag compare all see the same count.
             let kt = Location::Temp((insn.address as u32).wrapping_mul(2).wrapping_add(1));
             let k = fcall(
                 schelper,
-                vec![Expr::Read(rdi.clone()), al.clone(), rep_count(bits), konst(repe)],
+                vec![Expr::Read(rdi.clone()), al.clone(), rep_count(bits), konst(repe), df()],
             );
             let mut out = vec![Stmt::Set { dst: kt.clone(), expr: k }];
             out.push(Stmt::Set {
                 dst: rdi.clone(),
-                expr: bin(BinOp::Add, Expr::Read(rdi.clone()), bin(BinOp::Mul, Expr::Read(kt.clone()), konst(scsz))),
+                expr: bin(BinOp::Add, Expr::Read(rdi.clone()), bin(BinOp::Mul, Expr::Read(kt.clone()), step())),
             });
             out.push(Stmt::Set {
                 dst: rcx,
                 expr: bin(BinOp::Sub, rep_count(bits), Expr::Read(kt)),
             });
-            // Flags come from the last compared element, now at [edi - size].
+            // Flags come from the last compared element, now at [edi - step].
             let last = Expr::Load {
-                addr: Box::new(bin(BinOp::Sub, Expr::Read(rdi), konst(scsz))),
+                addr: Box::new(bin(BinOp::Sub, Expr::Read(rdi), step())),
                 ty,
             };
             let r = bin(BinOp::Sub, al.clone(), last.clone());
@@ -969,29 +977,32 @@ pub fn lift(insn: &Insn, bits: u32) -> Vec<Stmt> {
             let rcx = Location::Reg(RegId(1));
             // repe (F3) stops on the first mismatch; repne (F2) on the first match.
             let repe: i128 = if ins.has_repne_prefix() { 0 } else { 1 };
+            // Signed per-element step (DF): +size forward, -size backward.
+            let df = || Expr::Read(Location::Flag(FlagKind::Df));
+            let step = || bin(BinOp::Sub, konst(csz), bin(BinOp::Mul, konst(2 * csz), df()));
             // Elements compared (a pure read); stash in a per-instruction temp so
             // the esi/edi/ecx updates and the flag compare all see the same count.
             let kt = Location::Temp((insn.address as u32).wrapping_mul(2).wrapping_add(1));
             let k = fcall(
                 chelper,
-                vec![Expr::Read(rsi.clone()), Expr::Read(rdi.clone()), rep_count(bits), konst(repe)],
+                vec![Expr::Read(rsi.clone()), Expr::Read(rdi.clone()), rep_count(bits), konst(repe), df()],
             );
             let mut out = vec![Stmt::Set { dst: kt.clone(), expr: k }];
             out.push(Stmt::Set {
                 dst: rsi.clone(),
-                expr: bin(BinOp::Add, Expr::Read(rsi.clone()), bin(BinOp::Mul, Expr::Read(kt.clone()), konst(csz))),
+                expr: bin(BinOp::Add, Expr::Read(rsi.clone()), bin(BinOp::Mul, Expr::Read(kt.clone()), step())),
             });
             out.push(Stmt::Set {
                 dst: rdi.clone(),
-                expr: bin(BinOp::Add, Expr::Read(rdi.clone()), bin(BinOp::Mul, Expr::Read(kt.clone()), konst(csz))),
+                expr: bin(BinOp::Add, Expr::Read(rdi.clone()), bin(BinOp::Mul, Expr::Read(kt.clone()), step())),
             });
             out.push(Stmt::Set {
                 dst: rcx,
                 expr: bin(BinOp::Sub, rep_count(bits), Expr::Read(kt)),
             });
-            // Flags come from the last compared pair, at [esi-size] and [edi-size].
-            let la = Expr::Load { addr: Box::new(bin(BinOp::Sub, Expr::Read(rsi), konst(csz))), ty: ty.clone() };
-            let lb = Expr::Load { addr: Box::new(bin(BinOp::Sub, Expr::Read(rdi), konst(csz))), ty };
+            // Flags come from the last compared pair, at [esi-step] and [edi-step].
+            let la = Expr::Load { addr: Box::new(bin(BinOp::Sub, Expr::Read(rsi), step())), ty: ty.clone() };
+            let lb = Expr::Load { addr: Box::new(bin(BinOp::Sub, Expr::Read(rdi), step())), ty };
             let r = bin(BinOp::Sub, la.clone(), lb.clone());
             out.extend(sub_flags(&la, &lb, &r, w));
             return out;
@@ -1022,9 +1033,16 @@ pub fn lift(insn: &Insn, bits: u32) -> Vec<Stmt> {
             let rax = Location::Reg(RegId(0));
             let ld = |loc: &Location| Expr::Load { addr: Box::new(Expr::Read(loc.clone())), ty: ty.clone() };
             let amask = |e: Expr| if w >= 64 { e } else { bin(BinOp::And, e, konst(mask(w))) };
+            // Direction flag: forward (DF=0) advances by +size, backward (DF=1) by
+            // -size. step = size - 2*size*DF. DF reads 0 at entry (all SSA values
+            // init 0 = the ABI's DF=0), so a plain forward string op is unchanged.
+            let step = || {
+                let df = Expr::Read(Location::Flag(FlagKind::Df));
+                bin(BinOp::Sub, konst(size), bin(BinOp::Mul, konst(2 * size), df))
+            };
             let adv = |loc: &Location| Stmt::Set {
                 dst: loc.clone(),
-                expr: bin(BinOp::Add, Expr::Read(loc.clone()), konst(size)),
+                expr: bin(BinOp::Add, Expr::Read(loc.clone()), step()),
             };
             let mut out = Vec::new();
             match ins.mnemonic() {
@@ -1072,10 +1090,12 @@ pub fn lift(insn: &Insn, bits: u32) -> Vec<Stmt> {
 
     match ins.mnemonic() {
         Mnemonic::Nop | Mnemonic::Endbr32 | Mnemonic::Endbr64 => vec![Stmt::Nop],
-        // `cld` clears DF — the forward direction the string-op lifting assumes,
-        // so it is a no-op in our model. (`std`/DF=1 is left unmodelled -> sound
-        // asm fallback, so backward string ops abort rather than run forward.)
-        Mnemonic::Cld => vec![Stmt::Nop],
+        // Direction flag: `cld` clears DF (forward), `std` sets it (backward). The
+        // string-op lifting reads DF to pick the element-advance sign, so both are
+        // real writes now (not no-ops). DF reads 0 at entry (SSA init) = the ABI's
+        // DF=0, so code that omits `cld` still runs forward.
+        Mnemonic::Cld => vec![set_flag(FlagKind::Df, konst(0))],
+        Mnemonic::Std => vec![set_flag(FlagKind::Df, konst(1))],
 
         Mnemonic::Mov => {
             let v = some_or_asm!(op_value(ins, 1));

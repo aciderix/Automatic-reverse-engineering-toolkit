@@ -79,6 +79,7 @@ fn flag_bit(f: FlagKind) -> u32 {
         FlagKind::Zf => 6,
         FlagKind::Sf => 7,
         FlagKind::Of => 11,
+        FlagKind::Df => 10,
     }
 }
 
@@ -233,12 +234,45 @@ impl Interp {
                 }
                 Some(())
             }
+            // rep movs: element copy with a `back` (DF) flag. Forward is modelled
+            // here (cpudiff/funcdiff start DF=0); a backward call (back!=0) is left
+            // to the end-to-end winediff oracle — skip so it is never a false verdict.
+            "__rep_movs8" | "__rep_movs16" | "__rep_movs32" | "__rep_movs64"
+                if args.len() == 4 =>
+            {
+                let dst = self.eval(&args[0])?;
+                let src = self.eval(&args[1])?;
+                let count = self.eval(&args[2])? & 0xffff_ffff;
+                let back = self.eval(&args[3])?;
+                if back != 0 {
+                    return None;
+                }
+                let elem: u64 = match name {
+                    "__rep_movs8" => 1,
+                    "__rep_movs16" => 2,
+                    "__rep_movs32" => 4,
+                    _ => 8,
+                };
+                let total = count.checked_mul(elem)?;
+                if total > CAP {
+                    return None;
+                }
+                for i in 0..total {
+                    let b = self.mem_read(src.wrapping_add(i), 1)?;
+                    self.mem_write(dst.wrapping_add(i), 1, b)?;
+                }
+                Some(())
+            }
             "__rep_stos8" | "__rep_stos16" | "__rep_stos32" | "__rep_stos64"
-                if args.len() == 3 =>
+                if args.len() == 4 =>
             {
                 let dst = self.eval(&args[0])?;
                 let val = self.eval(&args[1])?;
                 let count = self.eval(&args[2])? & 0xffff_ffff;
+                let back = self.eval(&args[3])?;
+                if back != 0 {
+                    return None;
+                }
                 let elem: u64 = match name {
                     "__rep_stos8" => 1,
                     "__rep_stos16" => 2,
@@ -1972,11 +2006,13 @@ fn is_modeled_helper(name: &str) -> bool {
 /// (`do_memcall`): the synthetic `memcpy`/`memmove` (from `rep movs`) and
 /// `__rep_stos*` (from `rep stos`), each with explicit `(dst, src/val, len)`.
 fn is_modeled_memcall(name: &str, argc: usize) -> bool {
-    argc == 3
-        && matches!(
-            name,
-            "memcpy" | "memmove" | "__rep_stos8" | "__rep_stos16" | "__rep_stos32" | "__rep_stos64"
-        )
+    (argc == 3 && matches!(name, "memcpy" | "memmove"))
+        || (argc == 4
+            && matches!(
+                name,
+                "__rep_movs8" | "__rep_movs16" | "__rep_movs32" | "__rep_movs64"
+                    | "__rep_stos8" | "__rep_stos16" | "__rep_stos32" | "__rep_stos64"
+            ))
 }
 
 /// Check every call inside `e` is closure-modelable, collecting the recovered

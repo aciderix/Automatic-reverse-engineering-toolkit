@@ -165,7 +165,7 @@ bash bench/regression.sh    # PORTE unifiée : difftest 271/271, in-place 3/3,
                             # recompilabilité gzip/ls/cat 100%
 bash bench/difftest.sh              # décompile O0→O3
 bash bench/difftest_transpile.sh    # transpile (hash 19acad982194bf07)
-bash bench/winediff.sh              # axe 2 vs Wine (54/54)
+bash bench/winediff.sh              # axe 2 vs Wine (55/55)
 bash bench/funcdiff.sh              # lift-closure + opt-diff vs Unicorn (0 div)
 # Sweeps de vrais binaires (téléchargent + comparent à Wine) :
 bash bench/sqlite_sweep.sh   bash bench/busybox_sweep.sh   bash bench/corpus_sweep.sh
@@ -185,7 +185,7 @@ bash bench/wallsweep.sh <dir1> [dir2…]  # AGRÈGE --mode walls sur un corpus :
 
 ### État régression (référence — doit rester vert)
 difftest **271/271** · transpile-diff **4/4** (H=`19acad982194bf07`) · winediff
-**54/54** · cpudiff vert (per-instruction + séquences génératives) · funcdiff corpus **0 divergence** (lift ~12k scorées /
+**55/55** · cpudiff vert (per-instruction + séquences génératives) · funcdiff corpus **0 divergence** (lift ~12k scorées /
 ~6k appels, opt ~10k scorées) · SMT **11/11** · in-place **3/3** · magicdiv **2³²** ·
 recompilabilité **100 %** · WASM **7/7**.
 
@@ -206,12 +206,15 @@ recompilabilité **100 %** · WASM **7/7**.
 - **SSE scalaire + SIMD packed** validés bit-à-bit contre Unicorn (`__fp_*`/`__ps_*`/
   `__pi_*`). Bug `ss` (préservation `[63:32]`) corrigé. SSE2-string
   (pcmpeqb/pmovmskb/pshuflw…).
-- **Instructions de chaîne** : `movs/stos/lods/scas/cmps` (non-rep) + `rep movs/
-  stos/scas/cmps` (helpers `__rep_*`). `rep(ne) cmps` = **idiome memcmp/strcmp**
-  (`repe cmpsb;je…`) : helper `__rep_cmps{8,16,32}` compte + esi/edi/ecx + flags du
-  dernier couple ; **mur #1 du corpus** (analyzer 149 sites, 17/41 Win95) → gardé par
-  `winecorpus/str_repcmps.c` (bit-identique Wine). DF=0 assumé ; `std`/DF arrière +
-  `rep lods` = **abort sound**.
+- **Instructions de chaîne + drapeau de direction (DF)** : `movs/stos/lods/scas/cmps`
+  (non-rep) + `rep movs/stos/scas/cmps` (helpers `__rep_*`). `rep(ne) cmps` = **idiome
+  memcmp/strcmp** (`repe cmpsb;je…`). **DF modélisé** (`FlagKind::Df`, EFLAGS bit 10) :
+  `std`→DF=1, `cld`→DF=0 ; chaque op lit DF pour le **sens d'avance** (avant/arrière),
+  les helpers `__rep_*` prennent un flag `back` (memmove-overlap `std;rep movs`, strrchr
+  `std;repne scasb`). Avance = pas **signé** `size*(1-2·DF)` ; dernier élément à
+  `reg−step`. DF **= 0 à l'entrée** (init SSA = convention ABI) → code sans `cld` tourne
+  avant. Gardé `winecorpus/str_direction.c` (movs/stos/scas/cmps + non-rep, **2 sens**,
+  bit-identique Wine) + `str_repcmps.c`. Seul `rep lods` (rare) = **abort sound**.
 - **Divers** : `cpuid`/`xgetbv` (host réel, **AVX/SSE4.2 masqués** → chemins SSE2
   liftables), `bt/bts/btr/btc` (reg + `[mem],imm` + **`[mem],reg`** = idiome bit-array,
   offset registre non masqué → décale l'adresse `base+SAR(idx,log2w)*(w/8)`, gardé
