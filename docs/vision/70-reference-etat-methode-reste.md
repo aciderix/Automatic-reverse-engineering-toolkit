@@ -611,6 +611,7 @@ la **vitesse** change.
 | Oracle | Ce qu'il prouve | Commande |
 |--------|-----------------|----------|
 | **cpudiff** (Unicorn, per-instruction) | justesse d'**une instruction** liftée (registres+flags+mémoire) sur milliers d'états | `cargo test --features unpack cpudiff` |
+| **cpudiff-séquences** (Unicorn, blocs 2-3 insns) | **composition** (ordre SSA, snapshot esp, aliasing) — curatée + **générative** (4000 blocs aléatoires, 0 div) | idem |
 | **funcdiff-closure** (Unicorn, fonction) | lift **brut** d'une fonction + ses callees directs | `bench/funcdiff.sh` |
 | **funcdiff opt-diff** (post-opt vs pré-opt) | SSA + passes d'**opt** préservent la sémantique | idem |
 | **difftest** (natif, décompile O0→O3) | pipeline A | `bench/difftest.sh` |

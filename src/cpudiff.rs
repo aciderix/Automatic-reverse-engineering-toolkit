@@ -1586,6 +1586,15 @@ pub fn run(iters_per_insn: u32) -> Result<Vec<Mismatch>, String> {
 fn diff_seq(seq: &[Vec<u8>], iters: u32, seed: &mut u64) -> Result<Vec<Mismatch>, String> {
     let mut all_bytes: Vec<u8> = Vec::new();
     let mut stmts: Vec<Stmt> = Vec::new();
+    // Flags to compare = only those the LAST instruction writes. A flag defined by
+    // an earlier instruction can be left *architecturally undefined* by a later one
+    // (AND/OR/XOR/TEST leave AF undefined; a multi-bit shift leaves OF/AF undefined),
+    // so comparing the union across the block would diff a don't-care flag against
+    // Unicorn's arbitrary undefined result — a false positive. The last instruction's
+    // written flags are exactly the defined ones at the end, and its inputs are
+    // recomputed identically by both engines unless a real composition bug corrupts
+    // them (which is what we want to catch). Mirrors diff_one's per-instruction rule.
+    let mut cmp_flags: Vec<FlagKind> = Vec::new();
     for enc in seq {
         let addr = CODE_ADDR + all_bytes.len() as u64;
         let insn = decode_at(enc, addr);
@@ -1603,20 +1612,26 @@ fn diff_seq(seq: &[Vec<u8>], iters: u32, seed: &mut u64) -> Result<Vec<Mismatch>
         if s.iter().any(|st| matches!(st, Stmt::Branch { .. } | Stmt::Jump(_) | Stmt::Return(_))) {
             return Ok(Vec::new());
         }
+        cmp_flags = flags_written(&s);
         stmts.extend(s);
         all_bytes.extend_from_slice(enc);
     }
-    let cmp_flags = flags_written(&stmts);
     let asm: String = seq
         .iter()
         .map(|e| decode_at(e, CODE_ADDR).text)
         .collect::<Vec<_>>()
         .join(" ; ");
     let n_insns = seq.len();
-    // esp mid-page, ebp a quarter in — both esp- and ebp-relative accesses (and
-    // the pushes/pops themselves) then land inside the compared scratch page.
+    // Seed the four base registers a program actually dereferences at *distinct*
+    // spots inside the scratch page — esp mid-page, ebp a quarter in, edi/esi in
+    // the upper half — so esp/ebp-relative accesses, the pushes/pops themselves,
+    // AND `[edi]`/`[esi]`-based memory operands (the corpus's memory encodings)
+    // all land in the compared page instead of faulting out (skipped, unscored).
+    // Both engines start identical, so overlapping writes stay a valid comparison.
     let esp0 = DATA_ADDR + (DATA_SIZE as u64) / 2;
     let ebp0 = DATA_ADDR + (DATA_SIZE as u64) / 4;
+    let edi0 = DATA_ADDR + (DATA_SIZE as u64) * 3 / 4;
+    let esi0 = DATA_ADDR + (DATA_SIZE as u64) * 5 / 8;
 
     let mut uc: *mut uc_engine = std::ptr::null_mut();
     unsafe {
@@ -1645,6 +1660,8 @@ fn diff_seq(seq: &[Vec<u8>], iters: u32, seed: &mut u64) -> Result<Vec<Mismatch>
         }
         st.regs[4] = esp0; // esp
         st.regs[5] = ebp0; // ebp
+        st.regs[7] = edi0; // edi — base for `[edi]` memory operands
+        st.regs[6] = esi0; // esi — base for `[esi]` memory operands
         for f in [FlagKind::Cf, FlagKind::Zf, FlagKind::Sf, FlagKind::Of, FlagKind::Pf, FlagKind::Af] {
             st.flags.insert(f, next() & 1);
         }
@@ -1781,6 +1798,111 @@ pub fn run_sequences(iters_per_seq: u32) -> Result<Vec<Mismatch>, String> {
     let mut all = Vec::new();
     for seq in seq_corpus() {
         all.extend(diff_seq(&seq, iters_per_seq, &mut seed)?);
+    }
+    Ok(all)
+}
+
+/// Composition-relevant single-instruction encodings, drawn from the per-instruction
+/// `corpus()` — the alphabet the generative composer draws from. Curated sequences
+/// (`seq_corpus`) test hand-picked frame idioms; this pool exists so *random*
+/// 2–3 instruction compositions cover the interaction space **by construction**,
+/// not just the compositions I thought to write. Kept to GP + stack/frame + esp/ebp/
+/// edi-relative memory: exactly the ops whose *ordering against esp* (or whose
+/// aliasing of a shared base register through the SSA store) can make a composition
+/// wrong even when each instruction is right in isolation. (Float/packed SSE lanes
+/// don't interact with esp, so they'd only dilute the draw away from the hotspot.)
+fn seq_pool() -> Vec<Vec<u8>> {
+    vec![
+        // --- GP register arithmetic / logic / shift / move / lea / xchg ---
+        vec![0x01, 0xc8],             // add eax, ecx
+        vec![0x29, 0xc8],             // sub eax, ecx
+        vec![0x31, 0xc8],             // xor eax, ecx
+        vec![0x21, 0xc8],             // and eax, ecx
+        vec![0x09, 0xc8],             // or  eax, ecx
+        vec![0x39, 0xc8],             // cmp eax, ecx
+        vec![0x89, 0xc8],             // mov eax, ecx
+        vec![0x89, 0xd8],             // mov eax, ebx
+        vec![0x89, 0xe0],             // mov eax, esp   (capture esp into a GP reg)
+        vec![0x89, 0xe8],             // mov eax, ebp
+        vec![0x89, 0xc4],             // mov esp, eax   (arbitrary esp overwrite)
+        vec![0x89, 0xe5],             // mov ebp, esp   (prologue idiom)
+        vec![0x83, 0xc0, 0x10],       // add eax, 0x10
+        vec![0x83, 0xe8, 0x10],       // sub eax, 0x10
+        vec![0x83, 0xec, 0x10],       // sub esp, 0x10  (frame allocation)
+        vec![0x83, 0xc4, 0x10],       // add esp, 0x10  (frame teardown)
+        vec![0x83, 0xc4, 0x04],       // add esp, 4     (pop-equivalent)
+        vec![0xff, 0xc0],             // inc eax
+        vec![0xff, 0xc8],             // dec eax
+        vec![0x91],                   // xchg eax, ecx
+        vec![0xd3, 0xe0],             // shl eax, cl
+        vec![0x8d, 0x4f, 0x10],       // lea ecx, [edi+0x10]
+        vec![0x8d, 0x44, 0x24, 0x08], // lea eax, [esp+8]
+        vec![0x8d, 0x6c, 0x24, 0x08], // lea ebp, [esp+8]
+        // --- pushes (reg / imm / esp / esp-rel / ebp-rel / 16-bit) ---
+        vec![0x50],                   // push eax
+        vec![0x51],                   // push ecx
+        vec![0x55],                   // push ebp
+        vec![0x54],                   // push esp
+        vec![0x6a, 0x7f],             // push 0x7f (imm8)
+        vec![0x68, 0x78, 0x56, 0x34, 0x12], // push 0x12345678
+        vec![0xff, 0x34, 0x24],       // push [esp]
+        vec![0xff, 0x74, 0x24, 0x04], // push [esp+4]
+        vec![0xff, 0x74, 0x24, 0x08], // push [esp+8]
+        vec![0xff, 0x75, 0x00],       // push [ebp]
+        vec![0xff, 0x75, 0x08],       // push [ebp+8]
+        vec![0x66, 0x50],             // push ax
+        // --- pops (reg / esp / esp-rel / ebp-rel / 16-bit) ---
+        vec![0x58],                   // pop eax
+        vec![0x59],                   // pop ecx
+        vec![0x5d],                   // pop ebp
+        vec![0x5c],                   // pop esp
+        vec![0x8f, 0x44, 0x24, 0x08], // pop [esp+8]
+        vec![0x8f, 0x45, 0x00],       // pop [ebp]
+        vec![0x66, 0x58],             // pop ax
+        vec![0xc9],                   // leave
+        // --- esp/ebp/edi-relative loads & stores (address must match exactly) ---
+        vec![0x8b, 0x44, 0x24, 0x08], // mov eax, [esp+8]
+        vec![0x8b, 0x4c, 0x24, 0x04], // mov ecx, [esp+4]
+        vec![0x89, 0x44, 0x24, 0x0c], // mov [esp+0xc], eax
+        vec![0x89, 0x4c, 0x24, 0x04], // mov [esp+4], ecx
+        vec![0x8b, 0x45, 0x08],       // mov eax, [ebp+8]
+        vec![0x89, 0x4d, 0xf4],       // mov [ebp-0xc], ecx
+        vec![0x8b, 0x0f],             // mov ecx, [edi]
+        vec![0x89, 0x0f],             // mov [edi], ecx
+        vec![0x01, 0x0f],             // add [edi], ecx  (read-modify-write store)
+    ]
+}
+
+/// Generative sequence differential: compose *random* straight-line blocks of 2–3
+/// instructions from `seq_pool()` and diff each against Unicorn. This is the honest
+/// completion of the "enumerate composition bugs by construction" method — instead
+/// of only the hand-written frame idioms in `seq_corpus`, it samples the interaction
+/// space itself, so a composition bug in a pairing I never imagined still surfaces.
+/// A clean run over thousands of random blocks is strong evidence the composition
+/// layer (SSA ordering, esp snapshotting, shared-base aliasing) is sound.
+pub fn run_sequences_random(n_seqs: u32, iters_per_seq: u32) -> Result<Vec<Mismatch>, String> {
+    fn xorshift(s: &mut u64) -> u64 {
+        let mut x = *s;
+        x ^= x << 13;
+        x ^= x >> 7;
+        x ^= x << 17;
+        *s = x;
+        x
+    }
+    let pool = seq_pool();
+    let mut seed: u64 = 0x2545f4914f6cdd1d;
+    let mut all = Vec::new();
+    for _ in 0..n_seqs {
+        let len = 2 + (xorshift(&mut seed) as usize) % 2; // 2 or 3 instructions
+        let seq: Vec<Vec<u8>> = (0..len)
+            .map(|_| pool[(xorshift(&mut seed) as usize) % pool.len()].clone())
+            .collect();
+        // diff_seq owns its own per-iteration RNG (advancing the same `seed`), so the
+        // whole run is one reproducible stream.
+        all.extend(diff_seq(&seq, iters_per_seq, &mut seed)?);
+        if all.len() > 40 {
+            break; // enough signal — stop and report
+        }
     }
     Ok(all)
 }
@@ -2465,6 +2587,29 @@ mod tests {
         let mismatches = super::run_sequences(3000).expect("cpudiff sequence run");
         if !mismatches.is_empty() {
             let mut msg = format!("{} sequence divergence(s):\n", mismatches.len());
+            for m in mismatches.iter().take(20) {
+                msg += &format!(
+                    "  {} ({:02x?}) {}: lifted={:#x} unicorn={:#x}\n",
+                    m.asm, m.bytes, m.field, m.lifted, m.oracle,
+                );
+            }
+            panic!("{msg}");
+        }
+    }
+
+    /// Generative composition differential: thousands of *random* 2–3 instruction
+    /// blocks composed from the stack/frame + GP alphabet (`seq_pool`), each diffed
+    /// against Unicorn. Where `sequence_corpus` tests the frame idioms I thought to
+    /// write, this samples the interaction space **by construction** — a composition
+    /// bug in a pairing nobody curated (esp shifted by one op then read by another,
+    /// a shared base register aliased through the SSA store) still surfaces. Since it
+    /// reuses the exact per-instruction lift, a clean run isolates the *composition*
+    /// as the thing under test: a divergence here is a real ordering/aliasing bug.
+    #[test]
+    fn sequence_random_matches_unicorn() {
+        let mismatches = super::run_sequences_random(4000, 150).expect("cpudiff random-sequence run");
+        if !mismatches.is_empty() {
+            let mut msg = format!("{} random-sequence divergence(s):\n", mismatches.len());
             for m in mismatches.iter().take(20) {
                 msg += &format!(
                     "  {} ({:02x?}) {}: lifted={:#x} unicorn={:#x}\n",

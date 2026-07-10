@@ -283,6 +283,18 @@ Deux mécanismes complémentaires :
   au corpus mais ne comparait la page que si `mem_base.is_some()` (opérande mémoire explicite) —
   or push écrit la pile via opérande *implicite* → comparaison page élargie à
   `stack_pointer_increment() != 0`. Câblé `sequence_corpus_matches_unicorn`.
+- **cpudiff-séquences-génératif** (`run_sequences_random`/`seq_pool`, 2026-07-10) :
+  compose **au hasard** des blocs de 2-3 insns depuis `seq_pool` (GP + pile/frame +
+  mémoire esp/ebp/edi) — l'achèvement honnête de « énumérer par construction » (les 12
+  séquences curatées ratent les paires non imaginées). `diff_seq` sème aussi **edi/esi**
+  dans la page (bases `[edi]`/`[esi]` → scorées au lieu de fauter). **Piège clé résolu :
+  drapeaux indéfinis**. `and/or/xor/test` laissent **AF indéfini**, un shift multi-bit
+  laisse **OF/AF indéfinis** ; comparer l'*union* des flags écrits par le bloc diffait un
+  don't-care contre le résultat indéfini d'Unicorn (52 faux positifs au 1ᵉʳ run). Fix :
+  `cmp_flags` = flags de la **dernière insn seulement** (les seuls définis en fin de bloc ;
+  leurs entrées sont recalculées identiquement par les 2 moteurs sauf vrai bug de
+  composition — exactement la cible). 4000 blocs × 150 états = **0 divergence** →
+  couche de composition **prouvée saine**. Câblé `sequence_random_matches_unicorn`.
 - **funcdiff** (Unicorn, fonction) : **closure** (suit les appels directs récupérés,
   discipline call/ret exacte, retaddr sentinelle non-mappée, frames OFF) + **opt-diff**
   (post-opt SSA vs pré-opt : DCE ne supprime jamais un Store, opt ne touche pas le
@@ -711,5 +723,32 @@ Détail : **70 §6** (roadmap). Résumé :
 - **Vérifié** : `sequence_corpus_matches_unicorn` **0 divergence**, per-instruction 0 divergence, transpile-diff
   hash `19acad982194bf07` **inchangé**, difftest 271/271, funcdiff 0 divergence, winediff 49/49, busybox
   sweep 60/60, gauntlet 19/21. Commit `fea03f3`.
+
+### 2026-07-10 — [ORACLE] Couche de séquences GÉNÉRATIVE (composition par construction, drapeaux indéfinis)
+- **Contexte** : la couche de séquences (entrée précédente) était **curatée** (12 idiomes de frame écrits à
+  la main) — pas encore la vraie méthode « par construction ». Objectif : composer **au hasard** des blocs
+  2-3 insns pour échantillonner l'espace d'interaction lui-même, pas seulement les paires que j'imagine.
+- **Fait** (`src/cpudiff.rs`) : (1) `seq_pool` — l'alphabet de composition (GP arith/logique/shift/mov/lea/
+  xchg + toute la famille pile/frame + mémoire esp/ebp/edi-relative ; float/SSE exclus, n'interagissent pas
+  avec esp) ; (2) `run_sequences_random(n, iters)` — compose au hasard len∈{2,3} insns du pool, `diff_seq`
+  chacun ; (3) `diff_seq` sème aussi **edi (¾ page) + esi (⅝ page)** — les opérandes `[edi]`/`[esi]` du corpus
+  tombent en page (scorées au lieu de fauter) ; (4) câblé `sequence_random_matches_unicorn` (4000 blocs × 150).
+- **Piège clé résolu — drapeaux ARCHITECTURALEMENT INDÉFINIS** (52 faux positifs au 1ᵉʳ run) : `and/or/xor/
+  test` laissent **AF indéfini** ; un shift multi-bit laisse **OF indéfini** (count≠1) **et AF indéfini**.
+  `diff_seq` comparait `flags_written` de **l'union** du bloc → un flag posé par un `dec`/`add` précoce mais
+  laissé indéfini par le `and`/`shl` final était diffé contre le résultat indéfini d'Unicorn (matériel réel) →
+  fausse divergence. Ce n'est **pas** un bug de lift (l'IR ne modélise pas « indéfinit » ; le lift n'écrit
+  simplement pas le flag). **Fix sound** : `cmp_flags` = flags écrits par la **dernière insn seulement** — les
+  seuls définis en fin de bloc ; leurs entrées sont recalculées à l'identique par les 2 moteurs **sauf** vrai
+  bug de composition (registres/mémoire), ce qu'on veut attraper. C'est exactement la règle per-instruction de
+  `diff_one`, étendue au bloc. (Sur-conservateur si la dernière insn n'écrit aucun flag : perte de couverture
+  flag, jamais de faux positif — acceptable, la cible de la couche est esp/registres/mémoire.)
+- **Résultat** : après le fix, **4000 blocs aléatoires × 150 états = 0 divergence**. La couche de composition
+  (ordonnancement SSA, snapshot esp, aliasing de base partagée) est **prouvée saine par construction** — verdict
+  clair : le socle de justesse CPU est verrouillé aux niveaux instruction ET composition. Prochains hotspots
+  éventuels : séquences plus longues / à branchement (couvertes par funcdiff), non prioritaires sans signal.
+- **Portée** : round **cpudiff-only** (aucun code produit touché → hash transpile, difftest, funcdiff, winediff,
+  sweeps inchangés par construction). Vérifié : `sequence_random_matches_unicorn` 0 div, per-instruction 0 div,
+  `sequence_corpus` 0 div.
 
 <!-- NOUVELLES ENTRÉES ICI (garder l'ordre chronologique, plus récent en bas) -->
