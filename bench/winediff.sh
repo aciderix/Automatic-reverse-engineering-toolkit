@@ -59,7 +59,7 @@ for src in "$CORPUS"/*.c; do
   fi
   # Link the common Win32 libs a guard might reference (version info, OLE/COM,
   # BSTR). Harmless for programs that use none — the imports are demand-loaded.
-  if ! "$MINGW" -O1 -w "$src" $res_obj -lversion -lole32 -loleaut32 -o "$TMP/$name.exe" 2>"$TMP/err"; then
+  if ! "$MINGW" -O1 -w "$src" $res_obj -lversion -lole32 -loleaut32 -luser32 -o "$TMP/$name.exe" 2>"$TMP/err"; then
     echo "FAIL  $name (PE build: $(head -1 "$TMP/err"))"; continue
   fi
   # Optional per-program arguments: one per line in winecorpus/NAME.args. Passed

@@ -179,7 +179,7 @@ aret <exe> --mode imports           # couverture statique d'imports (axe 2 a-pri
 
 ### État régression (référence — doit rester vert)
 difftest **271/271** · transpile-diff **4/4** (H=`19acad982194bf07`) · winediff
-**50/50** · cpudiff vert (per-instruction + séquences génératives) · funcdiff corpus **0 divergence** (lift ~12k scorées /
+**51/51** · cpudiff vert (per-instruction + séquences génératives) · funcdiff corpus **0 divergence** (lift ~12k scorées /
 ~6k appels, opt ~10k scorées) · SMT **11/11** · in-place **3/3** · magicdiv **2³²** ·
 recompilabilité **100 %** · WASM **7/7**.
 
@@ -315,6 +315,11 @@ recompilabilité **100 %** · WASM **7/7**.
   (SysAllocString, CoInitialize/CoTaskMemAlloc), temp-fichiers, SetEndOfFile/
   SetFileTime, PeekNamedPipe (FIONREAD), GetThreadLocale (en-US 0x0409), TEB/PEB
   (ProcessParameters), VirtualQuery, LockFile.
+- **USER32 message-only** (sans pixels, portable/WASM) : `RegisterClassW`/`Unregister`,
+  `CreateWindowExW`/`DestroyWindow`, `DefWindowProcW`, `Get`/`Peek`/`Dispatch`/`Translate`/
+  `Post`/`SendMessageW`, `PostQuitMessage`, `SetTimer`/`KillTimer`, `MsgWaitForMultipleObjectsEx`.
+  Registre de classes + file de messages mono-thread + timers ; dispatch = **callback WNDPROC
+  dans le lifté** (`aret_call`). Débloque le notifier Tcl. Cf. §5 P6.5.
 
 ### 4.6 Démonstrateurs prouvés (bit-identiques à Wine)
 - **Lua 5.4.7** (mingw, 650 Ko) **symbolé ET strippé** → ELF natif : batterie
@@ -416,16 +421,19 @@ Tentée, **retirée** (faux positif : `esp` fantôme incohérent à la frontièr
 run_ssa↔run_closure). À reprendre en **threadant tout l'état CPU** (GP+flags+xmm+esp)
 proprement au call, testé par la garde opt + teeth-check avant de croire un verdict.
 
-### P6.5 — Fenêtre message-only USER32 (MESURÉ 2026-07-10, sqlite3_analyzer/Tcl)
-**Nouveau binaire testé** : `sqldiff.exe` = **bit-identique à Wine** (tous modes) ;
-`sqlite3_analyzer.exe` (embarque **Tcl**) = **abort SOUND** — le notifier Tcl crée une
-fenêtre message-only via `RegisterClassW`, notre stub échoue → `Tcl_Panic` → `ud2`.
-**Surface bornée** (~15 fns message-loop : Register/Unregister/CreateWindowEx/Destroy/
-DefWindowProc/Get/Peek/Dispatch/Translate/Post/Send/PostQuit/Set/KillTimer/MsgWait).
-**Une fenêtre message-only n'affiche RIEN** ⇒ implémentable **sound sans graphisme**
-(registre de classes + file de messages par thread + dispatch WNDPROC + timers).
-Débloque une **classe** (Tcl + toute fenêtre cachée) = **1ᵉʳ pas concret de M7**,
-déclenché par un binaire mesuré. Chantier neuf borné ; **décision produit à prendre**.
+### P6.5 — Fenêtre message-only USER32 ✅ FAIT (2026-07-10). Analyzer avance, nouveaux gaps
+**Sous-système message-only livré et vérifié** (`aret_win32.c`, ~15 fns : Register/
+Unregister/CreateWindowEx/Destroy/DefWindowProc/Get/Peek/Dispatch/Translate/Post/Send/
+PostQuit/Set/KillTimer/MsgWait) : registre de classes + table de fenêtres + file de
+messages mono-thread + timers ; chaque dispatch = **vrai callback WNDPROC dans le code
+lifté via `aret_call`** (frame stdcall posée sous esp, réentrant). **Zéro graphisme** ⇒
+standalone + WASM-portable. Gardé par `winecorpus/user32_msgwindow.c` = **bit-identique à
+Wine** (register/create/Send synchrone/Post+Get+Dispatch/PeekvIde/WM_QUIT). winediff
+50→**51/51**. `GetMessageW` sans message/quit/timer = **abort sound** (jamais hang/faux quit).
+**Analyzer débloqué du notifier** (plus de `Tcl_Panic`) → avance et révèle la **suite
+bornée** : `WSAStartup`/Winsock, `CreateEventW`, `wcschr`, `LoadLibraryW`, et le lift de
+`repe cmpsb` (`rep cmps` = abort sound aujourd'hui). Prochains incréments si on poursuit Tcl.
+*(sqldiff.exe testé au passage = bit-identique à Wine, tous modes.)*
 
 ### P7 — Chantiers longs : couverture « n'importe quel programme »
 > Détaillé au **§6** (roadmap complète M5→M7 + 64-bit + threads + GUI + graphisme +

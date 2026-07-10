@@ -772,3 +772,249 @@ uint32_t aret_CryptGenRandom(uint32_t esp) {
 }
 /* CryptReleaseContext(hProv, flags) -> BOOL. Nothing to release. */
 uint32_t aret_CryptReleaseContext(uint32_t esp) { (void)esp; return 1; }
+
+/* ================================================================== */
+/* USER32 — message-only window subsystem (no display, fully portable) */
+/* ================================================================== */
+/* A message-only window (HWND_MESSAGE) has no pixels: it is purely an internal
+ * message sink bound to a WNDPROC. Tcl's notifier — and many console programs —
+ * create one to drive an event loop. We model it soundly: a window-class
+ * registry, a window table, a single (mono-thread) message FIFO, and timers.
+ * Every dispatch is a real callback into the lifted WNDPROC via aret_call. No
+ * X11, no GDI, no host threads: this stays standalone and WASM-portable. Real
+ * *visible* multi-window GUI is a later milestone (SDL2-backed); this is the
+ * message plumbing only. Mono-thread, matching the rest of the runtime model. */
+
+#define U32_WM_QUIT   0x0012u
+#define U32_WM_TIMER  0x0113u
+#define U32_PM_REMOVE 0x0001u
+
+#define U32_MAX_CLASSES 64
+static struct { uint16_t name[128]; uint32_t wndproc; int used; } g_u32_class[U32_MAX_CLASSES];
+
+#define U32_MAX_WIN 256
+static struct { uint32_t wndproc; uint32_t parent; int used; } g_u32_win[U32_MAX_WIN];
+
+#define U32_MAX_MSG 8192
+static struct { uint32_t hwnd, message, wParam, lParam, time, ptx, pty; } g_u32_q[U32_MAX_MSG];
+static int g_u32_qh, g_u32_qt;          /* ring head/tail; empty when equal */
+
+static int g_u32_quit;                  /* PostQuitMessage seen */
+static int g_u32_quit_code;
+
+#define U32_MAX_TIMER 64
+static struct { uint32_t hwnd, id, elapse, proc; uint64_t due_ns; int used; } g_u32_timer[U32_MAX_TIMER];
+static uint32_t g_u32_next_timer_id = 0xF000u; /* ids for hwnd==NULL SetTimer */
+
+/* width-16 (Windows wchar_t) string helpers */
+static int u32_weq(const uint16_t *a, const uint16_t *b) {
+    for (int i = 0;; i++) { if (a[i] != b[i]) return 0; if (!a[i]) return 1; }
+}
+static void u32_wcpy(uint16_t *d, const uint16_t *s, int cap) {
+    int i = 0; if (s) for (; s[i] && i < cap - 1; i++) d[i] = s[i]; d[i] = 0;
+}
+
+/* Resolve a class reference (an ATOM from RegisterClass, or a wide-name pointer)
+ * to its registered WNDPROC, or 0 if unknown. */
+static uint32_t u32_class_wndproc(uint32_t cref) {
+    if (cref == 0) return 0;
+    if (cref < 0x10000u) {                 /* ATOM */
+        uint32_t idx = cref - 0xC000u;
+        if (idx < U32_MAX_CLASSES && g_u32_class[idx].used) return g_u32_class[idx].wndproc;
+        return 0;
+    }
+    const uint16_t *name = (const uint16_t *)(uintptr_t)cref;
+    for (int i = 0; i < U32_MAX_CLASSES; i++)
+        if (g_u32_class[i].used && u32_weq(g_u32_class[i].name, name)) return g_u32_class[i].wndproc;
+    return 0;
+}
+
+static uint32_t u32_win_wndproc(uint32_t hwnd) {
+    if (hwnd >= 1 && hwnd <= U32_MAX_WIN && g_u32_win[hwnd - 1].used) return g_u32_win[hwnd - 1].wndproc;
+    return 0;
+}
+
+/* Call a lifted WNDPROC(hwnd,msg,wParam,lParam) — a stdcall callback into guest
+ * code. Lay the frame just below the live machine esp (reentrant: a WNDPROC may
+ * itself SendMessage), exactly like a real call: [esp+0]=retaddr, [esp+4..]=args. */
+static uint32_t u32_call_wndproc(uint32_t esp, uint32_t wndproc,
+                                 uint32_t hwnd, uint32_t msg, uint32_t wp, uint32_t lp) {
+    uint32_t frame = (esp - 64) & ~15u;
+    uint32_t *f = (uint32_t *)(uintptr_t)frame;
+    f[0] = 0; f[1] = hwnd; f[2] = msg; f[3] = wp; f[4] = lp;
+    return (uint32_t)aret_call(wndproc, frame, 0, 0, 0, 0);
+}
+
+static int  u32_q_empty(void) { return g_u32_qh == g_u32_qt; }
+static int  u32_q_push(uint32_t hwnd, uint32_t msg, uint32_t wp, uint32_t lp) {
+    int nt = (g_u32_qt + 1) % U32_MAX_MSG;
+    if (nt == g_u32_qh) return 0;          /* full */
+    g_u32_q[g_u32_qt].hwnd = hwnd; g_u32_q[g_u32_qt].message = msg;
+    g_u32_q[g_u32_qt].wParam = wp; g_u32_q[g_u32_qt].lParam = lp;
+    g_u32_q[g_u32_qt].time = (uint32_t)(mono_ns() / 1000000ull);
+    g_u32_q[g_u32_qt].ptx = 0; g_u32_q[g_u32_qt].pty = 0;
+    g_u32_qt = nt; return 1;
+}
+/* Copy the queue head into a guest MSG (7 dwords), optionally removing it. */
+static void u32_q_peek_copy(uint32_t *m, int remove) {
+    if (m) {
+        m[0] = g_u32_q[g_u32_qh].hwnd;   m[1] = g_u32_q[g_u32_qh].message;
+        m[2] = g_u32_q[g_u32_qh].wParam; m[3] = g_u32_q[g_u32_qh].lParam;
+        m[4] = g_u32_q[g_u32_qh].time;   m[5] = g_u32_q[g_u32_qh].ptx; m[6] = g_u32_q[g_u32_qh].pty;
+    }
+    if (remove) g_u32_qh = (g_u32_qh + 1) % U32_MAX_MSG;
+}
+static void u32_fill_quit(uint32_t *m) {
+    if (!m) return;
+    m[0] = 0; m[1] = U32_WM_QUIT; m[2] = (uint32_t)g_u32_quit_code; m[3] = 0;
+    m[4] = (uint32_t)(mono_ns() / 1000000ull); m[5] = 0; m[6] = 0;
+}
+static int u32_any_timer(void) {
+    for (int i = 0; i < U32_MAX_TIMER; i++) if (g_u32_timer[i].used) return 1;
+    return 0;
+}
+/* Post a WM_TIMER for every timer whose due time has passed, and reschedule it.
+ * Uses the real monotonic clock; a batch program that never loops never fires
+ * one, so this stays deterministic in practice. */
+static void u32_pump_timers(void) {
+    uint64_t now = mono_ns();
+    for (int i = 0; i < U32_MAX_TIMER; i++) {
+        if (g_u32_timer[i].used && now >= g_u32_timer[i].due_ns) {
+            u32_q_push(g_u32_timer[i].hwnd, U32_WM_TIMER, g_u32_timer[i].id, g_u32_timer[i].proc);
+            g_u32_timer[i].due_ns = now + (uint64_t)g_u32_timer[i].elapse * 1000000ull;
+        }
+    }
+}
+
+/* RegisterClassW(const WNDCLASSW*) -> ATOM. Fields (32-bit): lpfnWndProc @+4,
+ * lpszClassName @+36. Returns a non-zero atom; 0 on failure. */
+uint32_t aret_RegisterClassW(uint32_t esp) {
+    const uint32_t *wc = (const uint32_t *)WP(0);
+    if (!wc) return 0;
+    const uint16_t *name = (const uint16_t *)(uintptr_t)wc[9]; /* +36 */
+    if (!name) return 0;
+    for (int i = 0; i < U32_MAX_CLASSES; i++) {
+        if (!g_u32_class[i].used) {
+            g_u32_class[i].used = 1;
+            g_u32_class[i].wndproc = wc[1];           /* +4 lpfnWndProc */
+            u32_wcpy(g_u32_class[i].name, name, 128);
+            return 0xC000u + (uint32_t)i;
+        }
+    }
+    return 0;
+}
+/* UnregisterClassW(lpClassName, hInstance) -> BOOL. */
+uint32_t aret_UnregisterClassW(uint32_t esp) {
+    uint32_t cref = WU(0);
+    if (cref && cref < 0x10000u) {
+        uint32_t idx = cref - 0xC000u;
+        if (idx < U32_MAX_CLASSES && g_u32_class[idx].used) { g_u32_class[idx].used = 0; return 1; }
+        return 0;
+    }
+    const uint16_t *name = (const uint16_t *)(uintptr_t)cref;
+    if (!name) return 0;
+    for (int i = 0; i < U32_MAX_CLASSES; i++)
+        if (g_u32_class[i].used && u32_weq(g_u32_class[i].name, name)) { g_u32_class[i].used = 0; return 1; }
+    return 0;
+}
+/* CreateWindowExW(exStyle, className@1, winName, style, x,y,w,h, parent@8, menu, inst, param)
+ * -> HWND. We support message-only (and any) windows as pure message sinks. */
+uint32_t aret_CreateWindowExW(uint32_t esp) {
+    uint32_t wndproc = u32_class_wndproc(WU(1));
+    if (!wndproc) return 0;                 /* unknown class -> fail (sound) */
+    for (int i = 0; i < U32_MAX_WIN; i++) {
+        if (!g_u32_win[i].used) {
+            g_u32_win[i].used = 1; g_u32_win[i].wndproc = wndproc; g_u32_win[i].parent = WU(8);
+            return (uint32_t)(i + 1);       /* HWND = index+1 (NULL invalid) */
+        }
+    }
+    return 0;
+}
+/* DestroyWindow(HWND) -> BOOL. */
+uint32_t aret_DestroyWindow(uint32_t esp) {
+    uint32_t h = WU(0);
+    if (h >= 1 && h <= U32_MAX_WIN && g_u32_win[h - 1].used) g_u32_win[h - 1].used = 0;
+    return 1;
+}
+/* DefWindowProcW(HWND,UINT,WPARAM,LPARAM) -> LRESULT. Message-only default = 0. */
+uint32_t aret_DefWindowProcW(uint32_t esp) { (void)esp; return 0; }
+/* PostMessageW(HWND,UINT,WPARAM,LPARAM) -> BOOL. Enqueue. */
+uint32_t aret_PostMessageW(uint32_t esp) { return (uint32_t)u32_q_push(WU(0), WU(1), WU(2), WU(3)); }
+/* SendMessageW(HWND,UINT,WPARAM,LPARAM) -> LRESULT. Synchronous: call the WNDPROC now. */
+uint32_t aret_SendMessageW(uint32_t esp) {
+    uint32_t wndproc = u32_win_wndproc(WU(0));
+    if (!wndproc) return 0;
+    return u32_call_wndproc(esp, wndproc, WU(0), WU(1), WU(2), WU(3));
+}
+/* DispatchMessageW(const MSG*) -> LRESULT. Route to the window's WNDPROC (or the
+ * TIMERPROC in lParam for a WM_TIMER carrying one). */
+uint32_t aret_DispatchMessageW(uint32_t esp) {
+    const uint32_t *m = (const uint32_t *)WP(0);
+    if (!m) return 0;
+    uint32_t hwnd = m[0], msg = m[1], wp = m[2], lp = m[3];
+    if (msg == U32_WM_TIMER && lp)          /* TIMERPROC callback */
+        return u32_call_wndproc(esp, lp, hwnd, msg, wp, (uint32_t)(mono_ns() / 1000000ull));
+    uint32_t wndproc = u32_win_wndproc(hwnd);
+    if (!wndproc) return 0;
+    return u32_call_wndproc(esp, wndproc, hwnd, msg, wp, lp);
+}
+/* TranslateMessage(const MSG*) -> BOOL. No keyboard input in this model -> no
+ * WM_CHAR synthesis; returns 0 (nothing translated), which is correct here. */
+uint32_t aret_TranslateMessage(uint32_t esp) { (void)esp; return 0; }
+/* PeekMessageW(lpMsg, hwnd, min, max, wRemoveMsg) -> BOOL. Non-blocking. */
+uint32_t aret_PeekMessageW(uint32_t esp) {
+    uint32_t *m = (uint32_t *)WP(0);
+    uint32_t remove = WU(4);
+    u32_pump_timers();
+    if (!u32_q_empty()) { u32_q_peek_copy(m, (remove & U32_PM_REMOVE) != 0); return 1; }
+    if (g_u32_quit)    { u32_fill_quit(m); return 1; }
+    return 0;
+}
+/* GetMessageW(lpMsg, hwnd, min, max) -> BOOL (0 = WM_QUIT, else 1). Blocks until a
+ * message is available. In the mono-thread model the only wakers are the queue
+ * (already posted) and timers, so if the queue is empty with no quit and no timer
+ * nothing can ever arrive -> we abort loudly rather than hang or fake a quit. */
+uint32_t aret_GetMessageW(uint32_t esp) {
+    uint32_t *m = (uint32_t *)WP(0);
+    for (;;) {
+        u32_pump_timers();
+        if (!u32_q_empty()) { u32_q_peek_copy(m, 1); return 1; }
+        if (g_u32_quit)    { u32_fill_quit(m); return 0; }
+        if (!u32_any_timer())
+            aret_unimpl("GetMessageW: empty queue, no WM_QUIT, no timer (would block forever in mono-thread model)");
+        usleep(1000);                        /* wait for the next timer to come due */
+    }
+}
+/* SetTimer(hwnd, nIDEvent, uElapse_ms, TIMERPROC) -> UINT_PTR. */
+uint32_t aret_SetTimer(uint32_t esp) {
+    uint32_t hwnd = WU(0), id = WU(1), elapse = WU(2), proc = WU(3);
+    if (hwnd == 0 && id == 0) id = g_u32_next_timer_id++;   /* window-less timer gets a fresh id */
+    int slot = -1;
+    for (int i = 0; i < U32_MAX_TIMER; i++) {               /* reuse an existing (hwnd,id) */
+        if (g_u32_timer[i].used && g_u32_timer[i].hwnd == hwnd && g_u32_timer[i].id == id) { slot = i; break; }
+        if (slot < 0 && !g_u32_timer[i].used) slot = i;
+    }
+    if (slot < 0) return 0;
+    g_u32_timer[slot].used = 1; g_u32_timer[slot].hwnd = hwnd; g_u32_timer[slot].id = id;
+    g_u32_timer[slot].elapse = elapse; g_u32_timer[slot].proc = proc;
+    g_u32_timer[slot].due_ns = mono_ns() + (uint64_t)elapse * 1000000ull;
+    return id;
+}
+/* KillTimer(hwnd, id) -> BOOL. */
+uint32_t aret_KillTimer(uint32_t esp) {
+    uint32_t hwnd = WU(0), id = WU(1);
+    for (int i = 0; i < U32_MAX_TIMER; i++)
+        if (g_u32_timer[i].used && g_u32_timer[i].hwnd == hwnd && g_u32_timer[i].id == id) { g_u32_timer[i].used = 0; return 1; }
+    return 0;
+}
+/* PostQuitMessage(nExitCode) -> void. */
+uint32_t aret_PostQuitMessage(uint32_t esp) { g_u32_quit = 1; g_u32_quit_code = WI(0); return 0; }
+/* MsgWaitForMultipleObjectsEx(nCount, pHandles, dwMs, dwWakeMask, dwFlags) -> DWORD.
+ * A message available -> WAIT_OBJECT_0 + nCount. We do not model signaled guest
+ * handles here, so otherwise report WAIT_TIMEOUT (0x102). */
+uint32_t aret_MsgWaitForMultipleObjectsEx(uint32_t esp) {
+    uint32_t nCount = WU(0);
+    u32_pump_timers();
+    if (!u32_q_empty() || g_u32_quit) return nCount;   /* WAIT_OBJECT_0 (=0) + nCount */
+    return 0x00000102u;                                /* WAIT_TIMEOUT */
+}

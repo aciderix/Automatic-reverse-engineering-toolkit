@@ -301,7 +301,7 @@ Deux mécanismes complémentaires :
   CFG). memcpy/rep-stos modélisés ; adresses masquées 32-bit. **`0 divergence`
   ≠ pas de bug** : dit *où il n'est pas* (bugs profonds derrière imports/skips).
 - **Portes** : difftest (décompile O0→O3, **271/271**), transpile-diff (produit, **4/4**,
-  hash **`19acad982194bf07`**), winediff (Wine, **50/50**), sweeps (sqlite/busybox/
+  hash **`19acad982194bf07`**), winediff (Wine, **51/51**), sweeps (sqlite/busybox/
   gauntlet), SMT (Z3, 11/11), magicdiv (2³²), in-place (3/3), recompilabilité (100%).
 - **`--mode imports`** : couverture d'imports **statique a-priori** (borne supérieure
   du trou runtime). Prioriser par la donnée, **filtrer par fidélité**.
@@ -793,5 +793,31 @@ Détail : **70 §6** (roadmap). Résumé :
   **sound, sans graphisme/X11** (registre de classes + file de messages par thread + dispatch WNDPROC + timers).
   Débloquerait une **classe** (tout programme Tcl + tout usage de fenêtre cachée) = **1ᵉʳ pas concret de M7**,
   déclenché par un binaire mesuré (pas spéculatif). **Décision produit ouverte** (chantier neuf, ~15 fns).
+
+### 2026-07-10 — [HLE-WIN32] Sous-système fenêtre message-only USER32 (débloque le notifier Tcl)
+- **Contexte** : suite directe de la sonde nouveau-binaire — `sqlite3_analyzer` (Tcl) abortait sound sur
+  `RegisterClassW` (notifier Tcl). Surface mesurée bornée (~15 fns message-loop), fenêtre message-only = **zéro
+  pixel** ⇒ implémentable sound **sans X11/graphisme** (garde standalone + WASM). Décision : coder à la main
+  (vs Winelib qui casse WASM/autonomie).
+- **Fait** (`runtime/aret_hle/aret_win32.c`, ~180 l. additives) : registre de classes (nom large 16-bit →
+  WNDPROC, ATOM `0xC000+i`), table de fenêtres (HWND = idx+1), **file de messages mono-thread** (ring), timers
+  (horloge mono). Les 15 : `RegisterClassW`/`UnregisterClassW`, `CreateWindowExW`/`DestroyWindow`,
+  `DefWindowProcW`, `GetMessageW`/`PeekMessageW`/`DispatchMessageW`/`TranslateMessage`, `PostMessageW`/
+  `SendMessageW`, `PostQuitMessage`, `SetTimer`/`KillTimer`, `MsgWaitForMultipleObjectsEx`. **Clé** : le
+  dispatch appelle le **WNDPROC dans le code lifté** via `aret_call`, frame stdcall posée **sous l'esp vif**
+  (`(esp-64)&~15`, [esp+0]=retaddr, [esp+4..]=hwnd/msg/wParam/lParam) — **réentrant** (un WNDPROC peut
+  SendMessage). `SendMessageW` = synchrone (appel direct) ; `PostMessageW`+`GetMessageW`+`DispatchMessageW` =
+  file. `+14` entrées `stdcall_pops.rs` triées (`TranslateMessage` existait déjà).
+- **Soundness** : `GetMessageW` sur file vide sans quit **ni timer** = **abort loud** (`aret_unimpl`,
+  « would block forever ») — **jamais** un faux WM_QUIT (qui tronquerait la sortie = faux silencieux). Timers
+  via horloge réelle (un batch qui ne boucle pas n'en déclenche aucun → déterministe).
+- **Vérifié** : fixture `winecorpus/user32_msgwindow.c` (register/create/**Send synchrone**/**Post+Get+Dispatch**/
+  Peek vide/**WM_QUIT+code**, le WNDPROC recalcule une valeur renvoyée à SendMessage = 4200+wParam) =
+  **bit-identique à Wine**. winediff 50→**51/51**. Harness : `-luser32` ajouté (comme -lversion/-lole32,
+  inoffensif). Hash transpile **inchangé** `19acad982194bf07`, difftest 271/271, busybox sweep OK, table triée.
+- **Effet analyzer** : **débloqué du notifier** (plus de `Tcl_Panic`/`Unable to register TclNotifier`). Avance
+  puis révèle la suite **bornée** (tous abort sound) : `WSAStartup`/Winsock, `CreateEventW`, `wcschr`,
+  `LoadLibraryW`, lift `repe cmpsb`. Tcl est un puits profond (multi-incréments) ; le sous-système message-only,
+  lui, est **fini et général** (débloque toute la classe « fenêtre cachée / notifier »).
 
 <!-- NOUVELLES ENTRÉES ICI (garder l'ordre chronologique, plus récent en bas) -->
