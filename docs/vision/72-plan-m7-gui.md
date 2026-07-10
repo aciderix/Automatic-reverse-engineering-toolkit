@@ -90,8 +90,13 @@ non-local + chaîne `fs:[0]` + handlers, correctness-critique.
 
 ## 5. Risques / questions ouvertes
 
-- **SDL2 dans l'environnement de build** : présent ? sinon lien optionnel + gating
-  (la couche compile sans SDL tant qu'on reste message-only/headless-contenu).
+- **SDL2 dans l'environnement de build** : ✅ **RÉSOLU** (2026-07-10). `libsdl2-dev:i386`
+  **2.30.0** installé (le proxy autorise les dépôts Ubuntu ; archi i386 activée) ; un
+  binaire **`-m32`** lie SDL2 et tourne **headless** (`SDL_VIDEODRIVER=dummy`,
+  `driver=dummy`). Conteneur **éphémère** → réinstallé au besoin par le hook
+  `.claude/hooks/session-start.sh` (idempotent, comme z3). La couche GUI détectera
+  SDL2 via `pkg-config` (chemin i386) et **dégradera proprement** si absent (CLI /
+  message-only / headless-contenu n'en dépendent pas).
 - **Impédance Win32↔SDL** : la sémantique fenêtre/message (HWND, WNDPROC, WM_*,
   boucle modale) reste **du code maison** au-dessus des primitives SDL — SDL ne
   donne « que » la fenêtre OS + les entrées (la vraie partie plateforme).

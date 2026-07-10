@@ -46,6 +46,16 @@ if ! command -v z3 >/dev/null 2>&1; then
   pip install --quiet z3-solver || true
 fi
 
+# SDL2 (i386) backs the M7 GUI layer (doc 72): the transpiled output is a 32-bit
+# ELF, so the GUI HLE links 32-bit SDL2. Install only if missing (idempotent, like
+# z3). Non-fatal: the CLI / message-only / headless-content paths don't need it,
+# and the GUI build detects SDL2 via pkg-config and degrades gracefully if absent.
+if ! PKG_CONFIG_PATH=/usr/lib/i386-linux-gnu/pkgconfig pkg-config --exists sdl2 2>/dev/null; then
+  sudo dpkg --add-architecture i386 >/dev/null 2>&1 || true
+  sudo apt-get update >/dev/null 2>&1 || true
+  sudo apt-get install -y libsdl2-dev:i386 >/dev/null 2>&1 || true
+fi
+
 # gcc/cc (level-1 recompile + level-2 differential) are part of the base image;
 # report if absent rather than failing the session.
 command -v cc >/dev/null 2>&1 || echo "warning: no C compiler (cc) found — recompile/differential benches will not run" >&2
