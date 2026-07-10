@@ -262,9 +262,14 @@ Deux mécanismes complémentaires :
   … », « sqlite3.exe … ».
 
 ### 2.8 `[ORACLE]` — différentiels (`src/cpudiff.rs`, `bench/*.sh`)
-- **cpudiff** (Unicorn, per-instruction) : ~120 encodages, milliers d'états ; interp
+- **cpudiff** (Unicorn, per-instruction) : ~150 encodages, milliers d'états ; interp
   renvoie `None` sur non-modélisé → **case sautée, jamais faux positif**. Couvre
-  entier/div-idiv/SSE scalaire/SIMD packed + CF/ZF/SF/OF/PF/AF.
+  entier/div-idiv/SSE scalaire/SIMD packed + CF/ZF/SF/OF/PF/AF + **famille pile/frame**
+  (push/pop reg/mem/imm/16-bit, esp/ebp-relatif — le hotspot des bugs de composition).
+  **Câblé en test de régression** (`per_instruction_corpus_matches_unicorn`, 2026-07-09 ;
+  auparavant `run()`/`corpus()` existaient mais n'étaient exercés par aucun test). esp placé
+  mid-page pour les insns modifiant esp (sinon écriture pile hors-page = case skippée).
+  **Méthode d'énumération des classes de miscompile par construction** (vs subir binaire par binaire).
 - **funcdiff** (Unicorn, fonction) : **closure** (suit les appels directs récupérés,
   discipline call/ret exacte, retaddr sentinelle non-mappée, frames OFF) + **opt-diff**
   (post-opt SSA vs pré-opt : DCE ne supprime jamais un Store, opt ne touche pas le
@@ -639,5 +644,34 @@ Détail : **70 §6** (roadmap). Résumé :
   `19acad982194bf07` inchangé, funcdiff 0 divergence, winediff 49/49, busybox sweep 60/60
   (**`sed -n` toujours OK**), gauntlet 19/21. plink : le segfault "SerialLine" est **résolu** (push fix) ;
   plink progresse dans son démarrage (crash résiduel plus loin, `sub_47fe86`, à suivre).
+
+### 2026-07-09 — [ORACLE][LIFT] Différentiel par-instruction CÂBLÉ + corpus pile/frame → 4 bugs push/pop
+- **Contexte** : question stratégique « combien de classes de miscompile général reste-t-il, mesurable en
+  une fois ? ». Réponse mécanique : la **couche par-instruction** (`cpudiff::run`/`corpus`) existait mais
+  **n'était câblée à aucun test** — seuls les tests niveau-fonction tournaient. Et le corpus échantillonnait
+  l'arithmétique/logique/SSE, **pas les hotspots esp/frame** (là où vit une classe entière de bugs de
+  composition, invisible aux tests étroits — cf. `push [esp+d]` trouvé via plink).
+- **Fait** (`src/cpudiff.rs`) : (1) **câblé** le corpus par-instruction en test de régression
+  (`per_instruction_corpus_matches_unicorn`, 4000 états/insn) ; (2) placé esp au **milieu de la page
+  scratch** pour toute instruction modifiant esp (`stack_pointer_increment()!=0`) — sinon l'écriture pile
+  tombait hors page → cas **silencieusement skippé** (toute la famille push/pop non testée) ; (3) étendu le
+  corpus avec ~35 encodages **pile/frame** (push/pop reg/mem/imm, esp/ebp-relatif, 16-bit, leave, lea/mov
+  [esp+d]).
+- **Bugs trouvés PAR CONSTRUCTION et corrigés** (`src/ir/lift.rs`, tous généraux, tous faux-silencieux) :
+  1. **`push`/`pop word` (16-bit)** : slot hardcodé `bits/8`=4 → esp décalé de 2 + store/load 4 o au lieu
+     de 2. Fix : taille via `stack_pointer_increment()`.
+  2. **`pop esp`** : l'incrément esp était appliqué après l'écriture (esp=[old]+4) alors que le pop dans esp
+     **supersede** l'incrément (esp=[old]). Fix : pas d'incrément si dest = esp.
+  3. **`pop [esp+d]`** : adresse dest calculée avec l'**ancien** esp ; x86 la calcule **après** l'incrément.
+     Fix : snapshot valeur (ancien esp) → incrément → write (miroir de `push [esp+d]`).
+  4. **`pop ax` (16-bit reg)** : `combine_write` court-circuitait `w>=bits` (16≥16) → écriture pleine →
+     zéroïait [31:16] au lieu de les préserver. Fix : passer `bits`(32) à `write_op0` (le load reste 16-bit).
+  - Progression du fuzzer : **106 → 63 → 42 → 21 → 0** divergences.
+- **Portée** : c'est **la** réponse à « énumérer les classes restantes » — le corpus par-instruction câblé
+  couvre l'espace i386 **par construction** (au lieu de subir binaire par binaire). Les hotspots restants
+  (aliasing multi-sortie, séquences 2-3 insns) sont énumérables de la même façon (extension future).
+- **Vérifié** : per-instruction corpus **0 divergence**, cpudiff suite 4/4, difftest 271/271, transpile-diff
+  hash `19acad982194bf07` **inchangé** (push/pop 32-bit produisent une IR identique), funcdiff 0 divergence,
+  winediff 49/49, busybox sweep 60/60, gauntlet 19/21. (plink : segfault résiduel plus profond, non lié.)
 
 <!-- NOUVELLES ENTRÉES ICI (garder l'ordre chronologique, plus récent en bas) -->

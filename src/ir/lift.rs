@@ -2128,7 +2128,13 @@ pub fn lift(insn: &Insn, bits: u32) -> Vec<Stmt> {
 
         Mnemonic::Push => {
             let v = some_or_asm!(op_value(ins, 0));
-            let ptr = (bits / 8) as i128;
+            // Slot = operand size, not a hardcoded word: `push word` (66-prefix)
+            // lowers esp by 2 and stores 2 bytes, `push dword` by 4. iced's
+            // stack-pointer delta is the authoritative size (`bits/8` mis-sized the
+            // 16-bit push — esp off by 2 and a 4-byte store).
+            let spinc = ins.stack_pointer_increment();
+            let ptr = if spinc != 0 { (-spinc) as i128 } else { (bits / 8) as i128 };
+            let opbits = (ptr * 8) as u8;
             let sp = Location::Reg(RegId(4)); // rsp/esp family
             let new_sp = bin(BinOp::Sub, Expr::Read(sp.clone()), konst(ptr));
             // A `push [esp+d]` source must be read with the *pre*-decrement esp:
@@ -2149,7 +2155,7 @@ pub fn lift(insn: &Insn, bits: u32) -> Vec<Stmt> {
                     Stmt::Store {
                         addr: Expr::Read(sp),
                         value: Expr::Read(t),
-                        ty: Ty::int(bits as u8),
+                        ty: Ty::int(opbits),
                     },
                 ]
             } else {
@@ -2158,24 +2164,54 @@ pub fn lift(insn: &Insn, bits: u32) -> Vec<Stmt> {
                     Stmt::Store {
                         addr: Expr::Read(sp),
                         value: v,
-                        ty: Ty::int(bits as u8),
+                        ty: Ty::int(opbits),
                     },
                 ]
             }
         }
         Mnemonic::Pop => {
-            let ptr = (bits / 8) as i128;
+            // Slot/operand size from the instruction (2 for `pop word`, else the
+            // address width) — see `push` above.
+            let spinc = ins.stack_pointer_increment();
+            let ptr = if spinc != 0 { spinc as i128 } else { (bits / 8) as i128 };
+            let opbits = (ptr * 8) as u32;
             let sp = Location::Reg(RegId(4));
             let load = Expr::Load {
                 addr: Box::new(Expr::Read(sp.clone())),
-                ty: Ty::int(bits as u8),
+                ty: Ty::int(opbits as u8),
             };
-            let mut out = some_or_asm!(write_op0(ins, load, bits));
-            out.push(Stmt::Set {
-                dst: sp.clone(),
-                expr: bin(BinOp::Add, Expr::Read(sp), konst(ptr)),
-            });
-            out
+            let sp_reg = if bits == 64 { Register::RSP } else { Register::ESP };
+            // `pop esp` writes the popped value straight into esp; the increment is
+            // superseded (final esp = [old esp], not +slot).
+            let dest_is_sp = ins.op0_kind() == OpKind::Register
+                && ins.op0_register().full_register() == Register::RSP;
+            // `pop [esp+d]`: x86 computes the destination effective address *after*
+            // incrementing esp, so it stores to `[new esp + d]`. Snapshot the popped
+            // value (read at the old esp) into a temp, bump esp, then write — so the
+            // store's `[esp+d]` resolves to the incremented esp (mirror of push).
+            let dest_uses_sp = ins.op0_kind() == OpKind::Memory
+                && (ins.memory_base() == sp_reg || ins.memory_index() == sp_reg);
+            if dest_uses_sp {
+                let t = Location::Temp((insn.address as u32).wrapping_mul(2).wrapping_add(1));
+                let mut out = vec![
+                    Stmt::Set { dst: t.clone(), expr: load },
+                    Stmt::Set {
+                        dst: sp.clone(),
+                        expr: bin(BinOp::Add, Expr::Read(sp.clone()), konst(ptr)),
+                    },
+                ];
+                out.extend(some_or_asm!(write_op0(ins, Expr::Read(t), bits)));
+                out
+            } else {
+                let mut out = some_or_asm!(write_op0(ins, load, bits));
+                if !dest_is_sp {
+                    out.push(Stmt::Set {
+                        dst: sp.clone(),
+                        expr: bin(BinOp::Add, Expr::Read(sp), konst(ptr)),
+                    });
+                }
+                out
+            }
         }
 
         Mnemonic::Call => {

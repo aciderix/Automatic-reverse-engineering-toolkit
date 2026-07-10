@@ -1103,6 +1103,16 @@ fn diff_one(bytes: &[u8], iters: u32, seed: &mut u64) -> Result<Vec<Mismatch>, S
         if let Some(b) = mem_base {
             st.regs[b] = DATA_PTR; // memory-operand base lands in the scratch page
         }
+        // Any esp-modifying instruction (push/pop/leave/enter) writes/reads the
+        // stack; place esp in the *middle* of the scratch page so those accesses
+        // land in the compared page (room below for pushes, above for pops)
+        // instead of the unmapped STACK_ADDR region — where the interpreter would
+        // return None and silently skip the whole push/pop/frame family. Applied
+        // after the mem_base override so an esp-relative operand (`push [esp+d]`)
+        // is also computed against this in-page esp.
+        if insn.raw.stack_pointer_increment() != 0 {
+            st.regs[4] = DATA_ADDR + (DATA_SIZE as u64) / 2;
+        }
         for f in [FlagKind::Cf, FlagKind::Zf, FlagKind::Sf, FlagKind::Of, FlagKind::Pf, FlagKind::Af] {
             st.flags.insert(f, next() & 1);
         }
@@ -1502,6 +1512,44 @@ fn corpus() -> Vec<Vec<u8>> {
         vec![0x0f, 0x14, 0xc1],       // unpcklps  xmm0, xmm1
         vec![0x0f, 0x15, 0xc1],       // unpckhps  xmm0, xmm1
         vec![0x0f, 0x50, 0xc1],       // movmskps  eax, xmm1
+        // ---- stack / frame family (the esp-touching hotspot) --------------
+        // `push`/`pop` both modify esp AND may take an esp/ebp-relative operand;
+        // the source/destination effective address must be computed with the
+        // *pre*-modification esp. This is where the `push [esp+d]` off-by-slot
+        // bug lived — invisible to arithmetic tests, so exercise it directly.
+        // (`diff_one` places esp mid-scratch-page for any esp-modifying insn so
+        // the push/pop lands in the compared page instead of being skipped.)
+        vec![0xff, 0x34, 0x24],             // push dword [esp]
+        vec![0xff, 0x74, 0x24, 0x04],       // push dword [esp+4]
+        vec![0xff, 0x74, 0x24, 0x08],       // push dword [esp+8]
+        vec![0xff, 0x74, 0x24, 0x10],       // push dword [esp+0x10]
+        vec![0xff, 0x74, 0x24, 0xfc],       // push dword [esp-4]
+        vec![0xff, 0x75, 0x00],             // push dword [ebp]
+        vec![0xff, 0x75, 0x08],             // push dword [ebp+8]
+        vec![0xff, 0x75, 0xf8],             // push dword [ebp-8]
+        vec![0x50],                         // push eax
+        vec![0x51],                         // push ecx
+        vec![0x55],                         // push ebp
+        vec![0x54],                         // push esp   (pushes the OLD esp)
+        vec![0x6a, 0x7f],                   // push 0x7f  (imm8, sign-extended)
+        vec![0x68, 0x78, 0x56, 0x34, 0x12], // push 0x12345678 (imm32)
+        vec![0x66, 0xff, 0x74, 0x24, 0x04], // push word [esp+4]
+        vec![0x66, 0x50],                   // push ax
+        vec![0x58],                         // pop eax
+        vec![0x5d],                         // pop ebp
+        vec![0x5c],                         // pop esp    (pop into esp)
+        vec![0x8f, 0x44, 0x24, 0x08],       // pop dword [esp+8]
+        vec![0x8f, 0x45, 0x00],             // pop dword [ebp]
+        vec![0x66, 0x58],                   // pop ax
+        vec![0xc9],                         // leave      (mov esp,ebp; pop ebp)
+        // esp/ebp-relative loads, stores and address computations (no esp change,
+        // but the effective address must match the hardware exactly).
+        vec![0x8b, 0x44, 0x24, 0x08],       // mov eax, [esp+8]
+        vec![0x8b, 0x6c, 0x24, 0x04],       // mov ebp, [esp+4]
+        vec![0x89, 0x44, 0x24, 0x0c],       // mov [esp+0xc], eax
+        vec![0x89, 0x4d, 0xf4],             // mov [ebp-0xc], ecx
+        vec![0x8d, 0x44, 0x24, 0x10],       // lea eax, [esp+0x10]
+        vec![0x8d, 0x4c, 0x24, 0x04],       // lea ecx, [esp+4]
     ]
 }
 
@@ -2158,6 +2206,28 @@ pub fn run_functions_opt(path: &str, iters: u32) -> Result<Vec<FnMismatch>, Stri
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Per-instruction differential: every instruction in the curated `corpus()`
+    /// (arithmetic/logic/shift/SSE + the stack/frame family) lifted and run
+    /// against Unicorn over thousands of random register/flag/memory states must
+    /// agree bit-for-bit (regs, flags, xmm, and the memory it writes). This is the
+    /// direct, by-construction coverage of the instruction space — the layer that
+    /// catches lift bugs a real binary would only hit by luck (the `push [esp+d]`
+    /// off-by-slot bug lived exactly here). A divergence is a real lift bug.
+    #[test]
+    fn per_instruction_corpus_matches_unicorn() {
+        let mismatches = super::run(4000).expect("cpudiff corpus run");
+        if !mismatches.is_empty() {
+            let mut msg = format!("{} per-instruction divergence(s):\n", mismatches.len());
+            for m in mismatches.iter().take(20) {
+                msg += &format!(
+                    "  {} ({:02x?}) {}: lifted={:#x} unicorn={:#x}\n",
+                    m.asm, m.bytes, m.field, m.lifted, m.oracle,
+                );
+            }
+            panic!("{msg}");
+        }
+    }
 
     /// The modelled memory calls (`memcpy`/`__rep_stos*`, from `rep movs`/`rep
     /// stos`) must match Unicorn byte-for-byte. `rep_movsb_copy.exe` copies a
