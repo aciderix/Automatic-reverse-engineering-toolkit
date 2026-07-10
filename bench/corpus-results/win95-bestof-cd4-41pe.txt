@@ -1,0 +1,79 @@
+analyzed 41 PE(s) (0 non-PE skipped)
+
+=== CORPUS WALL SWEEP — 41 binaries (0 fully clean / 41 with gaps) ===
+
+TOP UNMODELLED INSTRUCTIONS (lift gaps) — ranked by #binaries blocked:
+  bins   sites  mnemonic
+    17      21  repe cmpsb
+    14      27  std
+     7      13  bt
+     7      13  bts
+     5     144  popad
+     5      62  arpl
+     5      59  insd
+     5      13  in
+     5       6  int3
+     4     149  outsb
+     4     110  outsd
+     4      99  insb
+     4      28  bound
+     4       6  daa
+     3     112  push
+     3      11  div
+     3       6  outsw
+     3       3  into
+     2       9  enter
+     2       8  jb
+     2       8  je
+     2       8  pushfd
+     2       5  aam
+     2       5  data16
+     2       4  jo
+     2       3  ja
+     2       3  popa
+     2       2  jg
+     2       2  jne
+     2       2  verw
+
+TOP UNIMPLEMENTED IMPORTS (HLE gaps) — ranked by #binaries:
+  bins  import
+    38  GetVersion
+    37  MessageBoxA
+    35  GetWindowRect
+    35  RtlUnwind
+    34  SetWindowPos
+    34  SetWindowTextA
+    33  GetDlgItem
+    32  LoadStringA
+    32  SendMessageA
+    30  ReleaseDC
+    29  SetFileAttributesA
+    28  CreateProcessA
+    28  DosDateTimeToFileTime
+    28  GetDeviceCaps
+    27  GetDC
+    26  FindResourceA
+    26  LoadResource
+    26  RegisterClassA
+    26  SizeofResource
+    25  CreateThread
+    25  FreeResource
+    25  GetDiskFreeSpaceA
+    24  DefWindowProcA
+    24  DispatchMessageA
+    24  LockResource
+    23  CreateDialogParamA
+    23  GetExitCodeProcess
+    23  LoadCursorA
+    23  UpdateWindow
+    22  GetStockObject
+    22  PeekMessageA
+    21  GetDesktopWindow
+    21  ShowWindow
+    20  CreateWindowExA
+    20  EndDialog
+    20  RtlMoveMemory
+    19  EnableWindow
+    19  LoadIconA
+    19  SetDlgItemTextA
+    19  SetWindowLongA

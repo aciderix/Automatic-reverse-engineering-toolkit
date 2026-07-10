@@ -844,4 +844,31 @@ Détail : **70 §6** (roadmap). Résumé :
 - **Vérifié** : hash transpile **inchangé** `19acad982194bf07`, difftest 271/271, tests compilent. Robuste sur
   sqldiff (4 insns/5 imports/0 non résolu) et analyzer (34 Mo, rapide car pas de compilation).
 
+### 2026-07-10 — [INFRA][ORACLE] 1er corpus externe réel : 41 exe Win95 (extraits ISO via HTTP-range) + dégrossissement
+- **Méthode d'acquisition (réutilisable)** : archive.org est joignable. Les CD de shareware sont des **ISO**
+  (600 Mo). Au lieu de tout télécharger : **lecture ISO-9660 par requêtes HTTP-range** (pycdlib sur un
+  file-object `Range:`-backed, avec retry/backoff sur les 500 transitoires) → on ne récupère que le répertoire
+  + les octets de chaque fichier voulu. `BestOfWindows95DotCom/WIN95_09964.iso` : 196 exe → classés par
+  en-tête PE (`e_lfanew`→`PE`/`NE`/magic 0x10b) → **59 NE16 rejetés, 96 DOS/short rejetés, 41 PE32 gardés**.
+  Zéro téléchargement du 600 Mo. (Il reste 3 ISO + 510 zips sur ce seul item = extension facile.)
+- **`wallsweep` sur les 41** (binaires jamais vus, vieux MSVC/Borland/Watcom) : **0 crash de l'analyseur**
+  (robustesse recovery) ; **0/41 clean** (tous ont des gaps). Le classement par **nb de binaires bloqués** est
+  sans appel :
+  - **La GUI EST le mur** (Win95 = apps desktop) : MessageBoxA 37, GetWindowRect/SetWindowPos/SetWindowTextA
+    ~35, GetDlgItem 33, LoadStringA/SendMessageA 32, GetDC/ReleaseDC ~30, Find/Load/Sizeof/Lock/FreeResource
+    ~26, RegisterClassA 26, dialogs (CreateDialogParamA/EndDialog/SetDlgItemTextA), GDI (GetDeviceCaps/
+    GetStockObject). ⇒ **M7 confirmé par la donnée** : USER32/GDI32 **variantes A** + chargement de ressources
+    + dialogs. NB : mon sous-système fenêtre est en **W** ; ces apps sont **ANSI (A)** → il faut les **siblings
+    A** (RegisterClassA/CreateWindowExA/DefWindowProcA/Send/Peek/DispatchMessageA, 20-26 binaires, **peu cher**
+    car la machinerie W existe déjà).
+  - **Gains universels FACILES à forte largeur (manquants)** : **`GetVersion` (38/41)**, `DosDateTimeToFileTime`
+    (28), `RtlMoveMemory`=memmove (20) — shims triviaux touchant beaucoup de binaires.
+  - **Instruction #1** : `repe cmpsb` (**17/41**, confirmé aussi sur analyzer) = 1 fix lift `rep cmps`. Puis
+    `std` (14, DF=1), `bt/bts` (7, formes mémoire/index exclues). Le reste (arpl/insd/outsb/in/bound/daa/aam/
+    into/verw) = **privilégié/DOS = data décodée comme code** (bruit attendu, non atteint).
+- **Enseignement** : le dégrossissement par corpus **marche** et **priorise objectivement**. Pour ce type
+  (desktop Win95) le mur dominant est la GUI (gros chantier M7) ; en marge, 3-4 shims triviaux (`GetVersion`…)
+  et `rep cmps` sont des gains transverses immédiats. Couplage oracles **obligatoire** : la carte dit *où*,
+  chaque shim/lift devra passer winediff/cpudiff + régression avant d'être expédié.
+
 <!-- NOUVELLES ENTRÉES ICI (garder l'ordre chronologique, plus récent en bas) -->
