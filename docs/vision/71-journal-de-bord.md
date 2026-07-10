@@ -301,7 +301,7 @@ Deux mécanismes complémentaires :
   CFG). memcpy/rep-stos modélisés ; adresses masquées 32-bit. **`0 divergence`
   ≠ pas de bug** : dit *où il n'est pas* (bugs profonds derrière imports/skips).
 - **Portes** : difftest (décompile O0→O3, **271/271**), transpile-diff (produit, **4/4**,
-  hash **`19acad982194bf07`**), winediff (Wine, **55/55**), sweeps (sqlite/busybox/
+  hash **`19acad982194bf07`**), winediff (Wine, **56/56**), sweeps (sqlite/busybox/
   gauntlet), SMT (Z3, 11/11), magicdiv (2³²), in-place (3/3), recompilabilité (100%).
 - **`--mode imports`** : couverture d'imports **statique a-priori** (borne supérieure
   du trou runtime). Prioriser par la donnée, **filtrer par fidélité**.
@@ -939,5 +939,27 @@ Détail : **70 §6** (roadmap). Résumé :
   fns ne change pas : DF folde à 0 en avant), difftest 271/271, **busybox sweep bit-identique** (usage chaîne
   intensif en avant intact), **cpudiff 6/6** (per-instruction non-rep + memcall `__rep_movs`/`__rep_stos` +
   funcdiff), winediff **55/55**.
+
+### 2026-07-10 — [ORACLE][HLE-WIN32] RtlUnwind = FROID (mesuré) + grappe file/process (dernier non-GUI facile)
+- **B — RtlUnwind chaud/froid ?** Mesuré (règle « vérifier si le fallback suffit avant de conclure »). C'est le
+  **dérouleur SEH** (control-flow non-local + chaîne `fs:[0]` + callbacks) — **pas** un shim facile. Preuve
+  froid : nos démos MSVC qui tournent **bit-identiques à Wine** (sqlite3/nasm/sqldiff) référencent RtlUnwind
+  **0 fois** en code atteignable ; sur Win95 il n'est appelé que depuis la plomberie `_global_unwind2`/CRT,
+  invoquée **seulement quand une exception se propage**. ⇒ **abort sound suffit** ; RtlUnwind ira au tier EH
+  **avec** la GUI/C++ exceptions, pas en standalone. *(Le vrai « dernier facile » = les petits shims ci-dessous,
+  pas RtlUnwind — correction de mon cadrage initial.)*
+- **A — grappe file/process** (`aret_win32.c` + `aret_hle.c`) : (1) **`GetExitCodeProcess`** → STILL_ACTIVE
+  (259) (pas de process enfant créé) ; (2) **`GetDiskFreeSpaceA`** → `statvfs` + géométrie fixe (512 o/secteur,
+  8 secteurs/cluster) ; (3) **`SetFileAttributesA/W`** → seul FILE_ATTRIBUTE_READONLY est POSIX-mappable
+  (bits d'écriture via `chmod`, `translate_path` dans aret_hle.c) ; autres attrs acceptés-ignorés (= Wine).
+  +2 `stdcall_pops` triés (GetDiskFreeSpaceA=20, SetFileAttributesW=8).
+- **Oracle** : `winecorpus/win32_file_process.c`. Valeurs dépendantes de l'hôte (tailles disque) testées par
+  **invariant** (bps puissance de 2, spc≥1, total≥free) et non en brut ; GetExitCodeProcess sur le process
+  courant = STILL_ACTIVE déterministe ; SetFileAttributes **round-trip** via GetFileAttributes (READONLY ↔ bit
+  d'écriture). **Bit-identique à Wine.**
+- **Effet mesuré** : les 3 imports **éliminés des 41 Win95**.
+- **Vérifié** : hash transpile **inchangé** `19acad982194bf07`, difftest 271/271, winediff **56/56**, table triée.
+- **État corpus** : après cette grappe, le **top imports Win95 est ~100% GUI** (USER32-A/GDI/ressources/dialogs)
+  et le top instructions = **bruit** (privilégié/DOS misdécodé). ⇒ « descendre à zéro » = **chantier GUI (M7)**.
 
 <!-- NOUVELLES ENTRÉES ICI (garder l'ordre chronologique, plus récent en bas) -->

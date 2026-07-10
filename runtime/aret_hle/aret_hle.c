@@ -1089,6 +1089,32 @@ static uint32_t aret_attr_named(const char *name) {
 uint32_t aret_GetFileAttributesA(uint32_t esp) {
     return aret_attr_named((const char *)(uintptr_t)arg(esp, 0));
 }
+
+/* SetFileAttributesA/W(name, attrs) -> BOOL. The only POSIX-mappable attribute is
+ * FILE_ATTRIBUTE_READONLY (0x01) <-> the write permission bits; the rest (hidden/
+ * system/archive) have no host analogue and are accepted-and-ignored, exactly as
+ * Wine does. Round-trips with GetFileAttributes (which reports READONLY from the
+ * same write bit). */
+static uint32_t aret_setattr_named(const char *name, uint32_t attr) {
+    char path[1024];
+    translate_path(name, path, sizeof path);
+    struct stat st;
+    if (stat(path, &st) != 0) { g_last_error = (errno == ENOTDIR) ? 3u : 2u; return 0; }
+    mode_t m = st.st_mode;
+    if (attr & 0x01u) m &= ~(mode_t)(S_IWUSR | S_IWGRP | S_IWOTH); /* READONLY */
+    else m |= S_IWUSR;                                             /* writable */
+    if (chmod(path, m) != 0) { g_last_error = 5u; return 0; }      /* ACCESS_DENIED */
+    g_last_error = 0;
+    return 1;
+}
+uint32_t aret_SetFileAttributesA(uint32_t esp) {
+    return aret_setattr_named((const char *)(uintptr_t)arg(esp, 0), arg(esp, 1));
+}
+uint32_t aret_SetFileAttributesW(uint32_t esp) {
+    char name[1024];
+    aret_w2n((const uint16_t *)(uintptr_t)arg(esp, 0), name, sizeof name);
+    return aret_setattr_named(name, arg(esp, 1));
+}
 uint32_t aret_GetFileAttributesW(uint32_t esp) {
     char name[1024];
     aret_w2n((const uint16_t *)(uintptr_t)arg(esp, 0), name, sizeof name);

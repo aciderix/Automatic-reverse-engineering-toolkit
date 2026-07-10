@@ -28,6 +28,7 @@
 #include <unistd.h>
 #include <sys/time.h>
 #include <sys/stat.h>
+#include <sys/statvfs.h>
 #include <sys/ioctl.h>
 
 static inline uint32_t w32_arg(uint32_t esp, int i) {
@@ -605,6 +606,37 @@ uint32_t aret_GetModuleHandleExW(uint32_t esp) {
 }
 /* Pseudo-handles: GetCurrentProcess()/Thread() are the constants -1 / -2. */
 uint32_t aret_GetCurrentProcess(uint32_t esp) { (void)esp; return 0xFFFFFFFFu; }
+
+/* GetExitCodeProcess(hProcess, lpExitCode) -> BOOL. We create no child processes
+ * (CreateProcess is a sound failure), so any handle a program holds is the
+ * current-process pseudo-handle — report STILL_ACTIVE (259), exactly as a running
+ * process does (matches Wine for GetCurrentProcess). */
+uint32_t aret_GetExitCodeProcess(uint32_t esp) {
+    uint32_t *code = (uint32_t *)WP(1);
+    if (code) *code = 259u; /* STILL_ACTIVE */
+    return 1;
+}
+
+/* GetDiskFreeSpaceA(lpRootPath, lpSectorsPerCluster, lpBytesPerSector,
+ * lpFreeClusters, lpTotalClusters) -> BOOL. Host `statvfs` with a fixed geometry
+ * (512-byte sectors, 8 sectors/cluster = 4 KiB), free/total clusters from the real
+ * filesystem. A Windows root ("C:\\", NULL) maps to the host cwd. */
+uint32_t aret_GetDiskFreeSpaceA(uint32_t esp) {
+    struct statvfs vfs;
+    if (statvfs(".", &vfs) != 0) { return 0; }
+    uint32_t bps = 512, spc = 8;                 /* 4 KiB cluster */
+    uint64_t cluster = (uint64_t)bps * spc;
+    uint64_t total = ((uint64_t)vfs.f_blocks * (uint64_t)vfs.f_frsize) / cluster;
+    uint64_t avail = ((uint64_t)vfs.f_bavail * (uint64_t)vfs.f_frsize) / cluster;
+    if (total > 0xFFFFFFFFull) total = 0xFFFFFFFFull; /* 32-bit cluster count */
+    if (avail > total) avail = total;
+    uint32_t *p;
+    if ((p = (uint32_t *)WP(1))) *p = spc;
+    if ((p = (uint32_t *)WP(2))) *p = bps;
+    if ((p = (uint32_t *)WP(3))) *p = (uint32_t)avail;
+    if ((p = (uint32_t *)WP(4))) *p = (uint32_t)total;
+    return 1;
+}
 uint32_t aret_GetCurrentThread(uint32_t esp)  { (void)esp; return 0xFFFFFFFEu; }
 /* GetStartupInfoW: a console process with no inherited startup customization —
  * zero the STARTUPINFOW (68 bytes on 32-bit) and set cb; dwFlags stays 0. */

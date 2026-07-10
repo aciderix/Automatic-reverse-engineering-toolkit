@@ -165,7 +165,7 @@ bash bench/regression.sh    # PORTE unifiée : difftest 271/271, in-place 3/3,
                             # recompilabilité gzip/ls/cat 100%
 bash bench/difftest.sh              # décompile O0→O3
 bash bench/difftest_transpile.sh    # transpile (hash 19acad982194bf07)
-bash bench/winediff.sh              # axe 2 vs Wine (55/55)
+bash bench/winediff.sh              # axe 2 vs Wine (56/56)
 bash bench/funcdiff.sh              # lift-closure + opt-diff vs Unicorn (0 div)
 # Sweeps de vrais binaires (téléchargent + comparent à Wine) :
 bash bench/sqlite_sweep.sh   bash bench/busybox_sweep.sh   bash bench/corpus_sweep.sh
@@ -185,7 +185,7 @@ bash bench/wallsweep.sh <dir1> [dir2…]  # AGRÈGE --mode walls sur un corpus :
 
 ### État régression (référence — doit rester vert)
 difftest **271/271** · transpile-diff **4/4** (H=`19acad982194bf07`) · winediff
-**55/55** · cpudiff vert (per-instruction + séquences génératives) · funcdiff corpus **0 divergence** (lift ~12k scorées /
+**56/56** · cpudiff vert (per-instruction + séquences génératives) · funcdiff corpus **0 divergence** (lift ~12k scorées /
 ~6k appels, opt ~10k scorées) · SMT **11/11** · in-place **3/3** · magicdiv **2³²** ·
 recompilabilité **100 %** · WASM **7/7**.
 
@@ -332,6 +332,9 @@ recompilabilité **100 %** · WASM **7/7**.
 - **kernel32 divers (forte largeur corpus Win95)** : `GetVersion` (forme packée, cohérente avec
   GetVersionEx 6.2.9200 NT), `DosDateTimeToFileTime` (FAT→FILETIME, jours civils portables),
   `RtlMoveMemory`=memmove. Gardés par `winecorpus/win32_version_dostime.c`.
+  `GetExitCodeProcess` (STILL_ACTIVE), `GetDiskFreeSpaceA` (statvfs), `SetFileAttributesA/W`
+  (READONLY↔chmod). Gardés par `winecorpus/win32_file_process.c`. **RtlUnwind = froid** (SEH,
+  jamais atteint hors propagation d'exception → abort sound suffit ; tier EH avec la GUI).
 - **USER32 message-only** (sans pixels, portable/WASM) : `RegisterClassW`/`Unregister`,
   `CreateWindowExW`/`DestroyWindow`, `DefWindowProcW`, `Get`/`Peek`/`Dispatch`/`Translate`/
   `Post`/`SendMessageW`, `PostQuitMessage`, `SetTimer`/`KillTimer`, `MsgWaitForMultipleObjectsEx`.
