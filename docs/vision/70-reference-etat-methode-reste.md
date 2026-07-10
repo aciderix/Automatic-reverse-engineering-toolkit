@@ -179,6 +179,8 @@ aret <exe> --mode walls             # CARTE DES MURS statique complète (une pas
        # instructions non liftées (par nb de sites) + imports manquants + appels non résolus.
        # Sans émettre/compiler. La vue d'ensemble : voir TOUS les murs d'un coup au lieu de les
        # subir un par un au runtime. Agrégeable sur un corpus (grep les compteurs) pour dégrossir.
+bash bench/wallsweep.sh <dir1> [dir2…]  # AGRÈGE --mode walls sur un corpus : murs classés par
+       # nb de BINAIRES bloqués (largeur) → prioriser un fix par la donnée. Couplé aux oracles.
 ```
 
 ### État régression (référence — doit rester vert)
