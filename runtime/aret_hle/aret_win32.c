@@ -154,6 +154,69 @@ uint32_t aret_SetEnvironmentVariableA(uint32_t esp) {
     if (!name) return 0;
     return (uint32_t)(val ? (setenv(name, val, 1) == 0) : (unsetenv(name) == 0));
 }
+/* GetEnvironmentStringsW/A() -> a freshly allocated, double-NUL-terminated block
+ * of "VAR=VALUE\0" strings built from the host environment (wide for W, bytes for
+ * A). Programs that read the whole environment (PuTTY/plink at startup) walk this
+ * block; the old stub returned NULL and the caller dereferenced it -> segfault.
+ * Freed by FreeEnvironmentStrings{W,A}. */
+extern char **environ;
+uint32_t aret_GetEnvironmentStringsW(uint32_t esp) {
+    (void)esp;
+    size_t n = 1; /* the block's trailing NUL */
+    for (char **e = environ; e && *e; e++) n += strlen(*e) + 1;
+    uint16_t *block = (uint16_t *)malloc(n * sizeof(uint16_t));
+    if (!block) return 0;
+    uint16_t *p = block;
+    for (char **e = environ; e && *e; e++) {
+        for (const char *s = *e; *s; s++) *p++ = (uint16_t)(unsigned char)*s;
+        *p++ = 0;
+    }
+    *p = 0; /* block terminator (empty string) */
+    return (uint32_t)(uintptr_t)block;
+}
+uint32_t aret_GetEnvironmentStringsA(uint32_t esp) {
+    (void)esp;
+    size_t n = 1;
+    for (char **e = environ; e && *e; e++) n += strlen(*e) + 1;
+    char *block = (char *)malloc(n);
+    if (!block) return 0;
+    char *p = block;
+    for (char **e = environ; e && *e; e++) {
+        size_t l = strlen(*e) + 1;
+        memcpy(p, *e, l);
+        p += l;
+    }
+    *p = 0;
+    return (uint32_t)(uintptr_t)block;
+}
+/* GetEnvironmentStrings (no suffix) is the ANSI entry on Win32. */
+uint32_t aret_GetEnvironmentStrings(uint32_t esp) { return aret_GetEnvironmentStringsA(esp); }
+uint32_t aret_FreeEnvironmentStringsW(uint32_t esp) { free(WP(0)); return 1; }
+uint32_t aret_FreeEnvironmentStringsA(uint32_t esp) { free(WP(0)); return 1; }
+
+/* ---- Registry: a sound, EMPTY, read-only hive ----------------------------
+ * We do not emulate the Windows registry. Rather than lie that a key opened (the
+ * old stub returned ERROR_SUCCESS with an uninitialised HKEY, which callers then
+ * query/close), model an empty read-only hive: opens and value queries report
+ * "not found", key enumeration is empty, and writes fail honestly instead of
+ * silently dropping data. A program probing the registry for optional config
+ * (PuTTY/plink at startup: jump-list, saved sessions) takes its default path; one
+ * that truly needs a value fails loud, never silently wrong. LSTATUS codes:
+ * SUCCESS=0, FILE_NOT_FOUND=2, ACCESS_DENIED=5, NO_MORE_ITEMS=259. */
+uint32_t aret_RegOpenKeyExA(uint32_t esp) {
+    uint32_t *phk = (uint32_t *)WP(4); /* phkResult */
+    if (phk) *phk = 0;
+    return 2; /* ERROR_FILE_NOT_FOUND — no such key */
+}
+uint32_t aret_RegCreateKeyExA(uint32_t esp) {
+    uint32_t *phk = (uint32_t *)WP(7); /* phkResult (8th arg) */
+    if (phk) *phk = 0;
+    return 5; /* ERROR_ACCESS_DENIED — read-only hive, cannot create */
+}
+uint32_t aret_RegQueryValueExA(uint32_t esp) { (void)esp; return 2; }   /* not found */
+uint32_t aret_RegSetValueExA(uint32_t esp) { (void)esp; return 5; }     /* denied */
+uint32_t aret_RegEnumKeyA(uint32_t esp) { (void)esp; return 259; }      /* no more items */
+uint32_t aret_RegCloseKey(uint32_t esp) { (void)esp; return 0; }        /* always OK */
 /* ExpandEnvironmentStringsA(src, dst, size): substitute %NAME% with getenv(NAME),
  * copy literals through. Returns the length written including the NUL (or the
  * required size if dst is too small / NULL), matching the Win32 contract. */

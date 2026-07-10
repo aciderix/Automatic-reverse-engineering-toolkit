@@ -747,13 +747,24 @@ fn global_decode(
                                 continue; // NULL gap slot — not an entry
                             }
                             let trusted = in_table && counts[&v] < 3;
+                            // A value repeating >= 3x in the run is normally a
+                            // switch-case default (interior code) → needs the
+                            // prologue gate. But a *bare-`ret` stub* is never a
+                            // case body (a case does work then breaks): it is a
+                            // no-op default method installed into many vtable
+                            // slots (PuTTY's null handlers), a genuine trivial
+                            // function. Accept it inside a confirmed table (>= 3
+                            // code pointers) whatever its repeat count.
+                            let bare_stub_in_table = in_table && is_bare_ret_stub(prog, v);
                             if !global.contains_key(&v)
-                                && (trusted || looks_like_func_start(prog, v, false))
+                                && (trusted
+                                    || bare_stub_in_table
+                                    || looks_like_func_start(prog, v, false))
                             {
                                 cands.insert(v);
-                            } else if trusted
-                                && global.contains_key(&v)
-                                && looks_like_func_start(prog, v, false)
+                            } else if global.contains_key(&v)
+                                && ((trusted && looks_like_func_start(prog, v, false))
+                                    || bare_stub_in_table)
                             {
                                 // Already decoded, but a confirmed function-pointer
                                 // table (>= 3 consecutive code pointers) says `v` is a
@@ -762,9 +773,11 @@ fn global_decode(
                                 // *noreturn* call (e.g. `*_and_die`/exit), so `v` is
                                 // not yet an entry and the indirect call to it aborts.
                                 // Force it as an entry to split at the true boundary;
-                                // `looks_like_func_start` excludes interior jump-table
-                                // case bodies, and jump-table targets are filtered on
-                                // commit below.
+                                // `looks_like_func_start` (or the bare-`ret` stub check
+                                // — a table entry that is a bare `ret` is unambiguously a
+                                // callable no-op method, never an interior return of a
+                                // larger function) excludes interior jump-table case
+                                // bodies, and jump-table targets are filtered on commit.
                                 forced.insert(v);
                             }
                         }
@@ -954,7 +967,20 @@ fn global_decode(
     // symbol/call target is never a case target.)
     let jt_targets: BTreeSet<u64> =
         jump_tables.values().flat_map(|v| v.iter().copied()).collect();
-    entries.retain(|e| !jt_targets.contains(e));
+    // A *directly-called* address is unambiguously a function, even when the same
+    // address also appears as a jump-table default case — a bare `ret` shared
+    // between a switch's default and a callable no-op stub (PuTTY installs one
+    // null handler as both). Exempt direct-call targets from the jump-table-target
+    // pruning, else such a function is dropped and its direct call (and any
+    // indirect dispatch through a vtable slot holding it) aborts on unrecovered
+    // code. A genuine bogus case-body seed is interior code, never directly
+    // called, so it is still pruned.
+    let call_targets: BTreeSet<u64> = global
+        .values()
+        .filter(|i| i.flow == Flow::Call)
+        .filter_map(|i| i.target)
+        .collect();
+    entries.retain(|e| !jt_targets.contains(e) || call_targets.contains(e));
     prologue_only.retain(|e| !jt_targets.contains(e));
 
     (global, entries, jump_tables, prologue_only)

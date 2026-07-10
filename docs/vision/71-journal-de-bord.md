@@ -589,4 +589,31 @@ Détail : **70 §6** (roadmap). Résumé :
   bornée, non prioritaire) + 3 stubs `ret`/`xor eax,eax;ret` appelés directement mais non récupérés
   (appelants non atteints par la descente ; hors chemin `-V`). Binaire externe hors corpus → borné, pas chassé.
 
+### 2026-07-09 — [RECOV][HLE-WIN32] plink : env-block + registre vide + exemption jt des cibles d'appel direct
+- **Cible** : plink (PuTTY, clang, téléchargé `tartarus.org`). `-V` **segfaultait**. Fix par 3 causes
+  **générales** distinctes, chacune vérifiée sans régression.
+- **(1) `GetEnvironmentStringsW/A`** (`aret_win32.c`) : le stub retournait NULL → plink déréférençait le bloc
+  d'environnement NULL → SIGSEGV. Fix : construire un vrai bloc `VAR=VALUE\0…\0\0` (wide/ansi) depuis
+  `environ` hôte + `FreeEnvironmentStrings{W,A}`. Général (tout programme lisant l'environnement complet).
+- **(2) Registre vide sound** (`aret_win32.c`) : `RegOpenKeyExA`/`RegCreateKeyExA`/`RegQueryValueExA`/
+  `RegSetValueExA`/`RegEnumKeyA`/`RegCloseKey` retournaient 0 (SUCCESS) avec un HKEY garbage = **unsound**
+  (ment). Fix : modéliser un **hive vide read-only** — opens/queries → `ERROR_FILE_NOT_FOUND` (2), enum →
+  `ERROR_NO_MORE_ITEMS` (259), écritures → `ERROR_ACCESS_DENIED` (5, pas de no-op silencieux), close → 0.
+  Le programme prend son chemin « clé absente » (état valide). + `@N` stdcall ajoutés (`stdcall_pops`).
+- **(3) [RECOV] Exemption jt des cibles d'appel direct** (`src/analysis/mod.rs`) : 3 stubs no-op
+  (`ret`/`xor eax,eax;ret`/`mov al,1;ret`) étaient **à la fois** cases-default d'une jump-table **et**
+  fonctions appelées directement + entrées d'une vtable (null-handlers PuTTY). Le pruning
+  `entries.retain(|e| !jt_targets.contains(e))` les retirait → `call`/dispatch indirect abortait sur code
+  non récupéré. Cause : une adresse **directement appelée est sans ambiguïté une fonction**, même si son
+  adresse sert aussi de case-default. Fix : exempter les **cibles d'appel direct** (`call_targets` collecté
+  du global) du pruning jt (`!jt_targets.contains(e) || call_targets.contains(e)`) ; + accepter un stub
+  `ret` nu comme entrée d'une table de pointeurs confirmée (`bare_stub_in_table`, force-resplit). **0
+  unresolved direct call** (était 3).
+- **Vérifié** : difftest 271/271, transpile-diff hash `19acad982194bf07` inchangé, funcdiff 0 divergence,
+  winediff 49/49, busybox sweep 60/60, gauntlet 19/21 (aucune régression). plink : recovery **complète** +
+  imports gérés ; ne segfault plus sur l'env.
+- **Reste plink** : segfault résiduel dans le chargement de **config** (`sub_4845d0` compare "SerialLine"
+  vs NULL) — plink dépasse la détection de `-V` et entre dans le démarrage complet (Wine imprime la version
+  et sort). Divergence de flot / miscompile en amont dans le parsing d'arguments — forensics à part.
+
 <!-- NOUVELLES ENTRÉES ICI (garder l'ordre chronologique, plus récent en bas) -->
