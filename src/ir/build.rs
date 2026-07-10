@@ -161,73 +161,45 @@ fn is_stack_alloc_helper(prog: &Program, disasm: &Disassembler, entry: u64) -> b
     false
 }
 
-/// Recognise the GCC/mingw stack-probe helper `___chkstk_ms`. Unlike the MSVC
-/// `_chkstk`/`_alloca_probe` family (which lowers `esp` itself and is detected by
-/// `xchg esp, eax`), `___chkstk_ms` only *touches* (probes) the guard pages of a
-/// pending allocation and leaves `esp` UNCHANGED — the caller does its own
-/// `sub esp, eax` afterwards. Its prologue saves the two registers it uses and
-/// restores them on exit:
-/// ```text
-///   push ecx ; push eax ; cmp eax, 0x1000 ; lea ecx, [esp+0xc] ; ...
-///   ...      ; pop eax ; pop ecx ; ret
-/// ```
-/// So it preserves EVERY general register (eax and ecx explicitly, the rest
-/// untouched) and only clobbers flags. ARET's default call model, however, treats
-/// a call as clobbering the caller-saved `eax`/`ecx`/`edx`. mingw routinely emits
-/// `mov ecx, len ; call ___chkstk_ms ; sub esp, eax ; rep stos` (a large/dynamic
-/// `alloca` immediately `memset` to zero): pessimistically clobbering `ecx` drops
-/// the `memset` length to undef, so the buffer (e.g. a `getopt32` long-options
-/// array) is never zeroed and its NUL terminator is missing. We therefore model a
-/// call to this helper as a **no-op** — `esp` is unchanged, all GP registers are
-/// preserved, and the flat native stack needs no page probing — letting the size
-/// in `eax`/`ecx` survive to the following `sub esp, eax` / `rep stos`.
+/// Recognise the GCC/mingw stack-probe helper `___chkstk_ms` from its four-insn
+/// prologue (`push ecx; push eax; cmp eax, 0x1000; lea ecx, [esp+…]`), which
+/// normal code never begins with. Unlike the MSVC `_chkstk`/`_alloca_probe`
+/// family (which lowers `esp` itself, detected by `xchg esp, eax`), it only
+/// *probes* the guard pages and leaves `esp` and EVERY GP register intact — it
+/// saves/restores the only two it uses (`push ecx/eax … pop eax/ecx; ret`).
 ///
-/// Detected by the unmistakable four-instruction prologue (`push ecx; push eax;
-/// cmp eax, 0x1000; lea ecx, [esp+…]`), which normal code never begins with.
-fn is_chkstk_probe(prog: &Program, disasm: &Disassembler, entry: u64) -> bool {
+/// `compute_call_clobbers`' write-scan sees the `push`/`pop`/`lea`/`sub` touching
+/// ecx and would mark it clobbered, so a caller-saved value staged in ecx before
+/// the probe is dropped — mingw emits `mov ecx, len; call ___chkstk_ms; sub esp,
+/// eax; rep stos` (a dynamic `alloca` immediately `memset` to zero), and losing
+/// ecx leaves the buffer un-zeroed (a `getopt32` long-options array whose NUL
+/// terminator then goes missing → BusyBox `sed -n`). Reporting it as
+/// register-preserving keeps the value live *without* skipping the call (the
+/// probe itself is a faithful, harmless leaf on the flat native stack, so the
+/// per-instruction oracle still matches Unicorn — unlike modelling it as a no-op,
+/// which would drop the call's transient stack writes).
+fn is_chkstk_probe_fn(f: &Function) -> bool {
     use iced_x86::{Mnemonic, OpKind, Register};
-    let mut addr = entry;
-    let mut want: u8 = 0;
-    for _ in 0..4 {
-        let Some(insn) = disasm.decode_at(prog, addr) else { return false };
-        let r = &insn.raw;
-        match want {
-            0 => {
-                if r.mnemonic() != Mnemonic::Push || r.op0_register() != Register::ECX {
-                    return false;
-                }
-            }
-            1 => {
-                if r.mnemonic() != Mnemonic::Push || r.op0_register() != Register::EAX {
-                    return false;
-                }
-            }
-            2 => {
-                let imm_op = matches!(
-                    r.op1_kind(),
-                    OpKind::Immediate32 | OpKind::Immediate8to32 | OpKind::Immediate16
-                );
-                if r.mnemonic() != Mnemonic::Cmp
-                    || r.op0_register() != Register::EAX
-                    || !imm_op
-                    || r.immediate(1) != 0x1000
-                {
-                    return false;
-                }
-            }
-            _ => {
-                return r.mnemonic() == Mnemonic::Lea
-                    && r.op0_register() == Register::ECX
-                    && r.memory_base() == Register::ESP;
-            }
-        }
-        want += 1;
-        if insn.flow != Flow::Fallthrough {
-            return false;
-        }
-        addr = insn.next_addr();
+    let Some(b) = f.blocks.get(&f.entry) else { return false };
+    let i = &b.insns;
+    if i.len() < 4 {
+        return false;
     }
-    false
+    let (r0, r1, r2, r3) = (&i[0].raw, &i[1].raw, &i[2].raw, &i[3].raw);
+    r0.mnemonic() == Mnemonic::Push
+        && r0.op0_register() == Register::ECX
+        && r1.mnemonic() == Mnemonic::Push
+        && r1.op0_register() == Register::EAX
+        && r2.mnemonic() == Mnemonic::Cmp
+        && r2.op0_register() == Register::EAX
+        && matches!(
+            r2.op1_kind(),
+            OpKind::Immediate32 | OpKind::Immediate8to32 | OpKind::Immediate16
+        )
+        && r2.immediate(1) == 0x1000
+        && r3.mnemonic() == Mnemonic::Lea
+        && r3.op0_register() == Register::ECX
+        && r3.memory_base() == Register::ESP
 }
 
 /// Lift a recovered function into an SSA-ready IR CFG (pre-SSA: `Set`/`Read`).
@@ -311,15 +283,6 @@ pub fn build_ir(prog: &Program, func: &Function) -> IrFunction {
             if inline_frame_helpers && insn.flow == Flow::Call {
                 if let Some(target) = insn.target {
                     if prog.is_executable(target) {
-                        // mingw `___chkstk_ms`: probes guard pages only, leaves
-                        // `esp` and every GP register intact (the caller does its
-                        // own `sub esp, eax`). Model as a no-op so the size the
-                        // caller staged in `eax`/`ecx` survives to the following
-                        // `sub esp, eax` / `rep stos` (a default call would clobber
-                        // caller-saved `ecx` → undef `memset` length).
-                        if is_chkstk_probe(prog, &disasm, target) {
-                            continue;
-                        }
                         // `_chkstk`/`_alloca_probe`: the call allocates `eax` bytes
                         // on the stack (esp -= eax) and returns the buffer at the
                         // new esp. Model just the net esp adjustment.
@@ -876,6 +839,13 @@ pub fn compute_call_clobbers(funcs: &[&Function]) -> HashMap<u64, u8> {
     // Per function: (regs it writes directly, opaque?, direct internal callees).
     let mut local: HashMap<u64, (u8, bool, Vec<u64>)> = HashMap::new();
     for f in funcs {
+        // `___chkstk_ms` writes ecx/eax in its body but saves/restores them, so it
+        // preserves every GP register. Report an empty clobber set (the write-scan
+        // below would otherwise mark ecx clobbered and drop a caller's live value).
+        if is_chkstk_probe_fn(f) {
+            local.insert(f.entry, (0, false, Vec::new()));
+            continue;
+        }
         let mut mask = 0u8;
         let mut opaque = false;
         let mut callees = Vec::new();

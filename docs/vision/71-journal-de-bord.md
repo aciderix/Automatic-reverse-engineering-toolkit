@@ -131,13 +131,16 @@ Deux mécanismes complémentaires :
   **`call reg`** d'un import stdcall → pop `@N` (`stdcall_pop_for_regcall`).
 - **Frame helpers MSVC** : `_EH_prolog` **inliné** au site d'appel (détecté par `lea
   ebp,[esp+K]` K>0) ; `_chkstk`/`_alloca` = `esp -= eax` (détecté `xchg esp,eax`).
-- **`___chkstk_ms` (GCC/mingw) = no-op** (`is_chkstk_probe`, prologue `push ecx;push eax;cmp
-  eax,0x1000;lea ecx,[esp+…]`) : sonde de guard-pages **pure** (save/restore ecx+eax, esp inchangé, le
-  caller fait son propre `sub esp,eax`) → **préserve tous les registres GP**. Sans ça, le modèle de clobber
-  d'appel (ecx caller-saved) perdait la longueur d'un `memset` posée en ecx avant l'appel (idiome
-  `mov ecx,len;call ___chkstk_ms;sub esp,eax;rep stos` = alloca+memset) → tableau non zéroé, terminateur
-  manquant (getopt32 long-options busybox → `sed -n` cassé). edx échappait au bug (préservé par le split
-  edx:eax du retour). Distinct de la variante MSVC `xchg esp,eax`.
+- **`___chkstk_ms` (GCC/mingw) = préserve tous les registres** (`is_chkstk_probe_fn`, prologue
+  `push ecx;push eax;cmp eax,0x1000;lea ecx,[esp+…]`) : sonde de guard-pages pure (save/restore ecx+eax,
+  esp inchangé, le caller fait son propre `sub esp,eax`). Le write-scan de `compute_call_clobbers` voyait
+  les `push/pop/lea/sub` toucher ecx → marquait ecx clobbé → perdait la longueur d'un `memset` posée en ecx
+  avant l'appel (idiome `mov ecx,len;call ___chkstk_ms;sub esp,eax;rep stos` = alloca+memset) → tableau non
+  zéroé, terminateur manquant (getopt32 long-options busybox → `sed -n` cassé). Fix : **mask de clobber
+  vide** (préserve tout) — l'appel est **lifté/appelé normalement** (la sonde est un leaf fidèle inoffensif,
+  donc cpudiff matche Unicorn). ⚠️ **NE PAS** le modéliser en no-op : ça supprimait les écritures pile
+  transitoires du `call` → **régression cpudiff** (`fn 0x4014e0 stack +0x7ff4`), corrigée par cette approche.
+  Distinct de la variante MSVC `xchg esp,eax`. edx échappait au bug (préservé par le split edx:eax).
 - **self tail-call** : `jmp func.entry` = tail-call frais (pas boucle) → passe les
   reg-args à jour (whereSplit sqlite).
 - **auto-main** : sas CRT + `main` distinct ⇒ démarre au main (frame cdecl
@@ -615,5 +618,26 @@ Détail : **70 §6** (roadmap). Résumé :
 - **Reste plink** : segfault résiduel dans le chargement de **config** (`sub_4845d0` compare "SerialLine"
   vs NULL) — plink dépasse la détection de `-V` et entre dans le démarrage complet (Wine imprime la version
   et sort). Divergence de flot / miscompile en amont dans le parsing d'arguments — forensics à part.
+
+### 2026-07-09 — [LIFT][ABI] `push [esp+d]` (esp pré-décrément) + chkstk clobber-mask (fix régression cpudiff)
+- **(1) [LIFT] `push [esp+d]`** (`src/ir/lift.rs`) : le lift de `push` émettait `Set{esp=esp-4}` **avant**
+  le `Store{[esp]=v}`, et `v` (=`[esp+d]`, contenant `Read(esp)`) se résolvait en SSA à la position du Store
+  → **esp post-décrément** → source lue à `[esp-4+d]` au lieu de `[esp+d]` (**décalé de 4**). Tout
+  `push [esp+d]` (idiome clang/MSVC très courant de forward d'un arg pile) poussait la mauvaise valeur.
+  Trouvé sur plink : `sub_431310` faisait `push [esp+8]` (forward de son arg1) → NULL au lieu du pointeur →
+  `strcmp(NULL,"SerialLine")` → segfault dans le chargement de config. Fix : quand la source référence esp,
+  la capturer dans un **temp avant** le décrément (`t=[esp+d]; esp-=4; [esp]=t`). Autres pushs (reg/imm/mem
+  non-esp) inchangés (hash préservé).
+- **(2) [ABI] chkstk clobber-mask remplace le no-op** (`src/ir/build.rs`) : le fix `___chkstk_ms` du
+  2026-07-09 le modélisait en **no-op** — ce qui **supprimait les écritures pile transitoires** du `call`
+  (retaddr/regs sauvés dans la région de frame). cpudiff (comparaison pile complète, dont sous-esp) →
+  **régression `fn 0x4014e0 stack +0x7ff4: lifted=0x0 unicorn=0x10`** (introduite par 1dffe90, non détectée
+  car cpudiff pas lancé après). Fix : **ne pas no-op** ; à la place `is_chkstk_probe_fn` → `compute_call_
+  clobbers` reporte un **mask vide** (chkstk préserve tout via save/restore) → ecx survit **sans** sauter le
+  call → la sonde est liftée/exécutée fidèlement → cpudiff matche Unicorn.
+- **Vérifié** : cpudiff **PASS** (régression résolue), difftest 271/271, transpile-diff hash
+  `19acad982194bf07` inchangé, funcdiff 0 divergence, winediff 49/49, busybox sweep 60/60
+  (**`sed -n` toujours OK**), gauntlet 19/21. plink : le segfault "SerialLine" est **résolu** (push fix) ;
+  plink progresse dans son démarrage (crash résiduel plus loin, `sub_47fe86`, à suivre).
 
 <!-- NOUVELLES ENTRÉES ICI (garder l'ordre chronologique, plus récent en bas) -->

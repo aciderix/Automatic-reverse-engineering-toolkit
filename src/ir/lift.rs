@@ -2131,14 +2131,37 @@ pub fn lift(insn: &Insn, bits: u32) -> Vec<Stmt> {
             let ptr = (bits / 8) as i128;
             let sp = Location::Reg(RegId(4)); // rsp/esp family
             let new_sp = bin(BinOp::Sub, Expr::Read(sp.clone()), konst(ptr));
-            vec![
-                Stmt::Set { dst: sp.clone(), expr: new_sp },
-                Stmt::Store {
-                    addr: Expr::Read(sp),
-                    value: v,
-                    ty: Ty::int(bits as u8),
-                },
-            ]
+            // A `push [esp+d]` source must be read with the *pre*-decrement esp:
+            // x86 evaluates the memory operand, then lowers esp, then stores.
+            // Emitting the source expr directly into the `Store` (which follows
+            // `esp -= slot`) would resolve its `Read(esp)` to the decremented
+            // value — off by the slot size (`push [esp+8]` reads `[esp+4]`). When
+            // the source is esp-relative, snapshot it into a temp first. Other
+            // pushes (reg/imm/non-esp mem) keep the two-statement form unchanged.
+            let sp_reg = if bits == 64 { Register::RSP } else { Register::ESP };
+            let src_uses_sp = ins.op0_kind() == OpKind::Memory
+                && (ins.memory_base() == sp_reg || ins.memory_index() == sp_reg);
+            if src_uses_sp {
+                let t = Location::Temp((insn.address as u32).wrapping_mul(2));
+                vec![
+                    Stmt::Set { dst: t.clone(), expr: v },
+                    Stmt::Set { dst: sp.clone(), expr: new_sp },
+                    Stmt::Store {
+                        addr: Expr::Read(sp),
+                        value: Expr::Read(t),
+                        ty: Ty::int(bits as u8),
+                    },
+                ]
+            } else {
+                vec![
+                    Stmt::Set { dst: sp.clone(), expr: new_sp },
+                    Stmt::Store {
+                        addr: Expr::Read(sp),
+                        value: v,
+                        ty: Ty::int(bits as u8),
+                    },
+                ]
+            }
         }
         Mnemonic::Pop => {
             let ptr = (bits / 8) as i128;

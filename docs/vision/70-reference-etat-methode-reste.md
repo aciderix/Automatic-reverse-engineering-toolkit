@@ -246,10 +246,14 @@ recompilabilité **100 %** · WASM **7/7**.
 - **stdcall pop sur `call reg`** (import chargé en registre puis appelé).
 - **Helpers ABI MSVC à réécriture de frame** : `_EH_prolog` **inliné** au site
   d'appel ; `_chkstk`/`_alloca` modélisés `esp -= eax` (détectés par `xchg esp,eax`).
-- **`___chkstk_ms` (GCC/mingw) modélisé no-op** : sonde de guard-pages pure qui
-  **préserve tous les registres GP** (save/restore ecx+eax, esp inchangé). Le modèle de clobber d'appel
-  (ecx caller-saved) perdait sinon la longueur d'un `memset` posée en ecx avant l'appel (idiome alloca
-  `mov ecx,len;call ___chkstk_ms;sub esp,eax;rep stos`) → débloqué busybox `sed -n` (getopt32 long-options).
+- **`___chkstk_ms` (GCC/mingw) = registres préservés** (`is_chkstk_probe_fn` → mask de clobber vide dans
+  `compute_call_clobbers`) : sonde de guard-pages pure (save/restore ecx+eax, esp inchangé). Le write-scan
+  marquait sinon ecx clobbé (push/pop), perdant la longueur d'un `memset` posée en ecx (idiome alloca
+  `mov ecx,len;call ___chkstk_ms;sub esp,eax;rep stos`) → débloqué busybox `sed -n`. ⚠️ **pas** un no-op
+  (supprimerait les écritures pile transitoires du call → régression cpudiff).
+- **`push [esp+d]` — source pré-décrément** : le lift capture la source esp-relative dans un temp **avant**
+  `esp-=4` (sinon `Read(esp)` se résout post-décrément → source décalée de 4). Débloqué plink (forward d'arg
+  pile `sub_431310` → segfault config résolu).
 - **self tail-call** (`jmp func.entry`) = tail-call frais (pas une boucle) → passe
   correctement les registres-args mis à jour (whereSplit sqlite).
 - **auto-main** : si l'entrée PE est un sas CRT et qu'un `main`/`_main` distinct
