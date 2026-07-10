@@ -165,7 +165,7 @@ bash bench/regression.sh    # PORTE unifiée : difftest 271/271, in-place 3/3,
                             # recompilabilité gzip/ls/cat 100%
 bash bench/difftest.sh              # décompile O0→O3
 bash bench/difftest_transpile.sh    # transpile (hash 19acad982194bf07)
-bash bench/winediff.sh              # axe 2 vs Wine (49/49)
+bash bench/winediff.sh              # axe 2 vs Wine (50/50)
 bash bench/funcdiff.sh              # lift-closure + opt-diff vs Unicorn (0 div)
 # Sweeps de vrais binaires (téléchargent + comparent à Wine) :
 bash bench/sqlite_sweep.sh   bash bench/busybox_sweep.sh   bash bench/corpus_sweep.sh
@@ -179,7 +179,7 @@ aret <exe> --mode imports           # couverture statique d'imports (axe 2 a-pri
 
 ### État régression (référence — doit rester vert)
 difftest **271/271** · transpile-diff **4/4** (H=`19acad982194bf07`) · winediff
-**49/49** · cpudiff vert · funcdiff corpus **0 divergence** (lift ~12k scorées /
+**50/50** · cpudiff vert (per-instruction + séquences génératives) · funcdiff corpus **0 divergence** (lift ~12k scorées /
 ~6k appels, opt ~10k scorées) · SMT **11/11** · in-place **3/3** · magicdiv **2³²** ·
 recompilabilité **100 %** · WASM **7/7**.
 
@@ -231,7 +231,10 @@ recompilabilité **100 %** · WASM **7/7**.
   **bail**, les ops FPU s'exécutent contre une **pile FPU runtime** (correcte par
   construction, bornée → `__builtin_trap` sur under/overflow). Gaté transpile-only,
   purement additif. Couvre load/store/const/arith/fxch/fabs/fchs/fsqrt/frndint/
-  fldcw + **compare `fcom/fucom st(i)`** (fix récent : lire `op_count()-1`, pas ST0).
+  fldcw + **compare `fcom/fucom st(i)`** (fix récent : lire `op_count()-1`, pas ST0)
+  + **les transcendantales brutes** `fsin/fcos/fptan/fpatan/fyl2x/f2xm1/fscale/fsincos`
+  (`__x87rt_2xm1`/… ) — **8/8 vérifiées bit-identiques à Wine** (2026-07-10, fixture
+  inline-asm `winecorpus/x87_transcendental.c`, non host-backée ⇒ prouve le filet).
 - **Transcendantes = libm host-backed** (pow/sin/cos/exp/log/fmod/atan2… via
   `crt_symbol`/nom/FLIRT) → on branche la vraie libm au lieu de lifter du x87 dense.
   Cause racine du double-`sin` corrigée (helpers effacent **C2**).
@@ -358,22 +361,23 @@ agrégats, jointures, index, CTE, window, IN) :
 sur le build mingw pour re-mesurer la surface (FTS/RTREE non balayés → abort sound
 s'ils butent).
 
-### P2 — Robustesse x87 : réconciliation des joins ambigus (session dédiée)
-La **vraie difficulté récurrente** (Lua `intarith`/`forprep`, busybox `seq`, le
-join libm de `awk` `0x429129`). Quand un bloc est atteint à deux profondeurs de
-pile x87 différentes, la passe **abandonne toute la fonction**. À faire :
-1. **Suivre les valeurs conservées** par `fstp st(i)`/`fxch` dans les idiomes de
-   comparaison NaN (le vrai bug n'est pas un « join » mais une profondeur d'entrée
-   de bloc mal propagée après `fstp st(1)`).
-2. Intégrer le fix **fp-returning auto-récursif** (retry en supposant `f ∈ fp` si
-   le pass bail ; accepter si tous les rets restent à profondeur 1) — **prouvé
-   correct, réutilisable**, mais à ne shipper qu'avec bénéfice mesuré.
-3. Soit **modéliser les transcendantales x87** (`fldl2e`/`f2xm1`/`fscale`/`fyl2x`/
-   `fsin`/`fcos`, précision 80-bit, correctness-sensible), soit — **recommandé,
-   esprit UBT** — **reconnaître + host-backer** les exp/log/pow libm statiques par
-   signature d'idiome x87 (FLIRT ne les voit pas ici).
-Délicat : **une fonction à la fois, difftest + cpudiff + winediff + filet Lua à
-chaque pas.**
+### P2 — Robustesse x87 : joins ambigus + transcendantales ⇒ **QUALITÉ, pas correction** (MESURÉ 2026-07-10)
+**Mesure décisive (règle « vérifier si le filet runtime est actif AVANT de conclure ») :**
+tous les chemins x87 qui *bail* statiquement sont **corrects via le filet runtime**,
+**bit-identiques à Wine**. Vérifié end-to-end :
+- **Joins ambigus** (`awk` `0x428500`/`0x429c14`, bail `ambiguous join depth 1 vs 0`) :
+  `busybox awk` exp/log/sqrt/^/sin/cos/atan2/`exp(log 5)`/`3^3`/`10^-2` = **tous OK vs Wine**.
+- **Transcendantales** (bail `unmodelled x87 op` = `fsin`/`fcos`/`fptan`/`fpatan`/`fyl2x`/
+  `f2xm1`/`fscale`/`fsincos`) : fixture inline-asm brute (non host-backée) → filet
+  `__x87rt_*` → **8/8 bit-identiques à Wine**. Gardé par `winecorpus/x87_transcendental.c`.
+⇒ **Il n'y a PAS de feu x87 correctness.** P2 est un gain de **qualité** (lifter
+statiquement au lieu du filet = C plus propre/rapide), **pas** de justesse. Or notre
+étoile est la soundness, pas la vitesse ⇒ **P2 déprioritisé** (risque sans récompense
+correctness-critique = à ne shipper qu'avec bénéfice mesuré, cf. règle §2). Reste
+documenté pour plus tard ; *ne pas* y consacrer une session de forensics sans un binaire
+qui **échoue réellement** (le filet couvre tout le testé). Pistes si un jour un op sort
+du filet : suivre les valeurs conservées `fstp st(i)`/`fxch` ; fp-returning auto-récursif
+(prouvé) ; host-back par signature d'idiome. Délicat (une fn à la fois, toutes portes).
 
 ### P3 — Récupération points-to (Phase 4 vtables / dispatch calculé)
 - **NASM `-f obj` (OMF) ✅ RÉSOLU (2026-07-09)** : le stub `ret` nu (méthode no-op d'un

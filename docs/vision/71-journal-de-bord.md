@@ -301,7 +301,7 @@ Deux mécanismes complémentaires :
   CFG). memcpy/rep-stos modélisés ; adresses masquées 32-bit. **`0 divergence`
   ≠ pas de bug** : dit *où il n'est pas* (bugs profonds derrière imports/skips).
 - **Portes** : difftest (décompile O0→O3, **271/271**), transpile-diff (produit, **4/4**,
-  hash **`19acad982194bf07`**), winediff (Wine, **49/49**), sweeps (sqlite/busybox/
+  hash **`19acad982194bf07`**), winediff (Wine, **50/50**), sweeps (sqlite/busybox/
   gauntlet), SMT (Z3, 11/11), magicdiv (2³²), in-place (3/3), recompilabilité (100%).
 - **`--mode imports`** : couverture d'imports **statique a-priori** (borne supérieure
   du trou runtime). Prioriser par la donnée, **filtrer par fidélité**.
@@ -750,5 +750,28 @@ Détail : **70 §6** (roadmap). Résumé :
 - **Portée** : round **cpudiff-only** (aucun code produit touché → hash transpile, difftest, funcdiff, winediff,
   sweeps inchangés par construction). Vérifié : `sequence_random_matches_unicorn` 0 div, per-instruction 0 div,
   `sequence_corpus` 0 div.
+
+### 2026-07-10 — [X87][ORACLE] P2 MESURÉ : joins ambigus + transcendantales = filet SOUND, pas un feu correctness
+- **Contexte** : « Poursuit » sur P2 (joins x87 ambigus, « la vraie difficulté récurrente »). Règle applicable :
+  **« Mesurer, ne pas affirmer »** + **« Vérifier si le filet runtime est actif AVANT de conclure à un
+  abandon x87 »**. Donc 1ᵉʳ pas = diagnostic, pas du code.
+- **Mesure 1 — joins ambigus** : `ARET_X87_DEBUG=1` sur busybox montre le bail `ambiguous join depth (1 vs 0)`
+  à `fn 0x428500 @0x429129` (= le join libm awk du doc) et `0x429c14`. **Mais** `busybox awk` exp/log/sqrt/
+  `2^0.5`/sin/cos/atan2/`exp(log 5)`/`3^3`/`10^-2`/`log(exp 3)` = **tous bit-identiques à Wine**. Le bail tombe
+  au filet `__x87rt_*`, correct. ⇒ **quality gap, pas correctness.**
+- **Mesure 2 — « unmodelled x87 op »** (bail DOMINANT, plus fréquent que les joins) : `objdump` aux sites →
+  ce sont les **transcendantales brutes** `fsin`/`fcos`/`fpatan`/`fldln2`/`fyl2x`. Fixture inline-asm minimale
+  par op (`fldl;fsin;fstpl` etc., **non host-backable** car asm brut) : ARET rend **8/8 bit-identiques à Wine**
+  (`fsin`/`fcos`/`fptan`/`fpatan`/`fyl2x`/`f2xm1`/`fscale`/`fsincos`). `ARET_X87_DEBUG` + grep du C émis
+  confirment le chemin filet (`main` bail `unmodelled x87 op` → `__x87rt_2xm1()` dans `chunk_0.c`).
+- **Conclusion (evidence-backed)** : **tout le x87 qui bail statiquement est correct via le filet runtime.**
+  Il n'y a **pas** de feu x87 correctness. P2 (lifter statiquement au lieu du filet) est un gain de **qualité**
+  (C plus propre/rapide), pas de justesse. Notre étoile = soundness, pas vitesse ⇒ **P2 déprioritisé** ; pas de
+  session forensics sans un binaire qui échoue *réellement* (règle « pas de changement sans bénéfice mesuré en
+  zone correctness-critique »).
+- **Fait durable** : ajouté `bench/winecorpus/x87_transcendental.c` — le filet transcendantal n'était **gardé par
+  aucun test** (les fixtures `mathfns.c`/`math_more.c` appellent la libm par nom = host-backée, ne touchent pas
+  le lifter). Cette fixture force les instructions x87 brutes ⇒ garde le chemin `__x87rt_*` vs Wine. **winediff
+  49/49 → 50/50.** Aucun code produit touché (fixture + docs) → hash transpile inchangé.
 
 <!-- NOUVELLES ENTRÉES ICI (garder l'ordre chronologique, plus récent en bas) -->
