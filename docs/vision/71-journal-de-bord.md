@@ -301,7 +301,7 @@ Deux mécanismes complémentaires :
   CFG). memcpy/rep-stos modélisés ; adresses masquées 32-bit. **`0 divergence`
   ≠ pas de bug** : dit *où il n'est pas* (bugs profonds derrière imports/skips).
 - **Portes** : difftest (décompile O0→O3, **271/271**), transpile-diff (produit, **4/4**,
-  hash **`19acad982194bf07`**), winediff (Wine, **52/52**), sweeps (sqlite/busybox/
+  hash **`19acad982194bf07`**), winediff (Wine, **53/53**), sweeps (sqlite/busybox/
   gauntlet), SMT (Z3, 11/11), magicdiv (2³²), in-place (3/3), recompilabilité (100%).
 - **`--mode imports`** : couverture d'imports **statique a-priori** (borne supérieure
   du trou runtime). Prioriser par la donnée, **filtrer par fidélité**.
@@ -887,5 +887,21 @@ Détail : **70 §6** (roadmap). Résumé :
   binaires perdent ce mur. La boucle mesure→fix→re-mesure **confirmée** : le mur ciblé s'efface de la carte.
 - **Vérifié** : hash transpile **inchangé** `19acad982194bf07` (les fixtures n'utilisent pas rep cmps),
   difftest 271/271, winediff **52/52** (nouvelle fixture), cpudiff inchangé.
+
+### 2026-07-10 — [HLE-WIN32] Grappe de shims à forte largeur (GetVersion/DosDateTimeToFileTime/RtlMoveMemory)
+- **Contexte** : suite du dégrossissement corpus — 3 imports manquants à **forte largeur** sur les 41 Win95 :
+  `GetVersion` **38/41**, `DosDateTimeToFileTime` 28, `RtlMoveMemory` 20. Petits, sound, transverses.
+- **Fait** (`aret_win32.c`) : (1) **`GetVersion`** = forme packée héritée **cohérente avec `GetVersionEx`**
+  (6.2.9200 NT) : `6|2<<8|9200<<16` = 0x23F00206 (LOBYTE major, HIBYTE minor, HIWORD build, bit31=0 NT) ;
+  (2) **`RtlMoveMemory`** = `memmove` (overlap-safe) ; (3) **`DosDateTimeToFileTime`** = date/heure FAT packée →
+  FILETIME (100ns depuis 1601), calcul **jours civils portable** (algo Hinnant, pas de `timegm` → marche aussi
+  wasi), sans décalage TZ (canonique = Wine). +3 entrées `stdcall_pops` triées (GetVersion = 0 arg).
+- **Oracle** : `winecorpus/win32_version_dostime.c`. `GetVersion` : valeur = version OS **définie par
+  l'environnement** (non comparable en brut) → on teste l'**invariant stable** (packé cohérent avec
+  GetVersionEx + NT + major plausible), vrai sous Wine comme Windows réel. `DosDateTimeToFileTime` : conversion
+  **déterministe** → FILETIME exact `01c7661ae6295600` (bit-identique Wine). `RtlMoveMemory` : import explicite
+  (windows.h le macro-expanse sinon en memmove) + move chevauchant. **Bit-identique à Wine.**
+- **Effet mesuré (re-sweep)** : les 3 imports **éliminés des 41 Win95** (GetVersion touchait 38/41).
+- **Vérifié** : hash transpile **inchangé** `19acad982194bf07`, difftest 271/271, winediff **53/53**, table triée.
 
 <!-- NOUVELLES ENTRÉES ICI (garder l'ordre chronologique, plus récent en bas) -->

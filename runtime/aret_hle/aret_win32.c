@@ -420,6 +420,52 @@ uint32_t aret_GetVersionExW(uint32_t esp) {
     }
     return 1;
 }
+/* GetVersion(): the legacy packed form, kept consistent with GetVersionEx above
+ * (6.2.9200, NT). LOBYTE(LOWORD)=major, HIBYTE(LOWORD)=minor; bit 31 = 0 for NT,
+ * and then HIWORD = build number. Old programs branch on this, so it must agree
+ * with GetVersionEx (Wine's two version APIs agree too). 6 | 2<<8 | 9200<<16. */
+uint32_t aret_GetVersion(uint32_t esp) {
+    (void)esp;
+    return 6u | (2u << 8) | (9200u << 16); /* 0x23F00206 — 6.2.9200, NT */
+}
+
+/* RtlMoveMemory(dst, src, len) -> void. Overlap-safe copy = memmove. */
+uint32_t aret_RtlMoveMemory(uint32_t esp) {
+    void *d = WP(0);
+    const void *s = (const void *)WP(1);
+    if (d && s) memmove(d, s, WU(2));
+    return 0;
+}
+
+/* Days since 1970-01-01 for a proleptic-Gregorian date (Howard Hinnant's
+ * algorithm) — portable (no timegm; works under wasi too). */
+static int64_t aret_days_from_civil(int y, unsigned m, unsigned d) {
+    y -= m <= 2;
+    int64_t era = (y >= 0 ? y : y - 399) / 400;
+    unsigned yoe = (unsigned)(y - era * 400);
+    unsigned doy = (153u * (m + (m > 2 ? -3 : 9)) + 2) / 5 + d - 1;
+    unsigned doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    return era * 146097 + (int64_t)doe - 719468;
+}
+/* DosDateTimeToFileTime(wFatDate, wFatTime, LPFILETIME) -> BOOL. MS-DOS packed
+ * date/time -> a 64-bit FILETIME (100ns ticks since 1601), no timezone shift —
+ * the canonical field->FILETIME calendar computation (matches Wine). FAT date:
+ * bits 0-4 day, 5-8 month, 9-15 year-since-1980. FAT time: 0-4 sec/2, 5-10 min,
+ * 11-15 hour. */
+uint32_t aret_DosDateTimeToFileTime(uint32_t esp) {
+    uint32_t d = WU(0) & 0xffff, t = WU(1) & 0xffff;
+    uint32_t *ft = (uint32_t *)WP(2);
+    int year = (int)((d >> 9) & 0x7f) + 1980;
+    unsigned mon = (d >> 5) & 0x0f, day = d & 0x1f;
+    unsigned hour = (t >> 11) & 0x1f, min = (t >> 5) & 0x3f, sec = (t & 0x1f) * 2;
+    if (mon < 1) mon = 1;
+    if (day < 1) day = 1;
+    int64_t days = aret_days_from_civil(year, mon, day);
+    int64_t secs = days * 86400 + (int64_t)hour * 3600 + (int64_t)min * 60 + sec;
+    uint64_t ticks = ((uint64_t)(secs + 11644473600LL)) * 10000000ULL;
+    if (ft) { ft[0] = (uint32_t)ticks; ft[1] = (uint32_t)(ticks >> 32); }
+    return 1;
+}
 
 /* AreFileApisANSI(): the process uses the ANSI code page for narrow file APIs,
  * the Windows default (Wine returns TRUE). */
