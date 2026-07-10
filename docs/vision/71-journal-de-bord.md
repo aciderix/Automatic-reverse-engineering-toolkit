@@ -687,4 +687,29 @@ Détail : **70 §6** (roadmap). Résumé :
   hash `19acad982194bf07` **inchangé** (push/pop 32-bit produisent une IR identique), funcdiff 0 divergence,
   winediff 49/49, busybox sweep 60/60, gauntlet 19/21. (plink : segfault résiduel plus profond, non lié.)
 
+### 2026-07-10 — [ORACLE][LIFT] Couche différentielle de séquences → `push esp` post-décrément
+- **Contexte** : suite directe de l'entrée 2026-07-09 (qui annonçait « séquences 2-3 insns énumérables de la
+  même façon, extension future »). Une instruction juste **isolément** peut être fausse **en composition** :
+  une insn décale esp, une suivante lit contre cet esp — classe de bugs qu'aucun test par-instruction
+  n'atteint (c'est exactement ainsi que vivait `push [esp+d]`, trouvé par accident via plink).
+- **Fait** (`src/cpudiff.rs`) : (1) `decode_at(bytes, addr)` — décode chaque insn à **son propre offset**
+  pour que les ids de temp soient distincts (pas d'aliasing des temps scratch entre insns du bloc) ;
+  (2) `diff_seq` — concatène les statements liftés d'une **séquence droite** (skip si Asm/Branch/Jump/Return),
+  interprète vs Unicorn avec `count=n_insns`, esp mid-page + ebp quart-page → tout accès pile/frame tombe dans
+  la page comparée ; compare regs+flags+page ; (3) `seq_corpus` — 12 séquences de composition de frame
+  (`push imm;push [esp+8]`, `push ebp;mov ebp,esp;mov eax,[ebp+8]`, `sub esp,N;mov [esp+d],r;mov r,[esp+d]`,
+  `push esp;pop eax`, `leave`, …) ; (4) câblé `sequence_corpus_matches_unicorn` (3000 états/séq).
+- **Bug trouvé au 1ᵉʳ run et corrigé** (`src/ir/lift.rs`, général, faux-silencieux) : **`push esp`** poussait
+  l'esp **post**-décrément (`push esp;pop eax` rendait `esp-4`). x86 286+ pousse l'esp **avant** baisse. Fix :
+  `src_uses_sp` (déjà utilisé pour `push [esp+d]`) **élargi** au cas où la source est le **registre esp
+  lui-même** → snapshot dans un temp avant `esp-=4`. Même principe, une classe close pour de bon.
+- **Double trou de couverture fermé** : le per-instruction avait pourtant `push esp` (0x54) au corpus, mais
+  `diff_one` ne comparait la page **que si l'instruction avait un opérande mémoire explicite**
+  (`mem_base.is_some()`) — or un push écrit la pile via opérande **implicite** → son store n'était jamais
+  comparé. Élargi à `mem_base.is_some() || stack_pointer_increment()!=0` : le per-instruction couvre
+  désormais cette classe **indépendamment** de la couche séquences.
+- **Vérifié** : `sequence_corpus_matches_unicorn` **0 divergence**, per-instruction 0 divergence, transpile-diff
+  hash `19acad982194bf07` **inchangé**, difftest 271/271, funcdiff 0 divergence, winediff 49/49, busybox
+  sweep 60/60, gauntlet 19/21. Commit `fea03f3`.
+
 <!-- NOUVELLES ENTRÉES ICI (garder l'ordre chronologique, plus récent en bas) -->
