@@ -28,7 +28,9 @@
 #include <unistd.h>
 #include <sys/time.h>
 #include <sys/stat.h>
-#include <sys/statvfs.h>
+#ifndef __wasm__
+#include <sys/statvfs.h>   /* no filesystem statvfs under wasm32-wasi */
+#endif
 #include <sys/ioctl.h>
 
 static inline uint32_t w32_arg(uint32_t esp, int i) {
@@ -622,6 +624,11 @@ uint32_t aret_GetExitCodeProcess(uint32_t esp) {
  * (512-byte sectors, 8 sectors/cluster = 4 KiB), free/total clusters from the real
  * filesystem. A Windows root ("C:\\", NULL) maps to the host cwd. */
 uint32_t aret_GetDiskFreeSpaceA(uint32_t esp) {
+#ifdef __wasm__
+    /* wasm32-wasi has no filesystem statvfs. Report failure (BOOL FALSE) rather
+     * than a fabricated geometry — sound: no silent wrong disk size. */
+    (void)esp; return 0;
+#else
     struct statvfs vfs;
     if (statvfs(".", &vfs) != 0) { return 0; }
     uint32_t bps = 512, spc = 8;                 /* 4 KiB cluster */
@@ -636,6 +643,7 @@ uint32_t aret_GetDiskFreeSpaceA(uint32_t esp) {
     if ((p = (uint32_t *)WP(3))) *p = (uint32_t)avail;
     if ((p = (uint32_t *)WP(4))) *p = (uint32_t)total;
     return 1;
+#endif
 }
 uint32_t aret_GetCurrentThread(uint32_t esp)  { (void)esp; return 0xFFFFFFFEu; }
 /* GetStartupInfoW: a console process with no inherited startup customization —

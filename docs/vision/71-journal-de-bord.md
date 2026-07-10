@@ -103,6 +103,15 @@ Deux mécanismes complémentaires :
   `__builtin_trap`). Gaté transpile-only (`x87.is_none() && shared_stack()`),
   additif. ⚠️ Incréments 2/3 (transcendantes) **révoqués** (faux `sin(sin(1))`) puis
   refaits avec effacement **C2** (helper efface bit 10, notre libm gère toute plage).
+- **Tout-ou-rien statique/runtime (2026-07-10)** : les slots statiques `fpr()` et la
+  pile runtime `__x87rt_s[]` sont **deux représentations distinctes** — un corps ne
+  peut **pas** les mélanger. Donc le filet ne s'active que si **toute** la fonction
+  bail. Conséquence : un bloc **émis non atteint** par la passe (`entry_sp=-1`,
+  typiquement une **fonction absorbée** après un `call` noreturn, sans arête CFG)
+  laisserait ses ops x87 **non mappées** → `aret_unmodelled` (abort) dans une fonction
+  `Some`. Fix : `x87_depth_pass` **bail la fonction entière** si un bloc non atteint
+  porte des ops x87 → filet runtime. Jamais un mélange, jamais un abort sur une op
+  modélisable.
 - **Bug fucom runtime (2026-07-05)** : lire `op_register(op_count()-1)` (dernier ST),
   pas `op_register(0)` (= ST0 → compare avec soi-même → C3=1 → `awk /` = « div by
   zero »). Le statique était déjà correct.
@@ -1007,5 +1016,38 @@ Détail : **70 §6** (roadmap). Résumé :
   (hors 1 échec **pré-existant** non lié : `atexit_callback_after_noreturn` a des `fld/fstp qword` x87 non
   modélisés — le programme tourne pourtant jusqu'à `cleanup 1` ; l'assertion trébuche sur le warning honnête
   « unmodelled »), table triée.
+
+### 2026-07-10 — [X87][RECOV] x87 statique = tout-ou-rien (bloc absorbé non atteint → filet runtime, pas abort)
+- **Symptôme** : `atexit_callback_after_noreturn.exe` (régression pré-existante sur la branche) tournait
+  correctement (`work 1`/`cleanup 1`) **mais** émettait 6 `aret_unmodelled("fld/fstp qword…")`. Le programme
+  ne les atteint pas, mais la garde `!contains("unmodelled")` du test trébuchait — et surtout, atteints par
+  appel indirect (helper de formatage float), ils **aborteraient à tort**.
+- **Cause racine** (`ir/build.rs:x87_depth_pass`) : ces `fld/fstp m64`/`fstp st(0)`/`fxch` appartiennent à une
+  **fonction distincte absorbée** (`0x401c90`, prologue `push ebp` propre) dans `sub_4019a0` par le balayage
+  linéaire **après un `call` noreturn** — **sans arête CFG** vers elle. La passe de profondeur ne visite jamais
+  son bloc (`entry_sp=-1`) → ses ops ne sont **pas mappées**. La fonction restant statiquement modélisée
+  (`x87 = Some`), le filet runtime (`x87_rt`) **ne s'active pas** (il exige que **toute** la fonction bail), donc
+  ces ops tombent sur `lift()` → `Asm`/`aret_unmodelled`. Un repli **par-op** vers le filet serait **unsound** :
+  les slots statiques `fpr()` et la pile runtime `__x87rt_s[]` sont deux représentations qui **ne se mélangent
+  pas** dans un même corps.
+- **Fix (général, sound)** : `x87_depth_pass` **bail la fonction entière** (→ filet runtime) si un bloc **émis
+  non atteint** (`entry_sp=-1`) porte des ops x87. **Tout-ou-rien** : soit tout statique (toutes ops mappées),
+  soit tout le filet runtime — jamais un mélange, jamais un abort sur une op modélisable. Les 6 ops passent en
+  `__x87rt_ld64`/`st64`/`xch`/`sti`.
+- **Vérifié** : hash transpile **inchangé** `19acad982194bf07`, difftest 271/271, **cargo test complet vert**,
+  **busybox 60/60** bit-identique (x87 dense), **funcdiff 0 divergence** (12467 lift/10688 opt scorées),
+  winediff 58/58. Test `atexit_…_recovered` **repasse**.
+
+### 2026-07-10 — [INFRA][RECOMPILE] Build WASM cassé par `<sys/statvfs.h>` (GetDiskFreeSpaceA) — guardé
+- **Symptôme** : `windows_pe_to_webassembly` (régression pré-existante) échouait — `aret --target wasm` sur
+  `hello_win32.exe` : `unknown type name '__BEGIN_DECLS'` dans `/usr/include/sys/statvfs.h`. clang wasm32 ne
+  compile pas l'en-tête statvfs de l'hôte.
+- **Cause racine** : `aret_win32.c` incluait **inconditionnellement** `<sys/statvfs.h>` (ajouté avec
+  `GetDiskFreeSpaceA`, grappe file/process) — or wasm32-wasi n'a pas de `statvfs` de système de fichiers.
+- **Fix (général)** : include + usage `statvfs` guardés `#ifndef __wasm__` (comme le mmap, doc 70 §4.5).
+  Sur wasm, `GetDiskFreeSpaceA` **renvoie FALSE** (échec) plutôt qu'une géométrie fabriquée — **sound** (pas de
+  taille disque fausse en silence ; wasm n'a pas de vrai FS).
+- **Vérifié** : `windows_pe_to_webassembly` **repasse** (WASM 7/7 réellement vert), build natif -m32 inchangé,
+  toutes les autres portes vertes (cf. entrée x87 ci-dessus).
 
 <!-- NOUVELLES ENTRÉES ICI (garder l'ordre chronologique, plus récent en bas) -->

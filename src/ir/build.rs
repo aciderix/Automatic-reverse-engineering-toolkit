@@ -1270,6 +1270,22 @@ fn x87_depth_pass(
             }
         }
     }
+    // Soundness of the static model requires EVERY emitted x87 op to be mapped to a
+    // concrete depth. A block the forward walk never reached (`entry_sp == -1`) —
+    // typically a distinct function the linear sweep absorbed past a noreturn call,
+    // with no CFG edge into it — leaves its x87 ops unmapped. In a statically-modelled
+    // (`Some`) function those unmapped ops would degrade to a hard `aret_unmodelled`
+    // abort: the per-op runtime-net fallback (`x87_rt`) only fires when the WHOLE
+    // function bailed, because the static `fpr()` slots and the runtime `__x87rt_s[]`
+    // stack are two different representations that must not be mixed within one body.
+    // So bail the whole function instead — it falls to the runtime FPU net (sound by
+    // construction). All-or-nothing: never a mix, never an abort on a modellable op.
+    for (i, &addr) in order.iter().enumerate() {
+        if entry_sp[i] == -1 && func.blocks[&addr].insns.iter().any(|ins| is_x87(&ins.raw)) {
+            x87dbg(func.entry, addr, "unreached block carries x87 ops (absorbed fn?) → runtime net");
+            return Err(X87Bail);
+        }
+    }
     Ok(X87Info { ops: out, fp_calls, ret_depths })
 }
 
