@@ -165,7 +165,7 @@ bash bench/regression.sh    # PORTE unifiée : difftest 271/271, in-place 3/3,
                             # recompilabilité gzip/ls/cat 100%
 bash bench/difftest.sh              # décompile O0→O3
 bash bench/difftest_transpile.sh    # transpile (hash 19acad982194bf07)
-bash bench/winediff.sh              # axe 2 vs Wine (60/60)
+bash bench/winediff.sh              # axe 2 vs Wine (61/61)
 bash bench/funcdiff.sh              # lift-closure + opt-diff vs Unicorn (0 div)
 # Sweeps de vrais binaires (téléchargent + comparent à Wine) :
 bash bench/sqlite_sweep.sh   bash bench/busybox_sweep.sh   bash bench/corpus_sweep.sh
@@ -185,7 +185,7 @@ bash bench/wallsweep.sh <dir1> [dir2…]  # AGRÈGE --mode walls sur un corpus :
 
 ### État régression (référence — doit rester vert)
 difftest **271/271** · transpile-diff **4/4** (H=`19acad982194bf07`) · winediff
-**60/60** · cpudiff vert (per-instruction + séquences génératives) · funcdiff corpus **0 divergence** (lift ~12k scorées /
+**61/61** · cpudiff vert (per-instruction + séquences génératives) · funcdiff corpus **0 divergence** (lift ~12k scorées /
 ~6k appels, opt ~10k scorées) · SMT **11/11** · in-place **3/3** · magicdiv **2³²** ·
 recompilabilité **100 %** · WASM **7/7**.
 
@@ -343,6 +343,11 @@ recompilabilité **100 %** · WASM **7/7**.
 - **MessageBoxA/W** (M7 G5a, doc 72, **display-free**) : renvoie **-1** (repli sound = comportement Wine
   **sans écran**, mesuré : pas de blocage, pas de bouton deviné). Un vrai dialogue (SDL) arrivera avec G2b.
   Gardé `winecorpus/user32_messagebox` (marqueur `.nodisplay` → oracle Wine-sans-écran).
+- **Dialogs** (M7 G5b, doc 72, **display-free**) : `DialogBoxParamA/W`/`CreateDialogParamA/W` parsent le
+  **DLGTEMPLATE(EX)** → contrôles enfants (réutilise la table de fenêtres, champ `ctrl_id`) + **pompe modale**
+  (WM_INITDIALOG → DLGPROC via `aret_call`) ; `EndDialog`, `GetDlgItem`/`GetDlgCtrlID`, `Set`/`GetDlgItemText A/W`,
+  `Set`/`GetDlgItemInt`, `SendDlgItemMessageA/W`. DLGPROC qui n'`EndDialog` pas headless → **abort sound**.
+  Gardé `winecorpus/user32_dialog.{c,rc}` (bit-identique Wine sous Xvfb).
 - **Ressources PE `.rsrc`** (M7 G4, doc 72, **display-free**) : walker de l'arbre `IMAGE_RESOURCE_DIRECTORY`
   **en mémoire** (en-têtes PE déjà mappés à l'image base → `DataDirectory[2]` lu direct, 0 changement loader) →
   `FindResourceA`/`LoadResource`/`LockResource`/`SizeofResource`/`FreeResource` (id **ou** nom UTF-16) +

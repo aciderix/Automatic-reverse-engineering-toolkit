@@ -1060,6 +1060,7 @@ static struct {
     int visible, enabled;
     uint32_t userdata;       /* GWL_USERDATA */
     char title[256];         /* window text (ANSI) */
+    int ctrl_id;             /* dialog control id (0 = not a control) */
 } g_u32_win[U32_MAX_WIN];
 
 #define U32_MAX_MSG 8192
@@ -1129,6 +1130,7 @@ static uint32_t u32_window_create(uint32_t wndproc, uint32_t exstyle, uint32_t s
             g_u32_win[i].visible = (style & 0x10000000u /* WS_VISIBLE */) ? 1 : 0;
             g_u32_win[i].enabled = (style & 0x08000000u /* WS_DISABLED */) ? 0 : 1;
             g_u32_win[i].userdata = 0;
+            g_u32_win[i].ctrl_id = 0;
             int k = 0; if (title) for (; title[k] && k < 255; k++) g_u32_win[i].title[k] = title[k];
             g_u32_win[i].title[k] = 0;
             return (uint32_t)(i + 1);
@@ -1600,4 +1602,250 @@ uint32_t aret_GetSystemMetrics(uint32_t esp) {
     case 50: return 16;   /* SM_CYSMICON */
     default: return 0;
     }
+}
+
+/* ================================================================== */
+/* Dialogs — DLGTEMPLATE parse -> controls + modal pump (display-free) */
+/* ================================================================== */
+/* A dialog is a window (wndproc = the app's DLGPROC) whose child controls are
+ * windows too (each with its control id + template text; wndproc 0 = a system
+ * control, its text served natively). DialogBoxParamA creates them, sends
+ * WM_INITDIALOG, and runs a modal pump; a DLGPROC that EndDialog's during
+ * WM_INITDIALOG (the scriptable/headless case) returns at once. If a dialog
+ * instead waits for user input there is nothing to pump headless -> abort loudly
+ * (never hang or fake a result). Reuses the G2a window table; still display-free
+ * (real pixels are G2b). */
+#define U32_WM_INITDIALOG 0x0110u
+
+static uint32_t g_u32_modal_hwnd;   /* active modal dialog (0 = none) */
+static int      g_u32_modal_ended;
+static int      g_u32_modal_result;
+
+/* Resolve a dialog template resource (RT_DIALOG=5) to its bytes, or NULL. */
+static const uint8_t *u32_dlg_template(uint32_t name_ref) {
+    const uint8_t *de = u32_rsrc_data_entry(5 /* RT_DIALOG */, name_ref);
+    if (!de) return NULL;
+    return (const uint8_t *)(uintptr_t)(aret_image_lo + *(const uint32_t *)de);
+}
+/* Advance past a template "sz_Or_Ord" field (WORD 0 = empty; 0xFFFF + WORD ordinal;
+ * else a NUL-terminated WCHAR string). If `title`, narrow a string form to ANSI. */
+static const uint8_t *u32_dt_szord(const uint8_t *p, char *title, int cap) {
+    if (title && cap > 0) title[0] = 0;
+    uint16_t w = *(const uint16_t *)p;
+    if (w == 0x0000) return p + 2;
+    if (w == 0xFFFF) return p + 4;                       /* 0xFFFF + ordinal WORD */
+    const uint16_t *s = (const uint16_t *)p;
+    int i = 0;
+    while (s[i]) { if (title && i < cap - 1) title[i] = (char)(s[i] & 0xFF); i++; }
+    if (title && cap > 0) title[i < cap ? i : cap - 1] = 0;
+    return (const uint8_t *)(s + i + 1);                 /* past the NUL */
+}
+/* DWORD-align a cursor relative to the template base. */
+static const uint8_t *u32_dt_align(const uint8_t *base, const uint8_t *p) {
+    size_t off = (size_t)(p - base);
+    return base + ((off + 3) & ~(size_t)3);
+}
+/* Allocate a child-control window (system control: wndproc 0, text stored). */
+static uint32_t u32_new_control(uint32_t parent, int ctrl_id, uint32_t style, const char *title) {
+    for (int i = 0; i < U32_MAX_WIN; i++) {
+        if (!g_u32_win[i].used) {
+            memset(&g_u32_win[i], 0, sizeof g_u32_win[i]);
+            g_u32_win[i].used = 1;
+            g_u32_win[i].parent = parent;
+            g_u32_win[i].style = style;
+            g_u32_win[i].enabled = (style & 0x08000000u) ? 0 : 1;  /* WS_DISABLED */
+            g_u32_win[i].visible = (style & 0x10000000u) ? 1 : 0;  /* WS_VISIBLE */
+            g_u32_win[i].ctrl_id = ctrl_id;
+            int k = 0; if (title) for (; title[k] && k < 255; k++) g_u32_win[i].title[k] = title[k];
+            g_u32_win[i].title[k] = 0;
+            return (uint32_t)(i + 1);
+        }
+    }
+    return 0;
+}
+/* Parse a DLGTEMPLATE(EX) -> create the dialog window (wndproc = dlgproc) and its
+ * child controls. Returns the dialog HWND (0 on failure). Handles both templates. */
+static uint32_t u32_dialog_create(const uint8_t *tpl, uint32_t dlgproc, uint32_t parent) {
+    const uint8_t *p = tpl;
+    int ex = 0;
+    uint32_t style; uint16_t cdit;
+    if (*(const uint16_t *)p == 1 && *(const uint16_t *)(p + 2) == 0xFFFF) {  /* DLGTEMPLATEEX */
+        ex = 1;
+        style = *(const uint32_t *)(p + 12);            /* after dlgVer,sig,helpID,exStyle */
+        cdit  = *(const uint16_t *)(p + 16);
+        p += 26;                                        /* +cDlgItems(2)+x,y,cx,cy(8) -> menu */
+    } else {                                            /* classic DLGTEMPLATE */
+        style = *(const uint32_t *)p;
+        cdit  = *(const uint16_t *)(p + 8);             /* style(4)+exStyle(4) -> cdit */
+        p += 18;                                        /* +cdit(2)+x,y,cx,cy(8) -> menu */
+    }
+    char dtitle[256];
+    p = u32_dt_szord(p, NULL, 0);                        /* menu */
+    p = u32_dt_szord(p, NULL, 0);                        /* window class */
+    p = u32_dt_szord(p, dtitle, sizeof dtitle);         /* caption */
+    if (style & 0x40u /* DS_SETFONT */) {
+        p += ex ? 6 : 2;                                /* EX: size,weight,italic,charset ; classic: size */
+        p = u32_dt_szord(p, NULL, 0);                   /* typeface */
+    }
+    uint32_t hDlg = u32_window_create(dlgproc, 0, style, 0, 0, 0, 0, parent, dtitle);
+    if (!hDlg) return 0;
+    for (int c = 0; c < cdit; c++) {
+        p = u32_dt_align(tpl, p);
+        uint32_t cstyle, cid;
+        if (ex) {
+            cstyle = *(const uint32_t *)(p + 8);        /* helpID(4)+exStyle(4) -> style */
+            p += 20; cid = *(const uint32_t *)p; p += 4; /* +x,y,cx,cy(8) -> id(DWORD) */
+        } else {
+            cstyle = *(const uint32_t *)p;
+            p += 16; cid = *(const uint16_t *)p; p += 2; /* +exStyle(4)+x,y,cx,cy(8) -> id(WORD) */
+        }
+        char ctitle[256];
+        p = u32_dt_szord(p, NULL, 0);                   /* control class (atom or name) */
+        p = u32_dt_szord(p, ctitle, sizeof ctitle);     /* control caption */
+        uint16_t extra = *(const uint16_t *)p; p += 2;  /* creation-data byte count */
+        p += extra;
+        u32_new_control(hDlg, (int)cid, cstyle, ctitle);
+    }
+    return hDlg;
+}
+/* Destroy a dialog and all its child controls. */
+static void u32_dialog_destroy(uint32_t hDlg) {
+    for (int i = 0; i < U32_MAX_WIN; i++)
+        if (g_u32_win[i].used && ((uint32_t)(i + 1) == hDlg || g_u32_win[i].parent == hDlg))
+            g_u32_win[i].used = 0;
+}
+/* Find a dialog control by id (0 if none). */
+static uint32_t u32_dlg_item(uint32_t hDlg, int id) {
+    for (int i = 0; i < U32_MAX_WIN; i++)
+        if (g_u32_win[i].used && g_u32_win[i].parent == hDlg && g_u32_win[i].ctrl_id == id)
+            return (uint32_t)(i + 1);
+    return 0;
+}
+
+/* DialogBoxParamA(hInst, lpTemplate, hWndParent, lpDialogFunc, dwInitParam) -> INT_PTR.
+ * Modal: create, WM_INITDIALOG, pump until EndDialog, return the EndDialog result. */
+uint32_t aret_DialogBoxParamA(uint32_t esp) {
+    const uint8_t *tpl = u32_dlg_template(WU(1));
+    uint32_t dlgproc = WU(3), param = WU(4), parent = WU(2);
+    if (!tpl || !dlgproc) return (uint32_t)-1;
+    if (g_u32_modal_hwnd) aret_unimpl("nested modal DialogBox (mono-thread model)");
+    uint32_t hDlg = u32_dialog_create(tpl, dlgproc, parent);
+    if (!hDlg) return (uint32_t)-1;
+    g_u32_modal_hwnd = hDlg; g_u32_modal_ended = 0; g_u32_modal_result = 0;
+    u32_call_wndproc(esp, dlgproc, hDlg, U32_WM_INITDIALOG, 0, param);
+    while (!g_u32_modal_ended) {
+        u32_pump_timers();
+        if (!u32_q_empty()) {
+            uint32_t m[7]; u32_q_peek_copy(m, 1);
+            uint32_t wp = u32_win_wndproc(m[0]);
+            if (wp) u32_call_wndproc(esp, wp, m[0], m[1], m[2], m[3]);
+        } else {
+            aret_unimpl("modal DialogBox: DLGPROC did not EndDialog and no events (headless)");
+        }
+    }
+    int result = g_u32_modal_result;
+    u32_dialog_destroy(hDlg);
+    g_u32_modal_hwnd = 0;
+    return (uint32_t)result;
+}
+uint32_t aret_DialogBoxParamW(uint32_t esp) { return aret_DialogBoxParamA(esp); }
+/* CreateDialogParamA(...) -> HWND. Modeless: create + WM_INITDIALOG, return HWND. */
+uint32_t aret_CreateDialogParamA(uint32_t esp) {
+    const uint8_t *tpl = u32_dlg_template(WU(1));
+    uint32_t dlgproc = WU(3), param = WU(4), parent = WU(2);
+    if (!tpl || !dlgproc) return 0;
+    uint32_t hDlg = u32_dialog_create(tpl, dlgproc, parent);
+    if (!hDlg) return 0;
+    u32_call_wndproc(esp, dlgproc, hDlg, U32_WM_INITDIALOG, 0, param);
+    return hDlg;
+}
+uint32_t aret_CreateDialogParamW(uint32_t esp) { return aret_CreateDialogParamA(esp); }
+/* EndDialog(hDlg, nResult) -> BOOL. Ends the active modal loop with a result. */
+uint32_t aret_EndDialog(uint32_t esp) {
+    g_u32_modal_ended = 1; g_u32_modal_result = WI(1);
+    return 1;
+}
+/* GetDlgItem(hDlg, nIDDlgItem) -> HWND. */
+uint32_t aret_GetDlgItem(uint32_t esp) { return u32_dlg_item(WU(0), WI(1)); }
+/* GetDlgCtrlID(hWnd) -> int (the control's id). */
+uint32_t aret_GetDlgCtrlID(uint32_t esp) {
+    int i = u32_win_idx(WU(0));
+    return i < 0 ? 0 : (uint32_t)g_u32_win[i].ctrl_id;
+}
+/* SetDlgItemTextA(hDlg, id, lpString) -> BOOL. A system control stores its text. */
+uint32_t aret_SetDlgItemTextA(uint32_t esp) {
+    int i = u32_win_idx(u32_dlg_item(WU(0), WI(1)));
+    if (i < 0) return 0;
+    const char *s = WCS(2); int k = 0;
+    if (s) for (; s[k] && k < 255; k++) g_u32_win[i].title[k] = s[k];
+    g_u32_win[i].title[k] = 0;
+    return 1;
+}
+/* GetDlgItemTextA(hDlg, id, lpString, cchMax) -> chars copied (excl NUL). */
+uint32_t aret_GetDlgItemTextA(uint32_t esp) {
+    char *buf = (char *)WP(2); uint32_t cch = WU(3);
+    if (!buf || cch == 0) return 0;
+    int i = u32_win_idx(u32_dlg_item(WU(0), WI(1)));
+    if (i < 0) { buf[0] = 0; return 0; }
+    const char *t = g_u32_win[i].title; uint32_t len = (uint32_t)strlen(t);
+    uint32_t n = len < cch - 1 ? len : cch - 1;
+    for (uint32_t j = 0; j < n; j++) buf[j] = t[j];
+    buf[n] = 0;
+    return n;
+}
+/* SetDlgItemTextW(hDlg, id, lpString) — wide string, narrowed into the control. */
+uint32_t aret_SetDlgItemTextW(uint32_t esp) {
+    int i = u32_win_idx(u32_dlg_item(WU(0), WI(1)));
+    if (i < 0) return 0;
+    u32_w2n((const uint16_t *)WP(2), g_u32_win[i].title, sizeof g_u32_win[i].title);
+    return 1;
+}
+/* GetDlgItemTextW(hDlg, id, lpString, cchMax) — widen the stored ANSI text. */
+uint32_t aret_GetDlgItemTextW(uint32_t esp) {
+    uint16_t *buf = (uint16_t *)WP(2); uint32_t cch = WU(3);
+    if (!buf || cch == 0) return 0;
+    int i = u32_win_idx(u32_dlg_item(WU(0), WI(1)));
+    if (i < 0) { buf[0] = 0; return 0; }
+    const char *t = g_u32_win[i].title; uint32_t len = (uint32_t)strlen(t);
+    uint32_t n = len < cch - 1 ? len : cch - 1;
+    for (uint32_t j = 0; j < n; j++) buf[j] = (uint16_t)(unsigned char)t[j];
+    buf[n] = 0;
+    return n;
+}
+/* SetDlgItemInt(hDlg, id, uValue, bSigned) -> BOOL. */
+uint32_t aret_SetDlgItemInt(uint32_t esp) {
+    int i = u32_win_idx(u32_dlg_item(WU(0), WI(1)));
+    if (i < 0) return 0;
+    if (WU(3)) snprintf(g_u32_win[i].title, sizeof g_u32_win[i].title, "%d", WI(2));
+    else       snprintf(g_u32_win[i].title, sizeof g_u32_win[i].title, "%u", WU(2));
+    return 1;
+}
+/* GetDlgItemInt(hDlg, id, lpTranslated, bSigned) -> UINT. */
+uint32_t aret_GetDlgItemInt(uint32_t esp) {
+    uint32_t *ok = (uint32_t *)WP(2);
+    int i = u32_win_idx(u32_dlg_item(WU(0), WI(1)));
+    if (i < 0) { if (ok) *ok = 0; return 0; }
+    char *end = NULL; const char *t = g_u32_win[i].title;
+    long v = WU(3) ? strtol(t, &end, 10) : (long)strtoul(t, &end, 10);
+    if (ok) *ok = (end && end != t && *end == 0) ? 1 : 0;
+    return (uint32_t)v;
+}
+/* SendDlgItemMessageA(hDlg, id, msg, wParam, lParam) -> LRESULT. */
+uint32_t aret_SendDlgItemMessageA(uint32_t esp) {
+    uint32_t child = u32_dlg_item(WU(0), WI(1));
+    if (!child) return 0;
+    uint32_t wp = u32_win_wndproc(child);
+    if (wp) return u32_call_wndproc(esp, wp, child, WU(2), WU(3), WU(4));
+    uint32_t r;
+    if (u32_defproc_text(child, WU(2), WU(3), WU(4), 0, &r)) return r;  /* system control */
+    return 0;
+}
+uint32_t aret_SendDlgItemMessageW(uint32_t esp) {
+    uint32_t child = u32_dlg_item(WU(0), WI(1));
+    if (!child) return 0;
+    uint32_t wp = u32_win_wndproc(child);
+    if (wp) return u32_call_wndproc(esp, wp, child, WU(2), WU(3), WU(4));
+    uint32_t r;
+    if (u32_defproc_text(child, WU(2), WU(3), WU(4), 1, &r)) return r;
+    return 0;
 }

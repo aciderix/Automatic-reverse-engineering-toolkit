@@ -1,0 +1,15 @@
+#include <windows.h>
+
+#define IDD_TEST   101
+#define IDC_LABEL  1001
+#define IDC_EDIT   1002
+#define IDC_OKBTN  1003
+
+IDD_TEST DIALOG 0, 0, 200, 100
+STYLE WS_POPUP | WS_CAPTION | WS_SYSMENU
+CAPTION "Test Dialog"
+BEGIN
+    LTEXT           "Label text here", IDC_LABEL, 10, 10, 120, 12
+    EDITTEXT        IDC_EDIT, 10, 30, 120, 12
+    DEFPUSHBUTTON   "OK", IDC_OKBTN, 10, 60, 50, 14
+END

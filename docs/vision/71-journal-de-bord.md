@@ -1101,4 +1101,26 @@ Détail : **70 §6** (roadmap). Résumé :
   modale ; EndDialog ; GetDlgItem/Set-GetDlgItemTextA) — oracle-able sous Xvfb (dlgproc EndDialog sur
   WM_INITDIALOG = déterministe). Prochain incrément.
 
+### 2026-07-10 — [GUI][HLE-WIN32] M7 — G5b : dialogs (DLGTEMPLATE → contrôles + pompe modale), display-free
+- **Fait** (`aret_win32.c`, +15 `stdcall_pops` triés) : un **dialogue = une fenêtre** (wndproc = le DLGPROC de
+  l'appli) dont les **contrôles enfants** sont des fenêtres (chacune avec son `ctrl_id` + le texte du template ;
+  wndproc 0 = contrôle système, texte servi nativement). Ajout du champ `ctrl_id` à `g_u32_win`.
+  - **Parseur DLGTEMPLATE + DLGTEMPLATEEX** (`u32_dialog_create`) : détecte l'EX (dlgVer=1,sig=0xFFFF), lit
+    style/cdit, saute menu/classe/titre (`u32_dt_szord` : 0 vide / 0xFFFF+ordinal / chaîne WCHAR), le bloc font
+    si DS_SETFONT, puis chaque contrôle **DWORD-aligné** (id WORD en classic / DWORD en EX, classe, titre,
+    creation-data) → crée le contrôle enfant (`u32_new_control`).
+  - **`DialogBoxParamA/W`** (modal) : crée, envoie **WM_INITDIALOG** au DLGPROC via `aret_call`, **pompe modale**
+    jusqu'à `EndDialog` ; un DLGPROC qui `EndDialog` pendant WM_INITDIALOG (cas scriptable/headless) rend
+    aussitôt. Sinon rien à pomper headless → **abort bruyant** (jamais hang ni résultat inventé). `EndDialog`,
+    `CreateDialogParamA/W` (modeless), `GetDlgItem`, `GetDlgCtrlID`, `Set`/`GetDlgItemTextA/W`,
+    `Set`/`GetDlgItemInt`, `SendDlgItemMessageA/W` (contrôle système → texte via `u32_defproc_text`).
+- **Oracle** : `winecorpus/user32_dialog.{c,rc}` (DIALOG classique + LTEXT/EDITTEXT/DEFPUSHBUTTON) : le DLGPROC
+  lit le texte template du label, round-trip texte+entier de l'edit, `GetDlgItem`/`GetDlgCtrlID`, `EndDialog(77)`
+  → **bit-identique à Wine** (sous Xvfb, se termine sans interaction). Prouve : parsing template, création des
+  contrôles avec texte/id, **callback WM_INITDIALOG dans le lifté**, retour modal.
+- **Effet mesuré** : DialogBoxParamA 17, CreateDialogParamA 23, EndDialog 20, GetDlgItem 33, SetDlgItemTextA 19,
+  GetDlgItemTextA 12, SendDlgItemMessageA 16 **éliminés des 41 Win95**.
+- **Vérifié** : hash transpile **inchangé** `19acad982194bf07`, difftest 271/271, cargo test complet vert,
+  winediff **61/61**, table triée.
+
 <!-- NOUVELLES ENTRÉES ICI (garder l'ordre chronologique, plus récent en bas) -->
