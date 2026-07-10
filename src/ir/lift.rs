@@ -1823,6 +1823,50 @@ pub fn lift(insn: &Insn, bits: u32) -> Vec<Stmt> {
         // (`idx mod width`), a plain load/modify/store. The memory form with a
         // *register* index is excluded: it addresses a bit *string* (effective
         // address shifts by idx/8), which this does not model.
+        // Memory bit-base with a *register* bit offset (`bt [arr], eax` — the
+        // bit-array idiom). The register offset is NOT masked to the operand
+        // width; instead it shifts the effective address: the accessed element is
+        // at `base + SAR(idx, log2 w) * (w/8)` and the tested bit is `idx & (w-1)`.
+        // The offset is signed, so sign-extend it with shl/sar (SignExtend is not
+        // modelled by the cpudiff interp) before the arithmetic. Segment-overridden
+        // bases fall to a sound asm abort (mem_addr returns None).
+        Mnemonic::Bt | Mnemonic::Btc | Mnemonic::Bts | Mnemonic::Btr
+            if ins.op_kind(0) == OpKind::Memory && ins.op_kind(1) == OpKind::Register =>
+        {
+            let (base, w) = some_or_asm!(mem_addr(ins));
+            let idx = some_or_asm!(op_value(ins, 1));
+            let (log2w, bytes): (i128, i128) = match w {
+                16 => (4, 2),
+                32 => (5, 4),
+                64 => (6, 8),
+                _ => return asm(),
+            };
+            let ty = Ty::int(w as u8);
+            // Sign-extend idx from w bits to the interpreter's 64-bit width.
+            let s = (64 - w) as i128;
+            let idx_s = bin(BinOp::Sar, bin(BinOp::Shl, idx.clone(), konst(s)), konst(s));
+            let byteoff = bin(BinOp::Mul, bin(BinOp::Sar, idx_s, konst(log2w)), konst(bytes));
+            // Snapshot the adjusted address into a temp so the CF read and the
+            // read-modify-write store address it once, consistently.
+            let at = Location::Temp((insn.address as u32).wrapping_mul(2));
+            let load = Expr::Load { addr: Box::new(Expr::Read(at.clone())), ty: ty.clone() };
+            let pos = bin(BinOp::And, idx, konst((w - 1) as i128));
+            let bit = bin(BinOp::And, bin(BinOp::Shr, load.clone(), pos.clone()), konst(1));
+            let mut out = vec![
+                Stmt::Set { dst: at.clone(), expr: bin(BinOp::Add, base, byteoff) },
+                set_flag(FlagKind::Cf, bit),
+            ];
+            if ins.mnemonic() != Mnemonic::Bt {
+                let m = bin(BinOp::Shl, konst(1), pos);
+                let nv = match ins.mnemonic() {
+                    Mnemonic::Bts => bin(BinOp::Or, load, m),
+                    Mnemonic::Btr => bin(BinOp::And, load, Expr::Unary(UnOp::Not, Box::new(m))),
+                    _ => bin(BinOp::Xor, load, m), // Btc
+                };
+                out.push(Stmt::Store { addr: Expr::Read(at), value: nv, ty });
+            }
+            out
+        }
         Mnemonic::Bt | Mnemonic::Btc | Mnemonic::Bts | Mnemonic::Btr
             if ins.op_kind(0) == OpKind::Register || ins.op_kind(1) == OpKind::Immediate8 =>
         {

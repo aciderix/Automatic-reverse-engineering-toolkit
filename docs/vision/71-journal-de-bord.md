@@ -301,7 +301,7 @@ Deux mécanismes complémentaires :
   CFG). memcpy/rep-stos modélisés ; adresses masquées 32-bit. **`0 divergence`
   ≠ pas de bug** : dit *où il n'est pas* (bugs profonds derrière imports/skips).
 - **Portes** : difftest (décompile O0→O3, **271/271**), transpile-diff (produit, **4/4**,
-  hash **`19acad982194bf07`**), winediff (Wine, **53/53**), sweeps (sqlite/busybox/
+  hash **`19acad982194bf07`**), winediff (Wine, **54/54**), sweeps (sqlite/busybox/
   gauntlet), SMT (Z3, 11/11), magicdiv (2³²), in-place (3/3), recompilabilité (100%).
 - **`--mode imports`** : couverture d'imports **statique a-priori** (borne supérieure
   du trou runtime). Prioriser par la donnée, **filtrer par fidélité**.
@@ -903,5 +903,20 @@ Détail : **70 §6** (roadmap). Résumé :
   (windows.h le macro-expanse sinon en memmove) + move chevauchant. **Bit-identique à Wine.**
 - **Effet mesuré (re-sweep)** : les 3 imports **éliminés des 41 Win95** (GetVersion touchait 38/41).
 - **Vérifié** : hash transpile **inchangé** `19acad982194bf07`, difftest 271/271, winediff **53/53**, table triée.
+
+### 2026-07-10 — [LIFT] `bt/bts/btr/btc [mem], reg` (idiome bit-array, offset registre non masqué)
+- **Contexte** : nouveau top instruction Win95 après rep cmps. La forme `bt [mem], reg` (offset de bit dans un
+  **registre**, base mémoire) était exclue → asm. Sémantique délicate : l'offset **n'est pas masqué** à la
+  largeur ; il **décale l'adresse** (élément = `base + SAR(idx, log2 w)*(w/8)`, bit testé = `idx & (w-1)`) —
+  l'idiome tableau-de-bits `bt [arr], eax`.
+- **Fait** (`lift.rs`) : nouveau bras (avant celui reg/imm8) pour op0=Memory ∧ op1=Register. Adresse ajustée
+  via `mem_addr` + byteoff signé. **idx sign-étendu par `shl/sar`** (pas `SignExtend` : l'interp cpudiff le
+  skippe) avant l'arithmétique. Adresse snapshotée dans un temp (CF read + RMW store cohérents). BT = CF seul ;
+  bts/btr/btc = load|set/clear/toggle → store. Base `fs:/gs:` = abort sound (`mem_addr` renvoie None).
+- **Oracle** : cpudiff ne peut pas tester (idx aléatoire 32-bit → adresse hors page scratch → skip). Donc
+  **winediff** `bt_mem_reg.c` (inline-asm bt/bts/btr/btc, offsets 0/31/32/63/64/79/96/127 traversant les dwords,
+  RMW + dump tableau) = **bit-identique à Wine**. cpudiff per-instruction (forme registre) **inchangé/vert**.
+- **Effet mesuré** : `bt`/`bts` (formes mémoire) **éliminés des 41 Win95**.
+- **Vérifié** : hash transpile **inchangé** `19acad982194bf07`, difftest 271/271, cpudiff vert, winediff **54/54**.
 
 <!-- NOUVELLES ENTRÉES ICI (garder l'ordre chronologique, plus récent en bas) -->
