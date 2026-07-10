@@ -22,7 +22,19 @@ ARET="$(readlink -f "$ARET" 2>/dev/null || echo "$ARET")"
 DIR="$(cd "$(dirname "$0")" && pwd)"
 CORPUS="$DIR/winecorpus"
 TMP="$(mktemp -d)"
-trap 'rm -rf "$TMP"' EXIT
+XVFB_PID=""
+cleanup() { [ -n "$XVFB_PID" ] && kill "$XVFB_PID" 2>/dev/null; rm -rf "$TMP"; }
+trap cleanup EXIT
+# Headless X for GUI fixtures: CreateWindow needs a display driver, so start one
+# Xvfb for the whole run and point DISPLAY at it. Harmless for console fixtures.
+# Absent Xvfb → GUI fixtures that need a real window simply can't create one (they
+# stay honest: the same failure under Wine and ARET). One server, not per-test.
+if command -v Xvfb >/dev/null 2>&1; then
+  Xvfb :99 -screen 0 1280x1024x24 >/dev/null 2>&1 &
+  XVFB_PID=$!
+  export DISPLAY=:99
+  sleep 0.4
+fi
 MINGW="${MINGW:-i686-w64-mingw32-gcc}"
 WINDRES="${WINDRES:-${MINGW%-gcc}-windres}"
 
@@ -59,7 +71,7 @@ for src in "$CORPUS"/*.c; do
   fi
   # Link the common Win32 libs a guard might reference (version info, OLE/COM,
   # BSTR). Harmless for programs that use none — the imports are demand-loaded.
-  if ! "$MINGW" -O1 -w "$src" $res_obj -lversion -lole32 -loleaut32 -luser32 -o "$TMP/$name.exe" 2>"$TMP/err"; then
+  if ! "$MINGW" -O1 -w "$src" $res_obj -lversion -lole32 -loleaut32 -luser32 -lgdi32 -o "$TMP/$name.exe" 2>"$TMP/err"; then
     echo "FAIL  $name (PE build: $(head -1 "$TMP/err"))"; continue
   fi
   # Optional per-program arguments: one per line in winecorpus/NAME.args. Passed

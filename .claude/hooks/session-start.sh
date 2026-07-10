@@ -55,6 +55,11 @@ if ! PKG_CONFIG_PATH=/usr/lib/i386-linux-gnu/pkgconfig pkg-config --exists sdl2 
   sudo apt-get update >/dev/null 2>&1 || true
   sudo apt-get install -y libsdl2-dev:i386 >/dev/null 2>&1 || true
 fi
+# Xvfb: a virtual framebuffer X server so the GUI oracle (Wine CreateWindow) runs
+# headless in winediff.sh. Install only if missing.
+if ! command -v Xvfb >/dev/null 2>&1; then
+  sudo apt-get install -y xvfb >/dev/null 2>&1 || true
+fi
 
 # gcc/cc (level-1 recompile + level-2 differential) are part of the base image;
 # report if absent rather than failing the session.

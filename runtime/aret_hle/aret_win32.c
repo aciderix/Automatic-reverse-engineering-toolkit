@@ -866,12 +866,36 @@ uint32_t aret_CryptReleaseContext(uint32_t esp) { (void)esp; return 1; }
 #define U32_WM_QUIT   0x0012u
 #define U32_WM_TIMER  0x0113u
 #define U32_PM_REMOVE 0x0001u
+#define U32_WM_SETTEXT       0x000Cu
+#define U32_WM_GETTEXT       0x000Du
+#define U32_WM_GETTEXTLENGTH 0x000Eu
+
+/* A pseudo-HWND for the desktop window (GetDesktopWindow). Kept well outside the
+ * 1..U32_MAX_WIN handle range so it never aliases a real window. Its "rect" is the
+ * virtual screen — a defined ARET desktop size (like the host-backed values of
+ * GetDiskFreeSpace), not a guess: display-dependent raw values are tested by
+ * invariant, never bit-compared to Wine (doc 72 §4.5). */
+#define U32_DESKTOP  0x00010000u
+#define U32_SCREEN_W 1024
+#define U32_SCREEN_H 768
 
 #define U32_MAX_CLASSES 64
 static struct { uint16_t name[128]; uint32_t wndproc; int used; } g_u32_class[U32_MAX_CLASSES];
 
 #define U32_MAX_WIN 256
-static struct { uint32_t wndproc; uint32_t parent; int used; } g_u32_win[U32_MAX_WIN];
+/* A window object. For message-only windows only wndproc/parent matter; a visible
+ * (top-level) window also tracks its rect/style/text so the geometry & text APIs
+ * (GetWindowRect/SetWindowPos/Set/GetWindowText/…) round-trip. The actual pixels
+ * (an SDL_Window) come in G2b — this model layer is display-free and portable. */
+static struct {
+    uint32_t wndproc, parent;
+    int used;
+    int x, y, w, h;          /* window rect, screen coords */
+    uint32_t style, exstyle;
+    int visible, enabled;
+    uint32_t userdata;       /* GWL_USERDATA */
+    char title[256];         /* window text (ANSI) */
+} g_u32_win[U32_MAX_WIN];
 
 #define U32_MAX_MSG 8192
 static struct { uint32_t hwnd, message, wParam, lParam, time, ptx, pty; } g_u32_q[U32_MAX_MSG];
@@ -897,6 +921,12 @@ static void u32_wcpy(uint16_t *d, const uint16_t *s, int cap) {
 static void u32_a2w(const char *s, uint16_t *d, int cap) {
     int i = 0; if (s) for (; s[i] && i < cap - 1; i++) d[i] = (uint16_t)(unsigned char)s[i]; d[i] = 0;
 }
+/* Narrow a 16-bit (Windows wchar_t) string to ANSI — the reverse of u32_a2w. The
+ * window model stores text as ANSI; the W text APIs narrow on the way in and widen
+ * on the way out (exact for ASCII, which is what the content oracle exercises). */
+static void u32_w2n(const uint16_t *s, char *d, int cap) {
+    int i = 0; if (s) for (; s[i] && i < cap - 1; i++) d[i] = (char)(s[i] & 0xFF); d[i] = 0;
+}
 /* Register a class (shared A/W core): store wndproc + wide name, return the atom. */
 static uint32_t u32_class_register(uint32_t wndproc, const uint16_t *wname) {
     for (int i = 0; i < U32_MAX_CLASSES; i++) {
@@ -909,12 +939,33 @@ static uint32_t u32_class_register(uint32_t wndproc, const uint16_t *wname) {
     }
     return 0;
 }
-/* Create a window bound to `wndproc` (shared A/W core), return the HWND. */
-static uint32_t u32_window_create(uint32_t wndproc, uint32_t parent) {
+/* CW_USEDEFAULT: the caller leaves placement to the OS. We pick a fixed default so
+ * geometry is deterministic; explicit coords (the common, oracle-tested case) pass
+ * through unchanged. */
+static int u32_coord(uint32_t v, int dflt) {
+    return (v == 0x80000000u) ? dflt : (int)(int32_t)v;
+}
+/* Create a window (shared A/W core): bind wndproc + capture rect/style/text. */
+static uint32_t u32_window_create(uint32_t wndproc, uint32_t exstyle, uint32_t style,
+                                  uint32_t x, uint32_t y, uint32_t w, uint32_t h,
+                                  uint32_t parent, const char *title) {
     if (!wndproc) return 0;
     for (int i = 0; i < U32_MAX_WIN; i++) {
         if (!g_u32_win[i].used) {
-            g_u32_win[i].used = 1; g_u32_win[i].wndproc = wndproc; g_u32_win[i].parent = parent;
+            g_u32_win[i].used = 1;
+            g_u32_win[i].wndproc = wndproc;
+            g_u32_win[i].parent = parent;
+            g_u32_win[i].exstyle = exstyle;
+            g_u32_win[i].style = style;
+            g_u32_win[i].x = u32_coord(x, 0);
+            g_u32_win[i].y = u32_coord(y, 0);
+            g_u32_win[i].w = u32_coord(w, 0);
+            g_u32_win[i].h = u32_coord(h, 0);
+            g_u32_win[i].visible = (style & 0x10000000u /* WS_VISIBLE */) ? 1 : 0;
+            g_u32_win[i].enabled = (style & 0x08000000u /* WS_DISABLED */) ? 0 : 1;
+            g_u32_win[i].userdata = 0;
+            int k = 0; if (title) for (; title[k] && k < 255; k++) g_u32_win[i].title[k] = title[k];
+            g_u32_win[i].title[k] = 0;
             return (uint32_t)(i + 1);
         }
     }
@@ -1027,13 +1078,17 @@ uint32_t aret_UnregisterClassW(uint32_t esp) {
         if (g_u32_class[i].used && u32_weq(g_u32_class[i].name, name)) { g_u32_class[i].used = 0; return 1; }
     return 0;
 }
-/* CreateWindowExW(exStyle, className@1, winName, style, x,y,w,h, parent@8, menu, inst, param)
- * -> HWND. We support message-only (and any) windows as pure message sinks. */
+/* CreateWindowExW(exStyle@0, className@1, winName@2, style@3, x@4,y@5,w@6,h@7,
+ * parent@8, menu@9, inst@10, param@11) -> HWND. Binds the class WNDPROC and
+ * captures geometry/style/text; visible windows get real pixels in G2b. */
 uint32_t aret_CreateWindowExW(uint32_t esp) {
-    return u32_window_create(u32_class_wndproc(WU(1)), WU(8));
+    char title[256]; u32_w2n((const uint16_t *)WP(2), title, sizeof title);
+    return u32_window_create(u32_class_wndproc(WU(1)), WU(0), WU(3),
+                             WU(4), WU(5), WU(6), WU(7), WU(8), title);
 }
 /* CreateWindowExA — className@1 is a narrow name (or an atom). Widen a name to
- * look it up in the shared registry; atoms (<0x10000) pass through unchanged. */
+ * look it up in the shared registry; atoms (<0x10000) pass through unchanged. The
+ * window name @2 is already narrow. */
 uint32_t aret_CreateWindowExA(uint32_t esp) {
     uint32_t cref = WU(1);
     uint16_t wbuf[128];
@@ -1041,7 +1096,8 @@ uint32_t aret_CreateWindowExA(uint32_t esp) {
         u32_a2w((const char *)(uintptr_t)cref, wbuf, 128);
         cref = (uint32_t)(uintptr_t)wbuf;
     }
-    return u32_window_create(u32_class_wndproc(cref), WU(8));
+    return u32_window_create(u32_class_wndproc(cref), WU(0), WU(3),
+                             WU(4), WU(5), WU(6), WU(7), WU(8), WCS(2));
 }
 /* DestroyWindow(HWND) -> BOOL. */
 uint32_t aret_DestroyWindow(uint32_t esp) {
@@ -1049,8 +1105,45 @@ uint32_t aret_DestroyWindow(uint32_t esp) {
     if (h >= 1 && h <= U32_MAX_WIN && g_u32_win[h - 1].used) g_u32_win[h - 1].used = 0;
     return 1;
 }
-/* DefWindowProcW(HWND,UINT,WPARAM,LPARAM) -> LRESULT. Message-only default = 0. */
-uint32_t aret_DefWindowProcW(uint32_t esp) { (void)esp; return 0; }
+/* Default handling for the window-text messages (WM_SETTEXT/GETTEXT/GETTEXTLENGTH),
+ * shared by DefWindowProcA (narrow) and DefWindowProcW (wide). Returns 1 and sets
+ * *out if it handled the message, 0 to fall through. This is the real Windows path:
+ * Set/GetWindowText send these messages, and DefWindowProc is what stores/reports
+ * the text — so a subclass that intercepts them behaves exactly as under Wine. */
+static int u32_defproc_text(uint32_t hwnd, uint32_t msg, uint32_t wp, uint32_t lp,
+                            int wide, uint32_t *out) {
+    int i = (hwnd >= 1 && hwnd <= U32_MAX_WIN && g_u32_win[hwnd - 1].used) ? (int)hwnd - 1 : -1;
+    switch (msg) {
+    case U32_WM_SETTEXT:
+        if (i < 0) { *out = 0; return 1; }
+        if (wide) u32_w2n((const uint16_t *)(uintptr_t)lp, g_u32_win[i].title, sizeof g_u32_win[i].title);
+        else { const char *s = (const char *)(uintptr_t)lp; int k = 0;
+               if (s) for (; s[k] && k < 255; k++) g_u32_win[i].title[k] = s[k];
+               g_u32_win[i].title[k] = 0; }
+        *out = 1; return 1;                 /* TRUE */
+    case U32_WM_GETTEXTLENGTH:
+        *out = (i < 0) ? 0 : (uint32_t)strlen(g_u32_win[i].title); return 1;
+    case U32_WM_GETTEXT: {
+        uint32_t n = wp;                    /* buffer capacity in chars, incl. NUL */
+        if (i < 0 || n == 0 || lp == 0) { *out = 0; return 1; }
+        const char *t = g_u32_win[i].title; uint32_t len = (uint32_t)strlen(t);
+        uint32_t cc = len < n - 1 ? len : n - 1;
+        if (wide) { uint16_t *d = (uint16_t *)(uintptr_t)lp;
+                    for (uint32_t j = 0; j < cc; j++) d[j] = (uint16_t)(unsigned char)t[j]; d[cc] = 0; }
+        else      { char *d = (char *)(uintptr_t)lp;
+                    for (uint32_t j = 0; j < cc; j++) d[j] = t[j]; d[cc] = 0; }
+        *out = cc; return 1;
+    }
+    default: return 0;
+    }
+}
+/* DefWindowProcW(HWND,UINT,WPARAM,LPARAM) -> LRESULT. Handles the text messages
+ * (wide); everything else defaults to 0 (message-only semantics). */
+uint32_t aret_DefWindowProcW(uint32_t esp) {
+    uint32_t r;
+    if (u32_defproc_text(WU(0), WU(1), WU(2), WU(3), 1, &r)) return r;
+    return 0;
+}
 /* PostMessageW(HWND,UINT,WPARAM,LPARAM) -> BOOL. Enqueue. */
 uint32_t aret_PostMessageW(uint32_t esp) { return (uint32_t)u32_q_push(WU(0), WU(1), WU(2), WU(3)); }
 /* SendMessageW(HWND,UINT,WPARAM,LPARAM) -> LRESULT. Synchronous: call the WNDPROC now. */
@@ -1134,8 +1227,13 @@ uint32_t aret_MsgWaitForMultipleObjectsEx(uint32_t esp) {
 
 /* --- ANSI (A) twins. The message ops carry no text at this layer (message-only
  * windows have no keyboard/WM_CHAR translation), so A is byte-identical to W;
- * only the class-name-bearing RegisterClassA/CreateWindowExA (above) differ. --- */
-uint32_t aret_DefWindowProcA(uint32_t esp)   { return aret_DefWindowProcW(esp); }
+ * only the class-name-bearing RegisterClassA/CreateWindowExA and the text-bearing
+ * DefWindowProcA/Set-GetWindowTextA differ (ANSI vs wide payloads). --- */
+uint32_t aret_DefWindowProcA(uint32_t esp) {
+    uint32_t r;
+    if (u32_defproc_text(WU(0), WU(1), WU(2), WU(3), 0, &r)) return r;  /* narrow */
+    return 0;
+}
 uint32_t aret_GetMessageA(uint32_t esp)      { return aret_GetMessageW(esp); }
 uint32_t aret_PeekMessageA(uint32_t esp)     { return aret_PeekMessageW(esp); }
 uint32_t aret_DispatchMessageA(uint32_t esp) { return aret_DispatchMessageW(esp); }
@@ -1155,4 +1253,186 @@ uint32_t aret_UnregisterClassA(uint32_t esp) {
     for (int i = 0; i < U32_MAX_CLASSES; i++)
         if (g_u32_class[i].used && u32_weq(g_u32_class[i].name, wname)) { g_u32_class[i].used = 0; return 1; }
     return 0;
+}
+
+/* ------------------------------------------------------------------ */
+/* Window geometry / state / text (G2a, display-free)                 */
+/*                                                                    */
+/* This models the window manager's *state* (rect, style, text, show/ */
+/* enable) so the geometry & text APIs round-trip against Wine without */
+/* a real screen. Actual pixels (SDL_Window) are G2b. Geometry APIs   */
+/* read/write the window struct directly (as Windows' manager does);  */
+/* text APIs go through WM_SETTEXT/GETTEXT so subclasses see them.     */
+/* ------------------------------------------------------------------ */
+
+/* Valid live-window index for hwnd, or -1. */
+static int u32_win_idx(uint32_t hwnd) {
+    return (hwnd >= 1 && hwnd <= U32_MAX_WIN && g_u32_win[hwnd - 1].used) ? (int)hwnd - 1 : -1;
+}
+
+/* GetWindowRect(HWND, RECT*) -> BOOL. Screen coords {left,top,right,bottom} =
+ * {x, y, x+w, y+h} (Wine returns exactly the CreateWindow geometry). The desktop
+ * pseudo-window reports the virtual screen. */
+uint32_t aret_GetWindowRect(uint32_t esp) {
+    uint32_t hwnd = WU(0); int32_t *r = (int32_t *)WP(1);
+    if (!r) return 0;
+    if (hwnd == U32_DESKTOP) { r[0] = 0; r[1] = 0; r[2] = U32_SCREEN_W; r[3] = U32_SCREEN_H; return 1; }
+    int i = u32_win_idx(hwnd);
+    if (i < 0) return 0;
+    r[0] = g_u32_win[i].x; r[1] = g_u32_win[i].y;
+    r[2] = g_u32_win[i].x + g_u32_win[i].w; r[3] = g_u32_win[i].y + g_u32_win[i].h;
+    return 1;
+}
+/* SetWindowPos(HWND, hwndInsertAfter, X, Y, cx, cy, uFlags) -> BOOL. Honours
+ * SWP_NOMOVE/NOSIZE and SWP_SHOW/HIDEWINDOW; Z-order is a no-op in this model. */
+uint32_t aret_SetWindowPos(uint32_t esp) {
+    int i = u32_win_idx(WU(0));
+    if (i < 0) return 0;
+    uint32_t f = WU(6);
+    if (!(f & 0x0002u)) { g_u32_win[i].x = WI(2); g_u32_win[i].y = WI(3); }  /* !SWP_NOMOVE */
+    if (!(f & 0x0001u)) { g_u32_win[i].w = WI(4); g_u32_win[i].h = WI(5); }  /* !SWP_NOSIZE */
+    if (f & 0x0040u) g_u32_win[i].visible = 1;                               /* SWP_SHOWWINDOW */
+    if (f & 0x0080u) g_u32_win[i].visible = 0;                               /* SWP_HIDEWINDOW */
+    return 1;
+}
+/* MoveWindow(HWND, X, Y, nWidth, nHeight, bRepaint) -> BOOL. */
+uint32_t aret_MoveWindow(uint32_t esp) {
+    int i = u32_win_idx(WU(0));
+    if (i < 0) return 0;
+    g_u32_win[i].x = WI(1); g_u32_win[i].y = WI(2);
+    g_u32_win[i].w = WI(3); g_u32_win[i].h = WI(4);
+    return 1;
+}
+/* ShowWindow(HWND, nCmdShow) -> BOOL (nonzero = was previously visible). SW_HIDE=0
+ * hides; any other command shows (minimise/maximise are still "visible" here). */
+uint32_t aret_ShowWindow(uint32_t esp) {
+    int i = u32_win_idx(WU(0));
+    if (i < 0) return 0;
+    int was = g_u32_win[i].visible;
+    g_u32_win[i].visible = (WU(1) == 0 /* SW_HIDE */) ? 0 : 1;
+    return (uint32_t)was;
+}
+/* UpdateWindow(HWND) -> BOOL. No invalid region is tracked yet (GDI paint is G6),
+ * so there is nothing to repaint; report success for a valid window. */
+uint32_t aret_UpdateWindow(uint32_t esp) { return u32_win_idx(WU(0)) >= 0 ? 1u : 0u; }
+/* EnableWindow(HWND, bEnable) -> BOOL (nonzero = was previously DISABLED). */
+uint32_t aret_EnableWindow(uint32_t esp) {
+    int i = u32_win_idx(WU(0));
+    if (i < 0) return 0;
+    int was_disabled = !g_u32_win[i].enabled;
+    g_u32_win[i].enabled = WU(1) ? 1 : 0;
+    return (uint32_t)was_disabled;
+}
+/* GetParent(HWND) -> HWND. Returns the stored parent/owner (0 for a top-level). */
+uint32_t aret_GetParent(uint32_t esp) {
+    int i = u32_win_idx(WU(0));
+    return i < 0 ? 0 : g_u32_win[i].parent;
+}
+/* GetDesktopWindow() -> HWND: the desktop pseudo-window. */
+uint32_t aret_GetDesktopWindow(uint32_t esp) { (void)esp; return U32_DESKTOP; }
+/* IsWindow(HWND) -> BOOL. */
+uint32_t aret_IsWindow(uint32_t esp) {
+    uint32_t h = WU(0);
+    return (h == U32_DESKTOP || u32_win_idx(h) >= 0) ? 1u : 0u;
+}
+/* IsWindowVisible(HWND) -> BOOL. */
+uint32_t aret_IsWindowVisible(uint32_t esp) {
+    int i = u32_win_idx(WU(0));
+    return (i >= 0 && g_u32_win[i].visible) ? 1u : 0u;
+}
+/* IsWindowEnabled(HWND) -> BOOL. */
+uint32_t aret_IsWindowEnabled(uint32_t esp) {
+    int i = u32_win_idx(WU(0));
+    return (i >= 0 && g_u32_win[i].enabled) ? 1u : 0u;
+}
+/* IsIconic(HWND) -> BOOL. Windows are never minimised in this model. */
+uint32_t aret_IsIconic(uint32_t esp) { (void)esp; return 0; }
+/* GetWindowLongA(HWND, nIndex) -> LONG. Models the fields we store; other indices
+ * (GWL_HINSTANCE/ID we never set) are 0, which is their value for these windows. */
+uint32_t aret_GetWindowLongA(uint32_t esp) {
+    int i = u32_win_idx(WU(0));
+    if (i < 0) return 0;
+    switch (WI(1)) {
+    case -16: return g_u32_win[i].style;     /* GWL_STYLE */
+    case -20: return g_u32_win[i].exstyle;   /* GWL_EXSTYLE */
+    case -21: return g_u32_win[i].userdata;  /* GWL_USERDATA */
+    case -4:  return g_u32_win[i].wndproc;   /* GWL_WNDPROC */
+    case -8:  return g_u32_win[i].parent;    /* GWL_HWNDPARENT */
+    default:  return 0;
+    }
+}
+uint32_t aret_GetWindowLongW(uint32_t esp) { return aret_GetWindowLongA(esp); }
+/* SetWindowLongA(HWND, nIndex, dwNewLong) -> LONG (previous value). GWL_WNDPROC
+ * assignment is real subclassing (later messages dispatch to the new proc). */
+uint32_t aret_SetWindowLongA(uint32_t esp) {
+    int i = u32_win_idx(WU(0));
+    if (i < 0) return 0;
+    uint32_t v = WU(2), old;
+    switch (WI(1)) {
+    case -16: old = g_u32_win[i].style;    g_u32_win[i].style = v;    return old;
+    case -20: old = g_u32_win[i].exstyle;  g_u32_win[i].exstyle = v;  return old;
+    case -21: old = g_u32_win[i].userdata; g_u32_win[i].userdata = v; return old;
+    case -4:  old = g_u32_win[i].wndproc;  g_u32_win[i].wndproc = v;  return old;
+    default:  return 0;
+    }
+}
+uint32_t aret_SetWindowLongW(uint32_t esp) { return aret_SetWindowLongA(esp); }
+
+/* Window text: routed through WM_SETTEXT/GETTEXT/GETTEXTLENGTH so a subclassing
+ * WNDPROC observes them exactly as under Windows (DefWindowProc stores/reports).
+ * A and W share the machinery; the ANSI/wide payload distinction is realised by
+ * which DefWindowProc the guest's WNDPROC chains to. */
+/* SetWindowTextA(HWND, lpString) -> BOOL. */
+uint32_t aret_SetWindowTextA(uint32_t esp) {
+    uint32_t wndproc = u32_win_wndproc(WU(0));
+    if (!wndproc) return 0;
+    u32_call_wndproc(esp, wndproc, WU(0), U32_WM_SETTEXT, 0, WU(1));
+    return 1;
+}
+uint32_t aret_SetWindowTextW(uint32_t esp) { return aret_SetWindowTextA(esp); }
+/* GetWindowTextA(HWND, lpString, nMaxCount) -> int (chars copied, excl. NUL). */
+uint32_t aret_GetWindowTextA(uint32_t esp) {
+    uint32_t wndproc = u32_win_wndproc(WU(0));
+    if (!wndproc) return 0;
+    return u32_call_wndproc(esp, wndproc, WU(0), U32_WM_GETTEXT, WU(2), WU(1));
+}
+uint32_t aret_GetWindowTextW(uint32_t esp) { return aret_GetWindowTextA(esp); }
+/* GetWindowTextLengthA(HWND) -> int. */
+uint32_t aret_GetWindowTextLengthA(uint32_t esp) {
+    uint32_t wndproc = u32_win_wndproc(WU(0));
+    if (!wndproc) return 0;
+    return u32_call_wndproc(esp, wndproc, WU(0), U32_WM_GETTEXTLENGTH, 0, 0);
+}
+uint32_t aret_GetWindowTextLengthW(uint32_t esp) { return aret_GetWindowTextLengthA(esp); }
+
+/* GetSystemMetrics(nIndex) -> int. Display-independent metrics return their classic
+ * fixed values; screen dimensions return ARET's defined virtual-desktop size. Raw
+ * screen values are environment-dependent (doc 72 §4.5): tested by invariant, never
+ * bit-compared to Wine. Unmodelled indices return 0. */
+uint32_t aret_GetSystemMetrics(uint32_t esp) {
+    switch (WI(0)) {
+    case 0:  case 78: return U32_SCREEN_W;  /* SM_CXSCREEN / SM_CXVIRTUALSCREEN */
+    case 1:  case 79: return U32_SCREEN_H;  /* SM_CYSCREEN / SM_CYVIRTUALSCREEN */
+    case 16: return U32_SCREEN_W;           /* SM_CXFULLSCREEN (approx) */
+    case 17: return U32_SCREEN_H;           /* SM_CYFULLSCREEN (approx) */
+    case 2:  return 16;   /* SM_CXVSCROLL */
+    case 3:  return 16;   /* SM_CYHSCROLL */
+    case 4:  return 19;   /* SM_CYCAPTION */
+    case 5:  return 1;    /* SM_CXBORDER */
+    case 6:  return 1;    /* SM_CYBORDER */
+    case 11: return 32;   /* SM_CXICON */
+    case 12: return 32;   /* SM_CYICON */
+    case 13: return 32;   /* SM_CXCURSOR */
+    case 14: return 32;   /* SM_CYCURSOR */
+    case 15: return 19;   /* SM_CYMENU */
+    case 30: case 31: return 18; /* SM_CXSIZE / SM_CYSIZE */
+    case 32: return 4;    /* SM_CXFRAME / SM_CXSIZEFRAME */
+    case 33: return 4;    /* SM_CYFRAME / SM_CYSIZEFRAME */
+    case 43: return 3;    /* SM_CMOUSEBUTTONS */
+    case 45: return 2;    /* SM_CXEDGE */
+    case 46: return 2;    /* SM_CYEDGE */
+    case 49: return 16;   /* SM_CXSMICON */
+    case 50: return 16;   /* SM_CYSMICON */
+    default: return 0;
+    }
 }

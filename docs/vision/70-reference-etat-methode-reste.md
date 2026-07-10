@@ -165,7 +165,7 @@ bash bench/regression.sh    # PORTE unifiée : difftest 271/271, in-place 3/3,
                             # recompilabilité gzip/ls/cat 100%
 bash bench/difftest.sh              # décompile O0→O3
 bash bench/difftest_transpile.sh    # transpile (hash 19acad982194bf07)
-bash bench/winediff.sh              # axe 2 vs Wine (57/57)
+bash bench/winediff.sh              # axe 2 vs Wine (58/58)
 bash bench/funcdiff.sh              # lift-closure + opt-diff vs Unicorn (0 div)
 # Sweeps de vrais binaires (téléchargent + comparent à Wine) :
 bash bench/sqlite_sweep.sh   bash bench/busybox_sweep.sh   bash bench/corpus_sweep.sh
@@ -185,7 +185,7 @@ bash bench/wallsweep.sh <dir1> [dir2…]  # AGRÈGE --mode walls sur un corpus :
 
 ### État régression (référence — doit rester vert)
 difftest **271/271** · transpile-diff **4/4** (H=`19acad982194bf07`) · winediff
-**57/57** · cpudiff vert (per-instruction + séquences génératives) · funcdiff corpus **0 divergence** (lift ~12k scorées /
+**58/58** · cpudiff vert (per-instruction + séquences génératives) · funcdiff corpus **0 divergence** (lift ~12k scorées /
 ~6k appels, opt ~10k scorées) · SMT **11/11** · in-place **3/3** · magicdiv **2³²** ·
 recompilabilité **100 %** · WASM **7/7**.
 
@@ -340,6 +340,11 @@ recompilabilité **100 %** · WASM **7/7**.
   `Post`/`SendMessageW`, `PostQuitMessage`, `SetTimer`/`KillTimer`, `MsgWaitForMultipleObjectsEx` **+ jumeaux A** (M7 G1, doc 72).
   Registre de classes + file de messages mono-thread + timers ; dispatch = **callback WNDPROC
   dans le lifté** (`aret_call`). Débloque le notifier Tcl. Cf. §5 P6.5.
+- **USER32 modèle fenêtre étendu** (M7 G2a, doc 72, **display-free**) : état window-manager (rect/style/
+  visible/enabled/userdata/titre) → `GetWindowRect`/`SetWindowPos`/`MoveWindow`/`ShowWindow`/`UpdateWindow`/
+  `EnableWindow`/`Get`-`SetWindowLongA/W` ; texte `Set`/`GetWindowTextA/W`+`GetWindowTextLengthA/W` **via
+  WM_SETTEXT/GETTEXT** (le WNDPROC lifté les voit) ; `GetSystemMetrics`/`GetDesktopWindow`/`IsWindow(Visible/
+  Enabled)`/`IsIconic`/`GetParent`. Valeurs écran env-dépendantes = **invariant** (écran virtuel 1024×768).
 
 ### 4.6 Démonstrateurs prouvés (bit-identiques à Wine)
 - **Lua 5.4.7** (mingw, 650 Ko) **symbolé ET strippé** → ELF natif : batterie
@@ -484,7 +489,7 @@ bornée** : `WSAStartup`/Winsock, `CreateEventW`, `wcschr`, `LoadLibraryW`, et l
 | CRT+/W32 | Vrai CRT (forward libc) + Win32 native (kernel32→POSIX) | prog. C large + Win32 hors-GUI | ✅ |
 | UNPACK | Déballage dynamique Unicorn (émule stub → OEP → dump) | packers non-VM | ✅ |
 | M6 | Cible **WebAssembly** (`--target wasm`, wasmtime) | cible universelle | ✅ (7/7) |
-| **M7** | **GUI / graphisme** (USER32/GDI via **SDL2** portable, puis DXVK/vkd3d) | applis fenêtrées, puis **jeux** | 🚧 **plan doc 72**, G1 |
+| **M7** | **GUI / graphisme** (USER32/GDI via **SDL2** portable, puis DXVK/vkd3d) | applis fenêtrées, puis **jeux** | 🚧 **plan doc 72**, G1 + G2a (modèle fenêtre étendu display-free) |
 
 > **Règle** : on ne s'engage pas sur M_n+1 tant que M_n ne tourne pas proprement ;
 > chaque palier = un artefact démontrable + un test de non-régression.

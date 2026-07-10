@@ -979,4 +979,33 @@ Détail : **70 §6** (roadmap). Résumé :
   tournent pas encore — il leur faut G2 fenêtres visibles + GDI + ressources + dialogs.)*
 - **Vérifié** : hash transpile **inchangé** `19acad982194bf07`, difftest 271/271, winediff **57/57**, table triée.
 
+### 2026-07-10 — [GUI] M7 — G2a : modèle fenêtre étendu (géométrie / état / texte), display-free
+- **G2a fait** (`aret_win32.c`) : la table de fenêtres passe du simple sink message-only à un vrai **état de
+  window manager** — `x,y,w,h`, `style/exstyle`, `visible/enabled`, `userdata` (GWL_USERDATA), `title[256]`.
+  `u32_window_create` capture la géométrie/style/texte de `CreateWindowEx(A/W)` (helper `u32_coord` pour
+  CW_USEDEFAULT) ; les deux appelants A/W passent désormais les 9 args (title widené narrow via `u32_w2n`).
+- **APIs (18)** : `GetWindowRect` (= `{x,y,x+w,y+h}`, Wine renvoie exactement la géométrie CreateWindow),
+  `SetWindowPos` (respecte SWP_NOMOVE/NOSIZE/SHOW/HIDE), `MoveWindow`, `ShowWindow` (renvoie l'ancienne
+  visibilité), `UpdateWindow` (no-op sound : pas de région invalide tant que GDI paint = G6), `EnableWindow`
+  (renvoie l'ancien état **disabled**), `GetParent`, `GetDesktopWindow`/`IsWindow`/`IsWindowVisible`/
+  `IsWindowEnabled`/`IsIconic`, `Get/SetWindowLongA/W` (STYLE/EXSTYLE/USERDATA/WNDPROC=subclassing),
+  `GetSystemMetrics`. **Texte** : `Set/GetWindowTextA/W` + `GetWindowTextLengthA/W` **routés via
+  WM_SETTEXT/WM_GETTEXT/WM_GETTEXTLENGTH** → le WNDPROC lifté les voit, `DefWindowProcA/W` stocke/rapporte
+  (vrai chemin Windows ; un subclass les intercepte comme sous Wine). +20 `stdcall_pops` triés.
+- **Sound sur l'env-dépendant** (règle « invariant, pas valeur brute ») : `GetSystemMetrics` renvoie les
+  métriques fixes classiques + une taille d'écran virtuel **définie** (1024×768, comme les valeurs host de
+  GetDiskFreeSpace) ; `GetDesktopWindow`/`GetWindowRect(desktop)` = l'écran virtuel. Ces valeurs brutes sont
+  testées **par invariant** (>0), jamais bit-comparées à Wine (headless-dummy vs Xvfb 1280×1024).
+- **Oracle** : `winecorpus/user32_windowstate_a.c` (WS_POPUP → pas de clamping WM) : rect après create /
+  SetWindowPos move-only / size-only / MoveWindow, show+hide, enable+disable, GWL_USERDATA round-trip, texte
+  round-trip via le callback, parent/IsWindow/desktop/metrics par invariant = **bit-identique à Wine** headless
+  (Xvfb). Infra : `winediff.sh` démarre un Xvfb pour le run + lie `-lgdi32` ; `session-start.sh` installe Xvfb.
+- **Effet mesuré** : GetWindowRect 35, SetWindowPos 34, ShowWindow 21, GetSystemMetrics 17, GetDesktopWindow 21
+  (+ Set/GetWindowText, GetWindowLong…) **éliminés des 41 Win95**. *(Les binaires ne tournent toujours pas :
+  reste G2b fenêtre SDL visible + pompe SDL_PollEvent, puis GDI/ressources/dialogs.)*
+- **Vérifié** : hash transpile **inchangé** `19acad982194bf07`, difftest 271/271, winediff **58/58**, cargo test
+  (hors 1 échec **pré-existant** non lié : `atexit_callback_after_noreturn` a des `fld/fstp qword` x87 non
+  modélisés — le programme tourne pourtant jusqu'à `cleanup 1` ; l'assertion trébuche sur le warning honnête
+  « unmodelled »), table triée.
+
 <!-- NOUVELLES ENTRÉES ICI (garder l'ordre chronologique, plus récent en bas) -->

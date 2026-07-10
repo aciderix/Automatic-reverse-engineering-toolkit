@@ -61,7 +61,8 @@ moment de M7-WASM, non bloquant pour Linux/macOS.)*
 | # | Incrément | Débloque (corpus) | Oracle |
 |---|-----------|-------------------|--------|
 | **G1** | **Jumeaux A** du modèle fenêtre/classe/message (RegisterClassA, CreateWindowExA, DefWindowProcA, Get/Peek/Dispatch/Translate/Post/SendMessageA, GetMessageA) — ANSI, **toujours message-only** | RegisterClassA 26, SendMessageA 32, DefWindowProcA 24, DispatchMessageA 24, PeekMessageA 22, CreateWindowExA 20… | fixture message-only ANSI vs Wine (comme `user32_msgwindow.c` en A) |
-| **G2** | **Fenêtre visible via SDL2** : CreateWindowEx(WS_VISIBLE) → SDL_CreateWindow ; ShowWindow/UpdateWindow ; pompe messages ↔ SDL_PollEvent (clavier/souris/close → WM_*) ; GetWindowRect/SetWindowPos/GetSystemMetrics | GetWindowRect 35, SetWindowPos 34, ShowWindow 21, GetSystemMetrics 17, GetDesktopWindow 21 | fixture : créer fenêtre, poser/lire géométrie + titre, poster WM_CLOSE, vérifier séquence — headless vs Wine |
+| **G2a** ✅ | **Modèle fenêtre étendu (display-free)** : GetWindowRect/SetWindowPos/MoveWindow/ShowWindow/UpdateWindow/EnableWindow/Get-SetWindowLong ; Get-SetWindowText via WM_SETTEXT/GETTEXT ; GetSystemMetrics/GetDesktopWindow/IsWindow(Visible/Enabled)/GetParent | GetWindowRect 35, SetWindowPos 34, ShowWindow 21, GetSystemMetrics 17, GetDesktopWindow 21 | `user32_windowstate_a.c` : géométrie/état/texte round-trip, métriques par invariant — headless vs Wine ✅ |
+| **G2b** | **Fenêtre visible via SDL2** : CreateWindowEx(WS_VISIBLE) → SDL_CreateWindow ; pompe messages ↔ SDL_PollEvent (clavier/souris/close → WM_*) ; `-DARET_HAVE_SDL` via pkg-config, dégradation propre si absent | (visible windows) | fixture : créer fenêtre visible, poster WM_CLOSE, vérifier séquence — SDL headless (`SDL_VIDEODRIVER=dummy`) vs Wine |
 | **G3** | **Texte fenêtre + widgets simples** : SetWindowTextA/GetWindowTextA, WM_SETTEXT ; contrôles STATIC/BUTTON/EDIT (classes prédéfinies) ; GetDlgItem/SetDlgItemText/GetDlgItemText | SetWindowTextA 34, GetDlgItem 33, SetDlgItemTextA 19, EnableWindow 19 | round-trip texte + état contrôles vs Wine |
 | **G4** | **Ressources** : FindResourceA/LoadResource/SizeofResource/LockResource/FreeResource (indexer `.rsrc` déjà mappée), **LoadStringA**, LoadIconA/LoadCursorA (handles opaques) | LoadStringA 32, FindResourceA 26, LoadResource 26, SizeofResource 26, LoadCursorA 23, LoadIconA 19 | LoadString d'une table de chaînes .rc vs Wine (valeurs exactes) |
 | **G5** | **Dialogs** : DialogBoxParamA/CreateDialogParamA parsent le **DLGTEMPLATE** (ressource) → créent les contrôles + lancent la pompe modale ; EndDialog ; MessageBoxA (cas simple : titre+texte+boutons, renvoie le bouton) | DialogBoxParamA 17, CreateDialogParamA 23, EndDialog 20, MessageBoxA 37 | fixture dialogue (template .rc + WM_INITDIALOG + EndDialog) vs Wine ; MessageBox auto-répondu |
@@ -107,8 +108,13 @@ non-local + chaîne `fs:[0]` + handlers, correctness-critique.
 
 ## 6. Ordre d'exécution
 
-**G1 maintenant** (jumeaux A — cheap, étend l'existant, ~0 risque, débloque
-20-32 binaires par API). Puis G2 (SDL2 visible) = la vraie marche architecturale.
-Le reste par la donnée (re-sweep après chaque incrément). Chaque incrément :
+**G1 fait** (jumeaux A). **G2a fait** (modèle fenêtre étendu **display-free** :
+géométrie/état/texte — GetWindowRect/SetWindowPos/MoveWindow/ShowWindow/Enable/
+Get-SetWindowLong/Get-SetWindowText via WM_*TEXT*/GetSystemMetrics/desktop, oracle
+`user32_windowstate_a.c` bit-identique Wine, 58/58). G2a scinde G2 en deux : le
+**modèle** (fait, portable, sans SDL) puis **G2b** = la vraie marche archi (fenêtre
+SDL visible : `CreateWindowEx(WS_VISIBLE)`→`SDL_CreateWindow`, pompe messages ↔
+`SDL_PollEvent`, lien SDL2 via pkg-config `-DARET_HAVE_SDL`, dégradation propre si
+absent). Le reste par la donnée (re-sweep après chaque incrément). Chaque incrément :
 fixture minimale → implément → **oracle Wine** → régression complète → commit +
 doc (70 §4.5 / §5, 71 daté). Aucune régression tolérée.
