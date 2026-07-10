@@ -774,4 +774,24 @@ Détail : **70 §6** (roadmap). Résumé :
   le lifter). Cette fixture force les instructions x87 brutes ⇒ garde le chemin `__x87rt_*` vs Wine. **winediff
   49/49 → 50/50.** Aucun code produit touché (fixture + docs) → hash transpile inchangé.
 
+### 2026-07-10 — [DEMO][HLE-WIN32] Nouveaux binaires : sqldiff ✅ bit-identique ; sqlite3_analyzer → abort SOUND (Tcl notifier)
+- **Contexte** : « tester un nouveau binaire » (meilleur révélateur de bugs généraux). curl.se et sqlite.org ne
+  livrent plus de win32 récent → pris le bundle `sqlite-tools-win32-x86-3400100` (2022, même ère que notre
+  sqlite3.exe) : **`sqldiff.exe`** (583 Ko, C pur) + **`sqlite3_analyzer.exe`** (2 Mo, embarque **Tcl**).
+- **sqldiff = ✅ bit-identique à Wine** sur tous les modes testés : diff réel (schéma/update/delete/insert),
+  `--schema`/`--summary`/`--table`/`--primarykey`, BLOB/NULL/int64/unicode, diff vide. Réutilise le moteur
+  sqlite déjà maîtrisé → aucun bug. (Candidat gauntlet.)
+- **sqlite3_analyzer = abort SOUND** (respecte le principe sacré, **jamais faux en silence**). Tcl initialise,
+  exécute son script de démarrage, puis son **notifier** (boucle d'événements Windows) crée une fenêtre
+  message-only via `RegisterClassW` → notre stub échoue → le code Tcl imprime lui-même « Unable to register
+  TclNotifier window class » → `Tcl_Panic` → `ud2` → **abort bruyant**. Diagnostic précis : tout (lift CPU +
+  CRT + Tcl) marche jusqu'au notifier ; **seul** le sous-système fenêtre-message USER32 manque.
+- **Surface requise mesurée** (`--mode imports`) = jeu message-loop **borné** (~15) : `RegisterClassW`/
+  `UnregisterClassW`, `CreateWindowExW`/`DestroyWindow`, `DefWindowProcW`, `GetMessageW`/`PeekMessageW`/
+  `DispatchMessageW`/`TranslateMessage`, `PostMessageW`/`SendMessageW`/`PostQuitMessage`, `SetTimer`/`KillTimer`,
+  `MsgWaitForMultipleObjectsEx`. **Une fenêtre message-only n'affiche RIEN** → sous-système implémentable
+  **sound, sans graphisme/X11** (registre de classes + file de messages par thread + dispatch WNDPROC + timers).
+  Débloquerait une **classe** (tout programme Tcl + tout usage de fenêtre cachée) = **1ᵉʳ pas concret de M7**,
+  déclenché par un binaire mesuré (pas spéculatif). **Décision produit ouverte** (chantier neuf, ~15 fns).
+
 <!-- NOUVELLES ENTRÉES ICI (garder l'ordre chronologique, plus récent en bas) -->

@@ -416,6 +416,17 @@ Tentée, **retirée** (faux positif : `esp` fantôme incohérent à la frontièr
 run_ssa↔run_closure). À reprendre en **threadant tout l'état CPU** (GP+flags+xmm+esp)
 proprement au call, testé par la garde opt + teeth-check avant de croire un verdict.
 
+### P6.5 — Fenêtre message-only USER32 (MESURÉ 2026-07-10, sqlite3_analyzer/Tcl)
+**Nouveau binaire testé** : `sqldiff.exe` = **bit-identique à Wine** (tous modes) ;
+`sqlite3_analyzer.exe` (embarque **Tcl**) = **abort SOUND** — le notifier Tcl crée une
+fenêtre message-only via `RegisterClassW`, notre stub échoue → `Tcl_Panic` → `ud2`.
+**Surface bornée** (~15 fns message-loop : Register/Unregister/CreateWindowEx/Destroy/
+DefWindowProc/Get/Peek/Dispatch/Translate/Post/Send/PostQuit/Set/KillTimer/MsgWait).
+**Une fenêtre message-only n'affiche RIEN** ⇒ implémentable **sound sans graphisme**
+(registre de classes + file de messages par thread + dispatch WNDPROC + timers).
+Débloque une **classe** (Tcl + toute fenêtre cachée) = **1ᵉʳ pas concret de M7**,
+déclenché par un binaire mesuré. Chantier neuf borné ; **décision produit à prendre**.
+
 ### P7 — Chantiers longs : couverture « n'importe quel programme »
 > Détaillé au **§6** (roadmap complète M5→M7 + 64-bit + threads + GUI + graphisme +
 > macOS). Résumé de l'ordre : **types (Phase 6)** → **threads** → **64-bit
