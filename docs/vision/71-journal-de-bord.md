@@ -583,6 +583,10 @@ Détail : **70 §6** (roadmap). Résumé :
   divergence (12467 lift / 10688 opt scorées — plus de fonctions récupérées dans busybox/sqlite, toutes
   correctes), winediff 49/49, busybox sweep 60/60, gauntlet 19/21**. Fixture C minimale non retenue (le
   balayage linéaire absorbe un stub adjacent → ne reproduit pas ; NASM garde le vrai cas isolé).
-- **Reste** : **plink** (`0x450058`, même classe) à re-mesurer — peut être couvert par ce fix.
+- **Reste** : **plink** re-mesuré (snapshot PuTTY actuel, téléchargé de `tartarus.org`) — l'abort
+  points-to historique `0x450058` **a disparu** (résolu par les fixes récup accumulés). Nouveaux blocages
+  **différents** : imports `GetEnvironmentStringsW`/`RegOpenKeyExA`/`RegCloseKey` (registre = émulation non
+  bornée, non prioritaire) + 3 stubs `ret`/`xor eax,eax;ret` appelés directement mais non récupérés
+  (appelants non atteints par la descente ; hors chemin `-V`). Binaire externe hors corpus → borné, pas chassé.
 
 <!-- NOUVELLES ENTRÉES ICI (garder l'ordre chronologique, plus récent en bas) -->

@@ -376,8 +376,12 @@ chaque pas.**
   code_imm`) + acceptation du stub `ret` nu (`is_bare_ret_stub`) **uniquement** via cette preuve
   address-taken (jamais en balayage linéaire → pas de faux positif sur du padding). `nasm -f obj` =
   **bit-identique à Wine** (cf. §4.4 + 71 `[RECOV]`).
-- **plink** (MSVC/clang) : abort sur `0x450058`, même classe (pointeur isolé atteint
-  par adresse calculée) — **à re-mesurer** (peut être couvert par `mem_store_code_imm`).
+- **plink** (PuTTY, clang) : l'abort points-to historique (`0x450058`) est **RÉSOLU** (re-mesuré
+  2026-07-09 sur snapshot actuel : plink ne bute **plus** sur un pointeur isolé). Nouveaux blocages,
+  **différents** : imports non implémentés (`GetEnvironmentStringsW`, registre `RegOpenKeyExA/RegCloseKey`)
+  + 3 stubs no-op (`ret`/`xor eax,eax;ret`) appelés directement mais non récupérés (appelants dans du code
+  non atteint par la descente ; **hors chemin `-V`**, donc non bloquants pour la version). Registre =
+  émulation non bornée → **non prioritaire** (binaire externe hors corpus).
 - Vrai **C++ g++** (exceptions, RTTI, thiscall) : non testable sur l'hôte (pas de
   mingw g++) ; le **dispatch vtable lui-même fonctionne** (fixture validée).
 
