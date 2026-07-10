@@ -945,6 +945,59 @@ pub fn lift(insn: &Insn, bits: u32) -> Vec<Stmt> {
         }
     }
 
+    // `rep(ne) cmps`: compare [esi] vs [edi], advancing both and decrementing ecx,
+    // until ecx==0 or the compare condition ends the repeat (`repe`/F3 continues
+    // while equal — the ubiquitous `memcmp`/`strcmp` idiom `repe cmpsb; je …`;
+    // `repne`/F2 while not-equal). Without it a `memcmp` reads as an opaque asm
+    // no-op and every comparison is "equal" (wrong). Forward (DF=0) assumed, as for
+    // `rep movs`/`scas`. Handled for repne too (F2), which iced does not report via
+    // `has_rep_prefix()`. (ecx==0 leaves flags per the last-element read like
+    // `scas`; the memcmp idiom guards n==0 upstream.)
+    {
+        use Mnemonic::*;
+        let (csz, chelper): (i128, &str) = match ins.mnemonic() {
+            Cmpsb => (1, "__rep_cmps8"),
+            Cmpsw => (2, "__rep_cmps16"),
+            Cmpsd => (4, "__rep_cmps32"),
+            _ => (0, ""),
+        };
+        if csz != 0 && (ins.has_rep_prefix() || ins.has_repne_prefix()) {
+            let w = (csz * 8) as u32;
+            let ty = Ty::int(w as u8);
+            let rsi = Location::Reg(RegId(6));
+            let rdi = Location::Reg(RegId(7));
+            let rcx = Location::Reg(RegId(1));
+            // repe (F3) stops on the first mismatch; repne (F2) on the first match.
+            let repe: i128 = if ins.has_repne_prefix() { 0 } else { 1 };
+            // Elements compared (a pure read); stash in a per-instruction temp so
+            // the esi/edi/ecx updates and the flag compare all see the same count.
+            let kt = Location::Temp((insn.address as u32).wrapping_mul(2).wrapping_add(1));
+            let k = fcall(
+                chelper,
+                vec![Expr::Read(rsi.clone()), Expr::Read(rdi.clone()), rep_count(bits), konst(repe)],
+            );
+            let mut out = vec![Stmt::Set { dst: kt.clone(), expr: k }];
+            out.push(Stmt::Set {
+                dst: rsi.clone(),
+                expr: bin(BinOp::Add, Expr::Read(rsi.clone()), bin(BinOp::Mul, Expr::Read(kt.clone()), konst(csz))),
+            });
+            out.push(Stmt::Set {
+                dst: rdi.clone(),
+                expr: bin(BinOp::Add, Expr::Read(rdi.clone()), bin(BinOp::Mul, Expr::Read(kt.clone()), konst(csz))),
+            });
+            out.push(Stmt::Set {
+                dst: rcx,
+                expr: bin(BinOp::Sub, rep_count(bits), Expr::Read(kt)),
+            });
+            // Flags come from the last compared pair, at [esi-size] and [edi-size].
+            let la = Expr::Load { addr: Box::new(bin(BinOp::Sub, Expr::Read(rsi), konst(csz))), ty: ty.clone() };
+            let lb = Expr::Load { addr: Box::new(bin(BinOp::Sub, Expr::Read(rdi), konst(csz))), ty };
+            let r = bin(BinOp::Sub, la.clone(), lb.clone());
+            out.extend(sub_flags(&la, &lb, &r, w));
+            return out;
+        }
+    }
+
     // Single (non-rep) string instructions: operate on one element at [esi]/[edi]
     // and advance the pointer(s). Forward (DF=0) is assumed — the ABI-default the
     // compiler maintains (same assumption as `rep movs` above; a `std`/DF=1 region

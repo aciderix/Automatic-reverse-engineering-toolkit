@@ -185,7 +185,7 @@ bash bench/wallsweep.sh <dir1> [dir2…]  # AGRÈGE --mode walls sur un corpus :
 
 ### État régression (référence — doit rester vert)
 difftest **271/271** · transpile-diff **4/4** (H=`19acad982194bf07`) · winediff
-**51/51** · cpudiff vert (per-instruction + séquences génératives) · funcdiff corpus **0 divergence** (lift ~12k scorées /
+**52/52** · cpudiff vert (per-instruction + séquences génératives) · funcdiff corpus **0 divergence** (lift ~12k scorées /
 ~6k appels, opt ~10k scorées) · SMT **11/11** · in-place **3/3** · magicdiv **2³²** ·
 recompilabilité **100 %** · WASM **7/7**.
 
@@ -207,8 +207,11 @@ recompilabilité **100 %** · WASM **7/7**.
   `__pi_*`). Bug `ss` (préservation `[63:32]`) corrigé. SSE2-string
   (pcmpeqb/pmovmskb/pshuflw…).
 - **Instructions de chaîne** : `movs/stos/lods/scas/cmps` (non-rep) + `rep movs/
-  stos/scas` (helpers `__rep_*`). DF=0 assumé ; `std`/DF arrière + `rep cmps/lods`
-  = **abort sound**.
+  stos/scas/cmps` (helpers `__rep_*`). `rep(ne) cmps` = **idiome memcmp/strcmp**
+  (`repe cmpsb;je…`) : helper `__rep_cmps{8,16,32}` compte + esi/edi/ecx + flags du
+  dernier couple ; **mur #1 du corpus** (analyzer 149 sites, 17/41 Win95) → gardé par
+  `winecorpus/str_repcmps.c` (bit-identique Wine). DF=0 assumé ; `std`/DF arrière +
+  `rep lods` = **abort sound**.
 - **Divers** : `cpuid`/`xgetbv` (host réel, **AVX/SSE4.2 masqués** → chemins SSE2
   liftables), `bt/bts/btr/btc` (reg + `[mem],imm`), `stmxcsr`/`ldmxcsr`,
   `cmov/setcc`, `xchg` high-byte.

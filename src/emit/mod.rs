@@ -313,6 +313,14 @@ pub(crate) const FLOAT_HELPERS: &str = concat!(
     "static inline uint64_t __rep_scas8(uint64_t d,uint64_t v,uint64_t n,uint64_t repe){const uint8_t* p=(const uint8_t*)(uintptr_t)d;uint8_t x=(uint8_t)v;uint64_t k=0;while(n!=0){int eq=(p[k]==x);k++;n--;if(repe?!eq:eq)break;}return k;}\n",
     "static inline uint64_t __rep_scas16(uint64_t d,uint64_t v,uint64_t n,uint64_t repe){const uint16_t* p=(const uint16_t*)(uintptr_t)d;uint16_t x=(uint16_t)v;uint64_t k=0;while(n!=0){int eq=(p[k]==x);k++;n--;if(repe?!eq:eq)break;}return k;}\n",
     "static inline uint64_t __rep_scas32(uint64_t d,uint64_t v,uint64_t n,uint64_t repe){const uint32_t* p=(const uint32_t*)(uintptr_t)d;uint32_t x=(uint32_t)v;uint64_t k=0;while(n!=0){int eq=(p[k]==x);k++;n--;if(repe?!eq:eq)break;}return k;}\n",
+    // rep(ne) cmps: compare `n` elements at [esi] vs [edi], returning the count
+    // consumed. `repe` (1, F3 — the memcmp/strcmp idiom) stops on the first
+    // mismatch, `repne` (0, F2) on the first match; both stop when the count runs
+    // out. (esi/edi/ecx updates and flags are applied by the caller from this
+    // count.) Forward (DF=0) assumed, as for rep movs/scas.
+    "static inline uint64_t __rep_cmps8(uint64_t s,uint64_t d,uint64_t n,uint64_t repe){const uint8_t* a=(const uint8_t*)(uintptr_t)s;const uint8_t* b=(const uint8_t*)(uintptr_t)d;uint64_t k=0;while(n!=0){int eq=(a[k]==b[k]);k++;n--;if(repe?!eq:eq)break;}return k;}\n",
+    "static inline uint64_t __rep_cmps16(uint64_t s,uint64_t d,uint64_t n,uint64_t repe){const uint16_t* a=(const uint16_t*)(uintptr_t)s;const uint16_t* b=(const uint16_t*)(uintptr_t)d;uint64_t k=0;while(n!=0){int eq=(a[k]==b[k]);k++;n--;if(repe?!eq:eq)break;}return k;}\n",
+    "static inline uint64_t __rep_cmps32(uint64_t s,uint64_t d,uint64_t n,uint64_t repe){const uint32_t* a=(const uint32_t*)(uintptr_t)s;const uint32_t* b=(const uint32_t*)(uintptr_t)d;uint64_t k=0;while(n!=0){int eq=(a[k]==b[k]);k++;n--;if(repe?!eq:eq)break;}return k;}\n",
     // ---- Runtime x87 FPU-stack model: the fallback used for functions whose
     // static depth analysis bailed. The stack is ordinary runtime state, so no
     // compile-time depth is needed — correct by construction. Named `__x87rt_`

@@ -301,7 +301,7 @@ Deux mécanismes complémentaires :
   CFG). memcpy/rep-stos modélisés ; adresses masquées 32-bit. **`0 divergence`
   ≠ pas de bug** : dit *où il n'est pas* (bugs profonds derrière imports/skips).
 - **Portes** : difftest (décompile O0→O3, **271/271**), transpile-diff (produit, **4/4**,
-  hash **`19acad982194bf07`**), winediff (Wine, **51/51**), sweeps (sqlite/busybox/
+  hash **`19acad982194bf07`**), winediff (Wine, **52/52**), sweeps (sqlite/busybox/
   gauntlet), SMT (Z3, 11/11), magicdiv (2³²), in-place (3/3), recompilabilité (100%).
 - **`--mode imports`** : couverture d'imports **statique a-priori** (borne supérieure
   du trou runtime). Prioriser par la donnée, **filtrer par fidélité**.
@@ -870,5 +870,22 @@ Détail : **70 §6** (roadmap). Résumé :
   (desktop Win95) le mur dominant est la GUI (gros chantier M7) ; en marge, 3-4 shims triviaux (`GetVersion`…)
   et `rep cmps` sont des gains transverses immédiats. Couplage oracles **obligatoire** : la carte dit *où*,
   chaque shim/lift devra passer winediff/cpudiff + régression avant d'être expédié.
+
+### 2026-07-10 — [LIFT] `rep(ne) cmps` lifté (idiome memcmp/strcmp) — mur #1 du corpus abattu
+- **Contexte** : premier mur descendu par la méthode corpus. `rep cmps` était le **#1 instruction** partout
+  (analyzer **149 sites**, **17/41** Win95). C'est l'idiome `memcmp`/`strcmp` que les vieux MSVC/Borland
+  inlinent (`repe cmpsb; je …`). Non lifté → memcmp = no-op asm opaque → toute comparaison « égale » (faux).
+- **Fait** : (1) helpers runtime `__rep_cmps{8,16,32}(s,d,n,repe)` (emit/mod.rs, demand-load) — comparent n
+  éléments [esi] vs [edi], `repe`(F3) s'arrête au 1er différent (memcmp), `repne`(F2) au 1er égal, renvoient le
+  compte k ; (2) bloc de lift (lift.rs, calqué sur `rep scas`) : k dans un temp, puis esi/edi += k*taille,
+  ecx -= k, **flags du dernier couple** comparé ([esi-taille] vs [edi-taille]) via `sub_flags`. F2 géré (iced
+  ne le remonte pas via `has_rep_prefix`). DF=0 assumé (comme movs/scas) ; `std`/arrière = abort sound.
+- **Oracle** : per-instruction cpudiff ne modélise pas les helpers value-returning (skip) → oracle **end-to-end**
+  `winecorpus/str_repcmps.c` (inline-asm brut repe cmpsb equal/diff/reverse, repne cmpsw stop-on-match, repe
+  cmpsd equal/differ + comptes) = **bit-identique à Wine**. (Même logique que rep_movsb_copy vérifie rep movs.)
+- **Effet mesuré (re-sweep)** : analyzer **179 → 30 sites** (les 149 `repe cmpsb` disparus) ; Win95 : les 17
+  binaires perdent ce mur. La boucle mesure→fix→re-mesure **confirmée** : le mur ciblé s'efface de la carte.
+- **Vérifié** : hash transpile **inchangé** `19acad982194bf07` (les fixtures n'utilisent pas rep cmps),
+  difftest 271/271, winediff **52/52** (nouvelle fixture), cpudiff inchangé.
 
 <!-- NOUVELLES ENTRÉES ICI (garder l'ordre chronologique, plus récent en bas) -->
