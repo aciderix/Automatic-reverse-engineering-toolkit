@@ -270,6 +270,19 @@ Deux mécanismes complémentaires :
   auparavant `run()`/`corpus()` existaient mais n'étaient exercés par aucun test). esp placé
   mid-page pour les insns modifiant esp (sinon écriture pile hors-page = case skippée).
   **Méthode d'énumération des classes de miscompile par construction** (vs subir binaire par binaire).
+- **cpudiff-séquences** (`run_sequences`/`diff_seq`/`seq_corpus`, 2026-07-10) : **couche
+  de composition** au-dessus du per-instruction. Une insn correcte *isolément* peut être
+  fausse *en contexte* (une insn décale esp, une autre lit ensuite contre cet esp). Chaque
+  insn est décodée à **son propre offset** (`decode_at` → ids de temp distincts, pas
+  d'aliasing des temps de scratch entre insns du bloc), liftée, statements concaténés en un
+  bloc droit ; interp vs Unicorn (`count=n_insns`), esp mid-page + ebp quart-page → tout
+  accès pile/frame tombe dans la page comparée. **Trouvé au 1ᵉʳ run : `push esp` poussait
+  l'esp *post*-décrément** (le patron `push esp;pop eax` rendait `esp-4`). Fix général :
+  `src_uses_sp` élargi (sémantique 286+ : `push esp`/`push [esp+d]` lisent la source **avant**
+  de baisser esp → snapshot temp). **Double trou fermé** : le per-instruction avait `push esp`
+  au corpus mais ne comparait la page que si `mem_base.is_some()` (opérande mémoire explicite) —
+  or push écrit la pile via opérande *implicite* → comparaison page élargie à
+  `stack_pointer_increment() != 0`. Câblé `sequence_corpus_matches_unicorn`.
 - **funcdiff** (Unicorn, fonction) : **closure** (suit les appels directs récupérés,
   discipline call/ret exacte, retaddr sentinelle non-mappée, frames OFF) + **opt-diff**
   (post-opt SSA vs pré-opt : DCE ne supprime jamais un Store, opt ne touche pas le

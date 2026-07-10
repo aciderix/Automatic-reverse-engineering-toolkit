@@ -2145,8 +2145,12 @@ pub fn lift(insn: &Insn, bits: u32) -> Vec<Stmt> {
             // the source is esp-relative, snapshot it into a temp first. Other
             // pushes (reg/imm/non-esp mem) keep the two-statement form unchanged.
             let sp_reg = if bits == 64 { Register::RSP } else { Register::ESP };
-            let src_uses_sp = ins.op0_kind() == OpKind::Memory
-                && (ins.memory_base() == sp_reg || ins.memory_index() == sp_reg);
+            // The source reads esp when it is esp-relative memory (`push [esp+d]`)
+            // OR the esp register itself (`push esp` must push the *pre*-decrement
+            // value — 286+ semantics). Either way, snapshot before lowering esp.
+            let src_uses_sp = (ins.op0_kind() == OpKind::Memory
+                && (ins.memory_base() == sp_reg || ins.memory_index() == sp_reg))
+                || (ins.op0_kind() == OpKind::Register && ins.op0_register() == sp_reg);
             if src_uses_sp {
                 let t = Location::Temp((insn.address as u32).wrapping_mul(2));
                 vec![

@@ -962,12 +962,19 @@ pub struct Mismatch {
 }
 
 fn decode(bytes: &[u8]) -> crate::disasm::Insn {
+    decode_at(bytes, CODE_ADDR)
+}
+
+/// Decode a single instruction at a specific address. Distinct addresses give
+/// distinct per-instruction temp ids, so a lifted *sequence* (each instruction at
+/// its own offset) never aliases another's scratch temps.
+fn decode_at(bytes: &[u8], addr: u64) -> crate::disasm::Insn {
     use iced_x86::{Decoder, DecoderOptions, Instruction};
-    let mut dec = Decoder::with_ip(32, bytes, CODE_ADDR, DecoderOptions::NONE);
+    let mut dec = Decoder::with_ip(32, bytes, addr, DecoderOptions::NONE);
     let mut raw = Instruction::default();
     dec.decode_out(&mut raw);
     crate::disasm::Insn {
-        address: CODE_ADDR,
+        address: addr,
         len: raw.len(),
         text: format!("{}", raw),
         flow: crate::disasm::Flow::Fallthrough,
@@ -1253,7 +1260,11 @@ fn diff_one(bytes: &[u8], iters: u32, seed: &mut u64) -> Result<Vec<Mismatch>, S
             }
         }
         // ---- compare the scratch page (for memory stores) ----
-        if mem_base.is_some() {
+        // Not just explicit memory operands: any esp-moving instruction
+        // (push/pop/leave/enter) writes the stack through an *implicit* operand,
+        // and esp was seeded into this page — so its store must be compared too.
+        // (`push esp` stored the post-decrement esp; without this it went unseen.)
+        if mem_base.is_some() || insn.raw.stack_pointer_increment() != 0 {
             let mut uc_page = vec![0u8; DATA_SIZE];
             unsafe {
                 uc_mem_read(uc, DATA_ADDR, uc_page.as_mut_ptr() as *mut c_void, DATA_SIZE);
@@ -1559,6 +1570,217 @@ pub fn run(iters_per_insn: u32) -> Result<Vec<Mismatch>, String> {
     let mut all = Vec::new();
     for bytes in corpus() {
         all.extend(diff_one(&bytes, iters_per_insn, &mut seed)?);
+    }
+    Ok(all)
+}
+
+/// Differential over a straight-line SEQUENCE of instructions — the composition
+/// layer above `diff_one`. A single instruction can be correct in isolation yet
+/// wrong in context: `push X; push [esp+d]` mis-reads the source after the first
+/// push shifts esp, an SSA ordering bug no single-instruction test reaches. Each
+/// instruction is decoded at its own offset (distinct temp ids), lifted, and its
+/// statements concatenated into one straight-line block; the interpreter runs the
+/// block while Unicorn runs the same bytes, and the final register / flag /
+/// scratch-page state is compared. esp and ebp are seeded into the scratch page so
+/// all stack/frame activity lands in the compared region.
+fn diff_seq(seq: &[Vec<u8>], iters: u32, seed: &mut u64) -> Result<Vec<Mismatch>, String> {
+    let mut all_bytes: Vec<u8> = Vec::new();
+    let mut stmts: Vec<Stmt> = Vec::new();
+    for enc in seq {
+        let addr = CODE_ADDR + all_bytes.len() as u64;
+        let insn = decode_at(enc, addr);
+        if insn.len != enc.len() {
+            return Err(format!("seq decode consumed {}/{} bytes", insn.len, enc.len()));
+        }
+        let s = crate::ir::lift::lift(&insn, 32);
+        // Any unmodelled construct in the sequence: skip the whole case (never a
+        // false verdict, exactly as diff_one does per instruction).
+        if s.iter().any(|st| matches!(st, Stmt::Asm(_))) {
+            return Ok(Vec::new());
+        }
+        // Straight-line only: a control-flow lift (branch/call/ret) is not a block
+        // the interpreter runs linearly — skip (funcdiff covers those).
+        if s.iter().any(|st| matches!(st, Stmt::Branch { .. } | Stmt::Jump(_) | Stmt::Return(_))) {
+            return Ok(Vec::new());
+        }
+        stmts.extend(s);
+        all_bytes.extend_from_slice(enc);
+    }
+    let cmp_flags = flags_written(&stmts);
+    let asm: String = seq
+        .iter()
+        .map(|e| decode_at(e, CODE_ADDR).text)
+        .collect::<Vec<_>>()
+        .join(" ; ");
+    let n_insns = seq.len();
+    // esp mid-page, ebp a quarter in — both esp- and ebp-relative accesses (and
+    // the pushes/pops themselves) then land inside the compared scratch page.
+    let esp0 = DATA_ADDR + (DATA_SIZE as u64) / 2;
+    let ebp0 = DATA_ADDR + (DATA_SIZE as u64) / 4;
+
+    let mut uc: *mut uc_engine = std::ptr::null_mut();
+    unsafe {
+        if uc_open(UC_ARCH_X86, UC_MODE_32, &mut uc) != 0 {
+            return Err("uc_open failed".into());
+        }
+        uc_mem_map(uc, CODE_ADDR, 0x1000, UC_PROT_ALL);
+        uc_mem_map(uc, STACK_ADDR & !0xfff, 0x4000, UC_PROT_ALL);
+        uc_mem_map(uc, DATA_ADDR, DATA_SIZE, UC_PROT_ALL);
+        uc_mem_write(uc, CODE_ADDR, all_bytes.as_ptr() as *const c_void, all_bytes.len());
+    }
+
+    let mut out = Vec::new();
+    for _ in 0..iters {
+        let mut next = || {
+            let mut x = *seed;
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            *seed = x;
+            x
+        };
+        let mut st = CpuState { regs: [0; 8], flags: HashMap::new(), xmm: [[0; 2]; 8] };
+        for r in 0..8 {
+            st.regs[r] = (next() as u32) as u64;
+        }
+        st.regs[4] = esp0; // esp
+        st.regs[5] = ebp0; // ebp
+        for f in [FlagKind::Cf, FlagKind::Zf, FlagKind::Sf, FlagKind::Of, FlagKind::Pf, FlagKind::Af] {
+            st.flags.insert(f, next() & 1);
+        }
+        let mut page = vec![0u8; DATA_SIZE];
+        for b in page.iter_mut() {
+            *b = next() as u8;
+        }
+        unsafe {
+            uc_mem_write(uc, DATA_ADDR, page.as_ptr() as *const c_void, DATA_SIZE);
+        }
+
+        // interpret the concatenated block
+        let mut interp = Interp::new(&st, page.clone());
+        let mut ok = true;
+        for s in &stmts {
+            if interp.exec(s).is_none() {
+                ok = false;
+                break;
+            }
+        }
+        if !ok {
+            continue; // a per-state trap / out-of-page access: skip, never scored
+        }
+
+        // Unicorn from the same state, running exactly n_insns instructions.
+        let mut eflags: u32 = 0x2;
+        for (f, bitpos) in [
+            (FlagKind::Cf, 0u32), (FlagKind::Pf, 2), (FlagKind::Af, 4),
+            (FlagKind::Zf, 6), (FlagKind::Sf, 7), (FlagKind::Of, 11),
+        ] {
+            if st.flags.get(&f).copied().unwrap_or(0) != 0 {
+                eflags |= 1 << bitpos;
+            }
+        }
+        let mut uc_regs = [0u32; 8];
+        let mut uc_eflags: u32 = 0;
+        unsafe {
+            for r in 0..8 {
+                let v = st.regs[r] as u32;
+                uc_reg_write(uc, UC_GP[r], &v as *const u32 as *const c_void);
+            }
+            uc_reg_write(uc, UC_X86_REG_EFLAGS, &eflags as *const u32 as *const c_void);
+            let rc = uc_emu_start(uc, CODE_ADDR, CODE_ADDR + all_bytes.len() as u64, 0, n_insns);
+            if rc != 0 {
+                continue;
+            }
+            let mut eip: u32 = 0;
+            uc_reg_read(uc, UC_X86_REG_EIP, &mut eip as *mut u32 as *mut c_void);
+            if eip != (CODE_ADDR + all_bytes.len() as u64) as u32 {
+                continue; // did not retire the whole sequence (a fault) — skip
+            }
+            for r in 0..8 {
+                uc_reg_read(uc, UC_GP[r], &mut uc_regs[r] as *mut u32 as *mut c_void);
+            }
+            uc_reg_read(uc, UC_X86_REG_EFLAGS, &mut uc_eflags as *mut u32 as *mut c_void);
+        }
+
+        const NAMES: [&str; 8] = ["eax", "ecx", "edx", "ebx", "esp", "ebp", "esi", "edi"];
+        for r in 0..8 {
+            let lifted = interp.regs[r] as u32;
+            if lifted != uc_regs[r] {
+                out.push(Mismatch {
+                    asm: asm.clone(), bytes: all_bytes.clone(), field: NAMES[r].into(),
+                    lifted: lifted as u64, oracle: uc_regs[r] as u64,
+                });
+            }
+        }
+        for f in &cmp_flags {
+            let lifted = interp.flags.get(f).copied().unwrap_or(0);
+            let oracle = ((uc_eflags >> flag_bit(*f)) & 1) as u64;
+            if lifted != oracle {
+                out.push(Mismatch {
+                    asm: asm.clone(), bytes: all_bytes.clone(), field: format!("{:?}", f),
+                    lifted, oracle,
+                });
+            }
+        }
+        let mut uc_page = vec![0u8; DATA_SIZE];
+        unsafe {
+            uc_mem_read(uc, DATA_ADDR, uc_page.as_mut_ptr() as *mut c_void, DATA_SIZE);
+        }
+        if uc_page != interp.mem {
+            if let Some(i) = (0..DATA_SIZE).find(|&i| uc_page[i] != interp.mem[i]) {
+                out.push(Mismatch {
+                    asm: asm.clone(), bytes: all_bytes.clone(), field: format!("mem[{i}]"),
+                    lifted: interp.mem[i] as u64, oracle: uc_page[i] as u64,
+                });
+            }
+        }
+        if out.len() > 20 {
+            break;
+        }
+    }
+    unsafe { uc_close(uc); }
+    Ok(out)
+}
+
+/// Straight-line sequences targeting the composition hotspots — chiefly esp/frame
+/// interactions (a push/sub-esp shifting the base an esp-relative access then
+/// reads). Each entry is a list of instruction encodings run as one block.
+fn seq_corpus() -> Vec<Vec<Vec<u8>>> {
+    vec![
+        // push imm ; push [esp+8]  — the plink pattern: the second source must be
+        // read against the esp *after* the first push (forwarding a stack arg).
+        vec![vec![0x6a, 0x11], vec![0xff, 0x74, 0x24, 0x08]],
+        // push eax ; push [esp+4]
+        vec![vec![0x50], vec![0xff, 0x74, 0x24, 0x04]],
+        // push ecx ; mov eax, [esp+8]  (read a caller slot after a push)
+        vec![vec![0x51], vec![0x8b, 0x44, 0x24, 0x08]],
+        // sub esp, 0x10 ; mov [esp+4], eax ; mov ecx, [esp+4]  (frame store/reload)
+        vec![vec![0x83, 0xec, 0x10], vec![0x89, 0x44, 0x24, 0x04], vec![0x8b, 0x4c, 0x24, 0x04]],
+        // push ebp ; mov ebp, esp ; mov eax, [ebp+8]  (prologue + arg read)
+        vec![vec![0x55], vec![0x89, 0xe5], vec![0x8b, 0x45, 0x08]],
+        // push eax ; pop ecx  (round-trip through the stack)
+        vec![vec![0x50], vec![0x59]],
+        // push [esp] ; pop eax
+        vec![vec![0xff, 0x34, 0x24], vec![0x58]],
+        // mov [esp-4], eax ; push ecx ; mov edx, [esp+8]  (write below esp, push, reload)
+        vec![vec![0x89, 0x44, 0x24, 0xfc], vec![0x51], vec![0x8b, 0x54, 0x24, 0x08]],
+        // push esp ; pop eax  (push esp saves the OLD esp; pop reads it back)
+        vec![vec![0x54], vec![0x58]],
+        // lea eax, [esp+4] ; push eax ; pop ecx
+        vec![vec![0x8d, 0x44, 0x24, 0x04], vec![0x50], vec![0x59]],
+        // push ebp ; mov ebp, esp ; sub esp, 0x8 ; leave  (full frame set-up/tear-down)
+        vec![vec![0x55], vec![0x89, 0xe5], vec![0x83, 0xec, 0x08], vec![0xc9]],
+        // add esp, 4 ; push [esp]  (esp raised, then esp-relative read)
+        vec![vec![0x83, 0xc4, 0x04], vec![0xff, 0x34, 0x24]],
+    ]
+}
+
+/// Run the sequence corpus; returns every mismatch found.
+pub fn run_sequences(iters_per_seq: u32) -> Result<Vec<Mismatch>, String> {
+    let mut seed: u64 = 0xd1b54a32d192ed03;
+    let mut all = Vec::new();
+    for seq in seq_corpus() {
+        all.extend(diff_seq(&seq, iters_per_seq, &mut seed)?);
     }
     Ok(all)
 }
@@ -2219,6 +2441,30 @@ mod tests {
         let mismatches = super::run(4000).expect("cpudiff corpus run");
         if !mismatches.is_empty() {
             let mut msg = format!("{} per-instruction divergence(s):\n", mismatches.len());
+            for m in mismatches.iter().take(20) {
+                msg += &format!(
+                    "  {} ({:02x?}) {}: lifted={:#x} unicorn={:#x}\n",
+                    m.asm, m.bytes, m.field, m.lifted, m.oracle,
+                );
+            }
+            panic!("{msg}");
+        }
+    }
+
+    /// Sequence differential (the composition layer above the per-instruction
+    /// corpus): straight-line 2–4 instruction blocks — chiefly esp/frame
+    /// interactions where one instruction shifts the base another then reads
+    /// against (`push imm; push [esp+8]`, `push ebp; mov ebp,esp; mov eax,[ebp+8]`,
+    /// `sub esp,N; mov [esp+d],r; mov r,[esp+d]`). A single instruction can be
+    /// correct in isolation yet the *composition* wrong (SSA ordering / esp
+    /// snapshotting) — the plink `push [esp+8]` off-by-4 was exactly such a bug.
+    /// Lifted block interpreted vs Unicorn run for the same instruction count; regs,
+    /// flags and the scratch page must agree. A divergence is a real composition bug.
+    #[test]
+    fn sequence_corpus_matches_unicorn() {
+        let mismatches = super::run_sequences(3000).expect("cpudiff sequence run");
+        if !mismatches.is_empty() {
+            let mut msg = format!("{} sequence divergence(s):\n", mismatches.len());
             for m in mismatches.iter().take(20) {
                 msg += &format!(
                     "  {} ({:02x?}) {}: lifted={:#x} unicorn={:#x}\n",

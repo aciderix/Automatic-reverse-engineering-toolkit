@@ -251,9 +251,12 @@ recompilabilité **100 %** · WASM **7/7**.
   marquait sinon ecx clobbé (push/pop), perdant la longueur d'un `memset` posée en ecx (idiome alloca
   `mov ecx,len;call ___chkstk_ms;sub esp,eax;rep stos`) → débloqué busybox `sed -n`. ⚠️ **pas** un no-op
   (supprimerait les écritures pile transitoires du call → régression cpudiff).
-- **`push [esp+d]` — source pré-décrément** : le lift capture la source esp-relative dans un temp **avant**
-  `esp-=4` (sinon `Read(esp)` se résout post-décrément → source décalée de 4). Débloqué plink (forward d'arg
-  pile `sub_431310` → segfault config résolu).
+- **`push [esp+d]` / `push esp` — source pré-décrément** : le lift capture la source qui lit esp (mémoire
+  esp-relative **ou** le registre esp lui-même) dans un temp **avant** `esp-=4` (sinon `Read(esp)` se résout
+  post-décrément → source décalée de 4 ; `push esp` = sémantique 286+, pousse l'esp *avant* baisse). `push [esp+d]`
+  a débloqué plink (forward d'arg pile `sub_431310` → segfault config résolu) ; `push esp` trouvé par la
+  **couche cpudiff-séquences** (2026-07-10), pas par le per-instruction (qui ne comparait la page que sur
+  opérande mémoire explicite — élargi à `stack_pointer_increment()!=0` pour voir les écritures pile implicites).
 - **self tail-call** (`jmp func.entry`) = tail-call frais (pas une boucle) → passe
   correctement les registres-args mis à jour (whereSplit sqlite).
 - **auto-main** : si l'entrée PE est un sas CRT et qu'un `main`/`_main` distinct
