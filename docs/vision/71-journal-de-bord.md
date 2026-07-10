@@ -1080,4 +1080,25 @@ Détail : **70 §6** (roadmap). Résumé :
 - **Vérifié** : hash transpile **inchangé** `19acad982194bf07`, difftest 271/271, cargo test complet vert,
   winediff **59/59**, table triée.
 
+### 2026-07-10 — [GUI][HLE-WIN32] M7 — G5a : MessageBoxA (repli display-free sound, oracle Wine-sans-écran)
+- **Mesure (règle « mesurer, pas affirmer »)** : `MessageBoxA` (mur #1, **37 binaires**) est modal → bloque en
+  attendant un clic ; sous Wine avec Xvfb il **hangerait**. Probe empirique : **Wine, `DISPLAY` non défini**,
+  `MessageBoxA` renvoie **-1 (0xFFFFFFFF) immédiatement, sans bloquer** (MB_OK comme MB_OKCANCEL).
+- **Fix (sound)** : `aret_MessageBoxA/W/ExA/ExW` → **-1** dans le tier display-free. C'est la réponse honnête
+  « pas d'écran disponible » (pas un bouton **deviné**) : un programme qui ignore le résultat continue, un qui
+  le teste voit le **même** échec que sous Wine headless. Un vrai dialogue (`SDL_ShowSimpleMessageBox`) le
+  remplacera avec l'écran visible (G2b). +4 `stdcall_pops` triés.
+- **Infra oracle** : `winediff.sh` gagne un marqueur **`NAME.nodisplay`** → lance **les deux** moteurs avec
+  `env -u DISPLAY` (Wine prend son chemin sans-écran déterministe au lieu de bloquer ; les fixtures fenêtrées
+  omettent le marqueur et gardent Xvfb). Réutilisable pour toute API display-sensible.
+- **Oracle** : `winecorpus/user32_messagebox.c` (+`.nodisplay`) : MB_OK/MB_OKCANCEL/MB_YESNO → tous **-1**,
+  **bit-identique à Wine-sans-écran**.
+- **Effet mesuré** : `MessageBoxA` (37) éliminé des 41 Win95 (repli sound ; les programmes avancent au lieu
+  d'aborter).
+- **Vérifié** : hash transpile **inchangé** `19acad982194bf07`, difftest 271/271, cargo test complet vert,
+  winediff **60/60**, table triée.
+- **Reste G5** : dialogs (DialogBoxParamA/CreateDialogParamA parsent DLGTEMPLATE → contrôles enfants + pompe
+  modale ; EndDialog ; GetDlgItem/Set-GetDlgItemTextA) — oracle-able sous Xvfb (dlgproc EndDialog sur
+  WM_INITDIALOG = déterministe). Prochain incrément.
+
 <!-- NOUVELLES ENTRÉES ICI (garder l'ordre chronologique, plus récent en bas) -->

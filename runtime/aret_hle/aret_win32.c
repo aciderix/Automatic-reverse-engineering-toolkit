@@ -860,6 +860,22 @@ uint32_t aret_CryptGenRandom(uint32_t esp) {
 uint32_t aret_CryptReleaseContext(uint32_t esp) { (void)esp; return 1; }
 
 /* ================================================================== */
+/* MessageBox — display-free sound fallback                            */
+/* ================================================================== */
+/* A modal message box needs a display to show and a user to dismiss. In the
+ * display-free tier (no SDL yet) there is neither, so we return the same thing
+ * the ground truth does with no display: Wine's MessageBoxA with DISPLAY unset
+ * returns -1 (0xFFFFFFFF) immediately, without blocking — verified empirically.
+ * That is the honest "no display available" answer (not a guessed button): a
+ * program that ignores the result proceeds, one that checks it sees the same
+ * failure as under headless Wine. A real dialog (SDL_ShowSimpleMessageBox) will
+ * replace this when a visible display is available (G2b). */
+uint32_t aret_MessageBoxA(uint32_t esp) { (void)esp; return 0xFFFFFFFFu; }
+uint32_t aret_MessageBoxW(uint32_t esp) { (void)esp; return 0xFFFFFFFFu; }
+uint32_t aret_MessageBoxExA(uint32_t esp) { (void)esp; return 0xFFFFFFFFu; }
+uint32_t aret_MessageBoxExW(uint32_t esp) { (void)esp; return 0xFFFFFFFFu; }
+
+/* ================================================================== */
 /* PE resources (.rsrc) — Find/Load/Sizeof/Lock/Free + LoadString      */
 /* ================================================================== */
 /* The PE headers and the .rsrc section are mapped at their image VAs (the

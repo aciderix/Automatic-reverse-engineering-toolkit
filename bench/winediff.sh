@@ -83,11 +83,18 @@ for src in "$CORPUS"/*.c; do
   # Optional stdin: winecorpus/NAME.in is fed identically to both engines, so the
   # CRT stdin path (getchar -> _filbuf refill, fclose(stdin) on exit) is exercised.
   infile="$CORPUS/$name.in"; [ -f "$infile" ] || infile=/dev/null
+  # Optional per-program "no display": winecorpus/NAME.nodisplay unsets DISPLAY for
+  # both engines, so an API that needs a display (MessageBox, a modal dialog) takes
+  # its deterministic no-display path instead of blocking on a real window. (Wine's
+  # MessageBoxA returns -1 immediately with no DISPLAY; a windowed fixture omits the
+  # marker and keeps the Xvfb display.) Applied identically to Wine and ARET.
+  disp=()
+  [ -f "$CORPUS/$name.nodisplay" ] && disp=(env -u DISPLAY)
   # Oracle: real PE under Wine. Run from the temp dir so any files land there.
-  oracle="$(cd "$TMP" && wine "$TMP/$name.exe" "${pargs[@]}" <"$infile" 2>/dev/null | norm)"
+  oracle="$(cd "$TMP" && "${disp[@]}" wine "$TMP/$name.exe" "${pargs[@]}" <"$infile" 2>/dev/null | norm)"
   # ARET: transpile + run the same PE natively (args after `--`).
   rm -rf "$TMP/out"
-  got="$(cd "$TMP" && "$ARET" "$TMP/$name.exe" --mode transpile --out-dir "$TMP/out" --run -- "${pargs[@]}" <"$infile" 2>"$TMP/aerr" \
+  got="$(cd "$TMP" && "${disp[@]}" "$ARET" "$TMP/$name.exe" --mode transpile --out-dir "$TMP/out" --run -- "${pargs[@]}" <"$infile" 2>"$TMP/aerr" \
         | extract_aret | norm)"
   if [ "$oracle" = "$got" ]; then
     pass=$((pass+1)); echo "  ok    $name"
