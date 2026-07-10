@@ -891,6 +891,35 @@ static int u32_weq(const uint16_t *a, const uint16_t *b) {
 static void u32_wcpy(uint16_t *d, const uint16_t *s, int cap) {
     int i = 0; if (s) for (; s[i] && i < cap - 1; i++) d[i] = s[i]; d[i] = 0;
 }
+/* Widen a narrow (ANSI) class/window name to 16-bit — class names are ASCII in
+ * practice, so a byte→u16 widening is exact. Lets the ANSI (A) window APIs share
+ * the one wide class registry with the W APIs (Windows shares the atom table). */
+static void u32_a2w(const char *s, uint16_t *d, int cap) {
+    int i = 0; if (s) for (; s[i] && i < cap - 1; i++) d[i] = (uint16_t)(unsigned char)s[i]; d[i] = 0;
+}
+/* Register a class (shared A/W core): store wndproc + wide name, return the atom. */
+static uint32_t u32_class_register(uint32_t wndproc, const uint16_t *wname) {
+    for (int i = 0; i < U32_MAX_CLASSES; i++) {
+        if (!g_u32_class[i].used) {
+            g_u32_class[i].used = 1;
+            g_u32_class[i].wndproc = wndproc;
+            u32_wcpy(g_u32_class[i].name, wname, 128);
+            return 0xC000u + (uint32_t)i;
+        }
+    }
+    return 0;
+}
+/* Create a window bound to `wndproc` (shared A/W core), return the HWND. */
+static uint32_t u32_window_create(uint32_t wndproc, uint32_t parent) {
+    if (!wndproc) return 0;
+    for (int i = 0; i < U32_MAX_WIN; i++) {
+        if (!g_u32_win[i].used) {
+            g_u32_win[i].used = 1; g_u32_win[i].wndproc = wndproc; g_u32_win[i].parent = parent;
+            return (uint32_t)(i + 1);
+        }
+    }
+    return 0;
+}
 
 /* Resolve a class reference (an ATOM from RegisterClass, or a wide-name pointer)
  * to its registered WNDPROC, or 0 if unknown. */
@@ -969,17 +998,20 @@ static void u32_pump_timers(void) {
 uint32_t aret_RegisterClassW(uint32_t esp) {
     const uint32_t *wc = (const uint32_t *)WP(0);
     if (!wc) return 0;
-    const uint16_t *name = (const uint16_t *)(uintptr_t)wc[9]; /* +36 */
+    const uint16_t *name = (const uint16_t *)(uintptr_t)wc[9]; /* +36 lpszClassName */
     if (!name) return 0;
-    for (int i = 0; i < U32_MAX_CLASSES; i++) {
-        if (!g_u32_class[i].used) {
-            g_u32_class[i].used = 1;
-            g_u32_class[i].wndproc = wc[1];           /* +4 lpfnWndProc */
-            u32_wcpy(g_u32_class[i].name, name, 128);
-            return 0xC000u + (uint32_t)i;
-        }
-    }
-    return 0;
+    return u32_class_register(wc[1] /* +4 lpfnWndProc */, name);
+}
+/* RegisterClassA(const WNDCLASSA*) — same 40-byte layout as WNDCLASSW but a narrow
+ * class name; widen it and share the one registry. */
+uint32_t aret_RegisterClassA(uint32_t esp) {
+    const uint32_t *wc = (const uint32_t *)WP(0);
+    if (!wc) return 0;
+    const char *name = (const char *)(uintptr_t)wc[9];
+    if (!name) return 0;
+    uint16_t wname[128];
+    u32_a2w(name, wname, 128);
+    return u32_class_register(wc[1], wname);
 }
 /* UnregisterClassW(lpClassName, hInstance) -> BOOL. */
 uint32_t aret_UnregisterClassW(uint32_t esp) {
@@ -998,15 +1030,18 @@ uint32_t aret_UnregisterClassW(uint32_t esp) {
 /* CreateWindowExW(exStyle, className@1, winName, style, x,y,w,h, parent@8, menu, inst, param)
  * -> HWND. We support message-only (and any) windows as pure message sinks. */
 uint32_t aret_CreateWindowExW(uint32_t esp) {
-    uint32_t wndproc = u32_class_wndproc(WU(1));
-    if (!wndproc) return 0;                 /* unknown class -> fail (sound) */
-    for (int i = 0; i < U32_MAX_WIN; i++) {
-        if (!g_u32_win[i].used) {
-            g_u32_win[i].used = 1; g_u32_win[i].wndproc = wndproc; g_u32_win[i].parent = WU(8);
-            return (uint32_t)(i + 1);       /* HWND = index+1 (NULL invalid) */
-        }
+    return u32_window_create(u32_class_wndproc(WU(1)), WU(8));
+}
+/* CreateWindowExA — className@1 is a narrow name (or an atom). Widen a name to
+ * look it up in the shared registry; atoms (<0x10000) pass through unchanged. */
+uint32_t aret_CreateWindowExA(uint32_t esp) {
+    uint32_t cref = WU(1);
+    uint16_t wbuf[128];
+    if (cref >= 0x10000u) {
+        u32_a2w((const char *)(uintptr_t)cref, wbuf, 128);
+        cref = (uint32_t)(uintptr_t)wbuf;
     }
-    return 0;
+    return u32_window_create(u32_class_wndproc(cref), WU(8));
 }
 /* DestroyWindow(HWND) -> BOOL. */
 uint32_t aret_DestroyWindow(uint32_t esp) {
@@ -1095,4 +1130,29 @@ uint32_t aret_MsgWaitForMultipleObjectsEx(uint32_t esp) {
     u32_pump_timers();
     if (!u32_q_empty() || g_u32_quit) return nCount;   /* WAIT_OBJECT_0 (=0) + nCount */
     return 0x00000102u;                                /* WAIT_TIMEOUT */
+}
+
+/* --- ANSI (A) twins. The message ops carry no text at this layer (message-only
+ * windows have no keyboard/WM_CHAR translation), so A is byte-identical to W;
+ * only the class-name-bearing RegisterClassA/CreateWindowExA (above) differ. --- */
+uint32_t aret_DefWindowProcA(uint32_t esp)   { return aret_DefWindowProcW(esp); }
+uint32_t aret_GetMessageA(uint32_t esp)      { return aret_GetMessageW(esp); }
+uint32_t aret_PeekMessageA(uint32_t esp)     { return aret_PeekMessageW(esp); }
+uint32_t aret_DispatchMessageA(uint32_t esp) { return aret_DispatchMessageW(esp); }
+uint32_t aret_PostMessageA(uint32_t esp)     { return aret_PostMessageW(esp); }
+uint32_t aret_SendMessageA(uint32_t esp)     { return aret_SendMessageW(esp); }
+/* UnregisterClassA(lpClassName, hInstance) — widen a narrow name, else atom. */
+uint32_t aret_UnregisterClassA(uint32_t esp) {
+    uint32_t cref = WU(0);
+    if (cref && cref < 0x10000u) {
+        uint32_t idx = cref - 0xC000u;
+        if (idx < U32_MAX_CLASSES && g_u32_class[idx].used) { g_u32_class[idx].used = 0; return 1; }
+        return 0;
+    }
+    if (!cref) return 0;
+    uint16_t wname[128];
+    u32_a2w((const char *)(uintptr_t)cref, wname, 128);
+    for (int i = 0; i < U32_MAX_CLASSES; i++)
+        if (g_u32_class[i].used && u32_weq(g_u32_class[i].name, wname)) { g_u32_class[i].used = 0; return 1; }
+    return 0;
 }

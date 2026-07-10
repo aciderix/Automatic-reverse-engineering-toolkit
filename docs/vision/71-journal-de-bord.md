@@ -301,7 +301,7 @@ Deux mécanismes complémentaires :
   CFG). memcpy/rep-stos modélisés ; adresses masquées 32-bit. **`0 divergence`
   ≠ pas de bug** : dit *où il n'est pas* (bugs profonds derrière imports/skips).
 - **Portes** : difftest (décompile O0→O3, **271/271**), transpile-diff (produit, **4/4**,
-  hash **`19acad982194bf07`**), winediff (Wine, **56/56**), sweeps (sqlite/busybox/
+  hash **`19acad982194bf07`**), winediff (Wine, **57/57**), sweeps (sqlite/busybox/
   gauntlet), SMT (Z3, 11/11), magicdiv (2³²), in-place (3/3), recompilabilité (100%).
 - **`--mode imports`** : couverture d'imports **statique a-priori** (borne supérieure
   du trou runtime). Prioriser par la donnée, **filtrer par fidélité**.
@@ -961,5 +961,22 @@ Détail : **70 §6** (roadmap). Résumé :
 - **Vérifié** : hash transpile **inchangé** `19acad982194bf07`, difftest 271/271, winediff **56/56**, table triée.
 - **État corpus** : après cette grappe, le **top imports Win95 est ~100% GUI** (USER32-A/GDI/ressources/dialogs)
   et le top instructions = **bruit** (privilégié/DOS misdécodé). ⇒ « descendre à zéro » = **chantier GUI (M7)**.
+
+### 2026-07-10 — [GUI] M7 — plan (doc 72) + G1 : jumeaux ANSI du modèle fenêtre/message
+- **Plan doc 72** : chantier GUI USER32/GDI via **SDL2** (portable Linux/macOS/WASM, pas X11), incréments
+  **G1→G7** chacun avec son oracle Wine (contenu, pas pixels ; SDL headless ; framebuffer-hash pour GDI ;
+  dialogs auto-répondus). Fenêtre message-only reste sans graphisme. EH (RtlUnwind/C++) rangé dans ce tier.
+- **G1 fait** (`aret_win32.c`) : **jumeaux A** du sous-système message-only (W déjà fait). Cœurs partagés
+  extraits (`u32_class_register`, `u32_window_create`, `u32_a2w`) : `RegisterClassA`/`CreateWindowExA` widen
+  le nom de classe narrow→wide et **partagent le registre W unique** (Windows partage la table d'atomes) ;
+  `DefWindowProcA`/`GetMessageA`/`PeekMessageA`/`DispatchMessageA`/`PostMessageA`/`SendMessageA` = **forwarders
+  vers W** (identiques pour message-only : pas de texte/WM_CHAR à cette couche) ; `UnregisterClassA`. +7
+  `stdcall_pops` A triés.
+- **Oracle** : `winecorpus/user32_msgwindow_a.c` (round-trip A : register/create/Send synchrone/Post+Get+
+  Dispatch/Peek vide/WM_QUIT via les APIs **A**) = **bit-identique à Wine** (send=8400+wParam via le WNDPROC).
+- **Effet mesuré** : les imports fenêtre/message **A** (RegisterClassA 26, SendMessageA 32, DefWindowProcA 24,
+  DispatchMessageA 24, PeekMessageA 22, CreateWindowExA 20, …) **éliminés des 41 Win95**. *(Les binaires ne
+  tournent pas encore — il leur faut G2 fenêtres visibles + GDI + ressources + dialogs.)*
+- **Vérifié** : hash transpile **inchangé** `19acad982194bf07`, difftest 271/271, winediff **57/57**, table triée.
 
 <!-- NOUVELLES ENTRÉES ICI (garder l'ordre chronologique, plus récent en bas) -->
