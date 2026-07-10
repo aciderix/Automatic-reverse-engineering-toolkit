@@ -64,7 +64,7 @@ moment de M7-WASM, non bloquant pour Linux/macOS.)*
 | **G2a** ✅ | **Modèle fenêtre étendu (display-free)** : GetWindowRect/SetWindowPos/MoveWindow/ShowWindow/UpdateWindow/EnableWindow/Get-SetWindowLong ; Get-SetWindowText via WM_SETTEXT/GETTEXT ; GetSystemMetrics/GetDesktopWindow/IsWindow(Visible/Enabled)/GetParent | GetWindowRect 35, SetWindowPos 34, ShowWindow 21, GetSystemMetrics 17, GetDesktopWindow 21 | `user32_windowstate_a.c` : géométrie/état/texte round-trip, métriques par invariant — headless vs Wine ✅ |
 | **G2b** | **Fenêtre visible via SDL2** : CreateWindowEx(WS_VISIBLE) → SDL_CreateWindow ; pompe messages ↔ SDL_PollEvent (clavier/souris/close → WM_*) ; `-DARET_HAVE_SDL` via pkg-config, dégradation propre si absent | (visible windows) | fixture : créer fenêtre visible, poster WM_CLOSE, vérifier séquence — SDL headless (`SDL_VIDEODRIVER=dummy`) vs Wine |
 | **G3** | **Texte fenêtre + widgets simples** : SetWindowTextA/GetWindowTextA, WM_SETTEXT ; contrôles STATIC/BUTTON/EDIT (classes prédéfinies) ; GetDlgItem/SetDlgItemText/GetDlgItemText | SetWindowTextA 34, GetDlgItem 33, SetDlgItemTextA 19, EnableWindow 19 | round-trip texte + état contrôles vs Wine |
-| **G4** | **Ressources** : FindResourceA/LoadResource/SizeofResource/LockResource/FreeResource (indexer `.rsrc` déjà mappée), **LoadStringA**, LoadIconA/LoadCursorA (handles opaques) | LoadStringA 32, FindResourceA 26, LoadResource 26, SizeofResource 26, LoadCursorA 23, LoadIconA 19 | LoadString d'une table de chaînes .rc vs Wine (valeurs exactes) |
+| **G4** ✅ (partiel) | **Ressources** : FindResourceA/LoadResource/SizeofResource/LockResource/FreeResource (walker `IMAGE_RESOURCE_DIRECTORY` en mémoire ; en-têtes PE déjà mappés → 0 changement loader), **LoadStringA**. *Reste : LoadIconA/LoadCursorA (handles opaques), W-variants.* | LoadStringA 32, FindResourceA/LoadResource/SizeofResource 26, LockResource 24, FreeResource 25 | `user32_resources.{c,rc}` : blob RCDATA + table de chaînes multi-blocs + troncature vs Wine (octets/valeurs exacts) ✅ |
 | **G5** | **Dialogs** : DialogBoxParamA/CreateDialogParamA parsent le **DLGTEMPLATE** (ressource) → créent les contrôles + lancent la pompe modale ; EndDialog ; MessageBoxA (cas simple : titre+texte+boutons, renvoie le bouton) | DialogBoxParamA 17, CreateDialogParamA 23, EndDialog 20, MessageBoxA 37 | fixture dialogue (template .rc + WM_INITDIALOG + EndDialog) vs Wine ; MessageBox auto-répondu |
 | **G6** | **GDI de base** : GetDC/ReleaseDC/BeginPaint/EndPaint → HDC sur framebuffer ; TextOutA, Rectangle, LineTo, GetStockObject, GetDeviceCaps ; blit framebuffer → SDL | GetDC 27, ReleaseDC 30, GetDeviceCaps 28, GetStockObject 22 | dessin déterministe dans un framebuffer mémoire → **hash du buffer** vs Wine (contenu, pas fenêtre écran) |
 | **G7** | **Élargir au réel** : re-sweep corpus, attaquer les messages/API restants par la donnée. Boucle mesure→fix→re-mesure jusqu'à faire **tourner une vraie appli Win95** bout-en-bout. | le reste | une appli du corpus tourne vs Wine (contenu) |
@@ -115,6 +115,14 @@ Get-SetWindowLong/Get-SetWindowText via WM_*TEXT*/GetSystemMetrics/desktop, orac
 **modèle** (fait, portable, sans SDL) puis **G2b** = la vraie marche archi (fenêtre
 SDL visible : `CreateWindowEx(WS_VISIBLE)`→`SDL_CreateWindow`, pompe messages ↔
 `SDL_PollEvent`, lien SDL2 via pkg-config `-DARET_HAVE_SDL`, dégradation propre si
-absent). Le reste par la donnée (re-sweep après chaque incrément). Chaque incrément :
-fixture minimale → implément → **oracle Wine** → régression complète → commit +
-doc (70 §4.5 / §5, 71 daté). Aucune régression tolérée.
+absent). **G4 fait (partiel)** — **priorisé par la donnée AVANT G2b** : le re-sweep
+post-G2a montre que les plus gros murs sont **display-free** (ressources/LoadString/
+MessageBox), oracle **exact**, alors que G2b (fenêtre SDL) a un oracle dur (tempête
+de messages `CreateWindow` non bit-reproductible). Ressources `.rsrc` indexées
+(walker mémoire, en-têtes PE déjà mappés) + LoadStringA, `user32_resources` 59/59.
+Le reste par la donnée (re-sweep après chaque incrément). Ordre révisé : **G4
+(ressources/LoadString) ✅ → G5 (dialogs/MessageBox, display-free) → G2b (fenêtre
+SDL visible) → G6 (GDI)** — les tranches display-free (oracle exact) d'abord, la
+marche SDL quand un binaire mesuré l'exige. Chaque incrément : fixture minimale →
+implément → **oracle Wine** → régression complète → commit + doc (70 §4.5 / §5, 71
+daté). Aucune régression tolérée.

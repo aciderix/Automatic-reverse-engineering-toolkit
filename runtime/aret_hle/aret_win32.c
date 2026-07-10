@@ -860,6 +860,147 @@ uint32_t aret_CryptGenRandom(uint32_t esp) {
 uint32_t aret_CryptReleaseContext(uint32_t esp) { (void)esp; return 1; }
 
 /* ================================================================== */
+/* PE resources (.rsrc) — Find/Load/Sizeof/Lock/Free + LoadString      */
+/* ================================================================== */
+/* The PE headers and the .rsrc section are mapped at their image VAs (the
+ * Memory Layout Mapper), so we walk the real IMAGE_RESOURCE_DIRECTORY tree in
+ * place — no data is fabricated. Display-free and portable: this is pure data
+ * indexing (LoadString, custom RCDATA, dialog/menu templates for later GDI/dialog
+ * work). Sound: an absent resource returns NULL/0 (exactly as Win32), never a
+ * guess. RT_* IDs: RT_STRING=6, RT_RCDATA=10, RT_VERSION=16, RT_DIALOG=5, … */
+extern uint32_t aret_image_lo, aret_image_hi;
+
+/* Locate the resource directory root in mapped memory: parse the PE headers at
+ * the image base (aret_image_lo). Returns the root IMAGE_RESOURCE_DIRECTORY and,
+ * via *out_base, the image base (leaf data RVAs are relative to it). NULL if the
+ * image has no resource directory (or headers are unavailable). */
+static const uint8_t *u32_rsrc_root(uint32_t *out_base) {
+    uint32_t lo = aret_image_lo;
+    if (!lo) return NULL;
+    const uint8_t *img = (const uint8_t *)(uintptr_t)lo;
+    if (img[0] != 'M' || img[1] != 'Z') return NULL;             /* DOS header */
+    uint32_t e_lfanew = *(const uint32_t *)(img + 0x3C);
+    if ((uint64_t)lo + e_lfanew + 0x100 > aret_image_hi) return NULL;
+    const uint8_t *nt = img + e_lfanew;
+    if (nt[0] != 'P' || nt[1] != 'E' || nt[2] || nt[3]) return NULL; /* "PE\0\0" */
+    const uint8_t *opt = nt + 24;                                /* skip sig(4)+COFF(20) */
+    if (*(const uint16_t *)opt != 0x010B) return NULL;           /* PE32 only (our target) */
+    uint32_t rsrc_rva = *(const uint32_t *)(opt + 112);          /* DataDirectory[2].VirtualAddress */
+    if (!rsrc_rva) return NULL;
+    if (out_base) *out_base = lo;
+    return img + rsrc_rva;
+}
+
+/* Case-insensitive compare of an ANSI name to a UTF-16 IMAGE_RESOURCE_DIR_STRING_U
+ * (WORD length prefix + that many WCHARs, no NUL). Win32 resource names are ASCII
+ * and matched case-insensitively. */
+static int u32_rsrc_name_eq(const uint8_t *s, const char *name) {
+    uint16_t slen = *(const uint16_t *)s;
+    const uint8_t *ws = s + 2;
+    uint16_t k = 0;
+    for (; k < slen && name[k]; k++) {
+        uint16_t wc = *(const uint16_t *)(ws + 2 * k);
+        char a = name[k];
+        char la = (a >= 'A' && a <= 'Z') ? a + 32 : a;
+        char lb = ((char)wc >= 'A' && (char)wc <= 'Z') ? (char)wc + 32 : (char)wc;
+        if (wc > 0xFF || la != lb) return 0;
+    }
+    return k == slen && name[k] == 0;
+}
+
+/* Find the entry in a resource directory `dir` (rsrc base `rb`) whose key matches
+ * an integer id (name==NULL) or an ANSI name. Returns the entry's OffsetToData
+ * field (high bit = subdirectory, else data-entry offset), or 0 if not found. */
+static uint32_t u32_rsrc_entry(const uint8_t *rb, const uint8_t *dir, uint32_t id, const char *name) {
+    uint16_t nnamed = *(const uint16_t *)(dir + 12);
+    uint16_t nid = *(const uint16_t *)(dir + 14);
+    const uint8_t *e = dir + 16;
+    int total = (int)nnamed + (int)nid;
+    for (int i = 0; i < total; i++, e += 8) {
+        uint32_t nm = *(const uint32_t *)e;
+        if (name) {
+            if (!(nm & 0x80000000u)) continue;                   /* an ID, not a name */
+            if (u32_rsrc_name_eq(rb + (nm & 0x7FFFFFFFu), name)) return *(const uint32_t *)(e + 4);
+        } else {
+            if (nm & 0x80000000u) continue;                      /* a name, not an ID */
+            if (nm == id) return *(const uint32_t *)(e + 4);
+        }
+    }
+    return 0;
+}
+
+/* A resource reference is either an ANSI string pointer or a MAKEINTRESOURCE id
+ * (the whole value < 0x10000). Split it. */
+static void u32_rsrc_ref(uint32_t ref, uint32_t *id, const char **name) {
+    if (ref >= 0x10000u) { *name = (const char *)(uintptr_t)ref; *id = 0; }
+    else                 { *name = NULL; *id = ref; }
+}
+
+/* Walk type -> name -> language(first) and return the IMAGE_RESOURCE_DATA_ENTRY,
+ * or NULL. `type`/`name` are MAKEINTRESOURCE-or-string refs. */
+static const uint8_t *u32_rsrc_data_entry(uint32_t type_ref, uint32_t name_ref) {
+    uint32_t base;
+    const uint8_t *rb = u32_rsrc_root(&base);
+    if (!rb) return NULL;
+    uint32_t tid, nid; const char *tname, *nname;
+    u32_rsrc_ref(type_ref, &tid, &tname);
+    u32_rsrc_ref(name_ref, &nid, &nname);
+    uint32_t off = u32_rsrc_entry(rb, rb, tid, tname);           /* type level */
+    if (!(off & 0x80000000u)) return NULL;
+    off = u32_rsrc_entry(rb, rb + (off & 0x7FFFFFFFu), nid, nname); /* name level */
+    if (!(off & 0x80000000u)) return NULL;
+    const uint8_t *lang = rb + (off & 0x7FFFFFFFu);              /* language level */
+    /* Take the first language entry (its OffsetToData points at the leaf). */
+    uint16_t nnamed = *(const uint16_t *)(lang + 12), nidc = *(const uint16_t *)(lang + 14);
+    if ((int)nnamed + (int)nidc < 1) return NULL;
+    uint32_t leaf = *(const uint32_t *)(lang + 16 + 4);          /* first entry OffsetToData */
+    if (leaf & 0x80000000u) return NULL;                        /* must be a data entry, not a dir */
+    return rb + leaf;
+}
+
+/* FindResourceA(hModule, lpName, lpType) -> HRSRC. Returns the DATA_ENTRY pointer
+ * as an opaque handle (LoadResource/SizeofResource take it back). */
+uint32_t aret_FindResourceA(uint32_t esp) {
+    const uint8_t *de = u32_rsrc_data_entry(WU(2) /* type */, WU(1) /* name */);
+    return (uint32_t)(uintptr_t)de;
+}
+/* LoadResource(hModule, hResInfo) -> HGLOBAL. The bytes live at image_base+RVA. */
+uint32_t aret_LoadResource(uint32_t esp) {
+    const uint8_t *de = (const uint8_t *)(uintptr_t)WU(1);
+    if (!de) return 0;
+    return aret_image_lo + *(const uint32_t *)de;               /* OffsetToData is an image RVA */
+}
+/* LockResource(hResData) -> LPVOID. Already a pointer to the bytes. */
+uint32_t aret_LockResource(uint32_t esp) { return WU(0); }
+/* SizeofResource(hModule, hResInfo) -> DWORD (bytes). */
+uint32_t aret_SizeofResource(uint32_t esp) {
+    const uint8_t *de = (const uint8_t *)(uintptr_t)WU(1);
+    return de ? *(const uint32_t *)(de + 4) : 0;                /* DATA_ENTRY.Size */
+}
+/* FreeResource(hResData) -> BOOL. A no-op in Win32 (returns FALSE = 0). */
+uint32_t aret_FreeResource(uint32_t esp) { (void)esp; return 0; }
+
+/* LoadStringA(hInstance, uID, lpBuffer, cchBufferMax) -> chars copied (excl NUL).
+ * RT_STRING resources bundle 16 strings per block: block id = uID/16 + 1, index
+ * = uID%16; each entry is a WORD length (WCHARs) + that many WCHARs (no NUL). */
+uint32_t aret_LoadStringA(uint32_t esp) {
+    uint32_t uID = WU(1);
+    char *buf = (char *)WP(2);
+    uint32_t cch = WU(3);
+    if (!buf || cch == 0) return 0;
+    const uint8_t *de = u32_rsrc_data_entry(6 /* RT_STRING */, uID / 16 + 1);
+    if (!de) { buf[0] = 0; return 0; }
+    const uint16_t *p = (const uint16_t *)(uintptr_t)(aret_image_lo + *(const uint32_t *)de);
+    uint32_t idx = uID % 16;
+    for (uint32_t i = 0; i < idx; i++) p += 1 + *p;             /* skip to the target entry */
+    uint16_t len = *p++;                                        /* WCHAR count */
+    uint32_t n = len < cch - 1 ? len : cch - 1;
+    for (uint32_t i = 0; i < n; i++) buf[i] = (char)(p[i] & 0xFF);
+    buf[n] = 0;
+    return n;
+}
+
+/* ================================================================== */
 /* USER32 — message-only window subsystem (no display, fully portable) */
 /* ================================================================== */
 /* A message-only window (HWND_MESSAGE) has no pixels: it is purely an internal

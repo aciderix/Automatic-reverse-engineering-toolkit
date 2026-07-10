@@ -1050,4 +1050,34 @@ Détail : **70 §6** (roadmap). Résumé :
 - **Vérifié** : `windows_pe_to_webassembly` **repasse** (WASM 7/7 réellement vert), build natif -m32 inchangé,
   toutes les autres portes vertes (cf. entrée x87 ci-dessus).
 
+### 2026-07-10 — [GUI][HLE-WIN32] M7 — G4 (ressources .rsrc) priorisé par la donnée AVANT G2b (SDL)
+- **Re-mesure corpus (wallsweep 41 Win95, après G2a)** : top instructions = **bruit** (popad/arpl/insd/outsb/
+  bound/daa = opcodes privilégiés/DOS misdécodés en data-as-code). Top imports = **100 % GUI**, mais dominés par
+  du **display-free** : MessageBoxA 37, GetDlgItem 33, **LoadStringA 32**, ReleaseDC 30, GetDeviceCaps 28,
+  **FindResourceA/LoadResource/SizeofResource 26**, **LockResource 24**, **FreeResource 25**, LoadIcon/Cursor 19/23.
+- **Décision (règle « prioriser par la donnée, pas l'intuition »)** : faire **G4 (ressources + LoadString)**
+  **avant** G2b (fenêtre SDL). Motifs : (1) débloque **plus** de binaires ; (2) **display-free** → pas de
+  dépendance SDL, portable/WASM ; (3) **oracle exact** (valeurs de chaînes / octets de blob vs Wine), là où G2b
+  a un oracle dur (la tempête de messages Windows à `CreateWindow` n'est **pas** bit-reproductible) ; (4) la
+  `.rsrc` est **déjà mappée**.
+- **Découverte réutilisable** : les **en-têtes PE sont déjà mappés** à l'image base (`.pe_header`, loader), donc
+  le runtime lit `DataDirectory[2]` (resource RVA) **depuis la mémoire** — **0 changement loader/builder**, tout
+  reste dans `aret_win32.c`.
+- **Fait** (`aret_win32.c`, +6 `stdcall_pops` triés) : walker de l'arbre `IMAGE_RESOURCE_DIRECTORY` en mémoire
+  (`u32_rsrc_root` parse MZ→PE→PE32→DataDirectory[2] ; `u32_rsrc_entry` matche id **ou** nom UTF-16 casse-
+  insensible ; `u32_rsrc_data_entry` descend type→nom→langue[0]→DATA_ENTRY). `FindResourceA`(HRSRC=ptr
+  DATA_ENTRY), `LoadResource`(image_base+RVA), `LockResource`(identité), `SizeofResource`(Size), `FreeResource`
+  (no-op=0). **`LoadStringA`** : RT_STRING groupées 16/bloc (bloc=id/16+1, index=id%16 ; entrée = WORD longueur
+  WCHAR + WCHARs sans NUL) → narrow ANSI, tronque à cch-1. Ressource/chaîne absente → NULL/0 (**sound**, jamais
+  fabriqué).
+- **Oracle** : `winecorpus/user32_resources.{c,rc}` (windres compile le .rc, harness le lie) : blob RT_RCDATA
+  (octets exacts `41524554341200004200`), table de chaînes sur **2 blocs** (id 277→bloc 18), ressource absente,
+  id absent, **troncature** (buf 8 → "Hello, ") — **bit-identique à Wine** (les deux lisent les **mêmes octets**
+  embarqués). Les en-têtes PE mappés confirmés utilisables.
+- **Effet mesuré** : LoadStringA 32, FindResourceA/LoadResource/SizeofResource 26, LockResource 24, FreeResource
+  25 **éliminés des 41 Win95**. *(Les binaires ne tournent pas encore : reste dialogs/MessageBox/GDI + fenêtre
+  visible.)*
+- **Vérifié** : hash transpile **inchangé** `19acad982194bf07`, difftest 271/271, cargo test complet vert,
+  winediff **59/59**, table triée.
+
 <!-- NOUVELLES ENTRÉES ICI (garder l'ordre chronologique, plus récent en bas) -->

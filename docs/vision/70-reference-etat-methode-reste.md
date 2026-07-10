@@ -165,7 +165,7 @@ bash bench/regression.sh    # PORTE unifiée : difftest 271/271, in-place 3/3,
                             # recompilabilité gzip/ls/cat 100%
 bash bench/difftest.sh              # décompile O0→O3
 bash bench/difftest_transpile.sh    # transpile (hash 19acad982194bf07)
-bash bench/winediff.sh              # axe 2 vs Wine (58/58)
+bash bench/winediff.sh              # axe 2 vs Wine (59/59)
 bash bench/funcdiff.sh              # lift-closure + opt-diff vs Unicorn (0 div)
 # Sweeps de vrais binaires (téléchargent + comparent à Wine) :
 bash bench/sqlite_sweep.sh   bash bench/busybox_sweep.sh   bash bench/corpus_sweep.sh
@@ -185,7 +185,7 @@ bash bench/wallsweep.sh <dir1> [dir2…]  # AGRÈGE --mode walls sur un corpus :
 
 ### État régression (référence — doit rester vert)
 difftest **271/271** · transpile-diff **4/4** (H=`19acad982194bf07`) · winediff
-**58/58** · cpudiff vert (per-instruction + séquences génératives) · funcdiff corpus **0 divergence** (lift ~12k scorées /
+**59/59** · cpudiff vert (per-instruction + séquences génératives) · funcdiff corpus **0 divergence** (lift ~12k scorées /
 ~6k appels, opt ~10k scorées) · SMT **11/11** · in-place **3/3** · magicdiv **2³²** ·
 recompilabilité **100 %** · WASM **7/7**.
 
@@ -340,6 +340,11 @@ recompilabilité **100 %** · WASM **7/7**.
   `Post`/`SendMessageW`, `PostQuitMessage`, `SetTimer`/`KillTimer`, `MsgWaitForMultipleObjectsEx` **+ jumeaux A** (M7 G1, doc 72).
   Registre de classes + file de messages mono-thread + timers ; dispatch = **callback WNDPROC
   dans le lifté** (`aret_call`). Débloque le notifier Tcl. Cf. §5 P6.5.
+- **Ressources PE `.rsrc`** (M7 G4, doc 72, **display-free**) : walker de l'arbre `IMAGE_RESOURCE_DIRECTORY`
+  **en mémoire** (en-têtes PE déjà mappés à l'image base → `DataDirectory[2]` lu direct, 0 changement loader) →
+  `FindResourceA`/`LoadResource`/`LockResource`/`SizeofResource`/`FreeResource` (id **ou** nom UTF-16) +
+  **`LoadStringA`** (RT_STRING, 16/bloc). Ressource absente → NULL/0 (**sound**). Gardé `winecorpus/
+  user32_resources.{c,rc}` (blob RCDATA + table multi-blocs + troncature, bit-identique Wine).
 - **USER32 modèle fenêtre étendu** (M7 G2a, doc 72, **display-free**) : état window-manager (rect/style/
   visible/enabled/userdata/titre) → `GetWindowRect`/`SetWindowPos`/`MoveWindow`/`ShowWindow`/`UpdateWindow`/
   `EnableWindow`/`Get`-`SetWindowLongA/W` ; texte `Set`/`GetWindowTextA/W`+`GetWindowTextLengthA/W` **via

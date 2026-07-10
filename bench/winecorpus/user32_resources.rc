@@ -1,0 +1,20 @@
+#include <windows.h>
+
+/* A named custom resource (RT_RCDATA) with fixed bytes. Both Wine and ARET read
+ * the SAME embedded bytes from the SAME PE, so whatever windres encodes, the two
+ * engines see it identically. */
+MYBLOB RCDATA
+BEGIN
+  "ARET", 0x1234L, 0x42
+END
+
+/* A string table. Strings are bundled 16 per block (id/16 -> block, id%16 ->
+ * index); id 277 lands in a different block (277/16 = 17) to exercise indexing. */
+STRINGTABLE
+BEGIN
+  100 "Hello, resources!"
+  101 "deuxieme"
+  102 "third string value"
+  115 "last in first block"
+  277 "spans another block"
+END
