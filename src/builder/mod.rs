@@ -46,6 +46,11 @@ pub struct TranspileReport {
     /// the weak stub that warns and returns 0 — a silent wrong result (e.g.
     /// `qsort` leaving its array unsorted). Names are sanitized (`aret_qsort`).
     pub unimplemented_imports: Vec<String>,
+    /// Every unmodelled instruction across all recovered functions (the lift
+    /// gaps), deduplicated by text with a site count, most-frequent first. The
+    /// complete *static* per-instruction wall list — what the runtime would hit
+    /// one at a time, seen all at once. Empty ⇒ every recovered instruction lifts.
+    pub unmodelled_insns: Vec<(String, usize)>,
     /// Captured stdout if the binary was run, else `None`.
     pub run_output: Option<String>,
 }
@@ -94,6 +99,15 @@ impl TranspileReport {
             if self.unimplemented_imports.len() > 10 {
                 s.push_str(&format!("              … and {} more\n", self.unimplemented_imports.len() - 10));
             }
+            // Lift gaps (unmodelled instructions) — the same wall list `--mode
+            // walls` prints in full. Surfaced here (top few) so a plain transpile
+            // already shows *which* instructions block, not just a partial count.
+            for (t, c) in self.unmodelled_insns.iter().take(6) {
+                s.push_str(&format!("              ! unmodelled instruction (×{c}): {t}\n"));
+            }
+            if self.unmodelled_insns.len() > 6 {
+                s.push_str(&format!("              … and {} more distinct (see --mode walls)\n", self.unmodelled_insns.len() - 6));
+            }
         }
         s.push_str(&format!("  output dir: {}\n", self.out_dir.display()));
         s.push_str(&format!("  binary:     {}\n", self.binary.display()));
@@ -104,6 +118,61 @@ impl TranspileReport {
                 s.push_str(line);
                 s.push('\n');
             }
+        }
+        s
+    }
+
+    /// The complete static "wall map" for a binary: every coverage gap the runtime
+    /// could hit, enumerated in one pass instead of one-at-a-time at execution.
+    /// Three sections — unmodelled instructions (lift gaps, by site count),
+    /// unimplemented imports (HLE gaps), and unresolved direct calls (recovery
+    /// gaps). This turns "walk into wall after wall" into a prioritisable list, and
+    /// its stable sections aggregate across a corpus (grep the counts). Behaviour
+    /// bugs (miscompiles) are *not* here — those are undecidable statically and
+    /// surface only via the differential oracles.
+    pub fn render_walls(&self) -> String {
+        let mut s = String::new();
+        let sites: usize = self.unmodelled_insns.iter().map(|(_, n)| n).sum();
+        s.push_str("ARET wall map — complete static coverage gaps\n");
+        s.push_str(&format!(
+            "  recovered:  {} functions ({} lifted, {} partial-asm, {} host-backed), {}-bit\n\n",
+            self.functions, self.lifted, self.partial, self.host_backed, self.bits
+        ));
+        s.push_str(&format!(
+            "UNMODELLED INSTRUCTIONS (lift gaps) — {} distinct / {} sites\n",
+            self.unmodelled_insns.len(), sites
+        ));
+        if self.unmodelled_insns.is_empty() {
+            s.push_str("  (none — every recovered instruction lifts)\n");
+        }
+        for (t, n) in &self.unmodelled_insns {
+            s.push_str(&format!("  {n:>6}  {t}\n"));
+        }
+        s.push_str(&format!(
+            "\nUNIMPLEMENTED IMPORTS (HLE gaps) — {}\n",
+            self.unimplemented_imports.len()
+        ));
+        if self.unimplemented_imports.is_empty() {
+            s.push_str("  (none)\n");
+        }
+        let mut imps: Vec<&str> = self
+            .unimplemented_imports
+            .iter()
+            .map(|n| n.strip_prefix("aret_").unwrap_or(n))
+            .collect();
+        imps.sort_unstable();
+        for n in imps {
+            s.push_str(&format!("  {n}\n"));
+        }
+        s.push_str(&format!(
+            "\nUNRESOLVED DIRECT CALLS (recovery gaps) — {}\n",
+            self.unresolved.len()
+        ));
+        if self.unresolved.is_empty() {
+            s.push_str("  (none)\n");
+        }
+        for a in &self.unresolved {
+            s.push_str(&format!("  0x{a:x}\n"));
         }
         s
     }
@@ -640,6 +709,75 @@ pub fn import_coverage(prog: &crate::loader::Program) -> ImportCoverage {
     }
 }
 
+/// Collect every unmodelled instruction (a lift gap) across all functions,
+/// deduplicated by text with a site count, most-frequent first. An unmodelled
+/// instruction surfaces two ways — a `Stmt::Asm` (statement form) or an
+/// `asm:`-named call *expression* (an op that yields no value) — mirroring
+/// `has_opaque_asm`; both are counted. This is the complete, static
+/// per-instruction wall list the runtime would otherwise reveal one at a time.
+fn collect_unmodelled_insns(irfs: &[ir::types::IrFunction]) -> Vec<(String, usize)> {
+    use ir::types::{CallTarget, Expr, Stmt};
+    use std::collections::BTreeMap;
+    fn expr_walk(e: &Expr, c: &mut BTreeMap<String, usize>) {
+        match e {
+            Expr::Call { target, args, .. } => {
+                if let CallTarget::Named(n) = target {
+                    if let Some(insn) = n.strip_prefix("asm:") {
+                        *c.entry(insn.to_string()).or_insert(0) += 1;
+                    }
+                }
+                if let CallTarget::Indirect(x) = target {
+                    expr_walk(x, c);
+                }
+                for a in args {
+                    expr_walk(a, c);
+                }
+            }
+            Expr::Load { addr, .. } => expr_walk(addr, c),
+            Expr::Unary(_, x) | Expr::Cast { expr: x, .. } => expr_walk(x, c),
+            Expr::Binary(_, a, b) => {
+                expr_walk(a, c);
+                expr_walk(b, c);
+            }
+            Expr::Select { cond, then_, else_ } => {
+                expr_walk(cond, c);
+                expr_walk(then_, c);
+                expr_walk(else_, c);
+            }
+            _ => {}
+        }
+    }
+    fn stmt_walk(s: &Stmt, c: &mut BTreeMap<String, usize>) {
+        match s {
+            Stmt::Asm(t) => {
+                *c.entry(t.clone()).or_insert(0) += 1;
+            }
+            Stmt::Set { expr, .. } | Stmt::Assign { expr, .. } | Stmt::CallStmt(expr) => {
+                expr_walk(expr, c)
+            }
+            Stmt::Store { addr, value, .. } => {
+                expr_walk(addr, c);
+                expr_walk(value, c);
+            }
+            Stmt::Branch { cond, .. } => expr_walk(cond, c),
+            Stmt::Switch { value, .. } => expr_walk(value, c),
+            Stmt::Return(Some(e)) => expr_walk(e, c),
+            _ => {}
+        }
+    }
+    let mut counts: BTreeMap<String, usize> = BTreeMap::new();
+    for irf in irfs {
+        for b in &irf.blocks {
+            for st in &b.stmts {
+                stmt_walk(st, &mut counts);
+            }
+        }
+    }
+    let mut v: Vec<(String, usize)> = counts.into_iter().collect();
+    v.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+    v
+}
+
 /// Named shims a recovered function actually *calls* (`CallTarget::Named`), e.g.
 /// `aret_qsort` for an intercepted `qsort` import. Intersected against
 /// `implemented_shims` to find calls that would hit the unimplemented stub.
@@ -716,6 +854,7 @@ pub fn transpile(
     wasm: bool,
     snapshot: Option<&[(u64, Vec<u8>)]>,
     prog_args: &[String],
+    walls_only: bool,
 ) -> Result<TranspileReport> {
     // WebAssembly target: the recovered C is portable, and wasm32's linear memory
     // *is* the 32-bit address space, so it is a natural target (32-bit pointers,
@@ -821,6 +960,28 @@ pub fn transpile(
             .filter(|n| n.starts_with("aret_") && !impl_set.contains(n) && !is_setjmp_intrinsic(n))
             .collect()
     };
+    // The complete per-instruction lift-gap list (for the wall map + the report).
+    let unmodelled_insns = collect_unmodelled_insns(&irfs);
+    // `--mode walls`: the caller only wants the coverage-gap map, so stop here —
+    // before the expensive emit / layout / compile — with everything the report
+    // needs already computed. Same recovery + lift as a real transpile, so the
+    // map is exactly the one the produced binary would have.
+    if walls_only {
+        let unresolved = collect_undef_subs(&irfs);
+        return Ok(TranspileReport {
+            out_dir: out_dir.to_path_buf(),
+            binary: std::path::PathBuf::new(),
+            functions: n_funcs,
+            bits: prog.bitness.bits() as u32,
+            lifted: n_lifted,
+            partial: n_partial,
+            host_backed: n_host,
+            unresolved,
+            unimplemented_imports,
+            unmodelled_insns,
+            run_output: None,
+        });
+    }
     // The IR is no longer needed; free it before spawning the parallel compilers
     // (which need the memory) on a large program.
     drop(irfs);
@@ -1059,6 +1220,7 @@ pub fn transpile(
             host_backed: n_host,
             unresolved: undef_subs.clone(),
             unimplemented_imports: unimplemented_imports.clone(),
+            unmodelled_insns: unmodelled_insns.clone(),
             bits,
             run_output,
         });
@@ -1149,6 +1311,7 @@ pub fn transpile(
         host_backed: n_host,
         unresolved: undef_subs.clone(),
         unimplemented_imports: unimplemented_imports.clone(),
+        unmodelled_insns: unmodelled_insns.clone(),
         bits,
         run_output,
     })

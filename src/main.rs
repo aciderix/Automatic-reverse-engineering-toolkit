@@ -54,6 +54,10 @@ enum Mode {
     /// Transpile to a native executable for the target OS (UBT M1): intercept
     /// API imports into HLE shims, link, and recompile natively.
     Transpile,
+    /// Print the complete static "wall map" — every coverage gap the runtime could
+    /// hit (unmodelled instructions with site counts, unimplemented imports,
+    /// unresolved direct calls) — in one pass, without emitting or compiling.
+    Walls,
     /// Dynamically unpack a packed PE: emulate the stub (Unicorn) until it
     /// decrypts the payload, detect the OEP, and report. Requires `--features unpack`.
     Unpack,
@@ -452,7 +456,8 @@ fn main() -> Result<()> {
             let report = verify::run(&prog, &functions, limit, &args.backend);
             out.push_str(&report.render());
         }
-        Mode::Transpile => {
+        Mode::Transpile | Mode::Walls => {
+            let walls_only = args.mode == Mode::Walls;
             let wasm = args.target.as_deref() == Some("wasm");
             if let Some(t) = &args.target {
                 if wasm {
@@ -555,7 +560,12 @@ fn main() -> Result<()> {
                 wasm,
                 snapshot.as_deref(),
                 &args.prog_args,
+                walls_only,
             )?;
+            if walls_only {
+                out.push_str(&report.render_walls());
+                return emit(&args, out);
+            }
             out.push_str(&report.render());
             if args.strict && !report.is_sound() {
                 emit(&args, out)?;

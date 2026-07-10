@@ -820,4 +820,28 @@ Détail : **70 §6** (roadmap). Résumé :
   `LoadLibraryW`, lift `repe cmpsb`. Tcl est un puits profond (multi-incréments) ; le sous-système message-only,
   lui, est **fini et général** (débloque toute la classe « fenêtre cachée / notifier »).
 
+### 2026-07-10 — [ORACLE][INFRA] `--mode walls` : carte statique complète des murs de couverture
+- **Contexte** : critique juste — dérouler les blocages **un par un au runtime** est inefficace s'il y en a
+  des dizaines en série. Or le runtime ne suit qu'**un** chemin ; l'analyse statique voit **tout le code
+  récupéré**. Donc on peut énumérer **tous** les murs de couverture d'un coup, sans exécuter.
+- **Fait** (`src/builder/mod.rs`, `src/main.rs`) : nouveau `TranspileReport.unmodelled_insns`
+  (`collect_unmodelled_insns` : parcourt toutes les fns, dédup les instructions opaques — `Stmt::Asm` **et**
+  appels-expr `asm:` (mirroir de `has_opaque_asm`) — triées par nb de sites). Nouveau **`--mode walls`** :
+  chemin rapide dans `transpile(walls_only=true)` qui **s'arrête après recovery+lift** (avant émission/
+  compilation) et rend `render_walls()` : 3 sections — **instructions non liftées** (par sites), **imports
+  manquants** (triés), **appels directs non résolus**. Même recovery+lift qu'un vrai transpile ⇒ carte
+  **exacte**. Le rapport transpile normal montre désormais aussi le **top des instructions non liftées** (plus
+  seulement un compteur) — intégration au pipeline de base.
+- **Démonstration (sqlite3_analyzer)** : « 106 murs » → en réalité **14 instructions distinctes / 179 sites**
+  dont **`repe cmpsb` ×149 = 1 fix** (`rep cmps`), `ud2` ×16 = **abort correct** (Tcl_Panic), le reste ×1-2 =
+  data décodée comme code (non atteint) ; et **102 imports** dont **~29 = famille socket** (mappable POSIX
+  d'un bloc, probablement jamais appelés — analyzer ne réseaute pas) + 6 wide-CRT triviaux. La « série de
+  murs » s'effondre en **une poignée de familles bornées**. But suivant : agréger `--mode walls` sur un corpus
+  de ~100 exe pour dégrossir par la donnée.
+- **Portée honnête** : la carte couvre les murs **de couverture** (instructions/imports/récupération —
+  statiquement énumérables), **pas** les bugs de **comportement** (miscompiles, indécidables) qui restent du
+  ressort des oracles différentiels (cpudiff/funcdiff/winediff).
+- **Vérifié** : hash transpile **inchangé** `19acad982194bf07`, difftest 271/271, tests compilent. Robuste sur
+  sqldiff (4 insns/5 imports/0 non résolu) et analyzer (34 Mo, rapide car pas de compilation).
+
 <!-- NOUVELLES ENTRÉES ICI (garder l'ordre chronologique, plus récent en bas) -->

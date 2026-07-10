@@ -175,6 +175,10 @@ bash bench/gauntlet/score.sh        # 21 binaires gauntlet, corpus dans le repo
 aret <exe> --mode transpile --out-dir OUT [--entry main|0xADDR] [--function NAME]
      [--run -- ARGS…] [--backend llvm | --target wasm] [--strict]
 aret <exe> --mode imports           # couverture statique d'imports (axe 2 a-priori)
+aret <exe> --mode walls             # CARTE DES MURS statique complète (une passe) :
+       # instructions non liftées (par nb de sites) + imports manquants + appels non résolus.
+       # Sans émettre/compiler. La vue d'ensemble : voir TOUS les murs d'un coup au lieu de les
+       # subir un par un au runtime. Agrégeable sur un corpus (grep les compteurs) pour dégrossir.
 ```
 
 ### État régression (référence — doit rester vert)
@@ -619,6 +623,17 @@ la **vitesse** change.
 - **Un vrai binaire lancé bout-en-bout vs Wine** est le meilleur révélateur de « où
   on en est » — il sort des bugs généraux qu'aucun test synthétique ni sweep
   statique ne révèle (printf %I64, cluster stdin busybox…). Systématisé en sweeps.
+- **Carte des murs statique AVANT de dérouler au runtime** (`--mode walls`) : le runtime
+  ne frappe qu'un mur à la fois (un seul chemin) ; l'analyse statique voit **tout le code
+  récupéré** en une passe → énumère **d'un coup** les murs de couverture (instructions non
+  liftées par nb de sites, imports manquants, appels non résolus). Ça transforme « mur après
+  mur » en **liste priorisable** : souvent « des dizaines de murs » = quelques **familles
+  bornées** (ex. analyzer : 149× `repe cmpsb` = **1** fix ; 29 imports = **1** famille socket ;
+  le reste = `ud2`=abort correct ou data-décodée-en-code non atteinte). ⚠️ La carte ne couvre
+  que les murs **de couverture** (statiquement énumérables) — **pas** les bugs de comportement
+  (miscompiles, indécidables) qui, eux, restent du ressort des oracles différentiels.
+- **Dégrossir un corpus** : `--mode walls` sur N binaires + agrégation des compteurs → les
+  familles qui débloquent le plus de binaires (prioriser par la donnée, pas à l'intuition).
 - **`--mode imports`** mesure l'axe 2 **a-priori** (statique, énumérable) → prioriser
   les shims par la donnée (winetest : `SetConsoleMode`/`GetExitCodeProcess`
   dominent — jamais deviné à la main). Puis **filtrer par fidélité** (n'expédier que
