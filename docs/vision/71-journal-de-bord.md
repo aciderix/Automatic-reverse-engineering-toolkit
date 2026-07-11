@@ -1184,4 +1184,22 @@ Détail : **70 §6** (roadmap). Résumé :
 - **Vérifié** : hash transpile **inchangé** `19acad982194bf07`, difftest 271/271, cargo test complet vert,
   winediff **64/64**, table triée.
 
+### 2026-07-10 — [GUI][HLE-WIN32] M7 — G7 (2) : sous-système menus (modèle données, display-free)
+- **Mesuré d'abord (règle 9)** : probe Wine (sans écran) → `GetMenuState` renvoie les flags MF_* de l'item
+  (CHECKED=0x08, GRAYED=0x01), `EnableMenuItem`/`CheckMenuItem` renvoient l'**ancien** état, `GetMenuString`
+  le texte, `GetMenuState(pos,BYPOSITION)` l'item à la position.
+- **Fait** (`aret_win32.c`, +19 `stdcall_pops` triés) : un menu = liste d'items (id, flags, submenu, texte),
+  handles base 0x40000000. `CreateMenu`/`CreatePopupMenu`/`DestroyMenu`, `AppendMenuA/W`/`InsertMenuA`/
+  `DeleteMenu`/`RemoveMenu` (MF_POPUP→submenu, MF_SEPARATOR/BITMAP/OWNERDRAW→pas de texte), `GetMenuItemCount`,
+  `EnableMenuItem` (bits GRAYED|DISABLED, renvoie l'ancien), `CheckMenuItem` (bit CHECKED), `GetMenuState`
+  (flags ; popup→hiword=nb items du submenu), `GetMenuStringA/W`, `GetSubMenu`, `GetMenuItemID`. Barre de
+  menu fenêtre : `GetMenu`/`SetMenu` (tableau parallèle) ; `GetSystemMenu` (menu système SC_* par fenêtre,
+  lazy ; bRevert reset) ; `TrackPopupMenu(Ex)`→0 (pas de sélection headless, sound).
+- **Oracle** : `winecorpus/user32_menu.c` (+`.nodisplay`) — construction menu, count, states, Enable/Check
+  round-trip (**statements séquencés** : l'ordre d'éval des args printf est non spécifié → forcer la mutation
+  avant la lecture, sinon le test lit l'état pré-mutation), GetMenuString → **bit-identique à Wine**.
+- **Effet mesuré** : EnableMenuItem 14, GetSystemMenu 12 (+ CreatePopupMenu/AppendMenu/…) éliminés des 41 Win95.
+- **Vérifié** : hash transpile **inchangé** `19acad982194bf07`, difftest 271/271, cargo test complet vert,
+  winediff **65/65**, table triée.
+
 <!-- NOUVELLES ENTRÉES ICI (garder l'ordre chronologique, plus récent en bas) -->

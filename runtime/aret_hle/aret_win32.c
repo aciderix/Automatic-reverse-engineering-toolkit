@@ -2240,3 +2240,172 @@ uint32_t aret_MsgWaitForMultipleObjects(uint32_t esp) {
     if (!u32_q_empty() || g_u32_quit) return nCount;
     return 0x00000102u;   /* WAIT_TIMEOUT */
 }
+
+/* ================================================================== */
+/* USER32 menus — data model (display-free)                           */
+/* ================================================================== */
+/* A menu is a list of items (id, flags, optional submenu, text). No pixels: the
+ * model backs the state APIs (Enable/Check/GetMenuState/GetMenuString) that a
+ * program drives; painting a menu bar is display work (later). Handles: base
+ * 0x40000000 (distinct from window/GDI/menu ranges). MF_* flags: GRAYED=1,
+ * DISABLED=2, BITMAP=4, CHECKED=8, POPUP=0x10, OWNERDRAW=0x100, BYPOSITION=0x400,
+ * SEPARATOR=0x800. */
+#define U32_MENU_BASE 0x40000000u
+#define U32_MAX_MENUS 128
+#define U32_MAX_MITEMS 64
+static struct u32_menu {
+    int used, count;
+    struct { uint32_t id, flags, submenu; char text[128]; } it[U32_MAX_MITEMS];
+} g_u32_menu[U32_MAX_MENUS];
+static uint32_t g_u32_wmenu[U32_MAX_WIN], g_u32_wsysmenu[U32_MAX_WIN];
+
+static int u32_menu_idx(uint32_t h) {
+    if ((h & 0xFF000000u) != U32_MENU_BASE) return -1;
+    uint32_t i = h & 0x00FFFFFFu;
+    return (i < U32_MAX_MENUS && g_u32_menu[i].used) ? (int)i : -1;
+}
+static uint32_t u32_menu_new(void) {
+    for (int i = 1; i < U32_MAX_MENUS; i++)
+        if (!g_u32_menu[i].used) { memset(&g_u32_menu[i], 0, sizeof g_u32_menu[i]); g_u32_menu[i].used = 1; return U32_MENU_BASE | (uint32_t)i; }
+    return 0;
+}
+/* Find an item by command id (default) or by position (MF_BYPOSITION). */
+static int u32_menu_find(struct u32_menu *m, uint32_t item, uint32_t flags) {
+    if (flags & 0x400u) return (item < (uint32_t)m->count) ? (int)item : -1;
+    for (int k = 0; k < m->count; k++) if (m->it[k].id == item) return k;
+    return -1;
+}
+static void u32_menu_setitem(int mi, int slot, uint32_t flags, uint32_t idOrSub, const char *text) {
+    struct u32_menu *m = &g_u32_menu[mi];
+    m->it[slot].flags = flags & ~0x400u;                 /* MF_BYPOSITION is a lookup bit */
+    m->it[slot].id = idOrSub;
+    m->it[slot].submenu = (flags & 0x10u) ? idOrSub : 0; /* MF_POPUP: id is the submenu */
+    m->it[slot].text[0] = 0;
+    if (text && !(flags & (0x800u | 0x4u | 0x100u))) {   /* not separator/bitmap/ownerdraw */
+        int k = 0; for (; text[k] && k < 127; k++) m->it[slot].text[k] = text[k];
+        m->it[slot].text[k] = 0;
+    }
+}
+
+uint32_t aret_CreateMenu(uint32_t esp)      { (void)esp; return u32_menu_new(); }
+uint32_t aret_CreatePopupMenu(uint32_t esp) { (void)esp; return u32_menu_new(); }
+uint32_t aret_DestroyMenu(uint32_t esp)     { int i = u32_menu_idx(WU(0)); if (i < 0) return 0; g_u32_menu[i].used = 0; return 1; }
+
+uint32_t aret_AppendMenuA(uint32_t esp) {
+    int i = u32_menu_idx(WU(0)); if (i < 0 || g_u32_menu[i].count >= U32_MAX_MITEMS) return 0;
+    int s = g_u32_menu[i].count++;
+    u32_menu_setitem(i, s, WU(1), WU(2), WCS(3));
+    return 1;
+}
+uint32_t aret_AppendMenuW(uint32_t esp) {
+    int i = u32_menu_idx(WU(0)); if (i < 0 || g_u32_menu[i].count >= U32_MAX_MITEMS) return 0;
+    char t[128]; t[0] = 0;
+    if (!(WU(1) & (0x800u | 0x4u | 0x100u))) u32_w2n((const uint16_t *)WP(3), t, sizeof t);
+    int s = g_u32_menu[i].count++;
+    u32_menu_setitem(i, s, WU(1), WU(2), t);
+    return 1;
+}
+uint32_t aret_InsertMenuA(uint32_t esp) {
+    int i = u32_menu_idx(WU(0)); if (i < 0 || g_u32_menu[i].count >= U32_MAX_MITEMS) return 0;
+    struct u32_menu *m = &g_u32_menu[i];
+    int at = u32_menu_find(m, WU(1), WU(2)); if (at < 0) at = m->count;
+    for (int k = m->count; k > at; k--) m->it[k] = m->it[k - 1];
+    m->count++;
+    u32_menu_setitem(i, at, WU(2), WU(3), WCS(4));
+    return 1;
+}
+uint32_t aret_DeleteMenu(uint32_t esp) {
+    int i = u32_menu_idx(WU(0)); if (i < 0) return 0;
+    struct u32_menu *m = &g_u32_menu[i];
+    int at = u32_menu_find(m, WU(1), WU(2)); if (at < 0) return 0;
+    for (int k = at; k < m->count - 1; k++) m->it[k] = m->it[k + 1];
+    m->count--;
+    return 1;
+}
+uint32_t aret_RemoveMenu(uint32_t esp) { return aret_DeleteMenu(esp); }
+uint32_t aret_GetMenuItemCount(uint32_t esp) { int i = u32_menu_idx(WU(0)); return i < 0 ? 0xFFFFFFFFu : (uint32_t)g_u32_menu[i].count; }
+
+uint32_t aret_EnableMenuItem(uint32_t esp) {
+    int i = u32_menu_idx(WU(0)); if (i < 0) return 0xFFFFFFFFu;
+    int s = u32_menu_find(&g_u32_menu[i], WU(1), WU(2)); if (s < 0) return 0xFFFFFFFFu;
+    uint32_t prev = g_u32_menu[i].it[s].flags & 0x3u;    /* MF_GRAYED|MF_DISABLED */
+    g_u32_menu[i].it[s].flags = (g_u32_menu[i].it[s].flags & ~0x3u) | (WU(2) & 0x3u);
+    return prev;
+}
+uint32_t aret_CheckMenuItem(uint32_t esp) {
+    int i = u32_menu_idx(WU(0)); if (i < 0) return 0xFFFFFFFFu;
+    int s = u32_menu_find(&g_u32_menu[i], WU(1), WU(2)); if (s < 0) return 0xFFFFFFFFu;
+    uint32_t prev = g_u32_menu[i].it[s].flags & 0x8u;    /* MF_CHECKED */
+    g_u32_menu[i].it[s].flags = (g_u32_menu[i].it[s].flags & ~0x8u) | (WU(2) & 0x8u);
+    return prev;
+}
+uint32_t aret_GetMenuState(uint32_t esp) {
+    int i = u32_menu_idx(WU(0)); if (i < 0) return 0xFFFFFFFFu;
+    int s = u32_menu_find(&g_u32_menu[i], WU(1), WU(2)); if (s < 0) return 0xFFFFFFFFu;
+    uint32_t f = g_u32_menu[i].it[s].flags;
+    if (f & 0x10u) {                                     /* popup: hiword = submenu count */
+        int sub = u32_menu_idx(g_u32_menu[i].it[s].submenu);
+        uint32_t cnt = sub >= 0 ? (uint32_t)g_u32_menu[sub].count : 0;
+        return (cnt << 16) | (f & 0xFFFFu);
+    }
+    return f & 0xFFFFu;
+}
+uint32_t aret_GetMenuStringA(uint32_t esp) {
+    char *buf = (char *)WP(2); uint32_t cch = WU(3);
+    int i = u32_menu_idx(WU(0)); if (i < 0) { if (buf && cch) buf[0] = 0; return 0; }
+    int s = u32_menu_find(&g_u32_menu[i], WU(1), WU(4)); if (s < 0) { if (buf && cch) buf[0] = 0; return 0; }
+    const char *t = g_u32_menu[i].it[s].text; uint32_t len = (uint32_t)strlen(t);
+    if (!buf || cch == 0) return len;
+    uint32_t n = len < cch - 1 ? len : cch - 1;
+    for (uint32_t j = 0; j < n; j++) buf[j] = t[j];
+    buf[n] = 0;
+    return n;
+}
+uint32_t aret_GetMenuStringW(uint32_t esp) {
+    uint16_t *buf = (uint16_t *)WP(2); uint32_t cch = WU(3);
+    int i = u32_menu_idx(WU(0)); if (i < 0) { if (buf && cch) buf[0] = 0; return 0; }
+    int s = u32_menu_find(&g_u32_menu[i], WU(1), WU(4)); if (s < 0) { if (buf && cch) buf[0] = 0; return 0; }
+    const char *t = g_u32_menu[i].it[s].text; uint32_t len = (uint32_t)strlen(t);
+    if (!buf || cch == 0) return len;
+    uint32_t n = len < cch - 1 ? len : cch - 1;
+    for (uint32_t j = 0; j < n; j++) buf[j] = (uint16_t)(unsigned char)t[j];
+    buf[n] = 0;
+    return n;
+}
+uint32_t aret_GetSubMenu(uint32_t esp) {
+    int i = u32_menu_idx(WU(0)); if (i < 0) return 0;
+    int p = WI(1); if (p < 0 || p >= g_u32_menu[i].count) return 0;
+    return (g_u32_menu[i].it[p].flags & 0x10u) ? g_u32_menu[i].it[p].submenu : 0;
+}
+uint32_t aret_GetMenuItemID(uint32_t esp) {
+    int i = u32_menu_idx(WU(0)); if (i < 0) return 0xFFFFFFFFu;
+    int p = WI(1); if (p < 0 || p >= g_u32_menu[i].count) return 0xFFFFFFFFu;
+    if (g_u32_menu[i].it[p].flags & 0x10u) return 0xFFFFFFFFu;  /* popup -> -1 */
+    return g_u32_menu[i].it[p].id;
+}
+
+/* Window menu bar + system menu. */
+uint32_t aret_GetMenu(uint32_t esp) { int i = u32_win_idx(WU(0)); return i < 0 ? 0 : g_u32_wmenu[i]; }
+uint32_t aret_SetMenu(uint32_t esp) { int i = u32_win_idx(WU(0)); if (i < 0) return 0; g_u32_wmenu[i] = WU(1); return 1; }
+uint32_t aret_GetSystemMenu(uint32_t esp) {
+    int i = u32_win_idx(WU(0)); if (i < 0) return 0;
+    if (WU(1)) {                                         /* bRevert: reset, return NULL */
+        if (g_u32_wsysmenu[i]) { int mi = u32_menu_idx(g_u32_wsysmenu[i]); if (mi >= 0) g_u32_menu[mi].used = 0; g_u32_wsysmenu[i] = 0; }
+        return 0;
+    }
+    if (!g_u32_wsysmenu[i]) {
+        uint32_t h = u32_menu_new(); int mi = u32_menu_idx(h);
+        if (mi >= 0) {
+            static const struct { uint32_t id; const char *t; } sc[] = {
+                {0xF120u, "&Restore"}, {0xF010u, "&Move"}, {0xF000u, "&Size"},
+                {0xF020u, "Mi&nimize"}, {0xF030u, "Ma&ximize"}, {0xF060u, "&Close"} };
+            for (int k = 0; k < 6; k++) { int s = g_u32_menu[mi].count++; u32_menu_setitem(mi, s, 0, sc[k].id, sc[k].t); }
+        }
+        g_u32_wsysmenu[i] = h;
+    }
+    return g_u32_wsysmenu[i];
+}
+/* TrackPopupMenu(Ex): a modal popup needs a display + user; headless there is no
+ * selection -> return 0 (with TPM_RETURNCMD, 0 = "no item chosen"). */
+uint32_t aret_TrackPopupMenu(uint32_t esp)   { (void)esp; return 0; }
+uint32_t aret_TrackPopupMenuEx(uint32_t esp) { (void)esp; return 0; }
