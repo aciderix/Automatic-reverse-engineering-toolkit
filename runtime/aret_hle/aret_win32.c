@@ -570,6 +570,84 @@ uint32_t aret_LCMapStringW(uint32_t esp) {
     }
     return (uint32_t)n;
 }
+/* GetStringTypeA(Locale, dwInfoType, lpSrcStr, cchSrc, lpCharType) — ANSI twin of
+ * GetStringTypeW (note the extra leading Locale arg). Single-byte ctype. */
+uint32_t aret_GetStringTypeA(uint32_t esp) {
+    if (WU(1) != 1) return 0;                    /* CT_CTYPE1 only */
+    const unsigned char *s = (const unsigned char *)WP(2);
+    int n = WI(3);
+    uint16_t *out = (uint16_t *)WP(4);
+    if (!s || !out) return 0;
+    if (n < 0) { n = 0; while (s[n]) n++; }
+    for (int i = 0; i < n; i++) {
+        unsigned c = s[i]; uint16_t t = 0;
+        if (isupper((int)c)) t |= 0x0001 | 0x0100;
+        if (islower((int)c)) t |= 0x0002 | 0x0100;
+        if (isdigit((int)c)) t |= 0x0004;
+        if (isspace((int)c)) t |= 0x0008;
+        if (ispunct((int)c)) t |= 0x0010;
+        if (iscntrl((int)c)) t |= 0x0020;
+        if (isblank((int)c)) t |= 0x0040;
+        if (isxdigit((int)c)) t |= 0x0080;
+        if (t) t |= 0x0200;
+        out[i] = t;
+    }
+    return 1;
+}
+/* LCMapStringA — ANSI twin of LCMapStringW (upper/lower-case; else pass-through). */
+uint32_t aret_LCMapStringA(uint32_t esp) {
+    uint32_t flags = WU(1);
+    const unsigned char *src = (const unsigned char *)WP(2);
+    int srclen = WI(3);
+    char *dst = (char *)WP(4);
+    int dstlen = WI(5);
+    if (!src) return 0;
+    if (srclen < 0) { srclen = 0; while (src[srclen]) srclen++; srclen++; }
+    if (dstlen == 0 || !dst) return (uint32_t)srclen;
+    int n = srclen < dstlen ? srclen : dstlen;
+    for (int i = 0; i < n; i++) {
+        unsigned c = src[i];
+        if (flags & 0x00000200u) c = (unsigned)toupper((int)c);        /* LCMAP_UPPERCASE */
+        else if (flags & 0x00000100u) c = (unsigned)tolower((int)c);   /* LCMAP_LOWERCASE */
+        dst[i] = (char)c;
+    }
+    return (uint32_t)n;
+}
+/* CompareStringA/W(Locale, dwCmpFlags, s1, n1, s2, n2) -> CSTR_LESS_THAN(1)/
+ * EQUAL(2)/GREATER_THAN(3). Ordinal-ish (matches Wine for ASCII/en-US); honours
+ * NORM_IGNORECASE. Deep locale collation of accented text is not modelled. */
+uint32_t aret_CompareStringA(uint32_t esp) {
+    uint32_t flags = WU(1);
+    const char *a = (const char *)WP(2); int na = WI(3);
+    const char *b = (const char *)WP(4); int nb = WI(5);
+    if (!a || !b) return 0;
+    if (na < 0) na = (int)strlen(a);
+    if (nb < 0) nb = (int)strlen(b);
+    int ci = (flags & 0x00000001u) != 0;         /* NORM_IGNORECASE */
+    int i = 0;
+    for (; i < na && i < nb; i++) {
+        int ca = (unsigned char)a[i], cb = (unsigned char)b[i];
+        if (ci) { ca = tolower(ca); cb = tolower(cb); }
+        if (ca != cb) return ca < cb ? 1u : 3u;
+    }
+    return na == nb ? 2u : (na < nb ? 1u : 3u);
+}
+uint32_t aret_CompareStringW(uint32_t esp) {
+    uint32_t flags = WU(1);
+    const uint16_t *a = (const uint16_t *)WP(2); int na = WI(3);
+    const uint16_t *b = (const uint16_t *)WP(4); int nb = WI(5);
+    if (!a || !b) return 0;
+    if (na < 0) { na = 0; while (a[na]) na++; }
+    if (nb < 0) { nb = 0; while (b[nb]) nb++; }
+    int ci = (flags & 0x00000001u) != 0;
+    int i = 0;
+    for (; i < na && i < nb; i++) {
+        int ca = a[i], cb = b[i];
+        if (ci && ca < 256 && cb < 256) { ca = tolower(ca); cb = tolower(cb); }
+        if (ca != cb) return ca < cb ? 1u : 3u;
+    }
+    return na == nb ? 2u : (na < nb ? 1u : 3u);
+}
 uint32_t aret_IsProcessorFeaturePresent(uint32_t esp) { (void)esp; return 1; }
 uint32_t aret_IsDebuggerPresent(uint32_t esp) { (void)esp; return 0; }
 uint32_t aret_IsBadReadPtr(uint32_t esp)  { return (uint32_t)(WU(0) == 0); }

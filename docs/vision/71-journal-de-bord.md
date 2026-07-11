@@ -1245,4 +1245,16 @@ Détail : **70 §6** (roadmap). Résumé :
 - **Vérifié** : hash transpile **inchangé** `19acad982194bf07`, difftest 271/271, cargo test complet vert,
   winediff **68/68**, table triée.
 
+### 2026-07-10 — [HLE-WIN32] Locale A-twins : CompareStringA/W, LCMapStringA, GetStringTypeA
+- **Mesuré** : CompareStringA→CSTR_LESS/EQUAL/GREATER (1/2/3), NORM_IGNORECASE ok ; LCMapStringA upper/lower ;
+  GetStringTypeA CT_CTYPE1 flags ('A'=0x0381, '1'=0x0284, ' '=0x0248, 'x'=0x0302 — les cœurs W existants les
+  produisent déjà).
+- **Fait** (`aret_win32.c`) : `GetStringTypeA` (jumeau ANSI ; **arg Locale de tête en plus** vs W), `LCMapStringA`
+  (upper/lower single-byte), `CompareStringA/W` (**non implémentés avant** ; ordinal-ish + IGNORECASE, matche
+  Wine pour ASCII/en-US ; collation accentuée profonde non modélisée). Pops déjà présents.
+- **Oracle** : `winecorpus/win_locale.c` (+`.nodisplay`) → **bit-identique à Wine**.
+- **Effet mesuré** : GetStringTypeA 9, LCMapStringA 9, CompareStringA 6 éliminés des 41 Win95.
+- **Vérifié** : hash transpile **inchangé** `19acad982194bf07`, difftest 271/271, cargo test complet vert,
+  winediff **69/69**, table triée.
+
 <!-- NOUVELLES ENTRÉES ICI (garder l'ordre chronologique, plus récent en bas) -->
