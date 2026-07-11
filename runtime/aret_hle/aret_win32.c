@@ -1156,6 +1156,8 @@ static struct {
     int needs_paint;         /* update region non-empty -> owes a WM_PAINT */
     int needs_erase;         /* update region marked for erase -> WM_ERASEBKGND */
     uint32_t bg_brush;       /* class hbrBackground (HBRUSH) for the default erase */
+    int unicode;             /* created via a W API (IsWindowUnicode) */
+    int check_state;         /* dialog button check state (BM_GETCHECK/CheckDlgButton) */
 #ifdef ARET_HAVE_SDL
     void *sdl_win, *sdl_ren, *sdl_tex;  /* SDL window/renderer/streaming texture */
     uint32_t client_bmp;     /* HBITMAP of the client-area framebuffer (GDI draws here) */
@@ -1239,11 +1241,36 @@ static uint32_t u32_class_brush(uint32_t cref) {
 static int u32_coord(uint32_t v, int dflt) {
     return (v == 0x80000000u) ? dflt : (int)(int32_t)v;
 }
-/* Create a window (shared A/W core): bind wndproc + capture rect/style/text. */
+/* A predefined USER32 control class (BUTTON/EDIT/…) has no app WNDPROC — the system
+ * provides it. We model these as data-only control windows (state tracked, no
+ * pixels): enough for GetDlgItem / Get-SetDlgItemText / CheckDlgButton to work on
+ * a CreateWindowEx-created control, which real dialogs rely on. */
+static int u32_is_ctrl_class(uint32_t cref, int wide) {
+    if (cref < 0x10000u) return 0;                 /* atom = a registered class */
+    char n[64];
+    if (wide) u32_w2n((const uint16_t *)(uintptr_t)cref, n, sizeof n);
+    else { const char *s = (const char *)(uintptr_t)cref; int k = 0; for (; s[k] && k < 63; k++) n[k] = s[k]; n[k] = 0; }
+    static const char *const ctrls[] = { "button", "edit", "static", "listbox", "combobox",
+        "scrollbar", "mdiclient", "richedit", "richedit20a", "richedit20w", "syslistview32",
+        "systreeview32", "msctls_statusbar32", "msctls_updown32", "toolbarwindow32", "tooltips_class32", 0 };
+    for (int i = 0; ctrls[i]; i++) {
+        int eq = 1;
+        for (int j = 0;; j++) {
+            char a = n[j], b = ctrls[i][j];
+            char la = (a >= 'A' && a <= 'Z') ? a + 32 : a;
+            if (la != b) { eq = 0; break; }
+            if (!a) break;
+        }
+        if (eq) return 1;
+    }
+    return 0;
+}
+/* Create a window (shared A/W core): bind wndproc + capture rect/style/text.
+ * `is_ctrl` permits a data-only control window with no WNDPROC (predefined class). */
 static uint32_t u32_window_create(uint32_t wndproc, uint32_t exstyle, uint32_t style,
                                   uint32_t x, uint32_t y, uint32_t w, uint32_t h,
-                                  uint32_t parent, const char *title) {
-    if (!wndproc) return 0;
+                                  uint32_t parent, const char *title, int is_ctrl) {
+    if (!wndproc && !is_ctrl) return 0;
     for (int i = 0; i < U32_MAX_WIN; i++) {
         if (!g_u32_win[i].used) {
             g_u32_win[i].used = 1;
@@ -1451,9 +1478,11 @@ static void u32_class_name(uint32_t cref, int wide, char *out, int cap) {
 uint32_t aret_CreateWindowExW(uint32_t esp) {
     char title[256]; u32_w2n((const uint16_t *)WP(2), title, sizeof title);
     uint32_t h = u32_window_create(u32_class_wndproc(WU(1)), WU(0), WU(3),
-                                   WU(4), WU(5), WU(6), WU(7), WU(8), title);
+                                   WU(4), WU(5), WU(6), WU(7), WU(8), title, u32_is_ctrl_class(WU(1), 1));
     if (h) { u32_class_name(WU(1), 1, g_u32_win[h - 1].classname, sizeof g_u32_win[h - 1].classname);
-             g_u32_win[h - 1].bg_brush = u32_class_brush(WU(1)); }
+             g_u32_win[h - 1].bg_brush = u32_class_brush(WU(1));
+             g_u32_win[h - 1].unicode = 1;
+             if (WU(3) & 0x40000000u) g_u32_win[h - 1].ctrl_id = (int)WU(9);  /* WS_CHILD: hMenu=id */ }
     return h;
 }
 /* CreateWindowExA — className@1 is a narrow name (or an atom). Widen a name to
@@ -1467,9 +1496,10 @@ uint32_t aret_CreateWindowExA(uint32_t esp) {
         cref = (uint32_t)(uintptr_t)wbuf;
     }
     uint32_t h = u32_window_create(u32_class_wndproc(cref), WU(0), WU(3),
-                                   WU(4), WU(5), WU(6), WU(7), WU(8), WCS(2));
+                                   WU(4), WU(5), WU(6), WU(7), WU(8), WCS(2), u32_is_ctrl_class(WU(1), 0));
     if (h) { u32_class_name(WU(1), 0, g_u32_win[h - 1].classname, sizeof g_u32_win[h - 1].classname);
-             g_u32_win[h - 1].bg_brush = u32_class_brush(cref); }
+             g_u32_win[h - 1].bg_brush = u32_class_brush(cref);
+             if (WU(3) & 0x40000000u) g_u32_win[h - 1].ctrl_id = (int)WU(9);  /* WS_CHILD: hMenu=id */ }
     return h;
 }
 /* DestroyWindow(HWND) -> BOOL. */
@@ -1825,6 +1855,102 @@ uint32_t aret_SetWindowLongA(uint32_t esp) {
     }
 }
 uint32_t aret_SetWindowLongW(uint32_t esp) { return aret_SetWindowLongA(esp); }
+/* IsWindowUnicode(HWND) -> BOOL. A window created through a W API is Unicode. */
+uint32_t aret_IsWindowUnicode(uint32_t esp) {
+    int i = u32_win_idx(WU(0));
+    return (i >= 0 && g_u32_win[i].unicode) ? 1u : 0u;
+}
+/* RegisterWindowMessageA/W(lpString) -> UINT. A process-unique message id in the
+ * [0xC000, 0xFFFF] range, identical for equal strings (like a global atom). */
+#define U32_MAX_RWM 128
+static struct { char name[128]; uint32_t id; int used; } g_u32_rwm[U32_MAX_RWM];
+static uint32_t g_u32_rwm_next = 0xC000u;
+static uint32_t u32_reg_win_msg(const char *s) {
+    if (!s || !s[0]) return 0;
+    for (int i = 0; i < U32_MAX_RWM; i++)
+        if (g_u32_rwm[i].used && strncmp(g_u32_rwm[i].name, s, sizeof g_u32_rwm[i].name) == 0) return g_u32_rwm[i].id;
+    for (int i = 0; i < U32_MAX_RWM; i++)
+        if (!g_u32_rwm[i].used) {
+            g_u32_rwm[i].used = 1;
+            int k = 0; for (; s[k] && k < 127; k++) g_u32_rwm[i].name[k] = s[k]; g_u32_rwm[i].name[k] = 0;
+            g_u32_rwm[i].id = g_u32_rwm_next++;
+            return g_u32_rwm[i].id;
+        }
+    return 0;
+}
+uint32_t aret_RegisterWindowMessageA(uint32_t esp) { return u32_reg_win_msg(WCS(0)); }
+uint32_t aret_RegisterWindowMessageW(uint32_t esp) {
+    char buf[128]; u32_w2n((const uint16_t *)WP(0), buf, sizeof buf);
+    return u32_reg_win_msg(buf);
+}
+/* ExitWindowsEx(uFlags, dwReason) -> BOOL. We never log the user off / shut the
+ * host down (sound: a transpiled app must not affect the real session); report
+ * success so the app proceeds to its own teardown. Not oracle-compared (a real
+ * Wine call would actually try to end the session). */
+uint32_t aret_ExitWindowsEx(uint32_t esp) { (void)esp; return 1; }
+/* MapWindowPoints(hwndFrom, hwndTo, lpPoints, cPoints) -> DWORD. Translate points
+ * between two windows' client spaces. Client origin (no non-client frame modelled)
+ * = the window's screen position; a NULL window is the screen (origin 0,0). */
+uint32_t aret_MapWindowPoints(uint32_t esp) {
+    int32_t *pt = (int32_t *)WP(2);
+    uint32_t n = WU(3);
+    int fi = u32_win_idx(WU(0)), ti = u32_win_idx(WU(1));
+    int fx = fi >= 0 ? g_u32_win[fi].x : 0, fy = fi >= 0 ? g_u32_win[fi].y : 0;
+    int tx = ti >= 0 ? g_u32_win[ti].x : 0, ty = ti >= 0 ? g_u32_win[ti].y : 0;
+    int dx = fx - tx, dy = fy - ty;
+    if (pt) for (uint32_t k = 0; k < n; k++) { pt[k * 2] += dx; pt[k * 2 + 1] += dy; }
+    return ((uint32_t)(dy & 0xFFFF) << 16) | (uint32_t)(dx & 0xFFFF);
+}
+/* CheckDlgButton(hDlg, nIDButton, uCheck) -> BOOL; IsDlgButtonChecked(hDlg,id) ->
+ * UINT. The check state lives on the child control window. */
+static int u32_dlg_ctrl(uint32_t hdlg, int id) {
+    int d = u32_win_idx(hdlg); if (d < 0) return -1;
+    uint32_t dh = (uint32_t)(d + 1);
+    for (int i = 0; i < U32_MAX_WIN; i++)
+        if (g_u32_win[i].used && g_u32_win[i].parent == dh && g_u32_win[i].ctrl_id == id) return i;
+    return -1;
+}
+uint32_t aret_CheckDlgButton(uint32_t esp) {
+    int c = u32_dlg_ctrl(WU(0), WI(1)); if (c < 0) return 0;
+    g_u32_win[c].check_state = (int)WU(2);   /* BST_UNCHECKED/CHECKED/INDETERMINATE */
+    return 1;
+}
+uint32_t aret_IsDlgButtonChecked(uint32_t esp) {
+    int c = u32_dlg_ctrl(WU(0), WI(1)); return c < 0 ? 0 : (uint32_t)g_u32_win[c].check_state;
+}
+/* RedrawWindow(hwnd, lprcUpdate, hrgn, flags) -> BOOL. Fold into the paint model:
+ * RDW_INVALIDATE marks a WM_PAINT owed, RDW_VALIDATE clears it, RDW_UPDATENOW
+ * delivers it now. */
+uint32_t aret_RedrawWindow(uint32_t esp) {
+    int i = u32_win_idx(WU(0)); if (i < 0) return 0;
+    uint32_t flags = WU(3);
+    if ((flags & 0x0001u) && u32_win_paints(i)) {          /* RDW_INVALIDATE */
+        g_u32_win[i].needs_paint = 1;
+        if (flags & 0x0004u) g_u32_win[i].needs_erase = 1; /* RDW_ERASE */
+    }
+    if (flags & 0x0008u) g_u32_win[i].needs_paint = 0;     /* RDW_VALIDATE */
+    if ((flags & 0x0100u) && g_u32_win[i].needs_paint && u32_win_paints(i)) { /* RDW_UPDATENOW */
+        uint32_t wp = g_u32_win[i].wndproc;
+        if (wp) u32_call_wndproc(esp, wp, (uint32_t)(i + 1), U32_WM_PAINT, 0, 0);
+    }
+    return 1;
+}
+/* Deferred window positioning. We apply each move immediately (the final window
+ * state is identical to a batched apply; only repaint atomicity — cosmetic —
+ * differs), and use the count as an opaque non-zero HDWP. */
+uint32_t aret_BeginDeferWindowPos(uint32_t esp) { (void)esp; return 0x0DEF0001u; }
+uint32_t aret_DeferWindowPos(uint32_t esp) {
+    int i = u32_win_idx(WU(1));
+    if (i >= 0) {
+        uint32_t f = WU(7);
+        if (!(f & 0x0002u)) { g_u32_win[i].x = WI(3); g_u32_win[i].y = WI(4); }  /* !SWP_NOMOVE */
+        if (!(f & 0x0001u)) { g_u32_win[i].w = WI(5); g_u32_win[i].h = WI(6); }  /* !SWP_NOSIZE */
+        if (f & 0x0040u) g_u32_win[i].visible = 1;
+        if (f & 0x0080u) g_u32_win[i].visible = 0;
+    }
+    return WU(0);   /* return the (unchanged) HDWP */
+}
+uint32_t aret_EndDeferWindowPos(uint32_t esp) { (void)esp; return 1; }
 
 /* Window text: routed through WM_SETTEXT/GETTEXT/GETTEXTLENGTH so a subclassing
  * WNDPROC observes them exactly as under Windows (DefWindowProc stores/reports).
@@ -1968,7 +2094,7 @@ static uint32_t u32_dialog_create(const uint8_t *tpl, uint32_t dlgproc, uint32_t
         p += ex ? 6 : 2;                                /* EX: size,weight,italic,charset ; classic: size */
         p = u32_dt_szord(p, NULL, 0);                   /* typeface */
     }
-    uint32_t hDlg = u32_window_create(dlgproc, 0, style, 0, 0, 0, 0, parent, dtitle);
+    uint32_t hDlg = u32_window_create(dlgproc, 0, style, 0, 0, 0, 0, parent, dtitle, 0);
     if (!hDlg) return 0;
     for (int c = 0; c < cdit; c++) {
         p = u32_dt_align(tpl, p);
@@ -2150,7 +2276,7 @@ enum { GDIT_DC = 1, GDIT_BITMAP, GDIT_BRUSH, GDIT_PEN, GDIT_FONT, GDIT_RGN };
 static struct gdi_obj {
     int type, used, stock, null_obj;
     uint32_t sel_bitmap, sel_brush, sel_pen, sel_font;   /* DC */
-    uint32_t text_color, bk_color; int bk_mode;          /* DC */
+    uint32_t text_color, bk_color; int bk_mode; uint32_t text_align;  /* DC */
     int w, h, topdown, bpp; uint8_t *bits; int owns_bits; /* BITMAP */
     uint32_t color;                                      /* BRUSH/PEN */
     int mapmode, savetop;                                /* DC map mode + save-stack depth */
@@ -2644,6 +2770,9 @@ uint32_t aret_SetBkColor(uint32_t esp)   { int d = gdi_idx(WU(0)); if (d < 0) re
 uint32_t aret_SetBkMode(uint32_t esp)    { int d = gdi_idx(WU(0)); if (d < 0) return 0; int p = g_gdi[d].bk_mode; g_gdi[d].bk_mode = WI(1); return (uint32_t)p; }
 uint32_t aret_GetTextColor(uint32_t esp) { int d = gdi_idx(WU(0)); return d < 0 ? 0xFFFFFFFFu : g_gdi[d].text_color; }
 uint32_t aret_GetBkColor(uint32_t esp)   { int d = gdi_idx(WU(0)); return d < 0 ? 0xFFFFFFFFu : g_gdi[d].bk_color; }
+/* SetTextAlign/GetTextAlign(hdc[, align]) -> UINT. DC state (default TA_LEFT|TA_TOP=0). */
+uint32_t aret_SetTextAlign(uint32_t esp) { int d = gdi_idx(WU(0)); if (d < 0) return 0xFFFFFFFFu; uint32_t p = g_gdi[d].text_align; g_gdi[d].text_align = WU(1); return p; }
+uint32_t aret_GetTextAlign(uint32_t esp) { int d = gdi_idx(WU(0)); return d < 0 ? 0xFFFFFFFFu : g_gdi[d].text_align; }
 
 /* GetSysColor(nIndex) -> COLORREF. Classic Win32 default scheme (deterministic;
  * the values a the/me-less Wine also serves for the common indices). */

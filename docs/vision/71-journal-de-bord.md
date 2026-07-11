@@ -1477,4 +1477,33 @@ Détail : **70 §6** (roadmap). Résumé :
 - **Leçon (règle §2 « borner puis pivoter »)** : la recovery seule ne suffit pas — récupérer une entrée ne vaut
   que si le code qu'elle débloque lift **juste**. Le vrai mur de ces deux binaires est **en aval** de la recovery.
 
+### 2026-07-11 — [GUI][HLE-WIN32] M7 G7 — batch window/dialog/DC + classes de contrôles prédéfinies (par la donnée)
+- **Pourquoi** : le sweep runtime du corpus Win95 (26 applis) montre, après avoir écarté les **installeurs**
+  (`CreateProcessA`, frontière dure = >½ du corpus), un cluster de helpers **implémentables** partagés par les
+  vraies applis GUI. On les abat en batch, oracle Wine.
+- **Fait** (`aret_win32.c` + `stdcall_pops.rs`, tout display-free/sound) :
+  - **Classes de contrôles prédéfinies** (`u32_is_ctrl_class` : BUTTON/EDIT/STATIC/LISTBOX/COMBOBOX/SCROLLBAR/
+    common-controls…) → `CreateWindowEx` crée une **fenêtre-contrôle *data-only*** (état suivi, pas de WNDPROC app,
+    pas de pixels) au lieu de renvoyer 0. Enfant `WS_CHILD` : `hMenu`=**ctrl_id**. Débloque `GetDlgItem`/
+    `Get-SetDlgItemText`/`CheckDlgButton` sur les contrôles créés par `CreateWindowEx` (ce que font les vrais dialogs).
+  - **`CheckDlgButton`/`IsDlgButtonChecked`** (état de coche sur le contrôle enfant, round-trip).
+  - **`RegisterWindowMessageA/W`** (id unique process, [0xC000..0xFFFF], même chaîne→même id, comme un atome).
+  - **`MapWindowPoints`** (client↔écran via les rects fenêtre ; NULL=écran).
+  - **`IsWindowUnicode`** (fenêtre créée via une API W → TRUE ; champ `unicode`).
+  - **`SetTextAlign`/`GetTextAlign`** (état DC, round-trip).
+  - **`BeginDeferWindowPos`/`DeferWindowPos`/`EndDeferWindowPos`** (application immédiate = état final identique
+    au batch, seule l'atomicité de repaint diffère — cosmétique).
+  - **`RedrawWindow`** (replié dans le modèle de peinture : RDW_INVALIDATE/ERASE/VALIDATE/UPDATENOW).
+  - **`ExitWindowsEx`** → 1 (stub sound, jamais de logoff réel ; non oraclé).
+  - *Écarté* : `GetWindowWord`/`SetWindowWord` — sans le suivi de `cbWndExtra`, un write hors-borne diverge de Wine
+    (Wine l'ignore) → retiré plutôt que shipper un shim subtilement faux.
+- **Oracle** : `winecorpus/user32_winbatch.c` — RWM (même/diff/range), MapWindowPoints (2 sens), contrôle BUTTON +
+  Check/IsDlgButtonChecked, IsWindowUnicode, SetTextAlign round-trip, DeferWindowPos move → **bit-identique à Wine**.
+- **Effet mesuré (re-sweep)** : les murs **ont avancé** — `CheckDlgButton` (mirc), `BeginDeferWindowPos`
+  (portmessage) **disparaissent** de la tête de liste ; les applis butent désormais sur le **cluster suivant** (DDE,
+  imprimante, `ExtTextOut`/text-raster, ImageList/common-controls). Aucune appli entièrement débloquée (murs
+  derrière), mais la méthode *mesure→batch→re-mesure* **avance** concrètement, comme pour le corpus console.
+- **Vérifié** : hash transpile **inchangé** `19acad982194bf07`, difftest-transpile 4/4, `table_is_sorted` vert,
+  cargo test complet, winediff **79→80/80**.
+
 <!-- NOUVELLES ENTRÉES ICI (garder l'ordre chronologique, plus récent en bas) -->
