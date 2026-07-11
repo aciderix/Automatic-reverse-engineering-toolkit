@@ -1626,4 +1626,26 @@ Détail : **70 §6** (roadmap). Résumé :
   pour la structure de `v146`), et comparer l'état à Wine au même point. Possiblement lié au filet x87 ou à la
   chaîne SEH d'exit (`fs:0`).
 
+### 2026-07-11 — [RECOV][DEMO] finger (fin) : trace-write → **champ jamais initialisé** (lowio CRT), borné proprement
+- **Angle trace-write appliqué** (watchpoint gdb sur `v146+0x18` = 0x82169a8) → **le watchpoint ne se déclenche
+  JAMAIS** : le champ n'est **jamais écrit** de tout le run. Donc **init manquante**, pas corruption.
+- **Valeurs concrètes au crash** (handle en cours = **1 = stdout**) : `*(0x40730c)`=32 (nb max de handles),
+  `__pioinfo[0]`=**0x083b51a0 (valide)**, `v146+0x18`=**0**. La fonction `sub_403a90` = lookup lowio
+  **handle→ioinfo** (`v1` vérifié < 32, puis `*(v186+v185+4)&0x40` = flag `_osfile` FDEV). Le champ `+0x18`
+  devrait valoir **0x407310** (adresse de la table `__pioinfo`, constante ; le write candidat
+  `*(v21+0x18)=((h&~0x18)>>3)+0x407310` → 0x407310 pour h=1) — mais cette écriture ne touche **pas** la structure
+  lue (`v21`≠`v146`, deux emplacements pile distincts).
+- **Diagnostic** : au **cleanup de sortie** (term `_initterm`, flush de stdout), le code lowio lit une structure
+  dont le champ `__pioinfo`-ptr n'a **jamais été initialisé** — bien que `__pioinfo[0]` global soit valide (stdio a
+  marché : bannière imprimée). C'est une **interaction subtile** entre le lowio du CRT statique lifté de finger et
+  le modèle stdio/fichier d'ARET (ARET intercepte l'I/O par nom ; la structure de suivi que le flush-de-sortie
+  parcourt n'est que partiellement peuplée).
+- **Verdict (borné proprement, comme convenu)** : recovery `_initterm` = **avancée générale prouvée** (fait
+  tourner le `main`). Le crash restant = **init lowio manquante**, caractérisée définitivement (champ jamais
+  écrit) mais **non résolue** — fixer exactement demande de rétro-ingénierer la séquence d'init lowio du CRT
+  spécifique de finger × le modèle I/O d'ARET. **Généralité incertaine** (CRT statique daté). Reverté ; couplé.
+- **Régression complète PASS** (session verrouillée : difftest 271/271, funcdiff 0 div, sweeps, SMT, recompile).
+- **Suite** : décision **Winelib** (router GDI/USER32/stdio vers Wine natif = bit-identique, la seule voie *sound*
+  pour le GUI-texte sans substitution) — à cadrer.
+
 <!-- NOUVELLES ENTRÉES ICI (garder l'ordre chronologique, plus récent en bas) -->
