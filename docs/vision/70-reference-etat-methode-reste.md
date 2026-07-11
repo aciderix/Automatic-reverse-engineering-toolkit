@@ -518,7 +518,7 @@ bornée** : `WSAStartup`/Winsock, `CreateEventW`, `wcschr`, `LoadLibraryW`, et l
 | CRT+/W32 | Vrai CRT (forward libc) + Win32 native (kernel32→POSIX) | prog. C large + Win32 hors-GUI | ✅ |
 | UNPACK | Déballage dynamique Unicorn (émule stub → OEP → dump) | packers non-VM | ✅ |
 | M6 | Cible **WebAssembly** (`--target wasm`, wasmtime) | cible universelle | ✅ (7/7) |
-| **M7** | **GUI / graphisme** (USER32/GDI via **SDL2** portable, puis DXVK/vkd3d) | applis fenêtrées, puis **jeux** | 🚧 **plan doc 72**, G1 + G2a (modèle fenêtre étendu display-free) |
+| **M7** | **GUI / graphisme** (USER32/GDI via **SDL2** portable, puis DXVK/vkd3d) | applis fenêtrées, puis **jeux** | 🚧 **plan doc 72** — **couche USER32/GDI display-free quasi complète** : fenêtres/classes/messages (A+W), modèle fenêtre étendu, ressources/LoadString, MessageBox, **dialogs (DLGTEMPLATE+modal)**, **GDI DIB bit-exact**, menus, helpers, SID/token, rect/char/… (winediff **72/72**). **Reste** : G2b (fenêtre SDL **visible** + pompe SDL_PollEvent), GDI raster (TextOut/DrawText/font-metrics), + hors-GUI : **EH/RtlUnwind**, **threads** |
 
 > **Règle** : on ne s'engage pas sur M_n+1 tant que M_n ne tourne pas proprement ;
 > chaque palier = un artefact démontrable + un test de non-régression.
