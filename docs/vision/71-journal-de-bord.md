@@ -1217,4 +1217,20 @@ Détail : **70 §6** (roadmap). Résumé :
 - **Vérifié** : hash transpile **inchangé** `19acad982194bf07`, difftest 271/271, cargo test complet vert,
   winediff **66/66**, table triée.
 
+### 2026-07-10 — [HLE-WIN32] Long-tail : Global/Local lock+realloc, GetObject, FindWindow, TZ, StdHandle
+- **Mesuré** : `GlobalLock`(GMEM_FIXED)→le handle (=pointeur), `GlobalUnlock`→1, `GlobalReAlloc`=realloc
+  (préserve), `GetObjectA`(DIB)→24 (BITMAP : w/h/planes=1/bpp=32/widthBytes=w·4).
+- **Fait** (`aret_win32.c`, +12 `stdcall_pops` — dont **GlobalAlloc/Free/LocalAlloc ajoutés au pop table**,
+  manquants = drift esp latent sur ces stdcall) : `GlobalLock`/`Unlock`/`ReAlloc` + jumeaux `Local*` (handle
+  fixe = pointeur → Lock identité, Unlock succès, ReAlloc realloc) ; `GetObjectA/W` (BITMAP 24o / LOGBRUSH 12o) ;
+  `FindWindowA/W` (par **titre** ; requête classe-seule → 0 = « pas de fenêtre », le bon « single-instance ») ;
+  `GetTimeZoneInformation` (UTC : struct zérotée, Bias=0, TIME_ZONE_ID_UNKNOWN) ; `SetStdHandle` (dup2 sur le
+  slot std).
+- **Oracle** : `winecorpus/win_misc.c` — Global lock/realloc round-trip, GetObjectA dims, FindWindow titre →
+  **bit-identique à Wine**.
+- **Effet mesuré** : GetObjectA 7, GlobalLock/Unlock, FindWindowA 7, GetTimeZoneInformation 6, SetStdHandle 8
+  éliminés/avancés des 41 Win95.
+- **Vérifié** : hash transpile **inchangé** `19acad982194bf07`, difftest 271/271, cargo test complet vert,
+  winediff **67/67**, table triée.
+
 <!-- NOUVELLES ENTRÉES ICI (garder l'ordre chronologique, plus récent en bas) -->

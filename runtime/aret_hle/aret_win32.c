@@ -2409,3 +2409,85 @@ uint32_t aret_GetSystemMenu(uint32_t esp) {
  * selection -> return 0 (with TPM_RETURNCMD, 0 = "no item chosen"). */
 uint32_t aret_TrackPopupMenu(uint32_t esp)   { (void)esp; return 0; }
 uint32_t aret_TrackPopupMenuEx(uint32_t esp) { (void)esp; return 0; }
+
+/* ================================================================== */
+/* Misc: Global/Local lock+realloc, GetObject, FindWindow, TZ, StdHandle */
+/* ================================================================== */
+/* GMEM_FIXED handles are the malloc pointer itself (see GlobalAlloc), so Lock is
+ * identity and Unlock succeeds; ReAlloc is realloc (GMEM_MOVEABLE may move). */
+uint32_t aret_GlobalLock(uint32_t esp)    { return WU(0); }
+uint32_t aret_GlobalUnlock(uint32_t esp)  { (void)esp; return 1; }
+uint32_t aret_GlobalReAlloc(uint32_t esp) { return WRP(realloc(WP(0), WU(1))); }
+uint32_t aret_LocalLock(uint32_t esp)     { return WU(0); }
+uint32_t aret_LocalUnlock(uint32_t esp)   { (void)esp; return 1; }
+uint32_t aret_LocalReAlloc(uint32_t esp)  { return WRP(realloc(WP(0), WU(1))); }
+
+/* GetObjectA/W(hgdiobj, cb, lpv) -> bytes written. Fills BITMAP (24 bytes) for a
+ * bitmap, LOGBRUSH (12) for a brush. Other objects: 0 (sound). */
+uint32_t aret_GetObjectA(uint32_t esp) {
+    int i = gdi_idx(WU(0)); int cb = WI(1); uint8_t *lpv = (uint8_t *)WP(2);
+    if (i < 0 || !lpv) return 0;
+    if (g_gdi[i].type == GDIT_BITMAP) {
+        if (cb < 24) return 0;
+        int32_t *w = (int32_t *)lpv;
+        w[0] = 0;                                    /* bmType */
+        w[1] = g_gdi[i].w;                           /* bmWidth */
+        w[2] = g_gdi[i].h;                           /* bmHeight */
+        w[3] = g_gdi[i].w * 4;                       /* bmWidthBytes (32bpp, DWORD-aligned) */
+        *(uint16_t *)(lpv + 16) = 1;                 /* bmPlanes */
+        *(uint16_t *)(lpv + 18) = 32;                /* bmBitsPixel */
+        *(uint32_t *)(lpv + 20) = (uint32_t)(uintptr_t)g_gdi[i].bits;  /* bmBits */
+        return 24;
+    }
+    if (g_gdi[i].type == GDIT_BRUSH) {
+        if (cb < 12) return 0;
+        *(uint32_t *)(lpv + 0) = g_gdi[i].null_obj ? 1u : 0u;   /* lbStyle: BS_SOLID=0 / BS_NULL=1 */
+        *(uint32_t *)(lpv + 4) = g_gdi[i].color;               /* lbColor */
+        *(uint32_t *)(lpv + 8) = 0;                            /* lbHatch */
+        return 12;
+    }
+    return 0;
+}
+uint32_t aret_GetObjectW(uint32_t esp) { return aret_GetObjectA(esp); }
+
+/* FindWindowA/W(lpClassName, lpWindowName) -> HWND. Matched by window title (our
+ * windows don't store a class name; a class-only query -> 0, which is also the
+ * correct "no such window" for the common single-instance check). */
+uint32_t aret_FindWindowA(uint32_t esp) {
+    const char *cls = WCS(0); const char *title = WCS(1);
+    if (cls && !title) return 0;                     /* class-only: cannot match, none found */
+    for (int i = 0; i < U32_MAX_WIN; i++) {
+        if (!g_u32_win[i].used) continue;
+        if (title && strcmp(g_u32_win[i].title, title) != 0) continue;
+        return (uint32_t)(i + 1);
+    }
+    return 0;
+}
+uint32_t aret_FindWindowW(uint32_t esp) {
+    char title[256]; const char *tp = NULL;
+    if (WP(1)) { u32_w2n((const uint16_t *)WP(1), title, sizeof title); tp = title; }
+    if (WP(0) && !tp) return 0;
+    for (int i = 0; i < U32_MAX_WIN; i++) {
+        if (!g_u32_win[i].used) continue;
+        if (tp && strcmp(g_u32_win[i].title, tp) != 0) continue;
+        return (uint32_t)(i + 1);
+    }
+    return 0;
+}
+
+/* GetTimeZoneInformation(TIME_ZONE_INFORMATION*) -> DWORD. ARET runs on a defined
+ * UTC clock (tests fix TZ=UTC): zero the struct (Bias=0 => UTC, no DST) and report
+ * TIME_ZONE_ID_UNKNOWN. */
+uint32_t aret_GetTimeZoneInformation(uint32_t esp) {
+    uint8_t *tzi = (uint8_t *)WP(0);
+    if (tzi) memset(tzi, 0, 172);                    /* Bias + Std/Daylight name/date/bias */
+    return 0;                                        /* TIME_ZONE_ID_UNKNOWN */
+}
+/* SetStdHandle(nStdHandle, hHandle) -> BOOL. Redirect a std stream (fd model). */
+uint32_t aret_SetStdHandle(uint32_t esp) {
+    int32_t which = WI(0);
+    int slot = which == -10 ? 0 : which == -11 ? 1 : which == -12 ? 2 : -1;
+    if (slot < 0) return 0;
+    dup2((int)WU(1), slot);
+    return 1;
+}
