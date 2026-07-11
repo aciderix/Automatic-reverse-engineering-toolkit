@@ -1413,4 +1413,18 @@ Détail : **70 §6** (roadmap). Résumé :
   cargo test complet vert (dont wasm), winediff **76→78/78** (aucune régression). Une vraie fenêtre GUI affiche
   désormais **son fond de classe + son rendu double-buffered**, exactement comme sous Windows/Wine.
 
+### 2026-07-11 — [GUI][HLE-WIN32] M7 — `RegisterClassExA/W` (WNDCLASSEX — la forme des applis modernes)
+- **Pourquoi** : quasi toutes les applis GUI Win32 modernes enregistrent leur classe via `RegisterClassEx`
+  (WNDCLASSEX), pas `RegisterClass`. Sans lui, une telle appli **abortait** dès l'enregistrement de classe.
+- **Fait** (`aret_win32.c` + `stdcall_pops.rs`) : `aret_RegisterClassExA/W` parsent le WNDCLASSEX 32-bit (chaque
+  champ décalé de +4 vs WNDCLASS à cause de `cbSize@0`) → **lpfnWndProc @+8 (`wc[2]`)**, **hbrBackground @+32
+  (`wc[8]`)**, **lpszClassName @+40 (`wc[10]`)** ; réutilisent `u32_class_register` (donc pinceau de fond pris en
+  compte) et partagent le registre A/W. Table `stdcall_pops` : `RegisterClassExA/W` = 4 (1 pointeur), insérées
+  triées (`RegisterClassA` < `RegisterClassExA` < `RegisterClassExW` < `RegisterClassW`).
+- **Oracle** : `winecorpus/user32_classex.c` — `RegisterClassExA` + `hbrBackground` + fenêtre visible + `WM_PAINT`
+  (fond de classe lu `2D1E0F`=RGB(15,30,45), pixel dessiné) → **bit-identique à Wine** headless. Le chemin complet
+  d'une appli moderne (RegisterClassEx → CreateWindowEx → peinture avec fond) fonctionne.
+- **Vérifié** : hash transpile **inchangé** `19acad982194bf07`, difftest-transpile 4/4, `table_is_sorted_by_name`
+  vert, winediff **78→79/79**.
+
 <!-- NOUVELLES ENTRÉES ICI (garder l'ordre chronologique, plus récent en bas) -->

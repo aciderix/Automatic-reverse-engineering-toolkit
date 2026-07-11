@@ -1399,6 +1399,26 @@ uint32_t aret_RegisterClassA(uint32_t esp) {
     u32_a2w(name, wname, 128);
     return u32_class_register(wc[1], wc[7], wname);
 }
+/* RegisterClassExW(const WNDCLASSEXW*) -> ATOM. WNDCLASSEX (32-bit) shifts every
+ * field +4 vs WNDCLASS (cbSize @0): lpfnWndProc @+8, hbrBackground @+32,
+ * lpszClassName @+40. Modern apps use this form. */
+uint32_t aret_RegisterClassExW(uint32_t esp) {
+    const uint32_t *wc = (const uint32_t *)WP(0);
+    if (!wc) return 0;
+    const uint16_t *name = (const uint16_t *)(uintptr_t)wc[10]; /* +40 lpszClassName */
+    if (!name) return 0;
+    return u32_class_register(wc[2] /* +8 lpfnWndProc */, wc[8] /* +32 hbrBackground */, name);
+}
+/* RegisterClassExA(const WNDCLASSEXA*) — narrow class name; widen and share. */
+uint32_t aret_RegisterClassExA(uint32_t esp) {
+    const uint32_t *wc = (const uint32_t *)WP(0);
+    if (!wc) return 0;
+    const char *name = (const char *)(uintptr_t)wc[10];
+    if (!name) return 0;
+    uint16_t wname[128];
+    u32_a2w(name, wname, 128);
+    return u32_class_register(wc[2], wc[8], wname);
+}
 /* UnregisterClassW(lpClassName, hInstance) -> BOOL. */
 uint32_t aret_UnregisterClassW(uint32_t esp) {
     uint32_t cref = WU(0);

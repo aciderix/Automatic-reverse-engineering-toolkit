@@ -326,6 +326,8 @@ static TABLE: &[(&str, u32)] = &[
     ("RegQueryValueExA", 24),
     ("RegSetValueExA", 24),
     ("RegisterClassA", 4),
+    ("RegisterClassExA", 4),
+    ("RegisterClassExW", 4),
     ("RegisterClassW", 4),
     ("ReleaseDC", 8),
     ("RemoveMenu", 12),

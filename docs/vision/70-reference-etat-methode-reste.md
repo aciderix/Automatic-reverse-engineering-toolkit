@@ -165,7 +165,7 @@ bash bench/regression.sh    # PORTE unifiée : difftest 271/271, in-place 3/3,
                             # recompilabilité gzip/ls/cat 100%
 bash bench/difftest.sh              # décompile O0→O3
 bash bench/difftest_transpile.sh    # transpile (hash 19acad982194bf07)
-bash bench/winediff.sh              # axe 2 vs Wine (78/78)
+bash bench/winediff.sh              # axe 2 vs Wine (79/79)
 bash bench/funcdiff.sh              # lift-closure + opt-diff vs Unicorn (0 div)
 # Sweeps de vrais binaires (téléchargent + comparent à Wine) :
 bash bench/sqlite_sweep.sh   bash bench/busybox_sweep.sh   bash bench/corpus_sweep.sh
@@ -185,7 +185,7 @@ bash bench/wallsweep.sh <dir1> [dir2…]  # AGRÈGE --mode walls sur un corpus :
 
 ### État régression (référence — doit rester vert)
 difftest **271/271** · transpile-diff **4/4** (H=`19acad982194bf07`) · winediff
-**78/78** · cpudiff vert (per-instruction + séquences génératives) · funcdiff corpus **0 divergence** (lift ~12k scorées /
+**79/79** · cpudiff vert (per-instruction + séquences génératives) · funcdiff corpus **0 divergence** (lift ~12k scorées /
 ~6k appels, opt ~10k scorées) · SMT **11/11** · in-place **3/3** · magicdiv **2³²** ·
 recompilabilité **100 %** · WASM **7/7**.
 
@@ -402,7 +402,11 @@ recompilabilité **100 %** · WASM **7/7**.
   **double-buffering** (DIB offscreen dans un DC mémoire → `BitBlt` SRCCOPY vers le DC fenêtre, l'idiome de rendu
   dominant) compose **out-of-the-box** avec le framebuffer client. Oracles `user32_erasebg.c` (pixel non dessiné =
   couleur du pinceau de classe) + `user32_dbuffer.c` (offscreen→BitBlt→relecture) **bit-identiques à Wine**. Reste :
-  widgets natifs (BUTTON/EDIT), GDI raster (TextOut/DrawText), `RegisterClassEx`, WASM-GUI (Emscripten).
+  widgets natifs (BUTTON/EDIT), GDI raster (TextOut/DrawText), WASM-GUI (Emscripten).
+- **`RegisterClassExA/W`** (WNDCLASSEX — la forme utilisée par **quasi toutes** les applis GUI modernes) : parse
+  les offsets décalés (+8 wndproc, +32 hbrBackground, +40 className), partage le registre de classes A/W. Sans lui,
+  une appli moderne **abortait** à l'enregistrement de classe. Gardé `winecorpus/user32_classex.c` (RegisterClassEx
+  + fond de classe + fenêtre + peinture, **bit-identique à Wine**).
 
 ### 4.6 Démonstrateurs prouvés (bit-identiques à Wine)
 - **Lua 5.4.7** (mingw, 650 Ko) **symbolé ET strippé** → ELF natif : batterie
