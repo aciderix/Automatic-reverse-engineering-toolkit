@@ -1390,4 +1390,27 @@ Détail : **70 §6** (roadmap). Résumé :
   (dont wasm : modèle peinture compile sans SDL), winediff **75→76/76** (aucune régression : dialogs/windowstate/
   msgwindow intacts). Un programme GUI qui peint dans `WM_PAINT` **affiche maintenant son contenu à l'écran**.
 
+### 2026-07-11 — [GUI][HLE-WIN32] M7 — fond `WM_ERASEBKGND` (pinceau de classe) + garde double-buffering
+- **Pourquoi** : après le modèle de peinture, une vraie fenêtre affichait le **noir** au lieu de son fond voulu —
+  le `hbrBackground` de la classe n'était ni stocké ni appliqué. Or l'effacement de fond via `WM_ERASEBKGND` est
+  **universel** (toute fenêtre standard). Et le **double-buffering** (dessiner offscreen puis `BitBlt` vers la
+  fenêtre) est **l'idiome de rendu dominant** des vraies applis.
+- **Fait — `WM_ERASEBKGND`** (`aret_win32.c`) : `RegisterClassA/W` stocke `hbrBackground` (offset +28 = `wc[7]`)
+  dans le registre de classes ; `CreateWindowEx A/W` le copie sur la fenêtre (`bg_brush`) via `u32_class_brush`.
+  Région d'erase par fenêtre (`needs_erase`, posée au show et par `InvalidateRect(bErase=TRUE)`). `BeginPaint`
+  envoie **`WM_ERASEBKGND(wParam=hdc)`** (après avoir lié le DC au framebuffer client, et **avant** de valider) ;
+  `DefWindowProc(WM_ERASEBKGND)` **remplit tout le client** avec la couleur du pinceau (`u32_fill_dc_brush`,
+  réutilise `gdi_brush_color`/`gdi_dc_surface`) et renvoie TRUE. `needs_erase` effacé **avant** le callback (pas
+  de récursion). Pinceau NULL / pas de surface (display-free) → no-op sound.
+- **Fait — double-buffering** : **aucun code** — le binding framebuffer-client (G2b) + le GDI DIB (G6) composent
+  déjà : `CreateCompatibleDC`→`CreateDIBSection`→`FillRect`/`SetPixel`→`BitBlt(SRCCOPY)` vers le DC fenêtre
+  atterrit dans le framebuffer, relu bit-exact. Verrouillé comme garde de régression.
+- **Oracles** : `winecorpus/user32_erasebg.c` (classe avec `hbrBackground`=CreateSolidBrush ; un pixel **non
+  dessiné** lu pendant/après `WM_PAINT` = **couleur du pinceau de classe** `C89603`=RGB(3,150,200)) et
+  `user32_dbuffer.c` (DIB offscreen `RGB(7,8,9)`+pixel → `BitBlt` → relecture fenêtre) → **bit-identiques à Wine**
+  headless.
+- **Vérifié** : hash transpile **inchangé** `19acad982194bf07`, difftest-transpile 4/4 (compile no-SDL propre),
+  cargo test complet vert (dont wasm), winediff **76→78/78** (aucune régression). Une vraie fenêtre GUI affiche
+  désormais **son fond de classe + son rendu double-buffered**, exactement comme sous Windows/Wine.
+
 <!-- NOUVELLES ENTRÉES ICI (garder l'ordre chronologique, plus récent en bas) -->

@@ -1121,6 +1121,7 @@ uint32_t aret_LoadStringA(uint32_t esp) {
 #define U32_WM_TIMER  0x0113u
 #define U32_PM_REMOVE 0x0001u
 #define U32_WM_PAINT         0x000Fu
+#define U32_WM_ERASEBKGND    0x0014u
 #define U32_WM_SETTEXT       0x000Cu
 #define U32_WM_GETTEXT       0x000Du
 #define U32_WM_GETTEXTLENGTH 0x000Eu
@@ -1135,7 +1136,7 @@ uint32_t aret_LoadStringA(uint32_t esp) {
 #define U32_SCREEN_H 768
 
 #define U32_MAX_CLASSES 64
-static struct { uint16_t name[128]; uint32_t wndproc; int used; } g_u32_class[U32_MAX_CLASSES];
+static struct { uint16_t name[128]; uint32_t wndproc, hbr_bg; int used; } g_u32_class[U32_MAX_CLASSES];
 
 #define U32_MAX_WIN 256
 /* A window object. For message-only windows only wndproc/parent matter; a visible
@@ -1153,6 +1154,8 @@ static struct {
     int ctrl_id;             /* dialog control id (0 = not a control) */
     char classname[64];      /* registered class name (for GetClassName) */
     int needs_paint;         /* update region non-empty -> owes a WM_PAINT */
+    int needs_erase;         /* update region marked for erase -> WM_ERASEBKGND */
+    uint32_t bg_brush;       /* class hbrBackground (HBRUSH) for the default erase */
 #ifdef ARET_HAVE_SDL
     void *sdl_win, *sdl_ren, *sdl_tex;  /* SDL window/renderer/streaming texture */
     uint32_t client_bmp;     /* HBITMAP of the client-area framebuffer (GDI draws here) */
@@ -1203,16 +1206,31 @@ static void u32_a2w(const char *s, uint16_t *d, int cap) {
 static void u32_w2n(const uint16_t *s, char *d, int cap) {
     int i = 0; if (s) for (; s[i] && i < cap - 1; i++) d[i] = (char)(s[i] & 0xFF); d[i] = 0;
 }
-/* Register a class (shared A/W core): store wndproc + wide name, return the atom. */
-static uint32_t u32_class_register(uint32_t wndproc, const uint16_t *wname) {
+/* Register a class (shared A/W core): store wndproc + background brush + wide
+ * name, return the atom. */
+static uint32_t u32_class_register(uint32_t wndproc, uint32_t hbr_bg, const uint16_t *wname) {
     for (int i = 0; i < U32_MAX_CLASSES; i++) {
         if (!g_u32_class[i].used) {
             g_u32_class[i].used = 1;
             g_u32_class[i].wndproc = wndproc;
+            g_u32_class[i].hbr_bg = hbr_bg;
             u32_wcpy(g_u32_class[i].name, wname, 128);
             return 0xC000u + (uint32_t)i;
         }
     }
+    return 0;
+}
+/* Resolve a class reference (atom or name pointer) to its background brush, or 0. */
+static uint32_t u32_class_brush(uint32_t cref) {
+    if (cref == 0) return 0;
+    if (cref < 0x10000u) {
+        uint32_t idx = cref - 0xC000u;
+        if (idx < U32_MAX_CLASSES && g_u32_class[idx].used) return g_u32_class[idx].hbr_bg;
+        return 0;
+    }
+    const uint16_t *name = (const uint16_t *)(uintptr_t)cref;
+    for (int i = 0; i < U32_MAX_CLASSES; i++)
+        if (g_u32_class[i].used && u32_weq(g_u32_class[i].name, name)) return g_u32_class[i].hbr_bg;
     return 0;
 }
 /* CW_USEDEFAULT: the caller leaves placement to the OS. We pick a fixed default so
@@ -1243,13 +1261,16 @@ static uint32_t u32_window_create(uint32_t wndproc, uint32_t exstyle, uint32_t s
             g_u32_win[i].ctrl_id = 0;
             g_u32_win[i].classname[0] = 0;
             g_u32_win[i].needs_paint = 0;
+            g_u32_win[i].needs_erase = 0;
+            g_u32_win[i].bg_brush = 0;
             int k = 0; if (title) for (; title[k] && k < 255; k++) g_u32_win[i].title[k] = title[k];
             g_u32_win[i].title[k] = 0;
             /* A visible top-level window (no parent, not a child control) starts
-             * with its whole client invalid -> owes a WM_PAINT, and gets a real
-             * SDL window. Child/message-only windows never do either. */
+             * with its whole client invalid -> owes a WM_PAINT (erase included),
+             * and gets a real SDL window. Child/message-only windows never do. */
             if (g_u32_win[i].visible && parent == 0 && !(style & 0x40000000u /* WS_CHILD */)) {
                 g_u32_win[i].needs_paint = 1;
+                g_u32_win[i].needs_erase = 1;
 #ifdef ARET_HAVE_SDL
                 sdl_window_show(i);
 #endif
@@ -1354,15 +1375,18 @@ static int u32_next_paint(void) {
         if (g_u32_win[i].needs_paint && u32_win_paints(i)) return i;
     return -1;
 }
+/* Fill a DC's whole surface with a brush colour (the default WM_ERASEBKGND). No
+ * surface (display-free / null brush) -> sound no-op. Defined after the GDI model. */
+static void u32_fill_dc_brush(uint32_t hdc, uint32_t brush);
 
 /* RegisterClassW(const WNDCLASSW*) -> ATOM. Fields (32-bit): lpfnWndProc @+4,
- * lpszClassName @+36. Returns a non-zero atom; 0 on failure. */
+ * hbrBackground @+28, lpszClassName @+36. Returns a non-zero atom; 0 on failure. */
 uint32_t aret_RegisterClassW(uint32_t esp) {
     const uint32_t *wc = (const uint32_t *)WP(0);
     if (!wc) return 0;
     const uint16_t *name = (const uint16_t *)(uintptr_t)wc[9]; /* +36 lpszClassName */
     if (!name) return 0;
-    return u32_class_register(wc[1] /* +4 lpfnWndProc */, name);
+    return u32_class_register(wc[1] /* +4 lpfnWndProc */, wc[7] /* +28 hbrBackground */, name);
 }
 /* RegisterClassA(const WNDCLASSA*) — same 40-byte layout as WNDCLASSW but a narrow
  * class name; widen it and share the one registry. */
@@ -1373,7 +1397,7 @@ uint32_t aret_RegisterClassA(uint32_t esp) {
     if (!name) return 0;
     uint16_t wname[128];
     u32_a2w(name, wname, 128);
-    return u32_class_register(wc[1], wname);
+    return u32_class_register(wc[1], wc[7], wname);
 }
 /* UnregisterClassW(lpClassName, hInstance) -> BOOL. */
 uint32_t aret_UnregisterClassW(uint32_t esp) {
@@ -1408,7 +1432,8 @@ uint32_t aret_CreateWindowExW(uint32_t esp) {
     char title[256]; u32_w2n((const uint16_t *)WP(2), title, sizeof title);
     uint32_t h = u32_window_create(u32_class_wndproc(WU(1)), WU(0), WU(3),
                                    WU(4), WU(5), WU(6), WU(7), WU(8), title);
-    if (h) u32_class_name(WU(1), 1, g_u32_win[h - 1].classname, sizeof g_u32_win[h - 1].classname);
+    if (h) { u32_class_name(WU(1), 1, g_u32_win[h - 1].classname, sizeof g_u32_win[h - 1].classname);
+             g_u32_win[h - 1].bg_brush = u32_class_brush(WU(1)); }
     return h;
 }
 /* CreateWindowExA — className@1 is a narrow name (or an atom). Widen a name to
@@ -1423,7 +1448,8 @@ uint32_t aret_CreateWindowExA(uint32_t esp) {
     }
     uint32_t h = u32_window_create(u32_class_wndproc(cref), WU(0), WU(3),
                                    WU(4), WU(5), WU(6), WU(7), WU(8), WCS(2));
-    if (h) u32_class_name(WU(1), 0, g_u32_win[h - 1].classname, sizeof g_u32_win[h - 1].classname);
+    if (h) { u32_class_name(WU(1), 0, g_u32_win[h - 1].classname, sizeof g_u32_win[h - 1].classname);
+             g_u32_win[h - 1].bg_brush = u32_class_brush(cref); }
     return h;
 }
 /* DestroyWindow(HWND) -> BOOL. */
@@ -1475,9 +1501,13 @@ static int u32_defproc_text(uint32_t hwnd, uint32_t msg, uint32_t wp, uint32_t l
  * a WM_DESTROY, so a real close (the SDL window's X button) actually closes. Both
  * fire only on generated/real events, never in the deterministic headless oracle.
  * Returns 1 if handled, with the result in *out. */
-static int u32_defproc_common(uint32_t esp, uint32_t hwnd, uint32_t msg, uint32_t *out) {
+static int u32_defproc_common(uint32_t esp, uint32_t hwnd, uint32_t msg, uint32_t wp, uint32_t *out) {
     int i = (hwnd >= 1 && hwnd <= U32_MAX_WIN && g_u32_win[hwnd - 1].used) ? (int)hwnd - 1 : -1;
     if (msg == U32_WM_PAINT) { if (i >= 0) g_u32_win[i].needs_paint = 0; *out = 0; return 1; }
+    if (msg == U32_WM_ERASEBKGND) {   /* default erase: fill client with class brush */
+        if (i >= 0 && g_u32_win[i].bg_brush) u32_fill_dc_brush(wp /* HDC */, g_u32_win[i].bg_brush);
+        *out = 1; return 1;           /* TRUE = background erased */
+    }
     if (msg == 0x0010u /* WM_CLOSE */) {
         if (i >= 0) {
             uint32_t wp = g_u32_win[i].wndproc;
@@ -1495,7 +1525,7 @@ static int u32_defproc_common(uint32_t esp, uint32_t hwnd, uint32_t msg, uint32_
  * (wide) + the common paint/close defaults; everything else defaults to 0. */
 uint32_t aret_DefWindowProcW(uint32_t esp) {
     uint32_t r;
-    if (u32_defproc_common(esp, WU(0), WU(1), &r)) return r;
+    if (u32_defproc_common(esp, WU(0), WU(1), WU(2), &r)) return r;
     if (u32_defproc_text(WU(0), WU(1), WU(2), WU(3), 1, &r)) return r;
     return 0;
 }
@@ -1604,7 +1634,7 @@ uint32_t aret_MsgWaitForMultipleObjectsEx(uint32_t esp) {
  * DefWindowProcA/Set-GetWindowTextA differ (ANSI vs wide payloads). --- */
 uint32_t aret_DefWindowProcA(uint32_t esp) {
     uint32_t r;
-    if (u32_defproc_common(esp, WU(0), WU(1), &r)) return r;
+    if (u32_defproc_common(esp, WU(0), WU(1), WU(2), &r)) return r;
     if (u32_defproc_text(WU(0), WU(1), WU(2), WU(3), 0, &r)) return r;  /* narrow */
     return 0;
 }
@@ -1684,10 +1714,12 @@ uint32_t aret_ShowWindow(uint32_t esp) {
     if (i < 0) return 0;
     int was = g_u32_win[i].visible;
     g_u32_win[i].visible = (WU(1) == 0 /* SW_HIDE */) ? 0 : 1;
-    /* Becoming visible invalidates the whole window -> owes a WM_PAINT. */
+    /* Becoming visible invalidates the whole window -> owes a WM_PAINT (erase). */
     if (g_u32_win[i].visible && !was && g_u32_win[i].parent == 0
-        && !(g_u32_win[i].style & 0x40000000u /* WS_CHILD */))
+        && !(g_u32_win[i].style & 0x40000000u /* WS_CHILD */)) {
         g_u32_win[i].needs_paint = 1;
+        g_u32_win[i].needs_erase = 1;
+    }
 #ifdef ARET_HAVE_SDL
     if (g_u32_win[i].visible && g_u32_win[i].parent == 0 && !(g_u32_win[i].style & 0x40000000u))
         sdl_window_show(i);
@@ -2337,12 +2369,23 @@ uint32_t aret_BeginPaint(uint32_t esp) {
     uint8_t *ps = (uint8_t *)WP(1);
     int i = gdi_alloc(GDIT_DC); if (i) u32_dc_defaults(i);
     uint32_t hdc = i ? gdi_handle(i) : 0;
-    /* BeginPaint clears the update region (validates it). */
-    { int wi = u32_win_idx(WU(0)); if (wi >= 0) g_u32_win[wi].needs_paint = 0; }
+    int wi = u32_win_idx(WU(0));
 #ifdef ARET_HAVE_SDL
     /* Paint into the window's client framebuffer, like GetDC. */
     if (i) { uint32_t cb = u32_win_client_bmp(WU(0)); if (cb) g_gdi[i].sel_bitmap = cb; }
 #endif
+    /* A pending erase sends WM_ERASEBKGND now (DefWindowProc fills the class
+     * brush into the DC we just bound); then the update region is validated.
+     * needs_erase is cleared *before* the callback so a re-entrant BeginPaint
+     * cannot loop. */
+    if (wi >= 0) {
+        if (g_u32_win[wi].needs_erase) {
+            g_u32_win[wi].needs_erase = 0;
+            uint32_t wp = g_u32_win[wi].wndproc;
+            if (wp) u32_call_wndproc(esp, wp, WU(0), U32_WM_ERASEBKGND, hdc, 0);
+        }
+        g_u32_win[wi].needs_paint = 0;
+    }
     if (ps) { memset(ps, 0, 64); *(uint32_t *)ps = hdc; }   /* PAINTSTRUCT.hdc @0 */
     return hdc;
 }
@@ -2497,6 +2540,14 @@ static int gdi_brush_color(uint32_t hb, uint32_t *out) {
     if (b >= 0 && g_gdi[b].type == GDIT_BRUSH) { if (g_gdi[b].null_obj) return 0; *out = g_gdi[b].color; return 1; }
     if (hb >= 1 && hb <= 31) { *out = u32_syscolor((int)hb - 1); return 1; }  /* COLOR_x + 1 */
     return 0;
+}
+/* Fill a DC's whole surface with a brush colour — the default WM_ERASEBKGND. */
+static void u32_fill_dc_brush(uint32_t hdc, uint32_t brush) {
+    struct gdi_obj *bm = gdi_dc_surface(hdc);
+    uint32_t c;
+    if (!bm || !gdi_brush_color(brush, &c)) return;      /* no surface / null brush */
+    for (int y = 0; y < bm->h; y++)
+        for (int x = 0; x < bm->w; x++) gdi_put(bm, x, y, c);
 }
 
 /* ---- drawing (bit-exact on the offscreen DIB) ---- */
@@ -2670,8 +2721,9 @@ uint32_t aret_BringWindowToTop(uint32_t esp)    { return u32_win_idx(WU(0)) >= 0
  * InvalidateRect(NULL,...) invalidates every top-level window. */
 uint32_t aret_InvalidateRect(uint32_t esp) {
     uint32_t hwnd = WU(0);
-    if (hwnd == 0) { for (int i = 0; i < U32_MAX_WIN; i++) if (u32_win_paints(i)) g_u32_win[i].needs_paint = 1; return 1; }
-    int i = u32_win_idx(hwnd); if (i >= 0 && u32_win_paints(i)) g_u32_win[i].needs_paint = 1;
+    int erase = WU(2) != 0;                        /* bErase */
+    if (hwnd == 0) { for (int i = 0; i < U32_MAX_WIN; i++) if (u32_win_paints(i)) { g_u32_win[i].needs_paint = 1; if (erase) g_u32_win[i].needs_erase = 1; } return 1; }
+    int i = u32_win_idx(hwnd); if (i >= 0 && u32_win_paints(i)) { g_u32_win[i].needs_paint = 1; if (erase) g_u32_win[i].needs_erase = 1; }
     return 1;
 }
 uint32_t aret_InvalidateRgn(uint32_t esp)  { return aret_InvalidateRect(esp); }
