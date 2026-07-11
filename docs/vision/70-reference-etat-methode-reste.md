@@ -165,7 +165,7 @@ bash bench/regression.sh    # PORTE unifiée : difftest 271/271, in-place 3/3,
                             # recompilabilité gzip/ls/cat 100%
 bash bench/difftest.sh              # décompile O0→O3
 bash bench/difftest_transpile.sh    # transpile (hash 19acad982194bf07)
-bash bench/winediff.sh              # axe 2 vs Wine (75/75)
+bash bench/winediff.sh              # axe 2 vs Wine (76/76)
 bash bench/funcdiff.sh              # lift-closure + opt-diff vs Unicorn (0 div)
 # Sweeps de vrais binaires (téléchargent + comparent à Wine) :
 bash bench/sqlite_sweep.sh   bash bench/busybox_sweep.sh   bash bench/corpus_sweep.sh
@@ -185,7 +185,7 @@ bash bench/wallsweep.sh <dir1> [dir2…]  # AGRÈGE --mode walls sur un corpus :
 
 ### État régression (référence — doit rester vert)
 difftest **271/271** · transpile-diff **4/4** (H=`19acad982194bf07`) · winediff
-**75/75** · cpudiff vert (per-instruction + séquences génératives) · funcdiff corpus **0 divergence** (lift ~12k scorées /
+**76/76** · cpudiff vert (per-instruction + séquences génératives) · funcdiff corpus **0 divergence** (lift ~12k scorées /
 ~6k appels, opt ~10k scorées) · SMT **11/11** · in-place **3/3** · magicdiv **2³²** ·
 recompilabilité **100 %** · WASM **7/7**.
 
@@ -381,12 +381,21 @@ recompilabilité **100 %** · WASM **7/7**.
   (`aret_win32.c`, `#ifdef ARET_HAVE_SDL`) : chaque **fenêtre top-level visible** reçoit un **framebuffer client**
   (DIB 32bpp) que `GetDC(hwnd)`/`BeginPaint` **lient** (le GDI du programme y dessine, comme Wine) + une vraie
   **`SDL_Window`+Renderer+Texture** (`RGB888` = octets DIB `[B,G,R,0]`), présentée sur `UpdateWindow`/`EndPaint`/
-  `ReleaseDC` ; **pompe `SDL_PollEvent`** → `WM_CLOSE`/`WM_MOUSE*`/`WM_KEY*`. **Strictement additif** : seule
+  `ReleaseDC` ; **pompe `SDL_PollEvent`** → `WM_CLOSE`/`WM_MOUSE*`/`WM_KEY*`. **Modèle de peinture `WM_PAINT`**
+  (display-free, sound) : région d'invalidation coalescée par fenêtre (`needs_paint`) — `InvalidateRect`/`Rgn`
+  (NULL = toutes), `ValidateRect`/`Rgn`, une fenêtre visible fraîche l'active ; `WM_PAINT` **généré à la demande**
+  (jamais mis en file, priorité basse après file postée + `WM_QUIT`) par `Get`/`PeekMessage`, **et** livré
+  **synchrone** par `UpdateWindow` ; `BeginPaint` valide la région ; `DefWindowProc(WM_PAINT)`=peinture par défaut
+  (valide → pas de boucle infinie), `DefWindowProc(WM_CLOSE)`=`WM_DESTROY`+destruction (bouton X SDL ferme). ⇒ le
+  handler `WM_PAINT` du programme **s'exécute et dessine** = le contenu s'affiche vraiment. **Strictement additif** : seule
   l'entrée réelle devient un message (le bruit WM expose/focus **n'est pas** synthétisé) → séquence déterministe
-  **inchangée** ; pas d'écran ⇒ repli display-free sound, jamais d'abort. Oracle `winecorpus/user32_sdlwindow.c`
-  (client-rect + `GetDC`/`SetPixel`/`GetPixel` round-trip + cycle paint) **bit-identique à Wine** headless ; **et**
-  les fixtures GUI existantes **relient SDL** en winediff sans rien perturber (preuve d'additivité). Reste :
-  widgets natifs (BUTTON/EDIT), GDI raster (TextOut/DrawText), WASM-GUI (Emscripten).
+  **inchangée** ; l'**entrée** (souris/clavier) est env-dépendante ⇒ hors oracle bit-exact (on compare le
+  **contenu** : peintures, pixels — pas les events) ; pas d'écran ⇒ repli display-free sound, jamais d'abort.
+  Oracles : `user32_sdlwindow.c` (client-rect + `GetDC`/`SetPixel`/`GetPixel` round-trip + cycle paint) et
+  `user32_paint.c` (handler `WM_PAINT` dessine → `UpdateWindow`/`InvalidateRect`/`PeekMessage` livrent, comptes de
+  peinture + pixel) **bit-identiques à Wine** headless ; **et** les fixtures GUI existantes **relient SDL** en
+  winediff sans rien perturber (preuve d'additivité). Reste : widgets natifs (BUTTON/EDIT), GDI raster
+  (TextOut/DrawText), WASM-GUI (Emscripten).
 
 ### 4.6 Démonstrateurs prouvés (bit-identiques à Wine)
 - **Lua 5.4.7** (mingw, 650 Ko) **symbolé ET strippé** → ELF natif : batterie

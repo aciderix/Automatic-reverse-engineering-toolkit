@@ -1364,4 +1364,30 @@ Détail : **70 §6** (roadmap). Résumé :
   Reste (mesuré si un binaire l'exige) : widgets natifs (BUTTON/EDIT), GDI raster (TextOut/DrawText), WASM-GUI
   (Emscripten, 2ᵉ toolchain).
 
+### 2026-07-11 — [GUI][HLE-WIN32] M7 — modèle de peinture `WM_PAINT` / invalidation (le contenu s'affiche vraiment)
+- **Pourquoi** : après G2b (fenêtre visible), un programme qui **peint dans son handler `WM_PAINT`** ne dessinait
+  **rien** — `InvalidateRect` était un no-op et **personne** ne livrait `WM_PAINT`. C'est le chaînon manquant pour
+  qu'une fenêtre visible **affiche son contenu** piloté par la boucle de messages normale.
+- **Fait** (`aret_win32.c`, display-free, sound, portable — **pas** `#ifdef SDL`) : région d'invalidation
+  **coalescée par fenêtre** (champ `needs_paint` ; `WM_PAINT` unionne les régions de toute façon).
+  `InvalidateRect`/`InvalidateRgn` (hwnd NULL = **toutes** les top-level), `ValidateRect`/`Rgn`, une fenêtre
+  visible fraîche (`CreateWindow(WS_VISIBLE)`/`ShowWindow`) l'active. `WM_PAINT` **généré à la demande** (jamais
+  mis en file, **priorité basse** : après la file postée et `WM_QUIT`) par `Get`/`PeekMessage` (`u32_next_paint`),
+  **et** livré **synchrone** par `UpdateWindow` (comme Windows). `BeginPaint` **valide** la région (sinon boucle
+  infinie). `DefWindowProc(WM_PAINT)` = peinture par défaut → **valide** (un programme qui délègue ne boucle pas) ;
+  `DefWindowProc(WM_CLOSE)` = `WM_DESTROY` + destruction (le bouton X de la fenêtre SDL **ferme** vraiment). Gate
+  strict : **top-level visible seulement** (`u32_win_paints` : `parent==0`) → message-only/enfants **jamais**.
+- **Soundness / additivité** : `WM_PAINT` et `WM_CLOSE`/`WM_DESTROY` ne surgissent que d'événements générés ou
+  d'entrée **réelle**, jamais dans l'oracle déterministe headless (les fixtures message-only sont des
+  `HWND_MESSAGE` → exclues). **Découverte** : SDL sous Xvfb émet un `SDL_MOUSEMOTION` synthétique initial → un
+  `WM_MOUSEMOVE` que Wine ne poste pas. C'est **intrinsèque** (l'entrée est env-dépendante, non déterministe) ⇒
+  l'oracle compare le **contenu** (comptes de peinture, pixels), **pas** les itérations de boucle/events (doc 72
+  §4). Le fixture n'observe donc **pas** le nombre de tours de `PeekMessage`.
+- **Oracle** : `winecorpus/user32_paint.c` — handler `WM_PAINT` dessine un pixel + compte ; `UpdateWindow`
+  (livraison synchrone), `InvalidateRect`+`PeekMessage` (livraison générée), no-op quand la région est vide →
+  **bit-identique à Wine** (comptes 1→2, pixel `21160B`=RGB(11,22,33), headless SDL dummy / Xvfb).
+- **Vérifié** : hash transpile **inchangé** `19acad982194bf07`, difftest-transpile 4/4, cargo test complet vert
+  (dont wasm : modèle peinture compile sans SDL), winediff **75→76/76** (aucune régression : dialogs/windowstate/
+  msgwindow intacts). Un programme GUI qui peint dans `WM_PAINT` **affiche maintenant son contenu à l'écran**.
+
 <!-- NOUVELLES ENTRÉES ICI (garder l'ordre chronologique, plus récent en bas) -->

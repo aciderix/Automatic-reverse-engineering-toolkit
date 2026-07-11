@@ -1120,6 +1120,7 @@ uint32_t aret_LoadStringA(uint32_t esp) {
 #define U32_WM_QUIT   0x0012u
 #define U32_WM_TIMER  0x0113u
 #define U32_PM_REMOVE 0x0001u
+#define U32_WM_PAINT         0x000Fu
 #define U32_WM_SETTEXT       0x000Cu
 #define U32_WM_GETTEXT       0x000Du
 #define U32_WM_GETTEXTLENGTH 0x000Eu
@@ -1151,6 +1152,7 @@ static struct {
     char title[256];         /* window text (ANSI) */
     int ctrl_id;             /* dialog control id (0 = not a control) */
     char classname[64];      /* registered class name (for GetClassName) */
+    int needs_paint;         /* update region non-empty -> owes a WM_PAINT */
 #ifdef ARET_HAVE_SDL
     void *sdl_win, *sdl_ren, *sdl_tex;  /* SDL window/renderer/streaming texture */
     uint32_t client_bmp;     /* HBITMAP of the client-area framebuffer (GDI draws here) */
@@ -1240,14 +1242,18 @@ static uint32_t u32_window_create(uint32_t wndproc, uint32_t exstyle, uint32_t s
             g_u32_win[i].userdata = 0;
             g_u32_win[i].ctrl_id = 0;
             g_u32_win[i].classname[0] = 0;
+            g_u32_win[i].needs_paint = 0;
             int k = 0; if (title) for (; title[k] && k < 255; k++) g_u32_win[i].title[k] = title[k];
             g_u32_win[i].title[k] = 0;
+            /* A visible top-level window (no parent, not a child control) starts
+             * with its whole client invalid -> owes a WM_PAINT, and gets a real
+             * SDL window. Child/message-only windows never do either. */
+            if (g_u32_win[i].visible && parent == 0 && !(style & 0x40000000u /* WS_CHILD */)) {
+                g_u32_win[i].needs_paint = 1;
 #ifdef ARET_HAVE_SDL
-            /* A visible top-level window (no parent, not a child control) gets a
-             * real SDL window. Child/message-only windows never do. */
-            if (g_u32_win[i].visible && parent == 0 && !(style & 0x40000000u /* WS_CHILD */))
                 sdl_window_show(i);
 #endif
+            }
             return (uint32_t)(i + 1);
         }
     }
@@ -1309,6 +1315,11 @@ static void u32_fill_quit(uint32_t *m) {
     m[0] = 0; m[1] = U32_WM_QUIT; m[2] = (uint32_t)g_u32_quit_code; m[3] = 0;
     m[4] = (uint32_t)(mono_ns() / 1000000ull); m[5] = 0; m[6] = 0;
 }
+static void u32_fill_paint(uint32_t *m, int i) {
+    if (!m) return;
+    m[0] = (uint32_t)(i + 1); m[1] = U32_WM_PAINT; m[2] = 0; m[3] = 0;
+    m[4] = (uint32_t)(mono_ns() / 1000000ull); m[5] = 0; m[6] = 0;
+}
 static int u32_any_timer(void) {
     for (int i = 0; i < U32_MAX_TIMER; i++) if (g_u32_timer[i].used) return 1;
     return 0;
@@ -1324,6 +1335,24 @@ static void u32_pump_timers(void) {
             g_u32_timer[i].due_ns = now + (uint64_t)g_u32_timer[i].elapse * 1000000ull;
         }
     }
+}
+
+/* --- Paint model (WM_PAINT / invalidation) ---------------------------------
+ * A visible top-level window with a non-empty update region "owes" a WM_PAINT.
+ * WM_PAINT is not queued: it is generated on demand (lowest priority, after the
+ * posted queue and WM_QUIT) so a program's paint handler runs and draws — this is
+ * what makes a visible window actually show content. Display-free & sound: the
+ * message flow is correct Win32 behaviour whether or not a real screen (SDL) is
+ * present. Coalesced to a whole-client dirty flag (WM_PAINT unions regions). */
+static int u32_win_paints(int i) {
+    return i >= 0 && i < U32_MAX_WIN && g_u32_win[i].used
+        && g_u32_win[i].visible && g_u32_win[i].parent == 0;   /* excl. child/message-only */
+}
+/* The next visible window owing a WM_PAINT, or -1. */
+static int u32_next_paint(void) {
+    for (int i = 0; i < U32_MAX_WIN; i++)
+        if (g_u32_win[i].needs_paint && u32_win_paints(i)) return i;
+    return -1;
 }
 
 /* RegisterClassW(const WNDCLASSW*) -> ATOM. Fields (32-bit): lpfnWndProc @+4,
@@ -1440,10 +1469,33 @@ static int u32_defproc_text(uint32_t hwnd, uint32_t msg, uint32_t wp, uint32_t l
     default: return 0;
     }
 }
+/* DefWindowProc handling common to A/W, independent of text width: WM_PAINT does
+ * a default paint (validates the update region so a program that delegates
+ * painting doesn't loop forever on WM_PAINT); WM_CLOSE destroys the window after
+ * a WM_DESTROY, so a real close (the SDL window's X button) actually closes. Both
+ * fire only on generated/real events, never in the deterministic headless oracle.
+ * Returns 1 if handled, with the result in *out. */
+static int u32_defproc_common(uint32_t esp, uint32_t hwnd, uint32_t msg, uint32_t *out) {
+    int i = (hwnd >= 1 && hwnd <= U32_MAX_WIN && g_u32_win[hwnd - 1].used) ? (int)hwnd - 1 : -1;
+    if (msg == U32_WM_PAINT) { if (i >= 0) g_u32_win[i].needs_paint = 0; *out = 0; return 1; }
+    if (msg == 0x0010u /* WM_CLOSE */) {
+        if (i >= 0) {
+            uint32_t wp = g_u32_win[i].wndproc;
+            if (wp) u32_call_wndproc(esp, wp, hwnd, 0x0002u /* WM_DESTROY */, 0, 0);
+#ifdef ARET_HAVE_SDL
+            sdl_window_destroy(i);
+#endif
+            g_u32_win[i].used = 0;
+        }
+        *out = 0; return 1;
+    }
+    return 0;
+}
 /* DefWindowProcW(HWND,UINT,WPARAM,LPARAM) -> LRESULT. Handles the text messages
- * (wide); everything else defaults to 0 (message-only semantics). */
+ * (wide) + the common paint/close defaults; everything else defaults to 0. */
 uint32_t aret_DefWindowProcW(uint32_t esp) {
     uint32_t r;
+    if (u32_defproc_common(esp, WU(0), WU(1), &r)) return r;
     if (u32_defproc_text(WU(0), WU(1), WU(2), WU(3), 1, &r)) return r;
     return 0;
 }
@@ -1480,6 +1532,9 @@ uint32_t aret_PeekMessageW(uint32_t esp) {
     u32_pump_timers();
     if (!u32_q_empty()) { u32_q_peek_copy(m, (remove & U32_PM_REMOVE) != 0); return 1; }
     if (g_u32_quit)    { u32_fill_quit(m); return 1; }
+    /* WM_PAINT is generated on demand (never queued), lowest priority. Peeking
+     * does not clear the update region — BeginPaint/ValidateRect do. */
+    { int pi = u32_next_paint(); if (pi >= 0) { u32_fill_paint(m, pi); return 1; } }
     return 0;
 }
 /* GetMessageW(lpMsg, hwnd, min, max) -> BOOL (0 = WM_QUIT, else 1). Blocks until a
@@ -1495,6 +1550,8 @@ uint32_t aret_GetMessageW(uint32_t esp) {
         u32_pump_timers();
         if (!u32_q_empty()) { u32_q_peek_copy(m, 1); return 1; }
         if (g_u32_quit)    { u32_fill_quit(m); return 0; }
+        /* WM_PAINT: generated on demand, after the posted queue and WM_QUIT. */
+        { int pi = u32_next_paint(); if (pi >= 0) { u32_fill_paint(m, pi); return 1; } }
 #ifdef ARET_HAVE_SDL
         /* A real visible window is a message source (its close button, input): the
          * queue can wake even with no timer, so block on SDL events instead of
@@ -1547,6 +1604,7 @@ uint32_t aret_MsgWaitForMultipleObjectsEx(uint32_t esp) {
  * DefWindowProcA/Set-GetWindowTextA differ (ANSI vs wide payloads). --- */
 uint32_t aret_DefWindowProcA(uint32_t esp) {
     uint32_t r;
+    if (u32_defproc_common(esp, WU(0), WU(1), &r)) return r;
     if (u32_defproc_text(WU(0), WU(1), WU(2), WU(3), 0, &r)) return r;  /* narrow */
     return 0;
 }
@@ -1626,6 +1684,10 @@ uint32_t aret_ShowWindow(uint32_t esp) {
     if (i < 0) return 0;
     int was = g_u32_win[i].visible;
     g_u32_win[i].visible = (WU(1) == 0 /* SW_HIDE */) ? 0 : 1;
+    /* Becoming visible invalidates the whole window -> owes a WM_PAINT. */
+    if (g_u32_win[i].visible && !was && g_u32_win[i].parent == 0
+        && !(g_u32_win[i].style & 0x40000000u /* WS_CHILD */))
+        g_u32_win[i].needs_paint = 1;
 #ifdef ARET_HAVE_SDL
     if (g_u32_win[i].visible && g_u32_win[i].parent == 0 && !(g_u32_win[i].style & 0x40000000u))
         sdl_window_show(i);
@@ -1638,6 +1700,12 @@ uint32_t aret_ShowWindow(uint32_t esp) {
  * so there is nothing to repaint; report success for a valid window. */
 uint32_t aret_UpdateWindow(uint32_t esp) {
     int i = u32_win_idx(WU(0));
+    /* UpdateWindow paints immediately if the update region is non-empty: send
+     * WM_PAINT to the WNDPROC now (it Begin/EndPaints, which draws & validates). */
+    if (i >= 0 && g_u32_win[i].needs_paint && u32_win_paints(i)) {
+        uint32_t wp = g_u32_win[i].wndproc;
+        if (wp) u32_call_wndproc(esp, wp, (uint32_t)(i + 1), U32_WM_PAINT, 0, 0);
+    }
 #ifdef ARET_HAVE_SDL
     if (i >= 0) sdl_window_present(i);   /* flush the client framebuffer to screen */
 #endif
@@ -2269,6 +2337,8 @@ uint32_t aret_BeginPaint(uint32_t esp) {
     uint8_t *ps = (uint8_t *)WP(1);
     int i = gdi_alloc(GDIT_DC); if (i) u32_dc_defaults(i);
     uint32_t hdc = i ? gdi_handle(i) : 0;
+    /* BeginPaint clears the update region (validates it). */
+    { int wi = u32_win_idx(WU(0)); if (wi >= 0) g_u32_win[wi].needs_paint = 0; }
 #ifdef ARET_HAVE_SDL
     /* Paint into the window's client framebuffer, like GetDC. */
     if (i) { uint32_t cb = u32_win_client_bmp(WU(0)); if (cb) g_gdi[i].sel_bitmap = cb; }
@@ -2595,12 +2665,21 @@ uint32_t aret_SetForegroundWindow(uint32_t esp) { return u32_win_idx(WU(0)) >= 0
 uint32_t aret_GetForegroundWindow(uint32_t esp) { (void)esp; return g_u32_active; }
 uint32_t aret_BringWindowToTop(uint32_t esp)    { return u32_win_idx(WU(0)) >= 0 ? 1u : 0u; }
 
-/* Paint invalidation: no paint region is tracked headless (GDI paint targets an
- * offscreen DIB, not a live window), so these are sound no-ops returning TRUE. */
-uint32_t aret_InvalidateRect(uint32_t esp) { (void)esp; return 1; }
-uint32_t aret_InvalidateRgn(uint32_t esp)  { (void)esp; return 1; }
-uint32_t aret_ValidateRect(uint32_t esp)   { (void)esp; return 1; }
-uint32_t aret_ValidateRgn(uint32_t esp)    { (void)esp; return 1; }
+/* Paint invalidation. The update region is coalesced to a whole-client dirty flag
+ * (WM_PAINT unions regions anyway); a partial rect still yields one WM_PAINT.
+ * InvalidateRect(NULL,...) invalidates every top-level window. */
+uint32_t aret_InvalidateRect(uint32_t esp) {
+    uint32_t hwnd = WU(0);
+    if (hwnd == 0) { for (int i = 0; i < U32_MAX_WIN; i++) if (u32_win_paints(i)) g_u32_win[i].needs_paint = 1; return 1; }
+    int i = u32_win_idx(hwnd); if (i >= 0 && u32_win_paints(i)) g_u32_win[i].needs_paint = 1;
+    return 1;
+}
+uint32_t aret_InvalidateRgn(uint32_t esp)  { return aret_InvalidateRect(esp); }
+uint32_t aret_ValidateRect(uint32_t esp)   {
+    int i = u32_win_idx(WU(0)); if (i >= 0) g_u32_win[i].needs_paint = 0;
+    return 1;
+}
+uint32_t aret_ValidateRgn(uint32_t esp)    { return aret_ValidateRect(esp); }
 /* MessageBeep(uType) -> BOOL. No audio device; the call succeeds. */
 uint32_t aret_MessageBeep(uint32_t esp) { (void)esp; return 1; }
 
