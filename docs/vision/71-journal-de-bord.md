@@ -1150,4 +1150,24 @@ Détail : **70 §6** (roadmap). Résumé :
 - **Vérifié** : hash transpile **inchangé** `19acad982194bf07`, difftest 271/271, cargo test complet vert,
   winediff **62/62**, table triée.
 
+### 2026-07-10 — [GUI][HLE-WIN32] M7 — G7 (1) : batch helpers fenêtre (long-tail, mesuré vs Wine)
+- **Contexte (re-sweep post-G6)** : les gros blocs GUI franchis ; le front devient un **long-tail de petits
+  helpers**. Batch #1 = les plus sound/oracle-able.
+- **Mesuré d'abord (règle 9)** : probe Wine (Xvfb) → `GetClientRect`(WS_POPUP)=`{0,0,w,h}`,
+  `AdjustWindowRect`(WS_POPUP) inchangé, `SetForegroundWindow`/`InvalidateRect`/`MessageBeep`=1,
+  `CallWindowProcA`(WM_NULL→DefWindowProc)=0, `LoadCursorA`/`LoadIconA`≠NULL, `MsgWaitForMultipleObjects`
+  (0,NULL,…)=258 (WAIT_TIMEOUT).
+- **Fait** (`aret_win32.c`, +18 `stdcall_pops` triés) : `GetClientRect` ({0,0,w,h} — pas de non-client dans le
+  modèle, exact pour borderless), `AdjustWindowRect(Ex)` (rect inchangé, no-NC), `SetFocus`/`GetFocus`/
+  `SetActiveWindow`/`GetActiveWindow`/`SetForegroundWindow`/`GetForegroundWindow`/`BringWindowToTop` (focus/
+  activation suivis, pas de vrai focus), `InvalidateRect`/`InvalidateRgn`/`ValidateRect`/`ValidateRgn` (no-op
+  sound = rien à repeindre headless), `MessageBeep` (pas d'audio → succès), `CallWindowProcA/W` (appelle un
+  wndproc lifté via `aret_call` — idiome subclass), `LoadCursorA/W`/`LoadIconA/W` (handle opaque non-null
+  distinct par nom ; jamais déréférencé headless), `MsgWaitForMultipleObjects` (= logique de l'Ex).
+- **Oracle** : `winecorpus/user32_helpers.c` — **bit-identique à Wine** (sous Xvfb) sur les 8 valeurs mesurées.
+- **Effet mesuré** : GetClientRect 15, MsgWaitForMultipleObjects 15, SetForegroundWindow 13, CallWindowProcA 12,
+  AdjustWindowRect 11, InvalidateRect 11, MessageBeep 10, LoadCursorA 23, LoadIconA 19 **éliminés des 41 Win95**.
+- **Vérifié** : hash transpile **inchangé** `19acad982194bf07`, difftest 271/271, cargo test complet vert,
+  winediff **63/63**, table triée.
+
 <!-- NOUVELLES ENTRÉES ICI (garder l'ordre chronologique, plus récent en bas) -->

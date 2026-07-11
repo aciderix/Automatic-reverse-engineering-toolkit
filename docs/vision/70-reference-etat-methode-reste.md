@@ -165,7 +165,7 @@ bash bench/regression.sh    # PORTE unifiée : difftest 271/271, in-place 3/3,
                             # recompilabilité gzip/ls/cat 100%
 bash bench/difftest.sh              # décompile O0→O3
 bash bench/difftest_transpile.sh    # transpile (hash 19acad982194bf07)
-bash bench/winediff.sh              # axe 2 vs Wine (62/62)
+bash bench/winediff.sh              # axe 2 vs Wine (63/63)
 bash bench/funcdiff.sh              # lift-closure + opt-diff vs Unicorn (0 div)
 # Sweeps de vrais binaires (téléchargent + comparent à Wine) :
 bash bench/sqlite_sweep.sh   bash bench/busybox_sweep.sh   bash bench/corpus_sweep.sh
@@ -185,7 +185,7 @@ bash bench/wallsweep.sh <dir1> [dir2…]  # AGRÈGE --mode walls sur un corpus :
 
 ### État régression (référence — doit rester vert)
 difftest **271/271** · transpile-diff **4/4** (H=`19acad982194bf07`) · winediff
-**62/62** · cpudiff vert (per-instruction + séquences génératives) · funcdiff corpus **0 divergence** (lift ~12k scorées /
+**63/63** · cpudiff vert (per-instruction + séquences génératives) · funcdiff corpus **0 divergence** (lift ~12k scorées /
 ~6k appels, opt ~10k scorées) · SMT **11/11** · in-place **3/3** · magicdiv **2³²** ·
 recompilabilité **100 %** · WASM **7/7**.
 
@@ -355,6 +355,10 @@ recompilabilité **100 %** · WASM **7/7**.
   vérifiée = un **DIB qu'on possède** (COLORREF↔`[B,G,R,0]`) → oracle = **hash du framebuffer** vs Wine. Hors
   périmètre (abort sound) : TextOut (raster police), Rectangle/LineTo (bords stylo), <32bpp. Gardé
   `winecorpus/gdi_dib.c`.
+- **USER32 helpers fenêtre** (M7 G7, doc 72) : `GetClientRect`/`AdjustWindowRect(Ex)` (modèle no-NC),
+  focus/activation (`Set`/`GetFocus`/`ActiveWindow`/`ForegroundWindow`/`BringWindowToTop`), `InvalidateRect`/
+  `ValidateRect`/… (no-op sound), `MessageBeep`, `CallWindowProcA/W` (appelle un wndproc lifté), `LoadCursorA/W`/
+  `LoadIconA/W` (handles opaques), `MsgWaitForMultipleObjects`. Mesuré bit-identique Wine (`user32_helpers.c`).
 - **Ressources PE `.rsrc`** (M7 G4, doc 72, **display-free**) : walker de l'arbre `IMAGE_RESOURCE_DIRECTORY`
   **en mémoire** (en-têtes PE déjà mappés à l'image base → `DataDirectory[2]` lu direct, 0 changement loader) →
   `FindResourceA`/`LoadResource`/`LockResource`/`SizeofResource`/`FreeResource` (id **ou** nom UTF-16) +

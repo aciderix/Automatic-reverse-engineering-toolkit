@@ -2171,3 +2171,72 @@ uint32_t aret_GetDeviceCaps(uint32_t esp) {
     default: return 0;
     }
 }
+
+/* ================================================================== */
+/* USER32 window helpers (display-free, measured against Wine)         */
+/* ================================================================== */
+static uint32_t g_u32_focus, g_u32_active;
+
+/* GetClientRect(hwnd, RECT*) -> BOOL. Client area = {0,0,w,h}. Our windows have
+ * no non-client decoration (display-free), so client == window extent — exact for
+ * borderless windows (Wine: WS_POPUP client = {0,0,w,h}). */
+uint32_t aret_GetClientRect(uint32_t esp) {
+    int32_t *r = (int32_t *)WP(1);
+    if (!r) return 0;
+    int i = u32_win_idx(WU(0));
+    if (i < 0) { r[0] = r[1] = r[2] = r[3] = 0; return 0; }
+    r[0] = 0; r[1] = 0; r[2] = g_u32_win[i].w; r[3] = g_u32_win[i].h;
+    return 1;
+}
+/* AdjustWindowRect(RECT*, style, bMenu) / …Ex -> BOOL. No non-client area is
+ * modelled, so the rect is left unchanged (exact for borderless; Wine leaves a
+ * WS_POPUP rect unchanged). */
+uint32_t aret_AdjustWindowRect(uint32_t esp)   { return WP(0) ? 1u : 0u; }
+uint32_t aret_AdjustWindowRectEx(uint32_t esp) { return WP(0) ? 1u : 0u; }
+
+/* Focus / activation: tracked so Get* round-trips Set*; no real input focus. */
+uint32_t aret_SetFocus(uint32_t esp)         { uint32_t p = g_u32_focus;  g_u32_focus = WU(0);  return p; }
+uint32_t aret_GetFocus(uint32_t esp)         { (void)esp; return g_u32_focus; }
+uint32_t aret_SetActiveWindow(uint32_t esp)  { uint32_t p = g_u32_active; g_u32_active = WU(0); return p; }
+uint32_t aret_GetActiveWindow(uint32_t esp)  { (void)esp; return g_u32_active; }
+uint32_t aret_SetForegroundWindow(uint32_t esp) { return u32_win_idx(WU(0)) >= 0 ? 1u : 0u; }
+uint32_t aret_GetForegroundWindow(uint32_t esp) { (void)esp; return g_u32_active; }
+uint32_t aret_BringWindowToTop(uint32_t esp)    { return u32_win_idx(WU(0)) >= 0 ? 1u : 0u; }
+
+/* Paint invalidation: no paint region is tracked headless (GDI paint targets an
+ * offscreen DIB, not a live window), so these are sound no-ops returning TRUE. */
+uint32_t aret_InvalidateRect(uint32_t esp) { (void)esp; return 1; }
+uint32_t aret_InvalidateRgn(uint32_t esp)  { (void)esp; return 1; }
+uint32_t aret_ValidateRect(uint32_t esp)   { (void)esp; return 1; }
+uint32_t aret_ValidateRgn(uint32_t esp)    { (void)esp; return 1; }
+/* MessageBeep(uType) -> BOOL. No audio device; the call succeeds. */
+uint32_t aret_MessageBeep(uint32_t esp) { (void)esp; return 1; }
+
+/* CallWindowProcA/W(lpPrevWndFunc, hWnd, Msg, wParam, lParam) -> LRESULT. Invoke a
+ * (lifted) window procedure directly — the subclassing idiom's call to the original
+ * proc. */
+uint32_t aret_CallWindowProcA(uint32_t esp) {
+    uint32_t proc = WU(0);
+    if (!proc) return 0;
+    return u32_call_wndproc(esp, proc, WU(1), WU(2), WU(3), WU(4));
+}
+uint32_t aret_CallWindowProcW(uint32_t esp) { return aret_CallWindowProcA(esp); }
+
+/* LoadCursorA/W, LoadIconA/W(hInstance, lpName) -> opaque non-null handle. Cursors
+ * and icons are display-only; a program uses the handle as an opaque token (a
+ * WNDCLASS field, SetClassLong), never dereferencing it headless. Distinct per
+ * (kind, name) and non-null (matches Wine's "found" invariant). */
+uint32_t aret_LoadCursorA(uint32_t esp) { return 0xCC000000u | (WU(1) & 0x00FFFFFFu); }
+uint32_t aret_LoadCursorW(uint32_t esp) { return 0xCC000000u | (WU(1) & 0x00FFFFFFu); }
+uint32_t aret_LoadIconA(uint32_t esp)   { return 0xCD000000u | (WU(1) & 0x00FFFFFFu); }
+uint32_t aret_LoadIconW(uint32_t esp)   { return 0xCD000000u | (WU(1) & 0x00FFFFFFu); }
+
+/* MsgWaitForMultipleObjects(nCount, pHandles, bWaitAll, dwMs, dwWakeMask) -> DWORD.
+ * A message available -> WAIT_OBJECT_0 + nCount; else WAIT_TIMEOUT (0x102). Same
+ * model as the Ex variant (we read only nCount). */
+uint32_t aret_MsgWaitForMultipleObjects(uint32_t esp) {
+    uint32_t nCount = WU(0);
+    u32_pump_timers();
+    if (!u32_q_empty() || g_u32_quit) return nCount;
+    return 0x00000102u;   /* WAIT_TIMEOUT */
+}
