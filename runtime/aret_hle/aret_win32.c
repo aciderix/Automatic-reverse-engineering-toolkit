@@ -2491,3 +2491,49 @@ uint32_t aret_SetStdHandle(uint32_t esp) {
     dup2((int)WU(1), slot);
     return 1;
 }
+
+/* ================================================================== */
+/* Long-tail: FileTimeToSystemTime, GetDriveType, CharNext/Prev, coords */
+/* ================================================================== */
+/* FileTimeToSystemTime(const FILETIME*, SYSTEMTIME*) -> BOOL. Reverse of
+ * SystemTimeToFileTime; civil date via gmtime (matches Wine). */
+uint32_t aret_FileTimeToSystemTime(uint32_t esp) {
+    const uint32_t *ft = (const uint32_t *)WP(0);
+    uint16_t *w = (uint16_t *)WP(1);
+    if (!ft || !w) return 0;
+    uint64_t t = ((uint64_t)ft[1] << 32) | ft[0];
+    uint32_t ms = (uint32_t)((t / 10000ull) % 1000ull);
+    time_t sec = (time_t)(t / 10000000ull) - 11644473600ll;   /* 1601 -> 1970 epoch */
+    struct tm tmv; gmtime_r(&sec, &tmv);
+    w[0] = (uint16_t)(tmv.tm_year + 1900); w[1] = (uint16_t)(tmv.tm_mon + 1);
+    w[2] = (uint16_t)tmv.tm_wday;          w[3] = (uint16_t)tmv.tm_mday;
+    w[4] = (uint16_t)tmv.tm_hour;          w[5] = (uint16_t)tmv.tm_min;
+    w[6] = (uint16_t)tmv.tm_sec;           w[7] = (uint16_t)ms;
+    return 1;
+}
+/* GetDriveTypeA(lpRootPathName) -> UINT. Everything maps to the host filesystem,
+ * so a drive root is DRIVE_FIXED (3) — the common case (C:). */
+uint32_t aret_GetDriveTypeA(uint32_t esp) { (void)esp; return 3; }
+uint32_t aret_GetDriveTypeW(uint32_t esp) { (void)esp; return 3; }
+
+/* CharNextA/W(psz) -> the next character (single-byte / wide; at NUL, stays). */
+uint32_t aret_CharNextA(uint32_t esp) { const char *p = WCS(0); return (!p || !*p) ? WU(0) : WU(0) + 1; }
+uint32_t aret_CharNextW(uint32_t esp) { const uint16_t *p = (const uint16_t *)WP(0); return (!p || !*p) ? WU(0) : WU(0) + 2; }
+/* CharPrevA/W(lpszStart, lpszCurrent) -> the previous character (bounded at start). */
+uint32_t aret_CharPrevA(uint32_t esp) { uint32_t s = WU(0), c = WU(1); return c > s ? c - 1 : s; }
+uint32_t aret_CharPrevW(uint32_t esp) { uint32_t s = WU(0), c = WU(1); return c > s + 1 ? c - 2 : s; }
+
+/* ClientToScreen/ScreenToClient(hwnd, POINT*) -> BOOL. Client origin = the window
+ * origin (no non-client area modelled), so the mapping is a translate by (x,y). */
+uint32_t aret_ClientToScreen(uint32_t esp) {
+    int i = u32_win_idx(WU(0)); int32_t *pt = (int32_t *)WP(1);
+    if (i < 0 || !pt) return 0;
+    pt[0] += g_u32_win[i].x; pt[1] += g_u32_win[i].y;
+    return 1;
+}
+uint32_t aret_ScreenToClient(uint32_t esp) {
+    int i = u32_win_idx(WU(0)); int32_t *pt = (int32_t *)WP(1);
+    if (i < 0 || !pt) return 0;
+    pt[0] -= g_u32_win[i].x; pt[1] -= g_u32_win[i].y;
+    return 1;
+}

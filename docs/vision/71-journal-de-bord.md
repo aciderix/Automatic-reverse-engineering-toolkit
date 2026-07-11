@@ -1233,4 +1233,16 @@ Détail : **70 §6** (roadmap). Résumé :
 - **Vérifié** : hash transpile **inchangé** `19acad982194bf07`, difftest 271/271, cargo test complet vert,
   winediff **67/67**, table triée.
 
+### 2026-07-10 — [HLE] Long-tail : FileTimeToSystemTime, CharNext/Prev, GetDriveType, ClientToScreen
+- **Mesuré** : FileTime(2000-01-01)→dow=6 (samedi), CharNextA→+1 (à NUL reste), CharPrevA→-1,
+  GetDriveTypeA("C:\\")→3 (DRIVE_FIXED), ClientToScreen(WS_POPUP @100,50) translate de (x,y).
+- **Fait** (`aret_win32.c`, +7 `stdcall_pops`) : `FileTimeToSystemTime` (via `gmtime_r`, réciproque de
+  SystemTimeToFileTime, date civile = Wine), `GetDriveTypeA/W`→DRIVE_FIXED (tout mappé sur le FS hôte),
+  `CharNextA/W`/`CharPrevA/W` (single-byte/wide, bornés), `ClientToScreen`/`ScreenToClient` (origine client =
+  origine fenêtre, no-NC → translate par (x,y)).
+- **Oracle** : `winecorpus/win_timechar.c` → **bit-identique à Wine** (date, char iter, drive, coord round-trip).
+- **Effet mesuré** : FileTimeToSystemTime 9, GetDriveTypeA 9, CharNextA/PrevA 5, ClientToScreen 5 éliminés.
+- **Vérifié** : hash transpile **inchangé** `19acad982194bf07`, difftest 271/271, cargo test complet vert,
+  winediff **68/68**, table triée.
+
 <!-- NOUVELLES ENTRÉES ICI (garder l'ordre chronologique, plus récent en bas) -->
