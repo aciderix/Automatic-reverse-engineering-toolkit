@@ -1506,4 +1506,27 @@ Détail : **70 §6** (roadmap). Résumé :
 - **Vérifié** : hash transpile **inchangé** `19acad982194bf07`, difftest-transpile 4/4, `table_is_sorted` vert,
   cargo test complet, winediff **79→80/80**.
 
+### 2026-07-11 — [GUI][HLE-WIN32][HLE-FILE] M7 G7 — batch long-tail (props fenêtre, GlobalHandle, win.ini, stubs sound)
+- **Pourquoi** : après le batch dialogs, le re-sweep montre une **longue traîne** de shims (1-2 binaires chacun) ;
+  pas de gros cluster restant (FormatMessageA=catalogue Wine, text-raster=pas d'oracle). On abat le sous-ensemble
+  **sain + oracle-propre**.
+- **Fait** (`aret_win32.c`/`aret_hle.c` + pops) :
+  - **Liste de propriétés fenêtre** : `SetProp`/`GetProp`/`RemovePropA/W` (store par (hwnd,clé)→valeur, round-trip).
+  - **`GlobalHandle`/`LocalHandle`** : identité (tas fixe → handle == pointeur, cohérent avec `GlobalLock`).
+  - **`GetProfileStringA`/`GetProfileIntA`** : variantes win.ini des lectures private-profile (même lecteur INI,
+    fichier implicite « win.ini »).
+  - **`GetVolumeInformationA`** : volume ARET **invariant** (label/serial/fs), env-dépendant → non bit-comparé
+    (comme `GetDiskFreeSpace`).
+  - **`GetOpenFileNameA`/`GetSaveFileNameA`** → FALSE (pas de sélecteur affiché ; « annulé » sound, jamais un
+    nom deviné).
+  - **`WinExec`** → 2 (`ERROR_FILE_NOT_FOUND` ; même frontière dure que `CreateProcess`, ne prétend jamais lancer).
+- **Oracle** : `winecorpus/user32_propmisc.c` — props round-trip, `GlobalHandle` identité, profile défauts →
+  **bit-identique à Wine**.
+- **Vérifié** : hash transpile **inchangé** `19acad982194bf07`, difftest-transpile 4/4, `table_is_sorted` vert,
+  winediff **80→81/81**.
+- **Note honnête (rendements décroissants)** : la traîne restante = shims à 1-2 binaires, derrière chacun d'autres
+  murs (DDE, common-controls, text-raster) ; aucune vraie appli du corpus n'est encore débloquée de bout en bout.
+  La méthode avance, mais le marginal par shim est faible — cf. doc §5 (profondeur, pas largeur).
+
 <!-- NOUVELLES ENTRÉES ICI (garder l'ordre chronologique, plus récent en bas) -->
+JOURNAL_PLACEHOLDER

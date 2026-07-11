@@ -1055,6 +1055,35 @@ uint32_t aret_GetPrivateProfileIntA(uint32_t esp) {
     if (!found) return (uint32_t)def;
     return (uint32_t)strtol(val, NULL, 10);          /* leading integer; 0 if not numeric */
 }
+/* GetProfileStringA/GetProfileIntA — the win.ini variants of the private-profile
+ * calls (implicit file "win.ini"); the same INI reader, no filename argument. */
+uint32_t aret_GetProfileStringA(uint32_t esp) {
+    const char *section = (const char *)(uintptr_t)arg(esp, 0);
+    const char *key = (const char *)(uintptr_t)arg(esp, 1);
+    const char *def = (const char *)(uintptr_t)arg(esp, 2);
+    char *buf = (char *)(uintptr_t)arg(esp, 3);
+    uint32_t size = arg(esp, 4);
+    if (!buf || size == 0) return 0;
+    char path[1024]; translate_path("win.ini", path, sizeof path);
+    char *data = ini_slurp(path);
+    char val[1024]; int found = section && key && ini_get(data, section, key, val, sizeof val);
+    if (data) free(data);
+    const char *src = found ? val : (def ? def : "");
+    uint32_t n = 0; for (; src[n] && n < size - 1; n++) buf[n] = src[n];
+    buf[n] = 0;
+    return n;
+}
+uint32_t aret_GetProfileIntA(uint32_t esp) {
+    const char *section = (const char *)(uintptr_t)arg(esp, 0);
+    const char *key = (const char *)(uintptr_t)arg(esp, 1);
+    int def = (int)arg(esp, 2);
+    char path[1024]; translate_path("win.ini", path, sizeof path);
+    char *data = ini_slurp(path);
+    char val[64]; int found = section && key && ini_get(data, section, key, val, sizeof val);
+    if (data) free(data);
+    if (!found) return (uint32_t)def;
+    return (uint32_t)strtol(val, NULL, 10);
+}
 /* MoveFileA(existing, new) -> BOOL. POSIX rename (both paths translated). */
 /* GetShortPathNameA(long, short, cch) -> length. Linux has no 8.3 aliasing, so the
  * short path IS the long path (copied through). */

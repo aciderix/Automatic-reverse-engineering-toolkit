@@ -360,6 +360,10 @@ uint32_t aret_GlobalAlloc(uint32_t esp) {
 uint32_t aret_GlobalFree(uint32_t esp) { free(WP(0)); return 0; }
 uint32_t aret_LocalAlloc(uint32_t esp) { return aret_GlobalAlloc(esp); }
 uint32_t aret_LocalFree(uint32_t esp) { free(WP(0)); return 0; }
+/* GlobalHandle(pMem) -> HGLOBAL. Our heap is fixed (handle == pointer, GlobalLock
+ * is identity), so the handle for a locked pointer is the pointer itself. */
+uint32_t aret_GlobalHandle(uint32_t esp) { return WU(0); }
+uint32_t aret_LocalHandle(uint32_t esp) { return WU(0); }
 
 /* ------------------------------------------------------------------ */
 /* Interlocked atomics — map onto GCC __atomic builtins                */
@@ -1938,6 +1942,63 @@ uint32_t aret_RedrawWindow(uint32_t esp) {
 /* Deferred window positioning. We apply each move immediately (the final window
  * state is identical to a batched apply; only repaint atomicity — cosmetic —
  * differs), and use the count as an opaque non-zero HDWP. */
+/* Window property list: SetProp/GetProp/RemovePropA/W(hwnd, lpString, [hData]).
+ * A per-(window,key) value store — used by subclassing/wrapping code to hang
+ * per-window data off an HWND. */
+#define U32_MAX_PROP 256
+static struct { uint32_t hwnd; char key[64]; uint32_t val; int used; } g_u32_prop[U32_MAX_PROP];
+static int u32_prop_find(uint32_t hwnd, const char *key) {
+    for (int i = 0; i < U32_MAX_PROP; i++)
+        if (g_u32_prop[i].used && g_u32_prop[i].hwnd == hwnd && strncmp(g_u32_prop[i].key, key, 64) == 0) return i;
+    return -1;
+}
+static uint32_t u32_set_prop(uint32_t hwnd, const char *key, uint32_t val) {
+    if (!key) return 0;
+    int i = u32_prop_find(hwnd, key);
+    if (i < 0) for (i = 0; i < U32_MAX_PROP; i++) if (!g_u32_prop[i].used) break;
+    if (i >= U32_MAX_PROP) return 0;
+    g_u32_prop[i].used = 1; g_u32_prop[i].hwnd = hwnd;
+    int k = 0; for (; key[k] && k < 63; k++) g_u32_prop[i].key[k] = key[k]; g_u32_prop[i].key[k] = 0;
+    g_u32_prop[i].val = val; return 1;
+}
+static uint32_t u32_get_prop(uint32_t hwnd, const char *key) {
+    if (!key) return 0; int i = u32_prop_find(hwnd, key);
+    return i < 0 ? 0 : g_u32_prop[i].val;
+}
+static uint32_t u32_rm_prop(uint32_t hwnd, const char *key) {
+    if (!key) return 0; int i = u32_prop_find(hwnd, key);
+    if (i < 0) return 0; uint32_t v = g_u32_prop[i].val; g_u32_prop[i].used = 0; return v;
+}
+uint32_t aret_SetPropA(uint32_t esp) { return u32_set_prop(WU(0), WCS(1), WU(2)); }
+uint32_t aret_GetPropA(uint32_t esp) { return u32_get_prop(WU(0), WCS(1)); }
+uint32_t aret_RemovePropA(uint32_t esp) { return u32_rm_prop(WU(0), WCS(1)); }
+uint32_t aret_SetPropW(uint32_t esp) { char k[64]; u32_w2n((const uint16_t *)WP(1), k, sizeof k); return u32_set_prop(WU(0), k, WU(2)); }
+uint32_t aret_GetPropW(uint32_t esp) { char k[64]; u32_w2n((const uint16_t *)WP(1), k, sizeof k); return u32_get_prop(WU(0), k); }
+uint32_t aret_RemovePropW(uint32_t esp) { char k[64]; u32_w2n((const uint16_t *)WP(1), k, sizeof k); return u32_rm_prop(WU(0), k); }
+/* GetOpenFileNameA/GetSaveFileNameA(OPENFILENAME*) -> BOOL. No file chooser is
+ * shown (display-free): report cancellation (FALSE), the sound "user picked
+ * nothing" outcome — never a guessed filename. */
+uint32_t aret_GetOpenFileNameA(uint32_t esp) { (void)esp; return 0; }
+uint32_t aret_GetSaveFileNameA(uint32_t esp) { (void)esp; return 0; }
+/* WinExec(lpCmdLine, uCmdShow) -> UINT. Launching a child process has no host
+ * Windows to run it (same hard boundary as CreateProcess) -> ERROR_FILE_NOT_FOUND
+ * (2), a value < 32 meaning failure. Sound: never pretends to have launched. */
+uint32_t aret_WinExec(uint32_t esp) { (void)esp; return 2; }
+/* GetVolumeInformationA(root, volNameBuf, volNameSz, serial, maxComp, fsFlags,
+ * fsNameBuf, fsNameSz) -> BOOL. A defined ARET volume (invariant, like
+ * GetDiskFreeSpace): env-dependent raw values are tested by invariant, not
+ * bit-compared to Wine. */
+uint32_t aret_GetVolumeInformationA(uint32_t esp) {
+    char *vn = (char *)WP(1); uint32_t vns = WU(2);
+    uint32_t *serial = (uint32_t *)WP(3), *maxc = (uint32_t *)WP(4), *flags = (uint32_t *)WP(5);
+    char *fsn = (char *)WP(6); uint32_t fsns = WU(7);
+    if (vn && vns) { const char *s = "ARET"; uint32_t n = 0; for (; s[n] && n < vns - 1; n++) vn[n] = s[n]; vn[n] = 0; }
+    if (serial) *serial = 0x41524554u;
+    if (maxc) *maxc = 255;
+    if (flags) *flags = 0x00000002u;          /* FS_CASE_IS_PRESERVED */
+    if (fsn && fsns) { const char *s = "NTFS"; uint32_t n = 0; for (; s[n] && n < fsns - 1; n++) fsn[n] = s[n]; fsn[n] = 0; }
+    return 1;
+}
 uint32_t aret_BeginDeferWindowPos(uint32_t esp) { (void)esp; return 0x0DEF0001u; }
 uint32_t aret_DeferWindowPos(uint32_t esp) {
     int i = u32_win_idx(WU(1));
