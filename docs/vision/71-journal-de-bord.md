@@ -1582,4 +1582,26 @@ Détail : **70 §6** (roadmap). Résumé :
 - **Vérifié** : hash transpile **inchangé** `19acad982194bf07`, difftest-transpile 4/4, `table_is_sorted` vert,
   winediff **83→84/84**.
 
+### 2026-07-11 — [RECOV][DEMO] Diagnostic finger : la recovery `_initterm` **fonctionne** ; reste 1 crash CRT aval
+- **Contexte** : « est-ce une avancée générale ? » → mesurer avant de conclure. Ré-appliqué la recovery
+  `_initterm` (temporairement) + `gdb` sur le C généré `-O0 -g`.
+- **Résultat majeur** : avec la recovery, **finger imprime sa bannière CORRECTE** (`Finger v1.0 - Dennis j.
+  Cox - Public Domain / Use finger /? for help`) = **bit-identique à Wine**. Le `main` de finger **tourne
+  juste**. La recovery est donc une **vraie avancée générale** (déjà prouvée corpus-safe : difftest 271/271,
+  hash inchangé) — et 0x4017d0 (entrée `_initterm` récupérée) est une **vraie fonction** (prologue propre après
+  padding int3), pas un faux positif.
+- **Reste UN crash aval** : après la bannière, SIGSEGV dans `sub_403a90` (fonction msvcrt géante) au **term-time
+  `_initterm`** (cleanup de sortie) : `v184 = *(v146+0x18) = NULL` puis `*(NULL)`. `v146` est une structure
+  **sur la pile** (`+0x00=1, +0x04=ptr, +0x08=0x45, +0x0c=ptr, puis zéros`) ; le motif `*(v186+v185+4) & 0x40`
+  = un check de flag `_osfile` (lowio/`__pioinfo`). Wine ne crashe pas là → un champ que Wine a non-nul est nul
+  chez ARET. **Effet observable** : le crash empêche le flush stdout (bufferisé en pipe) → sortie vide via
+  `--run` (alors que la bannière est bien produite).
+- **Verdict** : recovery = **générale et correcte** (fait tourner le `main`). Mais **shippée seule elle est
+  pire** (finger passe d'un abort propre à un crash-sortie-vide) → **révoquée** (principe sacré). Le crash CRT
+  aval est **profond** (behemoth msvcrt, centaines de locals) et sa **généralité n'est pas prouvée** — chantier
+  **couplé** dédié : *recovery `_initterm` + fix du crash cleanup CRT*, à shipper ensemble.
+- **Reframing utile** : finger n'est **pas** loin — son `main` marche, il est **à 1 bug CRT** de fonctionner
+  (un vrai binaire Win95 qui tournerait). Le mur restant est le **cleanup CRT statique** (term `_initterm`
+  touchant une structure lowio à champ nul), pas la recovery ni le `main`.
+
 <!-- NOUVELLES ENTRÉES ICI (garder l'ordre chronologique, plus récent en bas) -->
