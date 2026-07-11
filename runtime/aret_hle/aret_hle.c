@@ -905,6 +905,156 @@ uint32_t aret_llseek(uint32_t esp) {
                     origin == 1 ? SEEK_CUR : (origin == 2 ? SEEK_END : SEEK_SET));
     return r < 0 ? ARET_HFILE_ERROR : (uint32_t)r;
 }
+/* ---- LZ decompression (lzexpand.dll: SZDD / LZSS) --------------------------
+ * Microsoft COMPRESS.EXE format: an 8-byte magic, mode + missing-char, a 4-byte
+ * uncompressed size, then LZSS data over a 4 KB ring buffer (init 0x20, position
+ * 4078). A genuine deterministic decompressor (verified-algorithm reuse) — the LZ
+ * APIs decompress install/data files. An LZ handle owns the whole decompressed
+ * content; a non-SZDD file is carried verbatim. HFILE = fd; LZ handle tag base
+ * 0x4C5A0000. */
+#define ARET_LZ_BASE 0x4C5A0000u
+#define ARET_LZ_MAX 32
+static struct { int used; uint8_t *buf; size_t len, pos; } g_lz[ARET_LZ_MAX];
+
+static int lz_szdd_decompress(const uint8_t *in, size_t inlen, uint8_t **out, size_t *outlen) {
+    static const uint8_t magic[8] = { 0x53,0x5A,0x44,0x44,0x88,0xF0,0x27,0x33 };
+    if (inlen < 14 || memcmp(in, magic, 8) != 0) return 0;
+    uint32_t osize = (uint32_t)in[10] | ((uint32_t)in[11] << 8) | ((uint32_t)in[12] << 16) | ((uint32_t)in[13] << 24);
+    uint8_t *o = (uint8_t *)malloc(osize ? osize : 1);
+    if (!o) return 0;
+    uint8_t ring[4096]; memset(ring, 0x20, sizeof ring);
+    int rp = 4096 - 16;
+    size_t ip = 14, op = 0;
+    while (ip < inlen && op < osize) {
+        uint8_t control = in[ip++];
+        for (int bit = 0; bit < 8 && op < osize; bit++) {
+            if (control & (1u << bit)) {                    /* literal */
+                if (ip >= inlen) break;
+                uint8_t b = in[ip++];
+                o[op++] = b; ring[rp] = b; rp = (rp + 1) & 0xFFF;
+            } else {                                        /* back-reference */
+                if (ip + 1 >= inlen) break;
+                uint8_t lo = in[ip++], hi = in[ip++];
+                int mpos = lo | ((hi & 0xF0) << 4), mlen = (hi & 0x0F) + 3;
+                for (int k = 0; k < mlen && op < osize; k++) {
+                    uint8_t b = ring[(mpos + k) & 0xFFF];
+                    o[op++] = b; ring[rp] = b; rp = (rp + 1) & 0xFFF;
+                }
+            }
+        }
+    }
+    *out = o; *outlen = op; return 1;
+}
+/* Read a whole file; decompress if SZDD, else keep it verbatim. */
+static int lz_slurp(int fd, uint8_t **out, size_t *outlen) {
+    if (fd < 0) return 0;
+    off_t sz = lseek(fd, 0, SEEK_END); lseek(fd, 0, SEEK_SET);
+    if (sz < 0) return 0;
+    uint8_t *raw = (uint8_t *)malloc((size_t)sz ? (size_t)sz : 1);
+    if (!raw) return 0;
+    ssize_t rd = read(fd, raw, (size_t)sz);
+    if (rd < 0) { free(raw); return 0; }
+    if (lz_szdd_decompress(raw, (size_t)rd, out, outlen)) { free(raw); return 1; }
+    *out = raw; *outlen = (size_t)rd; return 1;
+}
+static int lz_alloc(uint8_t *buf, size_t len) {
+    for (int i = 0; i < ARET_LZ_MAX; i++) if (!g_lz[i].used) {
+        g_lz[i].used = 1; g_lz[i].buf = buf; g_lz[i].len = len; g_lz[i].pos = 0; return i;
+    }
+    return -1;
+}
+static int lz_idx(uint32_t h) {
+    if ((h & 0xFFFF0000u) != ARET_LZ_BASE) return -1;
+    uint32_t i = h & 0xFFFFu;
+    return (i < ARET_LZ_MAX && g_lz[i].used) ? (int)i : -1;
+}
+/* LZOpenFileA(lpFileName, lpReOpenBuf, wStyle) -> HFILE (an LZ handle). Fills the
+ * OFSTRUCT's szPathName. */
+uint32_t aret_LZOpenFileA(uint32_t esp) {
+    char path[1024];
+    translate_path((const char *)(uintptr_t)arg(esp, 0), path, sizeof path);
+    int fd = open(path, O_RDONLY);
+    if (fd < 0) return ARET_HFILE_ERROR;
+    uint8_t *buf; size_t len; int ok = lz_slurp(fd, &buf, &len); close(fd);
+    if (!ok) return ARET_HFILE_ERROR;
+    int i = lz_alloc(buf, len);
+    if (i < 0) { free(buf); return ARET_HFILE_ERROR; }
+    uint8_t *of = (uint8_t *)(uintptr_t)arg(esp, 1);      /* OFSTRUCT */
+    if (of) { memset(of, 0, 136); of[0] = 136; const char *s = (const char *)(uintptr_t)arg(esp, 0);
+              int k = 0; if (s) for (; s[k] && k < 127; k++) of[8 + k] = s[k]; of[8 + k] = 0; }
+    return ARET_LZ_BASE | (uint32_t)i;
+}
+uint32_t aret_LZInit(uint32_t esp) {
+    uint32_t hf = arg(esp, 0);
+    if (lz_idx(hf) >= 0) return hf;                        /* already an LZ handle */
+    uint8_t *buf; size_t len;
+    if (!lz_slurp((int)hf, &buf, &len)) return ARET_HFILE_ERROR;
+    int i = lz_alloc(buf, len);
+    if (i < 0) { free(buf); return ARET_HFILE_ERROR; }
+    return ARET_LZ_BASE | (uint32_t)i;
+}
+/* LZRead(hFile, lpBuffer, cbRead) -> bytes read (from the decompressed content). */
+uint32_t aret_LZRead(uint32_t esp) {
+    int i = lz_idx(arg(esp, 0));
+    if (i < 0) return aret_lread(esp);                    /* raw fd: plain read */
+    uint8_t *dst = (uint8_t *)(uintptr_t)arg(esp, 1);
+    size_t want = arg(esp, 2), avail = g_lz[i].len - g_lz[i].pos;
+    if (want > avail) want = avail;
+    if (dst && want) memcpy(dst, g_lz[i].buf + g_lz[i].pos, want);
+    g_lz[i].pos += want;
+    return (uint32_t)want;
+}
+/* LZSeek(hFile, lOffset, iOrigin) -> new position. */
+uint32_t aret_LZSeek(uint32_t esp) {
+    int i = lz_idx(arg(esp, 0));
+    if (i < 0) return aret_llseek(esp);
+    int32_t off = (int32_t)arg(esp, 1); int origin = (int)arg(esp, 2);
+    long base = origin == 1 ? (long)g_lz[i].pos : (origin == 2 ? (long)g_lz[i].len : 0);
+    long np = base + off; if (np < 0) np = 0; if (np > (long)g_lz[i].len) np = (long)g_lz[i].len;
+    g_lz[i].pos = (size_t)np; return (uint32_t)np;
+}
+uint32_t aret_LZClose(uint32_t esp) {
+    int i = lz_idx(arg(esp, 0));
+    if (i < 0) { close((int)arg(esp, 0)); return 0; }
+    free(g_lz[i].buf); g_lz[i].used = 0; g_lz[i].buf = NULL; return 0;
+}
+/* LZCopy(hfSource, hfDest) -> LONG bytes copied. Source = LZ handle or raw fd;
+ * dest = a writable fd (from _lcreat). */
+uint32_t aret_LZCopy(uint32_t esp) {
+    uint32_t src = arg(esp, 0); int dfd = (int)arg(esp, 1);
+    int i = lz_idx(src);
+    uint8_t *buf; size_t len; int owned = 0;
+    if (i >= 0) { buf = g_lz[i].buf; len = g_lz[i].len; }
+    else { if (!lz_slurp((int)src, &buf, &len)) return 0xFFFFFFFFu; owned = 1; }
+    size_t off = 0; while (off < len) { ssize_t w = write(dfd, buf + off, len - off); if (w <= 0) break; off += (size_t)w; }
+    if (owned) free(buf);
+    return (uint32_t)off;
+}
+/* GetExpandedNameA(lpszSource, lpszBuffer) -> BOOL. Restore the packed file's
+ * original name: the SZDD header's byte 9 is the char stripped from the extension
+ * (which the packer replaced with '_'). */
+uint32_t aret_GetExpandedNameA(uint32_t esp) {
+    const char *src = (const char *)(uintptr_t)arg(esp, 0);
+    char *dst = (char *)(uintptr_t)arg(esp, 1);
+    if (!src || !dst) return 0;
+    int n = 0; for (; src[n] && n < 255; n++) dst[n] = src[n]; dst[n] = 0;
+    char path[1024]; translate_path(src, path, sizeof path);
+    int fd = open(path, O_RDONLY);
+    if (fd >= 0) {
+        uint8_t hdr[10];
+        if (read(fd, hdr, 10) == 10) {
+            static const uint8_t magic[8] = { 0x53,0x5A,0x44,0x44,0x88,0xF0,0x27,0x33 };
+            if (memcmp(hdr, magic, 8) == 0 && hdr[9] && hdr[9] != 0) {
+                /* replace a trailing '_' in the extension with the missing char */
+                int last = n - 1;
+                if (last >= 0 && dst[last] == '_') dst[last] = (char)hdr[9];
+            }
+        }
+        close(fd);
+    }
+    return 1;
+}
+
 /* lstrcpynA(dst, src, iMaxLength) -> dst: copy at most iMaxLength-1 chars + NUL
  * (iMaxLength counts the NUL). */
 uint32_t aret_lstrcpynA(uint32_t esp) {

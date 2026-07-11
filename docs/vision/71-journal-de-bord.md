@@ -1565,4 +1565,21 @@ Détail : **70 §6** (roadmap). Résumé :
 - **Vérifié** : hash transpile **inchangé** `19acad982194bf07`, difftest-transpile 4/4, `table_is_sorted` vert,
   winediff **82→83/83**.
 
+### 2026-07-11 — [HLE-FILE] M7 G7 — décompression LZ (lzexpand / SZDD) : réutilisation d'algorithme vérifié
+- **Pourquoi** : après avoir écarté `FormatMessageA` (catalogue Wine, froid) et le text-raster (pas d'oracle
+  pixel), **LZ** (`LZOpenFileA`/`LZCopy`/`LZClose`, 2 binaires) est le dernier mur **implémentable + oracle-propre**
+  du corpus — un **vrai algorithme déterministe** (LZSS/SZDD), pas un stub. Les APIs LZ décompressent les fichiers
+  d'install/données. C'est de la **réutilisation d'algorithme vérifié** (doctrine §1).
+- **Fait** (`aret_hle.c`) : décompresseur **SZDD LZSS** exact (magic 8 o + mode/missing + taille 4 o, puis LZSS sur
+  ring-buffer 4 Ko init 0x20, position 4078 ; control byte 8 bits LSB-first : littéral, ou back-ref 12-bit
+  position + (4-bit len +3)). Un handle LZ (tag `0x4C5A0000`) porte tout le contenu décompressé ; un fichier
+  non-SZDD est gardé verbatim. `LZOpenFileA` (slurp+décompresse, remplit l'OFSTRUCT), `LZRead`/`LZSeek` (sert
+  depuis le buffer ; fd brut → read/lseek), `LZClose`, `LZCopy` (source LZ/fd → écrit tout vers le fd dest),
+  `LZInit` (enveloppe un fd), `GetExpandedNameA` (restaure le char manquant de l'extension via l'en-tête).
+- **Oracle** : `winecorpus/lz_decompress.c` — blob SZDD **embarqué** (auto-suffisant, écrit via l'API Win16
+  `_lcreat`/`_lwrite`), décompressé 2 façons (`LZOpenFile`+`LZRead`, et `LZCopy` vers fichier) → 53 octets
+  exacts, chaîne correcte → **bit-identique à Wine**. `winediff.sh` lie `-llz32`.
+- **Vérifié** : hash transpile **inchangé** `19acad982194bf07`, difftest-transpile 4/4, `table_is_sorted` vert,
+  winediff **83→84/84**.
+
 <!-- NOUVELLES ENTRÉES ICI (garder l'ordre chronologique, plus récent en bas) -->
