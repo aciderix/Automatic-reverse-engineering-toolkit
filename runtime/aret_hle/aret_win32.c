@@ -1849,3 +1849,325 @@ uint32_t aret_SendDlgItemMessageW(uint32_t esp) {
     if (u32_defproc_text(child, WU(2), WU(3), WU(4), 1, &r)) return r;
     return 0;
 }
+
+/* ================================================================== */
+/* GDI — object/DC model + bit-exact DIB drawing (framebuffer oracle)  */
+/* ================================================================== */
+/* GDI objects (DCs, bitmaps, brushes, pens, fonts) live in one handle table;
+ * handles are opaque (base 0x30000000, distinct from HWND/GDI-stock). Drawing
+ * targets a memory DIB section — a 32-bit BGRA buffer we own — so SetPixel/
+ * FillRect/PatBlt are exact memory writes that match Wine's DIB byte-for-byte
+ * (verified: a 32bpp BI_RGB pixel is [B,G,R,0]). The oracle hashes that buffer.
+ * Screen/window DCs have no surface (no display) -> their drawing is a sound
+ * no-op; only the offscreen DIB path is pixel-verified. Text (font raster) and
+ * pen-edged shapes are NOT here (can't match Wine's rasteriser bit-for-bit) —
+ * abort sound until a binary needs a modellable subset. GDI is vast; we stop at
+ * the measured, exactly-reproducible core (doc 72 §5). */
+#define GDI_MAX  512
+#define GDI_BASE 0x30000000u
+enum { GDIT_DC = 1, GDIT_BITMAP, GDIT_BRUSH, GDIT_PEN, GDIT_FONT, GDIT_RGN };
+static struct gdi_obj {
+    int type, used, stock, null_obj;
+    uint32_t sel_bitmap, sel_brush, sel_pen, sel_font;   /* DC */
+    uint32_t text_color, bk_color; int bk_mode;          /* DC */
+    int w, h, topdown; uint8_t *bits; int owns_bits;     /* BITMAP */
+    uint32_t color;                                      /* BRUSH/PEN */
+} g_gdi[GDI_MAX];
+
+static uint32_t gdi_handle(int i) { return GDI_BASE | (uint32_t)i; }
+static int gdi_idx(uint32_t h) {
+    if ((h & 0xFF000000u) != GDI_BASE) return -1;
+    uint32_t i = h & 0x00FFFFFFu;
+    return (i < GDI_MAX && g_gdi[i].used) ? (int)i : -1;
+}
+static int gdi_alloc(int type) {
+    for (int i = 1; i < GDI_MAX; i++)
+        if (!g_gdi[i].used) { memset(&g_gdi[i], 0, sizeof g_gdi[i]); g_gdi[i].used = 1; g_gdi[i].type = type; return i; }
+    return 0;
+}
+/* The DIB surface a DC currently draws to (NULL if none / screen DC). */
+static struct gdi_obj *gdi_dc_surface(uint32_t hdc) {
+    int d = gdi_idx(hdc);
+    if (d < 0 || g_gdi[d].type != GDIT_DC) return NULL;
+    int b = gdi_idx(g_gdi[d].sel_bitmap);
+    if (b < 0 || g_gdi[b].type != GDIT_BITMAP || !g_gdi[b].bits) return NULL;
+    return &g_gdi[b];
+}
+/* Address of pixel (x,y) in a DIB (honours top-down vs bottom-up), or NULL. */
+static uint8_t *gdi_px(struct gdi_obj *bm, int x, int y) {
+    if (x < 0 || y < 0 || x >= bm->w || y >= bm->h) return NULL;
+    int row = bm->topdown ? y : (bm->h - 1 - y);
+    return bm->bits + ((size_t)row * bm->w + x) * 4;
+}
+/* COLORREF (0x00BBGGRR) -> DIB bytes [B,G,R,0], and back. */
+static void gdi_put(struct gdi_obj *bm, int x, int y, uint32_t c) {
+    uint8_t *p = gdi_px(bm, x, y); if (!p) return;
+    p[0] = (c >> 16) & 0xFF; p[1] = (c >> 8) & 0xFF; p[2] = c & 0xFF; p[3] = 0;
+}
+static uint32_t gdi_getpx(struct gdi_obj *bm, int x, int y) {
+    uint8_t *p = gdi_px(bm, x, y); if (!p) return 0xFFFFFFFFu; /* CLR_INVALID */
+    return (uint32_t)p[2] | ((uint32_t)p[1] << 8) | ((uint32_t)p[0] << 16);
+}
+
+/* ---- DC lifecycle ---- */
+/* GetDC/GetWindowDC(hwnd) -> HDC. A screen/window DC (no offscreen surface: no
+ * display, so its drawing is a sound no-op). */
+uint32_t aret_GetDC(uint32_t esp) { (void)esp; int i = gdi_alloc(GDIT_DC); return i ? gdi_handle(i) : 0; }
+uint32_t aret_GetWindowDC(uint32_t esp) { return aret_GetDC(esp); }
+/* ReleaseDC(hwnd, hdc) -> int (1). */
+uint32_t aret_ReleaseDC(uint32_t esp) { int i = gdi_idx(WU(1)); if (i >= 0 && !g_gdi[i].sel_bitmap) g_gdi[i].used = 0; return 1; }
+/* CreateCompatibleDC(hdc) -> HDC (a memory DC; select a bitmap before drawing). */
+uint32_t aret_CreateCompatibleDC(uint32_t esp) { (void)esp; int i = gdi_alloc(GDIT_DC); return i ? gdi_handle(i) : 0; }
+/* DeleteDC(hdc) -> BOOL. */
+uint32_t aret_DeleteDC(uint32_t esp) { int i = gdi_idx(WU(0)); if (i < 0) return 0; g_gdi[i].used = 0; return 1; }
+/* BeginPaint(hwnd, LPPAINTSTRUCT) -> HDC. Zero the PAINTSTRUCT, hand back a DC. */
+uint32_t aret_BeginPaint(uint32_t esp) {
+    uint8_t *ps = (uint8_t *)WP(1);
+    int i = gdi_alloc(GDIT_DC); uint32_t hdc = i ? gdi_handle(i) : 0;
+    if (ps) { memset(ps, 0, 64); *(uint32_t *)ps = hdc; }   /* PAINTSTRUCT.hdc @0 */
+    return hdc;
+}
+/* EndPaint(hwnd, const PAINTSTRUCT*) -> BOOL. Release the paint DC. */
+uint32_t aret_EndPaint(uint32_t esp) {
+    const uint8_t *ps = (const uint8_t *)WP(1);
+    if (ps) { int i = gdi_idx(*(const uint32_t *)ps); if (i >= 0) g_gdi[i].used = 0; }
+    return 1;
+}
+uint32_t aret_GdiFlush(uint32_t esp) { (void)esp; return 1; }   /* writes are immediate */
+
+/* ---- bitmaps ---- */
+/* CreateDIBSection(hdc, pbmi, usage, ppvBits, hSection, offset) -> HBITMAP.
+ * 32bpp BI_RGB only (the exactly-reproducible case); other depths abort sound. */
+uint32_t aret_CreateDIBSection(uint32_t esp) {
+    const uint8_t *bmi = (const uint8_t *)WP(1);
+    uint32_t *ppv = (uint32_t *)WP(3);
+    if (ppv) *ppv = 0;
+    if (!bmi) return 0;
+    int32_t bw = *(const int32_t *)(bmi + 4);
+    int32_t bh = *(const int32_t *)(bmi + 8);
+    uint16_t bpp = *(const uint16_t *)(bmi + 14);
+    if (bpp != 32) { aret_unimpl("CreateDIBSection: only 32bpp BI_RGB modelled"); return 0; }
+    int w = bw, h = bh < 0 ? -bh : bh, td = bh < 0;
+    if (w <= 0 || h <= 0) return 0;
+    int i = gdi_alloc(GDIT_BITMAP); if (!i) return 0;
+    g_gdi[i].w = w; g_gdi[i].h = h; g_gdi[i].topdown = td;
+    g_gdi[i].bits = (uint8_t *)calloc((size_t)w * h, 4); g_gdi[i].owns_bits = 1;
+    if (!g_gdi[i].bits) { g_gdi[i].used = 0; return 0; }
+    if (ppv) *ppv = (uint32_t)(uintptr_t)g_gdi[i].bits;
+    return gdi_handle(i);
+}
+/* CreateCompatibleBitmap(hdc, w, h) -> HBITMAP (32bpp, not app-exposed). */
+uint32_t aret_CreateCompatibleBitmap(uint32_t esp) {
+    int w = WI(1), h = WI(2);
+    if (w <= 0 || h <= 0) return 0;
+    int i = gdi_alloc(GDIT_BITMAP); if (!i) return 0;
+    g_gdi[i].w = w; g_gdi[i].h = h; g_gdi[i].topdown = 1;
+    g_gdi[i].bits = (uint8_t *)calloc((size_t)w * h, 4); g_gdi[i].owns_bits = 1;
+    if (!g_gdi[i].bits) { g_gdi[i].used = 0; return 0; }
+    return gdi_handle(i);
+}
+
+/* ---- objects ---- */
+uint32_t aret_CreateSolidBrush(uint32_t esp) {
+    int i = gdi_alloc(GDIT_BRUSH); if (!i) return 0;
+    g_gdi[i].color = WU(0) & 0x00FFFFFFu;
+    return gdi_handle(i);
+}
+uint32_t aret_CreatePen(uint32_t esp) {
+    int i = gdi_alloc(GDIT_PEN); if (!i) return 0;
+    g_gdi[i].color = WU(2) & 0x00FFFFFFu;                 /* (style, width, color) */
+    return gdi_handle(i);
+}
+/* GetStockObject(i) -> HGDIOBJ. Distinct, cached handle per stock id (opaque). */
+static uint32_t g_gdi_stock[32];
+uint32_t aret_GetStockObject(uint32_t esp) {
+    int id = WI(0);
+    if (id < 0 || id >= 32) return 0;
+    if (!g_gdi_stock[id]) {
+        int type = (id <= 5) ? GDIT_BRUSH : (id <= 8) ? GDIT_PEN : GDIT_FONT;
+        int i = gdi_alloc(type); if (!i) return 0;
+        g_gdi[i].stock = 1;
+        switch (id) {                                     /* stock brush colours */
+        case 0: g_gdi[i].color = 0xFFFFFF; break;         /* WHITE_BRUSH */
+        case 1: g_gdi[i].color = 0xC0C0C0; break;         /* LTGRAY_BRUSH */
+        case 2: g_gdi[i].color = 0x808080; break;         /* GRAY_BRUSH */
+        case 3: g_gdi[i].color = 0x404040; break;         /* DKGRAY_BRUSH */
+        case 4: g_gdi[i].color = 0x000000; break;         /* BLACK_BRUSH */
+        case 5: g_gdi[i].null_obj = 1; break;             /* NULL_BRUSH / HOLLOW_BRUSH */
+        case 6: g_gdi[i].color = 0xFFFFFF; break;         /* WHITE_PEN */
+        case 7: g_gdi[i].color = 0x000000; break;         /* BLACK_PEN */
+        case 8: g_gdi[i].null_obj = 1; break;             /* NULL_PEN */
+        default: break;                                   /* fonts: opaque */
+        }
+        g_gdi_stock[id] = gdi_handle(i);
+    }
+    return g_gdi_stock[id];
+}
+/* SelectObject(hdc, hgdiobj) -> previous object of that kind. */
+uint32_t aret_SelectObject(uint32_t esp) {
+    int d = gdi_idx(WU(0)), o = gdi_idx(WU(1));
+    if (d < 0 || g_gdi[d].type != GDIT_DC || o < 0) return 0;
+    uint32_t h = WU(1), prev = 0;
+    switch (g_gdi[o].type) {
+    case GDIT_BITMAP: prev = g_gdi[d].sel_bitmap; g_gdi[d].sel_bitmap = h; break;
+    case GDIT_BRUSH:  prev = g_gdi[d].sel_brush;  g_gdi[d].sel_brush = h;  break;
+    case GDIT_PEN:    prev = g_gdi[d].sel_pen;    g_gdi[d].sel_pen = h;    break;
+    case GDIT_FONT:   prev = g_gdi[d].sel_font;   g_gdi[d].sel_font = h;   break;
+    default: return 0;
+    }
+    return prev;
+}
+/* DeleteObject(hgdiobj) -> BOOL. Frees owned bits; stock objects are never freed. */
+uint32_t aret_DeleteObject(uint32_t esp) {
+    int i = gdi_idx(WU(0));
+    if (i < 0) return 0;
+    if (g_gdi[i].stock) return 1;
+    if (g_gdi[i].owns_bits && g_gdi[i].bits) { free(g_gdi[i].bits); g_gdi[i].bits = NULL; }
+    g_gdi[i].used = 0;
+    return 1;
+}
+
+/* Resolve a FillRect "brush": a real brush handle, or a system-colour index+1
+ * ((HBRUSH)(COLOR_x+1)). Returns 1 if a colour was produced, 0 for a null brush. */
+static uint32_t u32_syscolor(int i);
+static int gdi_brush_color(uint32_t hb, uint32_t *out) {
+    int b = gdi_idx(hb);
+    if (b >= 0 && g_gdi[b].type == GDIT_BRUSH) { if (g_gdi[b].null_obj) return 0; *out = g_gdi[b].color; return 1; }
+    if (hb >= 1 && hb <= 31) { *out = u32_syscolor((int)hb - 1); return 1; }  /* COLOR_x + 1 */
+    return 0;
+}
+
+/* ---- drawing (bit-exact on the offscreen DIB) ---- */
+/* SetPixel(hdc, x, y, color) -> COLORREF set (or CLR_INVALID). */
+uint32_t aret_SetPixel(uint32_t esp) {
+    struct gdi_obj *bm = gdi_dc_surface(WU(0));
+    if (!bm) return 0xFFFFFFFFu;
+    uint32_t c = WU(3) & 0x00FFFFFFu;
+    if (!gdi_px(bm, WI(1), WI(2))) return 0xFFFFFFFFu;
+    gdi_put(bm, WI(1), WI(2), c);
+    return c;
+}
+/* SetPixelV(hdc, x, y, color) -> BOOL. */
+uint32_t aret_SetPixelV(uint32_t esp) {
+    struct gdi_obj *bm = gdi_dc_surface(WU(0));
+    if (!bm || !gdi_px(bm, WI(1), WI(2))) return 0;
+    gdi_put(bm, WI(1), WI(2), WU(3) & 0x00FFFFFFu);
+    return 1;
+}
+/* GetPixel(hdc, x, y) -> COLORREF (or CLR_INVALID). */
+uint32_t aret_GetPixel(uint32_t esp) {
+    struct gdi_obj *bm = gdi_dc_surface(WU(0));
+    if (!bm) return 0xFFFFFFFFu;
+    return gdi_getpx(bm, WI(1), WI(2));
+}
+/* FillRect(hdc, const RECT*, hbrush) -> int. [left,right) x [top,bottom). */
+uint32_t aret_FillRect(uint32_t esp) {
+    struct gdi_obj *bm = gdi_dc_surface(WU(0));
+    const int32_t *r = (const int32_t *)WP(1);
+    if (!bm || !r) return 0;
+    uint32_t c;
+    if (!gdi_brush_color(WU(2), &c)) return 1;            /* null brush: nothing */
+    for (int y = r[1]; y < r[3]; y++)
+        for (int x = r[0]; x < r[2]; x++) gdi_put(bm, x, y, c);
+    return 1;
+}
+/* PatBlt(hdc, x, y, w, h, rop) -> BOOL. PATCOPY = fill with the selected brush;
+ * BLACKNESS/WHITENESS = solid black/white. Other ROPs abort sound. */
+uint32_t aret_PatBlt(uint32_t esp) {
+    struct gdi_obj *bm = gdi_dc_surface(WU(0));
+    if (!bm) return 0;
+    int x0 = WI(1), y0 = WI(2), x1 = x0 + WI(3), y1 = y0 + WI(4);
+    uint32_t rop = WU(5), c;
+    if (rop == 0x00F00021u /* PATCOPY */) {
+        int b = gdi_idx(g_gdi[gdi_idx(WU(0))].sel_brush);
+        if (b < 0) return 0;
+        if (g_gdi[b].null_obj) return 1;
+        c = g_gdi[b].color;
+    } else if (rop == 0x00000042u /* BLACKNESS */) c = 0x000000;
+    else if (rop == 0x00FF0062u /* WHITENESS */) c = 0xFFFFFF;
+    else { aret_unimpl("PatBlt: only PATCOPY/BLACKNESS/WHITENESS modelled"); return 0; }
+    for (int y = y0; y < y1; y++) for (int x = x0; x < x1; x++) gdi_put(bm, x, y, c);
+    return 1;
+}
+/* BitBlt(hdcDst, x, y, w, h, hdcSrc, x1, y1, rop) -> BOOL. SRCCOPY only. */
+uint32_t aret_BitBlt(uint32_t esp) {
+    struct gdi_obj *dst = gdi_dc_surface(WU(0));
+    if (WU(8) != 0x00CC0020u /* SRCCOPY */) { aret_unimpl("BitBlt: only SRCCOPY modelled"); return 0; }
+    struct gdi_obj *src = gdi_dc_surface(WU(5));
+    if (!dst || !src) return 0;
+    int dx = WI(1), dy = WI(2), w = WI(3), h = WI(4), sx = WI(6), sy = WI(7);
+    for (int j = 0; j < h; j++)
+        for (int i = 0; i < w; i++) {
+            uint8_t *s = gdi_px(src, sx + i, sy + j);
+            uint8_t *d = gdi_px(dst, dx + i, dy + j);
+            if (s && d) { d[0] = s[0]; d[1] = s[1]; d[2] = s[2]; d[3] = s[3]; }
+        }
+    return 1;
+}
+
+/* ---- DC attributes ---- */
+uint32_t aret_SetTextColor(uint32_t esp) { int d = gdi_idx(WU(0)); if (d < 0) return 0xFFFFFFFFu; uint32_t p = g_gdi[d].text_color; g_gdi[d].text_color = WU(1) & 0xFFFFFFu; return p; }
+uint32_t aret_SetBkColor(uint32_t esp)   { int d = gdi_idx(WU(0)); if (d < 0) return 0xFFFFFFFFu; uint32_t p = g_gdi[d].bk_color; g_gdi[d].bk_color = WU(1) & 0xFFFFFFu; return p; }
+uint32_t aret_SetBkMode(uint32_t esp)    { int d = gdi_idx(WU(0)); if (d < 0) return 0; int p = g_gdi[d].bk_mode; g_gdi[d].bk_mode = WI(1); return (uint32_t)p; }
+uint32_t aret_GetTextColor(uint32_t esp) { int d = gdi_idx(WU(0)); return d < 0 ? 0xFFFFFFFFu : g_gdi[d].text_color; }
+uint32_t aret_GetBkColor(uint32_t esp)   { int d = gdi_idx(WU(0)); return d < 0 ? 0xFFFFFFFFu : g_gdi[d].bk_color; }
+
+/* GetSysColor(nIndex) -> COLORREF. Classic Win32 default scheme (deterministic;
+ * the values a the/me-less Wine also serves for the common indices). */
+static uint32_t u32_syscolor(int i) {
+    switch (i) {
+    case 0:  return 0x808080;   /* COLOR_SCROLLBAR */
+    case 1:  return 0x000000;   /* COLOR_BACKGROUND / DESKTOP */
+    case 2:  return 0x800000;   /* COLOR_ACTIVECAPTION */
+    case 3:  return 0x808080;   /* COLOR_INACTIVECAPTION */
+    case 4:  return 0xC0C0C0;   /* COLOR_MENU */
+    case 5:  return 0xFFFFFF;   /* COLOR_WINDOW */
+    case 6:  return 0x000000;   /* COLOR_WINDOWFRAME */
+    case 7:  return 0x000000;   /* COLOR_MENUTEXT */
+    case 8:  return 0x000000;   /* COLOR_WINDOWTEXT */
+    case 9:  return 0xFFFFFF;   /* COLOR_CAPTIONTEXT */
+    case 10: return 0xC0C0C0;   /* COLOR_ACTIVEBORDER */
+    case 11: return 0xC0C0C0;   /* COLOR_INACTIVEBORDER */
+    case 12: return 0x808080;   /* COLOR_APPWORKSPACE */
+    case 13: return 0x800000;   /* COLOR_HIGHLIGHT */
+    case 14: return 0xFFFFFF;   /* COLOR_HIGHLIGHTTEXT */
+    case 15: return 0xC0C0C0;   /* COLOR_BTNFACE / 3DFACE */
+    case 16: return 0x808080;   /* COLOR_BTNSHADOW */
+    case 17: return 0x808080;   /* COLOR_GRAYTEXT */
+    case 18: return 0x000000;   /* COLOR_BTNTEXT */
+    case 19: return 0xC0C0C0;   /* COLOR_INACTIVECAPTIONTEXT */
+    case 20: return 0xFFFFFF;   /* COLOR_BTNHIGHLIGHT */
+    default: return 0x000000;
+    }
+}
+uint32_t aret_GetSysColor(uint32_t esp) { return u32_syscolor(WI(0)); }
+/* GetSysColorBrush(nIndex) -> HBRUSH (cached solid brush of that colour). */
+static uint32_t g_gdi_syscolorbrush[32];
+uint32_t aret_GetSysColorBrush(uint32_t esp) {
+    int id = WI(0); if (id < 0 || id >= 32) return 0;
+    if (!g_gdi_syscolorbrush[id]) {
+        int i = gdi_alloc(GDIT_BRUSH); if (!i) return 0;
+        g_gdi[i].stock = 1; g_gdi[i].color = u32_syscolor(id);
+        g_gdi_syscolorbrush[id] = gdi_handle(i);
+    }
+    return g_gdi_syscolorbrush[id];
+}
+/* GetDeviceCaps(hdc, index) -> int. Fixed device-class metrics exact; the
+ * environment-dependent screen extents use ARET's virtual desktop (tested by
+ * invariant, not raw, like GetSystemMetrics — doc 72 §4.5). */
+uint32_t aret_GetDeviceCaps(uint32_t esp) {
+    switch (WI(1)) {
+    case 2:  return 1;            /* TECHNOLOGY = DT_RASDISPLAY */
+    case 8:  return U32_SCREEN_W; /* HORZRES */
+    case 10: return U32_SCREEN_H; /* VERTRES */
+    case 12: return 32;           /* BITSPIXEL */
+    case 14: return 1;            /* PLANES */
+    case 88: return 96;           /* LOGPIXELSX */
+    case 90: return 96;           /* LOGPIXELSY */
+    case 24: return -1;           /* NUMCOLORS (truecolor) */
+    case 104: return 1;           /* SIZEPALETTE-ish / COLORMGMTCAPS default */
+    case 4:  return 320;          /* HORZSIZE (mm, ~96dpi) */
+    case 6:  return 240;          /* VERTSIZE (mm) */
+    default: return 0;
+    }
+}

@@ -1123,4 +1123,31 @@ Détail : **70 §6** (roadmap). Résumé :
 - **Vérifié** : hash transpile **inchangé** `19acad982194bf07`, difftest 271/271, cargo test complet vert,
   winediff **61/61**, table triée.
 
+### 2026-07-10 — [GUI][HLE-WIN32] M7 — G6a : GDI (modèle objet/DC + dessin DIB bit-exact)
+- **Mesure préalable (règle « mesurer, pas affirmer »)** : probe Wine → un pixel DIB 32bpp BI_RGB = **`[B,G,R,0]`**,
+  `FillRect`/`SetPixel`/`GetPixel` déterministes. ⇒ dessin dans un **DIB mémoire qu'on possède** = reproductible
+  **bit-à-bit** (aucun rasteriseur/police de l'hôte). C'est la stratégie oracle de la GDI (doc 72 §4.3 : hash du
+  framebuffer).
+- **Fait** (`aret_win32.c`, +29 `stdcall_pops` triés) : table d'objets GDI unifiée (DC/bitmap/brush/pen/font,
+  handles opaques base 0x30000000). DC screen/window **sans surface** (pas d'écran → dessin no-op sound) ; la
+  **DIB section** (32bpp, buffer `calloc` exposé via ppvBits) est la seule cible **vérifiée pixel**.
+  - Cycle DC : `GetDC`/`GetWindowDC`/`ReleaseDC`/`CreateCompatibleDC`/`DeleteDC`/`BeginPaint`/`EndPaint`/`GdiFlush`.
+  - Bitmaps : `CreateDIBSection` (32bpp ; autres profondeurs = **abort sound**), `CreateCompatibleBitmap`.
+  - Objets : `CreateSolidBrush`/`CreatePen`/`GetStockObject`/`GetSysColorBrush`/`SelectObject`/`DeleteObject`.
+  - Dessin **bit-exact** : `SetPixel`/`SetPixelV`/`GetPixel`/`FillRect`/`PatBlt` (PATCOPY/BLACKNESS/WHITENESS)/
+    `BitBlt` (SRCCOPY ; autres ROPs abort sound). Format COLORREF↔`[B,G,R,0]`, top-down/bottom-up gérés.
+  - Attributs : `SetTextColor`/`SetBkColor`/`SetBkMode`/`Get*` ; `GetSysColor` (schéma Win32 classique) ;
+    `GetDeviceCaps` (métriques de classe exactes ; extents écran = desktop virtuel, testé par invariant).
+- **Bug attrapé par l'oracle** (rule 10) : `GetDeviceCaps` avait **BITSPIXEL(12) et PLANES(14) inversés** →
+  `bpp>=8` divergeait (0 vs 1). Corrigé (12→32, 14→1).
+- **Hors périmètre (sound)** : `TextOut` (raster police ≠ Wine bit-à-bit) et `Rectangle`/`LineTo` (règles de bord
+  du stylo) → **pas modélisés** ; un sous-ensemble mesuré viendra si un binaire l'exige (doc 72 §5).
+- **Oracle** : `winecorpus/gdi_dib.c` : DIB 8×8, FillRect fond + sous-rect, SetPixel/SetPixelV, PatBlt
+  BLACKNESS + PATCOPY → **hash du buffer `a182d45a`** + GetPixel + stock objets distincts + GetDeviceCaps par
+  invariant = **bit-identique à Wine** (sous Xvfb).
+- **Effet mesuré** : ReleaseDC 30, GetDeviceCaps 28, GetDC 27, GetStockObject 22, SelectObject 14, DeleteObject
+  12, GetSysColor 12, BeginPaint/EndPaint 11, CreateSolidBrush 11 **éliminés des 41 Win95**.
+- **Vérifié** : hash transpile **inchangé** `19acad982194bf07`, difftest 271/271, cargo test complet vert,
+  winediff **62/62**, table triée.
+
 <!-- NOUVELLES ENTRÉES ICI (garder l'ordre chronologique, plus récent en bas) -->
