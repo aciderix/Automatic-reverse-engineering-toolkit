@@ -1458,4 +1458,23 @@ Détail : **70 §6** (roadmap). Résumé :
   potentiellement finger/nslookup (et tout static-CRT MSVC-like du corpus) bout-en-bout.
 - **Mesuré, non deviné.** Aucun code changé cet incrément (mesure pure) ; corpus/ISO en scratchpad éphémère.
 
+### 2026-07-11 — [RECOV] Tentative `_initterm(begin,end)` statique — **corpus-safe mais REVERTÉE** (expose un bug aval)
+- **Fait (puis reverté)** : détecteur du couple `push pfend; push pfbegin; call dispatcher` → si les **deux**
+  extrémités sont des pointeurs de données poussés et que **chaque mot non-nul de `[begin,end)`** pointe dans une
+  section exécutable, marquer chaque entrée non-nulle address-taken (contourne la garde de prologue, comme les
+  autres preuves address-taken). Idiome très spécifique → **byte-identique** sur tout le corpus existant.
+- **Vérifié corpus existant INCHANGÉ** : hash transpile **`19acad982194bf07`**, difftest **271/271** — le
+  heuristique **ne sur-sème pas** (sûr là où ça compte). Récupère bien 0x401700 & co pour finger (67→78 fn).
+- **MAIS — reverté (principe sacré)** : une fois les entrées `_initterm` récupérées, finger/nslookup **dépassent
+  le startup CRT et divergent en AVAL** : finger tourne jusqu'au bout mais **sortie vide** (Wine imprime la
+  bannière) = **faux silencieux** ; nslookup **abort sur `indirect call 0x80000073`** (pointeur-fonction
+  **garbage** au runtime). Transformer un **abort sound en sortie muette fausse** = **violation** du principe →
+  révoqué. Le heuristique de recovery est **correct et corpus-safe**, mais **couplé** à un **bug de lift aval**
+  (chemin stdio/CRT du static-CRT « Dennis J. Cox » : un init mal lifté laisse un pointeur-fonction à 0x80000073,
+  ou un cast/signe le produit). ⇒ **chantier couplé** pour session dédiée : *recovery `_initterm` + fix du miscompile
+  aval*, à shipper **ensemble** (recompiler finger en `-O0 -g` + gdb sur le call 0x80000073, cf. tip §7). Tant que
+  l'aval n'est pas juste, finger/nslookup **restent à l'abort sound** (correct-ou-abort), jamais faux en silence.
+- **Leçon (règle §2 « borner puis pivoter »)** : la recovery seule ne suffit pas — récupérer une entrée ne vaut
+  que si le code qu'elle débloque lift **juste**. Le vrai mur de ces deux binaires est **en aval** de la recovery.
+
 <!-- NOUVELLES ENTRÉES ICI (garder l'ordre chronologique, plus récent en bas) -->
