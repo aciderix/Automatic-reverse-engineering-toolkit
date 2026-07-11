@@ -2920,6 +2920,65 @@ uint32_t aret_ImageList_Destroy(uint32_t esp) { int m = iml_idx(WU(0)); if (m < 
 uint32_t aret_InitCommonControls(uint32_t esp) { (void)esp; return 0; }
 uint32_t aret_InitCommonControlsEx(uint32_t esp) { (void)esp; return 1; }
 
+/* ---- Bitmap resources: LoadBitmap / LoadImage(IMAGE_BITMAP) ---- */
+/* Decode a packed DIB (BITMAPINFOHEADER + palette + bits, no BITMAPFILEHEADER)
+ * from an RT_BITMAP resource into an internal 32bpp HBITMAP the GDI model can
+ * blit. This is how real GUI apps load their toolbar/UI images (then hand them to
+ * ImageList). BI_RGB 1/4/8/24/32 bpp; other compression aborts sound. */
+static uint32_t u32_load_dib_resource(uint32_t name_ref) {
+    const uint8_t *de = u32_rsrc_data_entry(2 /* RT_BITMAP */, name_ref);
+    if (!de) return 0;
+    const uint8_t *p = (const uint8_t *)(uintptr_t)(aret_image_lo + *(const uint32_t *)de);
+    uint32_t hdrsize = *(const uint32_t *)p;
+    if (hdrsize < 40) return 0;                             /* need a BITMAPINFOHEADER */
+    int32_t w = *(const int32_t *)(p + 4), hh = *(const int32_t *)(p + 8);
+    uint16_t bitcount = *(const uint16_t *)(p + 14);
+    uint32_t comp = *(const uint32_t *)(p + 16), clrused = *(const uint32_t *)(p + 32);
+    if (comp != 0) { aret_unimpl("LoadBitmap: only BI_RGB (uncompressed) DIB modelled"); return 0; }
+    if (bitcount != 1 && bitcount != 4 && bitcount != 8 && bitcount != 24 && bitcount != 32) {
+        aret_unimpl("LoadBitmap: only 1/4/8/24/32 bpp modelled"); return 0;
+    }
+    if (w <= 0 || w > 8192) return 0;
+    int topdown = hh < 0, h = topdown ? -hh : hh;
+    if (h <= 0 || h > 8192) return 0;
+    const uint8_t *pal = p + hdrsize;
+    uint32_t ncol = (bitcount <= 8) ? (clrused ? clrused : (1u << bitcount)) : 0;
+    const uint8_t *px = pal + (size_t)ncol * 4;
+    int stride = ((w * bitcount + 31) / 32) * 4;
+    int bi = gdi_alloc(GDIT_BITMAP); if (!bi) return 0;
+    g_gdi[bi].w = w; g_gdi[bi].h = h; g_gdi[bi].topdown = 1; g_gdi[bi].bpp = 32;
+    g_gdi[bi].bits = (uint8_t *)calloc((size_t)w * h, 4); g_gdi[bi].owns_bits = 1;
+    if (!g_gdi[bi].bits) { g_gdi[bi].used = 0; return 0; }
+    for (int y = 0; y < h; y++) {
+        int srow = topdown ? y : (h - 1 - y);
+        const uint8_t *row = px + (size_t)srow * stride;
+        uint8_t *dst = g_gdi[bi].bits + (size_t)y * w * 4;
+        for (int x = 0; x < w; x++) {
+            uint8_t b8 = 0, g8 = 0, r8 = 0;
+            if (bitcount <= 8) {
+                uint32_t idx = (bitcount == 1) ? ((row[x >> 3] >> (7 - (x & 7))) & 1)
+                            : (bitcount == 4) ? ((x & 1) ? (row[x >> 1] & 0xF) : (row[x >> 1] >> 4))
+                            : row[x];
+                if (idx < ncol) { b8 = pal[idx * 4]; g8 = pal[idx * 4 + 1]; r8 = pal[idx * 4 + 2]; }
+            } else if (bitcount == 24) { b8 = row[x * 3]; g8 = row[x * 3 + 1]; r8 = row[x * 3 + 2]; }
+            else                       { b8 = row[x * 4]; g8 = row[x * 4 + 1]; r8 = row[x * 4 + 2]; }
+            dst[x * 4] = b8; dst[x * 4 + 1] = g8; dst[x * 4 + 2] = r8; dst[x * 4 + 3] = 0;
+        }
+    }
+    return gdi_handle(bi);
+}
+uint32_t aret_LoadBitmapA(uint32_t esp) { return u32_load_dib_resource(WU(1)); }
+uint32_t aret_LoadBitmapW(uint32_t esp) { return u32_load_dib_resource(WU(1)); }  /* MAKEINTRESOURCE ids */
+/* LoadImageA(hInst, name, type, cx, cy, fuLoad) -> HANDLE. IMAGE_BITMAP from a
+ * resource is the modelled case; icons/cursors and LR_LOADFROMFILE are not yet
+ * (return 0 = sound "not loaded", never a bogus handle). */
+uint32_t aret_LoadImageA(uint32_t esp) {
+    if (WU(2) == 0 /* IMAGE_BITMAP */ && !(WU(5) & 0x0010u /* LR_LOADFROMFILE */))
+        return u32_load_dib_resource(WU(1));
+    return 0;
+}
+uint32_t aret_LoadImageW(uint32_t esp) { return aret_LoadImageA(esp); }
+
 /* ---- DC attributes ---- */
 uint32_t aret_SetTextColor(uint32_t esp) { int d = gdi_idx(WU(0)); if (d < 0) return 0xFFFFFFFFu; uint32_t p = g_gdi[d].text_color; g_gdi[d].text_color = WU(1) & 0xFFFFFFu; return p; }
 uint32_t aret_SetBkColor(uint32_t esp)   { int d = gdi_idx(WU(0)); if (d < 0) return 0xFFFFFFFFu; uint32_t p = g_gdi[d].bk_color; g_gdi[d].bk_color = WU(1) & 0xFFFFFFu; return p; }

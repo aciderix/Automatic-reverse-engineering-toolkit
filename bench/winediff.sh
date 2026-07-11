@@ -65,7 +65,8 @@ for src in "$CORPUS"/*.c; do
   # tests can embed resources (e.g. a VS_VERSIONINFO block for the version APIs).
   res_obj=""
   if [ -f "$CORPUS/$name.rc" ] && command -v "$WINDRES" >/dev/null 2>&1; then
-    "$WINDRES" "$CORPUS/$name.rc" -O coff -o "$TMP/$name.res.o" 2>"$TMP/err" || \
+    # -I CORPUS so an .rc can reference sibling files (e.g. a BITMAP "foo.bmp").
+    "$WINDRES" -I "$CORPUS" "$CORPUS/$name.rc" -O coff -o "$TMP/$name.res.o" 2>"$TMP/err" || \
       { echo "FAIL  $name (windres: $(head -1 "$TMP/err"))"; continue; }
     res_obj="$TMP/$name.res.o"
   fi

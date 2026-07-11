@@ -1549,4 +1549,20 @@ Détail : **70 §6** (roadmap). Résumé :
 - **Vérifié** : hash transpile **inchangé** `19acad982194bf07`, difftest-transpile 4/4, `table_is_sorted` vert,
   winediff **81→82/82**.
 
+### 2026-07-11 — [GUI][HLE-WIN32] M7 G7 — `LoadBitmapA/W` + `LoadImageA/W` : décodeur DIB ressource → HBITMAP
+- **Pourquoi** : suite logique d'ImageList — les vraies applis chargent leurs images de toolbar/UI depuis les
+  **ressources** (`LoadBitmap`/`LoadImage`) puis les passent à ImageList. Ferme le pipeline ressource→HBITMAP→
+  ImageList→dessin. Oracle propre (charger un .bmp connu, relire les pixels).
+- **Fait** (`aret_win32.c`, réutilise le walker de ressources G4 + le modèle DIB G6) : `u32_load_dib_resource`
+  décode un **DIB empaqueté** (BITMAPINFOHEADER + palette + bits, **sans** BITMAPFILEHEADER) d'une ressource
+  **RT_BITMAP** vers un HBITMAP interne 32bpp. Gère **BI_RGB 1/4/8/24/32 bpp** (palette pour ≤8bpp, bottom-up,
+  stride aligné 4) ; RLE/autre compression → **abort sound**. `LoadBitmapA/W` (MAKEINTRESOURCE), `LoadImageA/W`
+  (IMAGE_BITMAP depuis ressource ; icônes/curseurs/LR_LOADFROMFILE → 0 sound, pas de handle bidon).
+- **Oracle** : `winecorpus/comctl_loadbitmap.{c,rc,bmp}` — .bmp 4×2 24bpp embarqué (windres), `LoadBitmapA` →
+  select dans un DC mémoire → `GetObject` (taille) + `GetPixel` des 4 coins → **bit-identique à Wine**
+  (`1E140A`/`3264C8`/`090807`/`FFFFFF`). `winediff.sh` : `windres -I $CORPUS` (une .rc peut référencer un .bmp
+  voisin) + déjà `-lcomctl32`.
+- **Vérifié** : hash transpile **inchangé** `19acad982194bf07`, difftest-transpile 4/4, `table_is_sorted` vert,
+  winediff **82→83/83**.
+
 <!-- NOUVELLES ENTRÉES ICI (garder l'ordre chronologique, plus récent en bas) -->
