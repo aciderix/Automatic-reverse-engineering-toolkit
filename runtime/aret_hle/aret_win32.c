@@ -1139,6 +1139,7 @@ static struct {
     uint32_t userdata;       /* GWL_USERDATA */
     char title[256];         /* window text (ANSI) */
     int ctrl_id;             /* dialog control id (0 = not a control) */
+    char classname[64];      /* registered class name (for GetClassName) */
 } g_u32_win[U32_MAX_WIN];
 
 #define U32_MAX_MSG 8192
@@ -1209,6 +1210,7 @@ static uint32_t u32_window_create(uint32_t wndproc, uint32_t exstyle, uint32_t s
             g_u32_win[i].enabled = (style & 0x08000000u /* WS_DISABLED */) ? 0 : 1;
             g_u32_win[i].userdata = 0;
             g_u32_win[i].ctrl_id = 0;
+            g_u32_win[i].classname[0] = 0;
             int k = 0; if (title) for (; title[k] && k < 255; k++) g_u32_win[i].title[k] = title[k];
             g_u32_win[i].title[k] = 0;
             return (uint32_t)(i + 1);
@@ -1326,10 +1328,24 @@ uint32_t aret_UnregisterClassW(uint32_t esp) {
 /* CreateWindowExW(exStyle@0, className@1, winName@2, style@3, x@4,y@5,w@6,h@7,
  * parent@8, menu@9, inst@10, param@11) -> HWND. Binds the class WNDPROC and
  * captures geometry/style/text; visible windows get real pixels in G2b. */
+/* Resolve a class reference (atom or name pointer) to its registered class name. */
+static void u32_class_name(uint32_t cref, int wide, char *out, int cap) {
+    out[0] = 0;
+    if (cref == 0) return;
+    if (cref < 0x10000u) {                           /* ATOM -> registry wide name */
+        uint32_t idx = cref - 0xC000u;
+        if (idx < U32_MAX_CLASSES && g_u32_class[idx].used) u32_w2n(g_u32_class[idx].name, out, cap);
+        return;
+    }
+    if (wide) u32_w2n((const uint16_t *)(uintptr_t)cref, out, cap);
+    else { const char *s = (const char *)(uintptr_t)cref; int k = 0; for (; s[k] && k < cap - 1; k++) out[k] = s[k]; out[k] = 0; }
+}
 uint32_t aret_CreateWindowExW(uint32_t esp) {
     char title[256]; u32_w2n((const uint16_t *)WP(2), title, sizeof title);
-    return u32_window_create(u32_class_wndproc(WU(1)), WU(0), WU(3),
-                             WU(4), WU(5), WU(6), WU(7), WU(8), title);
+    uint32_t h = u32_window_create(u32_class_wndproc(WU(1)), WU(0), WU(3),
+                                   WU(4), WU(5), WU(6), WU(7), WU(8), title);
+    if (h) u32_class_name(WU(1), 1, g_u32_win[h - 1].classname, sizeof g_u32_win[h - 1].classname);
+    return h;
 }
 /* CreateWindowExA — className@1 is a narrow name (or an atom). Widen a name to
  * look it up in the shared registry; atoms (<0x10000) pass through unchanged. The
@@ -1341,8 +1357,10 @@ uint32_t aret_CreateWindowExA(uint32_t esp) {
         u32_a2w((const char *)(uintptr_t)cref, wbuf, 128);
         cref = (uint32_t)(uintptr_t)wbuf;
     }
-    return u32_window_create(u32_class_wndproc(cref), WU(0), WU(3),
-                             WU(4), WU(5), WU(6), WU(7), WU(8), WCS(2));
+    uint32_t h = u32_window_create(u32_class_wndproc(cref), WU(0), WU(3),
+                                   WU(4), WU(5), WU(6), WU(7), WU(8), WCS(2));
+    if (h) u32_class_name(WU(1), 0, g_u32_win[h - 1].classname, sizeof g_u32_win[h - 1].classname);
+    return h;
 }
 /* DestroyWindow(HWND) -> BOOL. */
 uint32_t aret_DestroyWindow(uint32_t esp) {
@@ -1988,20 +2006,22 @@ static uint32_t gdi_getpx(struct gdi_obj *bm, int x, int y) {
 }
 
 /* ---- DC lifecycle ---- */
+static void u32_dc_defaults(int d);   /* selects the DC's default stock objects */
 /* GetDC/GetWindowDC(hwnd) -> HDC. A screen/window DC (no offscreen surface: no
  * display, so its drawing is a sound no-op). */
-uint32_t aret_GetDC(uint32_t esp) { (void)esp; int i = gdi_alloc(GDIT_DC); return i ? gdi_handle(i) : 0; }
+uint32_t aret_GetDC(uint32_t esp) { (void)esp; int i = gdi_alloc(GDIT_DC); if (i) u32_dc_defaults(i); return i ? gdi_handle(i) : 0; }
 uint32_t aret_GetWindowDC(uint32_t esp) { return aret_GetDC(esp); }
 /* ReleaseDC(hwnd, hdc) -> int (1). */
 uint32_t aret_ReleaseDC(uint32_t esp) { int i = gdi_idx(WU(1)); if (i >= 0 && !g_gdi[i].sel_bitmap) g_gdi[i].used = 0; return 1; }
 /* CreateCompatibleDC(hdc) -> HDC (a memory DC; select a bitmap before drawing). */
-uint32_t aret_CreateCompatibleDC(uint32_t esp) { (void)esp; int i = gdi_alloc(GDIT_DC); return i ? gdi_handle(i) : 0; }
+uint32_t aret_CreateCompatibleDC(uint32_t esp) { (void)esp; int i = gdi_alloc(GDIT_DC); if (i) u32_dc_defaults(i); return i ? gdi_handle(i) : 0; }
 /* DeleteDC(hdc) -> BOOL. */
 uint32_t aret_DeleteDC(uint32_t esp) { int i = gdi_idx(WU(0)); if (i < 0) return 0; g_gdi[i].used = 0; return 1; }
 /* BeginPaint(hwnd, LPPAINTSTRUCT) -> HDC. Zero the PAINTSTRUCT, hand back a DC. */
 uint32_t aret_BeginPaint(uint32_t esp) {
     uint8_t *ps = (uint8_t *)WP(1);
-    int i = gdi_alloc(GDIT_DC); uint32_t hdc = i ? gdi_handle(i) : 0;
+    int i = gdi_alloc(GDIT_DC); if (i) u32_dc_defaults(i);
+    uint32_t hdc = i ? gdi_handle(i) : 0;
     if (ps) { memset(ps, 0, 64); *(uint32_t *)ps = hdc; }   /* PAINTSTRUCT.hdc @0 */
     return hdc;
 }
@@ -2058,8 +2078,7 @@ uint32_t aret_CreatePen(uint32_t esp) {
 }
 /* GetStockObject(i) -> HGDIOBJ. Distinct, cached handle per stock id (opaque). */
 static uint32_t g_gdi_stock[32];
-uint32_t aret_GetStockObject(uint32_t esp) {
-    int id = WI(0);
+static uint32_t u32_stock(int id) {
     if (id < 0 || id >= 32) return 0;
     if (!g_gdi_stock[id]) {
         int type = (id <= 5) ? GDIT_BRUSH : (id <= 8) ? GDIT_PEN : GDIT_FONT;
@@ -2080,6 +2099,15 @@ uint32_t aret_GetStockObject(uint32_t esp) {
         g_gdi_stock[id] = gdi_handle(i);
     }
     return g_gdi_stock[id];
+}
+uint32_t aret_GetStockObject(uint32_t esp) { return u32_stock(WI(0)); }
+/* A new DC selects the Windows default objects (so SelectObject round-trips a
+ * default back like Wine): SYSTEM_FONT, WHITE_BRUSH, BLACK_PEN. */
+static void u32_dc_defaults(int d) {
+    if (d < 0) return;
+    g_gdi[d].sel_font  = u32_stock(13);   /* SYSTEM_FONT */
+    g_gdi[d].sel_brush = u32_stock(0);    /* WHITE_BRUSH */
+    g_gdi[d].sel_pen   = u32_stock(7);    /* BLACK_PEN */
 }
 /* SelectObject(hdc, hgdiobj) -> previous object of that kind. */
 uint32_t aret_SelectObject(uint32_t esp) {
@@ -2825,3 +2853,42 @@ uint32_t aret_GetWindowThreadProcessId(uint32_t esp) {
     uint32_t *pid = (uint32_t *)WP(1); if (pid) *pid = (uint32_t)getpid();
     return 1;   /* thread id */
 }
+
+/* ================================================================== */
+/* GetClassName, fonts, IsDialogMessage                               */
+/* ================================================================== */
+/* GetClassNameA/W(hWnd, lpClassName, nMaxCount) -> chars copied. */
+uint32_t aret_GetClassNameA(uint32_t esp) {
+    char *buf = (char *)WP(1); uint32_t cch = WU(2);
+    if (!buf || cch == 0) return 0;
+    int i = u32_win_idx(WU(0));
+    if (i < 0) { buf[0] = 0; return 0; }
+    const char *c = g_u32_win[i].classname; uint32_t len = (uint32_t)strlen(c);
+    uint32_t n = len < cch - 1 ? len : cch - 1;
+    for (uint32_t j = 0; j < n; j++) buf[j] = c[j];
+    buf[n] = 0;
+    return n;
+}
+uint32_t aret_GetClassNameW(uint32_t esp) {
+    uint16_t *buf = (uint16_t *)WP(1); uint32_t cch = WU(2);
+    if (!buf || cch == 0) return 0;
+    int i = u32_win_idx(WU(0));
+    if (i < 0) { buf[0] = 0; return 0; }
+    const char *c = g_u32_win[i].classname; uint32_t len = (uint32_t)strlen(c);
+    uint32_t n = len < cch - 1 ? len : cch - 1;
+    for (uint32_t j = 0; j < n; j++) buf[j] = (uint16_t)(unsigned char)c[j];
+    buf[n] = 0;
+    return n;
+}
+
+/* Fonts: opaque GDI font objects (glyph rendering is display work; a program uses
+ * the handle as a token — SelectObject/DeleteObject/GetObject-LOGFONT). */
+uint32_t aret_CreateFontA(uint32_t esp)         { (void)esp; int i = gdi_alloc(GDIT_FONT); return i ? gdi_handle(i) : 0; }
+uint32_t aret_CreateFontW(uint32_t esp)         { return aret_CreateFontA(esp); }
+uint32_t aret_CreateFontIndirectA(uint32_t esp) { (void)esp; int i = gdi_alloc(GDIT_FONT); return i ? gdi_handle(i) : 0; }
+uint32_t aret_CreateFontIndirectW(uint32_t esp) { return aret_CreateFontIndirectA(esp); }
+
+/* IsDialogMessageA/W(hDlg, lpMsg) -> BOOL. Headless keyboard navigation has no
+ * input to translate, so no message is consumed as a dialog message. */
+uint32_t aret_IsDialogMessageA(uint32_t esp) { (void)esp; return 0; }
+uint32_t aret_IsDialogMessageW(uint32_t esp) { (void)esp; return 0; }

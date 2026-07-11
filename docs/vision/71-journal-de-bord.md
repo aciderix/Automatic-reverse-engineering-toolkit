@@ -1304,4 +1304,19 @@ Détail : **70 §6** (roadmap). Résumé :
 - **Vérifié** : hash transpile **inchangé** `19acad982194bf07`, difftest 271/271, cargo test complet vert,
   winediff **72/72**, table triée.
 
+### 2026-07-10 — [GUI][HLE-WIN32] GetClassName + fonts GDI + défauts DC + IsDialogMessage
+- **Fait** (`aret_win32.c`, +8 `stdcall_pops`) : **stockage du nom de classe** dans la fenêtre (champ
+  `classname`, résolu à la création via `u32_class_name` — atome→registre / string A ou W) → `GetClassNameA/W`.
+  Fonts GDI opaques (`CreateFontA/W`/`CreateFontIndirectA/W` → objets `GDIT_FONT`). `IsDialogMessageA/W`→0
+  (nav clavier headless, sound ; **hang sous Wine** → non oraclé).
+- **Bug attrapé par l'oracle (rule 10)** : `SelectObject(dc,f)` puis re-select ne round-trippait pas — un DC
+  ARET n'avait **pas d'objets par défaut**, alors que Wine a SYSTEM_FONT/WHITE_BRUSH/BLACK_PEN sélectionnés.
+  Fix : `u32_dc_defaults` (refactor `GetStockObject`→`u32_stock`) sélectionne les défauts à `GetDC`/
+  `CreateCompatibleDC`/`BeginPaint` → round-trip = Wine. Hash GDI DIB **inchangé** `a182d45a`.
+- **Oracle** : `winecorpus/win_classfont.c` — GetClassName, font non-null/distinct, **SelectObject font
+  round-trip** → **bit-identique à Wine** (Xvfb).
+- **Effet mesuré** : GetClassNameA/CreateFontIndirectA/IsDialogMessageA (4 binaires chacun) éliminés des 41 Win95.
+- **Vérifié** : hash transpile **inchangé** `19acad982194bf07`, difftest 271/271, cargo test complet vert,
+  winediff **73/73**, table triée.
+
 <!-- NOUVELLES ENTRÉES ICI (garder l'ordre chronologique, plus récent en bas) -->
