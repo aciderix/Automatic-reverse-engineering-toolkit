@@ -1604,4 +1604,26 @@ Détail : **70 §6** (roadmap). Résumé :
   (un vrai binaire Win95 qui tournerait). Le mur restant est le **cleanup CRT statique** (term `_initterm`
   touchant une structure lowio à champ nul), pas la recovery ni le `main`.
 
+### 2026-07-11 — [RECOV][DEMO] finger (suite) : crash exit-cleanup CRT localisé, **non résolu** (borné)
+- **Attaqué le crash aval** (session dédiée). Progrès réels, pas de fix convergent :
+  - **Entrée = correcte** : ARET démarre à `sub_4014d0` = le **vrai `mainCRTStartup`** (prologue SEH
+    `mov eax,fs:0; push ebp; push -1; push 0x405000`). L'entrée du header PE `0x4013e0` **désassemble en garbage**
+    (`jmp` bogus) — forcer `--entry 0x4013e0` donne une sortie vide. Donc pas un problème de choix d'entrée.
+  - **Hypothèse `VirtualAlloc` (reserve→commit) RÉFUTÉE** : sous gdb, `VirtualAlloc`/`HeapAlloc` **jamais
+    appelés** ; finger n'appelle que `HeapCreate` (→ handle 1). Le fix « honorer la base au commit » n'a rien
+    changé (et n'est exercé par aucun oracle) → **reverté**.
+  - **Crash localisé** : SIGSEGV **déterministe** à l'exit-cleanup (term `_initterm`) dans `sub_403a90` (fonction
+    msvcrt géante), `*(v146+0x18)=NULL` puis `*(NULL)`. `v146` = structure sur la pile, `+0x00=1` (le handle
+    `HeapCreate`), `+0x04`/`+0x0c` = pointeurs pile auto-référents (nœud de liste), `+0x10..+0x1c=0`. Motif
+    `*(v186+v185+4)&0x40` = check flag (lowio `_osfile`/heap). Zone enveloppée de `__x87rt_precall/postcall`
+    (filet x87 runtime actif). Wine n'y crashe pas → un champ que Wine a non-nul est nul chez ARET.
+- **Verdict** : la recovery `_initterm` **reste une avancée générale prouvée** (fait tourner le `main`, bannière
+  bit-identique). Mais le crash cleanup est un bug **profond des internals de l'ancien MSVCRT** (heap-tracking /
+  exit), **non caractérisé comme général** et **non convergent** en une session. Les deux (recovery + ce fix)
+  restent un **chantier couplé reverté**. Borné (doc §2 « borner puis pivoter »).
+- **Pour la reprise** : pistes non épuisées — tracer *qui écrit* `v146+0x18` (le write trouvé
+  `*(v21+0x18)=((v1&~0x18)>>3)+0x407310` pointe une table globale `0x407310` ; vérifier si ce write est atteint
+  pour la structure de `v146`), et comparer l'état à Wine au même point. Possiblement lié au filet x87 ou à la
+  chaîne SEH d'exit (`fs:0`).
+
 <!-- NOUVELLES ENTRÉES ICI (garder l'ordre chronologique, plus récent en bas) -->
