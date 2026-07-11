@@ -1529,4 +1529,3 @@ Détail : **70 §6** (roadmap). Résumé :
   La méthode avance, mais le marginal par shim est faible — cf. doc §5 (profondeur, pas largeur).
 
 <!-- NOUVELLES ENTRÉES ICI (garder l'ordre chronologique, plus récent en bas) -->
-JOURNAL_PLACEHOLDER
