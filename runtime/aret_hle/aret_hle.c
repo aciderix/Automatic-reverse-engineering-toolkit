@@ -918,6 +918,161 @@ uint32_t aret_lstrcpynA(uint32_t esp) {
     return (uint32_t)(uintptr_t)dst;
 }
 
+/* .INI profile API (GetPrivateProfileString/Int, WritePrivateProfileString).
+ * Backed by a real INI file (translate_path). We match Wine's READ semantics —
+ * value whitespace trimmed, one surrounding double-quote pair stripped, section/
+ * key matched case-insensitively — which is all the oracle checks (the on-disk
+ * layout is our own; only the read-back values are compared). */
+static char *ini_slurp(const char *path) {
+    FILE *fp = fopen(path, "rb");
+    if (!fp) return NULL;
+    fseek(fp, 0, SEEK_END); long n = ftell(fp); fseek(fp, 0, SEEK_SET);
+    if (n < 0) n = 0;
+    char *b = (char *)malloc((size_t)n + 1);
+    if (!b) { fclose(fp); return NULL; }
+    size_t rd = fread(b, 1, (size_t)n, fp); fclose(fp);
+    b[rd] = 0;
+    return b;
+}
+/* Case-insensitive compare of a[0..alen) to NUL-terminated b. */
+static int ini_ieq(const char *a, int alen, const char *b) {
+    int i = 0;
+    for (; i < alen && b[i]; i++) {
+        char ca = a[i], cb = b[i];
+        if (ca >= 'A' && ca <= 'Z') ca += 32;
+        if (cb >= 'A' && cb <= 'Z') cb += 32;
+        if (ca != cb) return 0;
+    }
+    return i == alen && b[i] == 0;
+}
+/* Clean a value (points just after '='): trim leading/trailing ws, strip one pair
+ * of surrounding double quotes. Copies into out (cap incl NUL). */
+static void ini_clean_value(const char *v, const char *le, char *out, int cap) {
+    while (v < le && (*v == ' ' || *v == '\t')) v++;
+    const char *e = le;
+    while (e > v && (e[-1] == ' ' || e[-1] == '\t' || e[-1] == '\r')) e--;
+    int len = (int)(e - v);
+    if (len >= 2 && v[0] == '"' && v[len - 1] == '"') { v++; len -= 2; }
+    if (len > cap - 1) len = cap - 1;
+    if (len < 0) len = 0;
+    for (int i = 0; i < len; i++) out[i] = v[i];
+    out[len] = 0;
+}
+/* Look up section/key in the slurped data. Returns 1 (value in out) or 0. */
+static int ini_get(const char *data, const char *section, const char *key, char *out, int cap) {
+    if (!data) return 0;
+    const char *p = data; int in = 0;
+    while (*p) {
+        const char *le = p; while (*le && *le != '\n') le++;
+        const char *nl = (*le == '\n') ? le + 1 : le;
+        const char *t = p; while (t < le && (*t == ' ' || *t == '\t')) t++;
+        if (t < le && *t == '[') {
+            const char *s = t + 1, *e = s; while (e < le && *e != ']') e++;
+            in = ini_ieq(s, (int)(e - s), section);
+        } else if (in && t < le && *t != ';' && *t != '#' && *t != '\r') {
+            const char *eq = t; while (eq < le && *eq != '=') eq++;
+            if (eq < le) {
+                const char *ke = eq; while (ke > t && (ke[-1] == ' ' || ke[-1] == '\t')) ke--;
+                if (ini_ieq(t, (int)(ke - t), key)) { ini_clean_value(eq + 1, le, out, cap); return 1; }
+            }
+        }
+        p = nl;
+    }
+    return 0;
+}
+/* Rewrite the INI content applying (section,key,value): value=NULL deletes the
+ * key; key=NULL deletes the whole section; else set/insert. Returns malloc'd
+ * content (*outlen), or NULL on alloc failure. */
+static char *ini_rewrite(const char *data, const char *section, const char *key,
+                         const char *value, size_t *outlen) {
+    size_t inlen = data ? strlen(data) : 0;
+    size_t cap = inlen + strlen(section) + (key ? strlen(key) : 0) + (value ? strlen(value) : 0) + 64;
+    char *out = (char *)malloc(cap); if (!out) return NULL;
+    size_t o = 0;
+    int in_target = 0, key_done = 0, section_seen = 0;
+    const char *p = data ? data : "";
+    while (*p) {
+        const char *ls = p, *le = p; while (*le && *le != '\n') le++;
+        const char *nl = (*le == '\n') ? le + 1 : le;
+        const char *t = ls; while (t < le && (*t == ' ' || *t == '\t')) t++;
+        if (t < le && *t == '[') {
+            if (in_target && key && value && !key_done)          /* leaving target: flush key */
+                { o += (size_t)snprintf(out + o, cap - o, "%s=%s\n", key, value); key_done = 1; }
+            const char *s = t + 1, *e = s; while (e < le && *e != ']') e++;
+            int match = ini_ieq(s, (int)(e - s), section);
+            in_target = match; if (match) section_seen = 1;
+            if (match && !key) { p = nl; continue; }              /* delete whole section: skip */
+            memcpy(out + o, ls, (size_t)(nl - ls)); o += (size_t)(nl - ls);
+            p = nl; continue;
+        }
+        if (in_target && !key) { p = nl; continue; }              /* deleting section: skip lines */
+        if (in_target && key) {
+            const char *eq = t; while (eq < le && *eq != '=') eq++;
+            if (eq < le) {
+                const char *ke = eq; while (ke > t && (ke[-1] == ' ' || ke[-1] == '\t')) ke--;
+                if (ini_ieq(t, (int)(ke - t), key)) {
+                    if (value) o += (size_t)snprintf(out + o, cap - o, "%s=%s\n", key, value);
+                    key_done = 1; p = nl; continue;               /* replaced or deleted */
+                }
+            }
+        }
+        memcpy(out + o, ls, (size_t)(nl - ls)); o += (size_t)(nl - ls);
+        p = nl;
+    }
+    if (key && value && !key_done) {
+        if (o > 0 && out[o - 1] != '\n') out[o++] = '\n';
+        if (!section_seen) o += (size_t)snprintf(out + o, cap - o, "[%s]\n%s=%s\n", section, key, value);
+        else               o += (size_t)snprintf(out + o, cap - o, "%s=%s\n", key, value);
+    }
+    *outlen = o;
+    return out;
+}
+uint32_t aret_GetPrivateProfileStringA(uint32_t esp) {
+    const char *section = (const char *)(uintptr_t)arg(esp, 0);
+    const char *key = (const char *)(uintptr_t)arg(esp, 1);
+    const char *def = (const char *)(uintptr_t)arg(esp, 2);
+    char *buf = (char *)(uintptr_t)arg(esp, 3);
+    uint32_t size = arg(esp, 4);
+    if (!buf || size == 0) return 0;
+    char path[1024]; translate_path((const char *)(uintptr_t)arg(esp, 5), path, sizeof path);
+    char *data = ini_slurp(path);
+    char val[1024]; int found = 0;
+    if (section && key) found = ini_get(data, section, key, val, sizeof val);
+    if (data) free(data);
+    const char *src = found ? val : (def ? def : "");
+    uint32_t n = 0; for (; src[n] && n < size - 1; n++) buf[n] = src[n];
+    buf[n] = 0;
+    return n;
+}
+uint32_t aret_GetPrivateProfileIntA(uint32_t esp) {
+    const char *section = (const char *)(uintptr_t)arg(esp, 0);
+    const char *key = (const char *)(uintptr_t)arg(esp, 1);
+    int def = (int)arg(esp, 2);
+    char path[1024]; translate_path((const char *)(uintptr_t)arg(esp, 3), path, sizeof path);
+    char *data = ini_slurp(path);
+    char val[64]; int found = section && key && ini_get(data, section, key, val, sizeof val);
+    if (data) free(data);
+    if (!found) return (uint32_t)def;
+    return (uint32_t)strtol(val, NULL, 10);          /* leading integer; 0 if not numeric */
+}
+uint32_t aret_WritePrivateProfileStringA(uint32_t esp) {
+    const char *section = (const char *)(uintptr_t)arg(esp, 0);
+    const char *key = (const char *)(uintptr_t)arg(esp, 1);
+    const char *value = (const char *)(uintptr_t)arg(esp, 2);
+    if (!section) return 0;
+    char path[1024]; translate_path((const char *)(uintptr_t)arg(esp, 3), path, sizeof path);
+    char *data = ini_slurp(path);
+    size_t olen = 0;
+    char *out = ini_rewrite(data, section, key, value, &olen);
+    if (data) free(data);
+    if (!out) return 0;
+    make_parents(path);
+    FILE *fp = fopen(path, "wb");
+    if (!fp) { free(out); return 0; }
+    fwrite(out, 1, olen, fp); fclose(fp); free(out);
+    return 1;
+}
+
 /* File mapping (CreateFileMapping/MapViewOfFile/UnmapViewOfFile) — bridged to
  * host mmap. The guest runs natively with flat pointers, so a host mmap address
  * is directly usable by the guest. A mapping HANDLE is a heap pointer (not an

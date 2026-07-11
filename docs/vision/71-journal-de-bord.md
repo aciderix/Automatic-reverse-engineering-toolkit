@@ -1202,4 +1202,19 @@ Détail : **70 §6** (roadmap). Résumé :
 - **Vérifié** : hash transpile **inchangé** `19acad982194bf07`, difftest 271/271, cargo test complet vert,
   winediff **65/65**, table triée.
 
+### 2026-07-10 — [HLE-FILE] .INI profile API (GetPrivateProfileString/Int, WritePrivateProfileString)
+- **Mesuré d'abord (règle 9)** : probe Wine → valeur **trimmée** (espaces début/fin ; `"  42  "`→`42`), **une
+  paire de guillemets** entourants retirée (`"spaced value"`→`spaced value`), section/clé **casse-insensible**,
+  clé absente → défaut, `GetPrivateProfileInt` parse l'entier.
+- **Fait** (`aret_hle.c`, +3 `stdcall_pops`) : INI adossé à un vrai fichier (`translate_path`). `ini_get`
+  (sémantique de lecture Wine : trim + dé-quote + casse-insensible), `ini_rewrite` (set/insert clé ; value=NULL
+  supprime la clé ; key=NULL supprime la section entière ; passe unique préservant le reste du fichier),
+  `GetPrivateProfileStringA`/`GetPrivateProfileIntA`/`WritePrivateProfileStringA`. **L'oracle ne compare que
+  les valeurs relues** (le layout disque est le nôtre — liberté totale de format).
+- **Oracle** : `winecorpus/win_ini.c` (+`.nodisplay`) — write/read round-trip, trim, dé-quote, casse-insensible,
+  défaut, **réécriture** de clé, **suppression** de clé → **bit-identique à Wine**.
+- **Effet mesuré** : GetPrivateProfileStringA 7, GetPrivateProfileIntA 6 éliminés des 41 Win95.
+- **Vérifié** : hash transpile **inchangé** `19acad982194bf07`, difftest 271/271, cargo test complet vert,
+  winediff **66/66**, table triée.
+
 <!-- NOUVELLES ENTRÉES ICI (garder l'ordre chronologique, plus récent en bas) -->
