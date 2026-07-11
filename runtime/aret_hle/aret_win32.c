@@ -2717,3 +2717,111 @@ uint32_t aret_GetTokenInformation(uint32_t esp) {
     if (cls == 18 /* TokenElevationType */) { if (buf && len >= 4) *(uint32_t *)buf = 1; if (ret) *ret = 4; return 1; } /* Default */
     return 0;                                        /* class not modelled */
 }
+
+/* ================================================================== */
+/* Rect math, char case, pointer/input/path stubs                     */
+/* ================================================================== */
+uint32_t aret_SetRect(uint32_t esp) {
+    int32_t *r = (int32_t *)WP(0); if (!r) return 0;
+    r[0] = WI(1); r[1] = WI(2); r[2] = WI(3); r[3] = WI(4); return 1;
+}
+uint32_t aret_SetRectEmpty(uint32_t esp) { int32_t *r = (int32_t *)WP(0); if (!r) return 0; r[0]=r[1]=r[2]=r[3]=0; return 1; }
+uint32_t aret_CopyRect(uint32_t esp) {
+    int32_t *d = (int32_t *)WP(0); const int32_t *s = (const int32_t *)WP(1);
+    if (!d || !s) return 0; d[0]=s[0]; d[1]=s[1]; d[2]=s[2]; d[3]=s[3]; return 1;
+}
+uint32_t aret_IsRectEmpty(uint32_t esp) {
+    const int32_t *r = (const int32_t *)WP(0);
+    return (!r || r[0] >= r[2] || r[1] >= r[3]) ? 1u : 0u;
+}
+uint32_t aret_EqualRect(uint32_t esp) {
+    const int32_t *a = (const int32_t *)WP(0), *b = (const int32_t *)WP(1);
+    if (!a || !b) return 0;
+    return (a[0]==b[0] && a[1]==b[1] && a[2]==b[2] && a[3]==b[3]) ? 1u : 0u;
+}
+uint32_t aret_PtInRect(uint32_t esp) {
+    const int32_t *r = (const int32_t *)WP(0); int32_t x = WI(1), y = WI(2);
+    if (!r) return 0;
+    return (x >= r[0] && x < r[2] && y >= r[1] && y < r[3]) ? 1u : 0u;
+}
+uint32_t aret_OffsetRect(uint32_t esp) {
+    int32_t *r = (int32_t *)WP(0); int32_t dx = WI(1), dy = WI(2);
+    if (!r) return 0; r[0]+=dx; r[2]+=dx; r[1]+=dy; r[3]+=dy; return 1;
+}
+uint32_t aret_InflateRect(uint32_t esp) {
+    int32_t *r = (int32_t *)WP(0); int32_t dx = WI(1), dy = WI(2);
+    if (!r) return 0; r[0]-=dx; r[2]+=dx; r[1]-=dy; r[3]+=dy; return 1;
+}
+uint32_t aret_IntersectRect(uint32_t esp) {
+    int32_t *d = (int32_t *)WP(0); const int32_t *a = (const int32_t *)WP(1), *b = (const int32_t *)WP(2);
+    if (!d || !a || !b) return 0;
+    int32_t l = a[0] > b[0] ? a[0] : b[0], t = a[1] > b[1] ? a[1] : b[1];
+    int32_t r = a[2] < b[2] ? a[2] : b[2], bo = a[3] < b[3] ? a[3] : b[3];
+    if (l >= r || t >= bo) { d[0]=d[1]=d[2]=d[3]=0; return 0; }
+    d[0]=l; d[1]=t; d[2]=r; d[3]=bo; return 1;
+}
+uint32_t aret_UnionRect(uint32_t esp) {
+    int32_t *d = (int32_t *)WP(0); const int32_t *a = (const int32_t *)WP(1), *b = (const int32_t *)WP(2);
+    if (!d || !a || !b) return 0;
+    int ae = (a[0] >= a[2] || a[1] >= a[3]), be = (b[0] >= b[2] || b[1] >= b[3]);
+    if (ae && be) { d[0]=d[1]=d[2]=d[3]=0; return 0; }
+    if (ae) { d[0]=b[0]; d[1]=b[1]; d[2]=b[2]; d[3]=b[3]; return 1; }
+    if (be) { d[0]=a[0]; d[1]=a[1]; d[2]=a[2]; d[3]=a[3]; return 1; }
+    d[0] = a[0] < b[0] ? a[0] : b[0]; d[1] = a[1] < b[1] ? a[1] : b[1];
+    d[2] = a[2] > b[2] ? a[2] : b[2]; d[3] = a[3] > b[3] ? a[3] : b[3];
+    return 1;
+}
+
+/* CharUpper/Lower A/W: a string pointer (in place), or — if the high word is 0 —
+ * a single character to convert (returned in the low byte). */
+uint32_t aret_CharUpperA(uint32_t esp) {
+    uint32_t p = WU(0);
+    if (p < 0x10000) return (uint32_t)(unsigned char)toupper((int)(p & 0xFF));
+    char *s = (char *)(uintptr_t)p; for (; *s; s++) *s = (char)toupper((unsigned char)*s);
+    return p;
+}
+uint32_t aret_CharLowerA(uint32_t esp) {
+    uint32_t p = WU(0);
+    if (p < 0x10000) return (uint32_t)(unsigned char)tolower((int)(p & 0xFF));
+    char *s = (char *)(uintptr_t)p; for (; *s; s++) *s = (char)tolower((unsigned char)*s);
+    return p;
+}
+uint32_t aret_CharUpperW(uint32_t esp) {
+    uint32_t p = WU(0);
+    if (p < 0x10000) return (uint32_t)(uint16_t)toupper((int)(p & 0xFF));
+    uint16_t *s = (uint16_t *)(uintptr_t)p; for (; *s; s++) if (*s < 256) *s = (uint16_t)toupper(*s);
+    return p;
+}
+uint32_t aret_CharLowerW(uint32_t esp) {
+    uint32_t p = WU(0);
+    if (p < 0x10000) return (uint32_t)(uint16_t)tolower((int)(p & 0xFF));
+    uint16_t *s = (uint16_t *)(uintptr_t)p; for (; *s; s++) if (*s < 256) *s = (uint16_t)tolower(*s);
+    return p;
+}
+uint32_t aret_CharUpperBuffA(uint32_t esp) {
+    char *s = (char *)WP(0); uint32_t n = WU(1);
+    if (s) for (uint32_t i = 0; i < n; i++) s[i] = (char)toupper((unsigned char)s[i]);
+    return n;
+}
+uint32_t aret_CharLowerBuffA(uint32_t esp) {
+    char *s = (char *)WP(0); uint32_t n = WU(1);
+    if (s) for (uint32_t i = 0; i < n; i++) s[i] = (char)tolower((unsigned char)s[i]);
+    return n;
+}
+
+/* Pointer validation: the guest runs natively with real pointers, so a non-null
+ * pointer is valid (0 = "not bad"), like IsBadReadPtr. */
+uint32_t aret_IsBadCodePtr(uint32_t esp)   { return (uint32_t)(WU(0) == 0); }
+uint32_t aret_IsBadStringPtrA(uint32_t esp){ return (uint32_t)(WU(0) == 0); }
+uint32_t aret_IsBadStringPtrW(uint32_t esp){ return (uint32_t)(WU(0) == 0); }
+
+/* Input state: headless -> no keys/buttons pressed, cursor at origin. */
+uint32_t aret_GetKeyState(uint32_t esp)      { (void)esp; return 0; }
+uint32_t aret_GetAsyncKeyState(uint32_t esp) { (void)esp; return 0; }
+uint32_t aret_GetMessagePos(uint32_t esp)    { (void)esp; return 0; }
+uint32_t aret_GetMessageTime(uint32_t esp)   { (void)esp; return (uint32_t)(mono_ns() / 1000000ull); }
+/* GetWindowThreadProcessId(hwnd, *pid) -> tid. Single-process/thread model. */
+uint32_t aret_GetWindowThreadProcessId(uint32_t esp) {
+    uint32_t *pid = (uint32_t *)WP(1); if (pid) *pid = (uint32_t)getpid();
+    return 1;   /* thread id */
+}

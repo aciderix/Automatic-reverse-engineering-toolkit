@@ -1290,4 +1290,18 @@ Détail : **70 §6** (roadmap). Résumé :
 - **Vérifié** : hash transpile **inchangé** `19acad982194bf07`, difftest 271/271, cargo test complet vert,
   winediff **71/71**, table triée.
 
+### 2026-07-10 — [HLE-WIN32] Long-tail : rect math, char case, ptr/input/path stubs
+- **Fait** (`aret_win32.c` +23 `stdcall_pops`, `aret_hle.c`) : **math rect** exacte — `SetRect(Empty)`/`CopyRect`/
+  `IsRectEmpty`/`EqualRect`/`PtInRect`/`OffsetRect`/`InflateRect`/`IntersectRect`/`UnionRect` ; **char case** —
+  `CharUpper/LowerA/W` (chaîne in-place **ou** char unique si hiword=0), `CharUpper/LowerBuffA` ; validation
+  pointeur — `IsBadCodePtr`/`IsBadStringPtrA/W`→0 (natif = valide) ; input headless — `GetKeyState`/
+  `GetAsyncKeyState`/`GetMessagePos`→0, `GetMessageTime`→tick, `GetWindowThreadProcessId` ; `GetShortPathNameA`
+  (pas de 8.3 Linux → chemin long copié).
+- **Oracle** : `winecorpus/win_rect.c` (+`.nodisplay`) — intersect/union/ptin/offset (**IntersectRect séquencé**
+  avant lecture, cf. ordre d'éval printf), upper/lower, IsBadCodePtr → **bit-identique à Wine**.
+- **Effet mesuré** : IntersectRect/CharUpperA/GetKeyState/IsBadCodePtr/GetShortPathNameA/GetWindowThreadProcessId
+  (4-5 binaires chacun) éliminés des 41 Win95.
+- **Vérifié** : hash transpile **inchangé** `19acad982194bf07`, difftest 271/271, cargo test complet vert,
+  winediff **72/72**, table triée.
+
 <!-- NOUVELLES ENTRÉES ICI (garder l'ordre chronologique, plus récent en bas) -->

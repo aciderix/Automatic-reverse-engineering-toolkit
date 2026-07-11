@@ -1056,6 +1056,17 @@ uint32_t aret_GetPrivateProfileIntA(uint32_t esp) {
     return (uint32_t)strtol(val, NULL, 10);          /* leading integer; 0 if not numeric */
 }
 /* MoveFileA(existing, new) -> BOOL. POSIX rename (both paths translated). */
+/* GetShortPathNameA(long, short, cch) -> length. Linux has no 8.3 aliasing, so the
+ * short path IS the long path (copied through). */
+uint32_t aret_GetShortPathNameA(uint32_t esp) {
+    const char *lng = (const char *)(uintptr_t)arg(esp, 0);
+    char *shrt = (char *)(uintptr_t)arg(esp, 1);
+    uint32_t cch = arg(esp, 2);
+    if (!lng) return 0;
+    uint32_t len = (uint32_t)strlen(lng);
+    if (shrt && cch > len) { memcpy(shrt, lng, len + 1); return len; }
+    return len + 1;   /* required buffer size (incl NUL) */
+}
 uint32_t aret_MoveFileA(uint32_t esp) {
     char from[1024], to[1024];
     translate_path((const char *)(uintptr_t)arg(esp, 0), from, sizeof from);
