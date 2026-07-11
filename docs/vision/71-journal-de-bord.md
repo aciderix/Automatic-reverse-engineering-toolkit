@@ -1528,4 +1528,25 @@ Détail : **70 §6** (roadmap). Résumé :
   murs (DDE, common-controls, text-raster) ; aucune vraie appli du corpus n'est encore débloquée de bout en bout.
   La méthode avance, mais le marginal par shim est faible — cf. doc §5 (profondeur, pas largeur).
 
+### 2026-07-11 — [GUI][HLE-WIN32] M7 G7 — common controls : sous-système **ImageList** (comctl32)
+- **Pourquoi** : pivot vers un **sous-système entier** (pas la traîne) — ImageList est la **fondation données**
+  des toolbars / list-view / tree-view des vraies applis GUI. Oracle propre (opérations bitmap).
+- **Fait** (`aret_win32.c`, réutilise le modèle DIB GDI G6) : table d'image-lists (handle base `0x50000000`),
+  images stockées en **bande verticale 32bpp** (cx large, count·cy haut). `ImageList_Create`(cx,cy,flags,cInit,
+  cGrow), `ImageList_Add`/`AddMasked` (copie les tuiles cx-larges d'un HBITMAP source, croissance auto),
+  `ImageList_Draw`(ILD_NORMAL/…, blit opaque dans la surface DC destination, bit-exact), `GetImageCount`,
+  `GetIconSize`, `Set`/`GetBkColor`, `Destroy`. `InitCommonControls(Ex)` (no-op/TRUE).
+- **Modèle 32bpp opaque (matche Wine)** : une source `BI_RGB` plate ne porte **pas** d'alpha, et une liste
+  `ILC_COLOR32` n'applique **pas** de masque par couleur-clé → mesuré : Wine `AddMasked`+`ILD_TRANSPARENT` dessine
+  le rouge **opaque** (pas transparent). Reproduire la sémantique masque/profondeur exacte de Wine (dépendante du
+  color-depth) = terrier fragile → on **matche le comportement mesuré** (opaque) au lieu de deviner. Une divergence
+  attrapée par l'oracle (fond frais → ARET transparent vs Wine opaque) → corrigé en opaque. Cf. leçon FillRect-inversé.
+- **Oracle** : `winecorpus/comctl_imagelist.c` — create/iconsize/add/count, draw de 2 tuiles (rouge/vert) dans un
+  DIB destination + relecture pixels, SetBkColor → **bit-identique à Wine**. (Gotcha printf ordre d'éval :
+  `count` séquencé après `add`.)
+- **Reste ImageList** : `ImageList_LoadImageA` (charge depuis ressource — décode bitmap, différé → 0/unimpl),
+  icônes réelles avec alpha (blend), masque 1bpp pour listes <32bpp. À faire si un binaire mesuré l'exige.
+- **Vérifié** : hash transpile **inchangé** `19acad982194bf07`, difftest-transpile 4/4, `table_is_sorted` vert,
+  winediff **81→82/82**.
+
 <!-- NOUVELLES ENTRÉES ICI (garder l'ordre chronologique, plus récent en bas) -->

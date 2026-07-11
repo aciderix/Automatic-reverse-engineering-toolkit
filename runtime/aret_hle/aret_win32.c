@@ -2825,6 +2825,101 @@ uint32_t aret_BitBlt(uint32_t esp) {
     return 1;
 }
 
+/* ================================================================== */
+/* Common controls (comctl32) — image list. The data foundation of      */
+/* toolbars / list-view / tree-view: a list of same-size 32bpp images.   */
+/* Images are stored as a vertical strip (cx wide, count*cy tall); the    */
+/* per-pixel alpha byte carries the transparency mask (0 = transparent).  */
+/* Draw blits into a DC surface (bit-exact, reuses the GDI DIB model).    */
+/* ================================================================== */
+#define U32_MAX_IML 64
+#define IML_BASE 0x50000000u
+static struct { int used, cx, cy, count, cap; uint32_t bkcolor; uint8_t *bits; } g_iml[U32_MAX_IML];
+static int iml_idx(uint32_t h) {
+    if ((h & 0xFF000000u) != IML_BASE) return -1;
+    uint32_t i = h & 0x00FFFFFFu;
+    return (i < U32_MAX_IML && g_iml[i].used) ? (int)i : -1;
+}
+static uint8_t *iml_px(int m, int img, int x, int y) {
+    if (x < 0 || y < 0 || x >= g_iml[m].cx || y >= g_iml[m].cy) return NULL;
+    return g_iml[m].bits + ((size_t)(img * g_iml[m].cy + y) * g_iml[m].cx + x) * 4;
+}
+static int iml_grow(int m, int need) {
+    if (need <= g_iml[m].cap) return 1;
+    int nc = g_iml[m].cap * 2; if (nc < need) nc = need;
+    uint8_t *nb = (uint8_t *)calloc((size_t)g_iml[m].cx * g_iml[m].cy * nc, 4);
+    if (!nb) return 0;
+    if (g_iml[m].bits) { memcpy(nb, g_iml[m].bits, (size_t)g_iml[m].cx * g_iml[m].cy * g_iml[m].count * 4); free(g_iml[m].bits); }
+    g_iml[m].bits = nb; g_iml[m].cap = nc; return 1;
+}
+uint32_t aret_ImageList_Create(uint32_t esp) {
+    int cx = WI(0), cy = WI(1), cInit = WI(3);
+    if (cx <= 0 || cy <= 0 || cx > 1024 || cy > 1024) return 0;
+    for (int i = 0; i < U32_MAX_IML; i++) if (!g_iml[i].used) {
+        memset(&g_iml[i], 0, sizeof g_iml[i]);
+        g_iml[i].used = 1; g_iml[i].cx = cx; g_iml[i].cy = cy;
+        g_iml[i].bkcolor = 0xFFFFFFFFu;                 /* CLR_NONE */
+        g_iml[i].cap = cInit > 0 ? cInit : 4;
+        g_iml[i].bits = (uint8_t *)calloc((size_t)cx * cy * g_iml[i].cap, 4);
+        if (!g_iml[i].bits) { g_iml[i].used = 0; return 0; }
+        return IML_BASE | (uint32_t)i;
+    }
+    return 0;
+}
+/* Copy the cx-wide tiles of a source HBITMAP into the list (opaque 32bpp copy).
+ * We model 32bpp colour images without a colour-key mask plane, matching Wine's
+ * behaviour for an ILC_COLOR32 source built from a flat BI_RGB DIB: the mask a
+ * lower-depth list would derive from a colour key is not applied (32bpp images
+ * carry their own alpha, which our sources don't). Returns the first new index. */
+static int iml_add(int m, uint32_t hbm) {
+    int b = gdi_idx(hbm);
+    if (b < 0 || g_gdi[b].type != GDIT_BITMAP || !g_gdi[b].bits) return -1;
+    int n = g_gdi[b].w / g_iml[m].cx; if (n < 1) n = 1;
+    if (!iml_grow(m, g_iml[m].count + n)) return -1;
+    int first = g_iml[m].count;
+    for (int k = 0; k < n; k++) {
+        int img = first + k;
+        for (int y = 0; y < g_iml[m].cy; y++) for (int x = 0; x < g_iml[m].cx; x++) {
+            uint8_t *s = gdi_px(&g_gdi[b], k * g_iml[m].cx + x, y);
+            uint8_t *d = iml_px(m, img, x, y);
+            if (!d) continue;
+            if (s) { d[0] = s[0]; d[1] = s[1]; d[2] = s[2]; d[3] = 0; }
+            else  { d[0] = d[1] = d[2] = d[3] = 0; }
+        }
+    }
+    g_iml[m].count = first + n;
+    return first;
+}
+uint32_t aret_ImageList_Add(uint32_t esp) { int m = iml_idx(WU(0)); return m < 0 ? (uint32_t)-1 : (uint32_t)iml_add(m, WU(1)); }
+uint32_t aret_ImageList_AddMasked(uint32_t esp) { int m = iml_idx(WU(0)); return m < 0 ? (uint32_t)-1 : (uint32_t)iml_add(m, WU(1)); }
+/* ImageList_Draw(himl, i, hdcDst, x, y, fStyle) -> BOOL. An opaque tile copy into
+ * the destination surface (see iml_add on the 32bpp mask model). */
+uint32_t aret_ImageList_Draw(uint32_t esp) {
+    int m = iml_idx(WU(0)), img = WI(1);
+    if (m < 0 || img < 0 || img >= g_iml[m].count) return 0;
+    struct gdi_obj *dst = gdi_dc_surface(WU(2));
+    if (!dst) return 0;
+    int x0 = WI(3), y0 = WI(4);
+    for (int y = 0; y < g_iml[m].cy; y++) for (int x = 0; x < g_iml[m].cx; x++) {
+        uint8_t *s = iml_px(m, img, x, y), *d = gdi_px(dst, x0 + x, y0 + y);
+        if (s && d) { d[0] = s[0]; d[1] = s[1]; d[2] = s[2]; d[3] = 0; }
+    }
+    return 1;
+}
+uint32_t aret_ImageList_GetImageCount(uint32_t esp) { int m = iml_idx(WU(0)); return m < 0 ? 0 : (uint32_t)g_iml[m].count; }
+uint32_t aret_ImageList_SetBkColor(uint32_t esp) { int m = iml_idx(WU(0)); if (m < 0) return 0xFFFFFFFFu; uint32_t o = g_iml[m].bkcolor; g_iml[m].bkcolor = WU(1); return o; }
+uint32_t aret_ImageList_GetBkColor(uint32_t esp) { int m = iml_idx(WU(0)); return m < 0 ? 0xFFFFFFFFu : g_iml[m].bkcolor; }
+uint32_t aret_ImageList_GetIconSize(uint32_t esp) {
+    int m = iml_idx(WU(0)); if (m < 0) return 0;
+    int32_t *cx = (int32_t *)WP(1), *cy = (int32_t *)WP(2);
+    if (cx) *cx = g_iml[m].cx; if (cy) *cy = g_iml[m].cy; return 1;
+}
+uint32_t aret_ImageList_Destroy(uint32_t esp) { int m = iml_idx(WU(0)); if (m < 0) return 0; free(g_iml[m].bits); g_iml[m].used = 0; return 1; }
+/* InitCommonControls() -> void; InitCommonControlsEx(const INITCOMMONCONTROLSEX*)
+ * -> BOOL. Registering the control classes is a no-op in our model. */
+uint32_t aret_InitCommonControls(uint32_t esp) { (void)esp; return 0; }
+uint32_t aret_InitCommonControlsEx(uint32_t esp) { (void)esp; return 1; }
+
 /* ---- DC attributes ---- */
 uint32_t aret_SetTextColor(uint32_t esp) { int d = gdi_idx(WU(0)); if (d < 0) return 0xFFFFFFFFu; uint32_t p = g_gdi[d].text_color; g_gdi[d].text_color = WU(1) & 0xFFFFFFu; return p; }
 uint32_t aret_SetBkColor(uint32_t esp)   { int d = gdi_idx(WU(0)); if (d < 0) return 0xFFFFFFFFu; uint32_t p = g_gdi[d].bk_color; g_gdi[d].bk_color = WU(1) & 0xFFFFFFu; return p; }
