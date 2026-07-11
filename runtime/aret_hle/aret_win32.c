@@ -1948,7 +1948,7 @@ static struct gdi_obj {
     int type, used, stock, null_obj;
     uint32_t sel_bitmap, sel_brush, sel_pen, sel_font;   /* DC */
     uint32_t text_color, bk_color; int bk_mode;          /* DC */
-    int w, h, topdown; uint8_t *bits; int owns_bits;     /* BITMAP */
+    int w, h, topdown, bpp; uint8_t *bits; int owns_bits; /* BITMAP */
     uint32_t color;                                      /* BRUSH/PEN */
 } g_gdi[GDI_MAX];
 
@@ -2028,7 +2028,7 @@ uint32_t aret_CreateDIBSection(uint32_t esp) {
     int w = bw, h = bh < 0 ? -bh : bh, td = bh < 0;
     if (w <= 0 || h <= 0) return 0;
     int i = gdi_alloc(GDIT_BITMAP); if (!i) return 0;
-    g_gdi[i].w = w; g_gdi[i].h = h; g_gdi[i].topdown = td;
+    g_gdi[i].w = w; g_gdi[i].h = h; g_gdi[i].topdown = td; g_gdi[i].bpp = 32;
     g_gdi[i].bits = (uint8_t *)calloc((size_t)w * h, 4); g_gdi[i].owns_bits = 1;
     if (!g_gdi[i].bits) { g_gdi[i].used = 0; return 0; }
     if (ppv) *ppv = (uint32_t)(uintptr_t)g_gdi[i].bits;
@@ -2039,7 +2039,7 @@ uint32_t aret_CreateCompatibleBitmap(uint32_t esp) {
     int w = WI(1), h = WI(2);
     if (w <= 0 || h <= 0) return 0;
     int i = gdi_alloc(GDIT_BITMAP); if (!i) return 0;
-    g_gdi[i].w = w; g_gdi[i].h = h; g_gdi[i].topdown = 1;
+    g_gdi[i].w = w; g_gdi[i].h = h; g_gdi[i].topdown = 1; g_gdi[i].bpp = 32;
     g_gdi[i].bits = (uint8_t *)calloc((size_t)w * h, 4); g_gdi[i].owns_bits = 1;
     if (!g_gdi[i].bits) { g_gdi[i].used = 0; return 0; }
     return gdi_handle(i);
@@ -2511,9 +2511,9 @@ uint32_t aret_GetObjectA(uint32_t esp) {
         w[0] = 0;                                    /* bmType */
         w[1] = g_gdi[i].w;                           /* bmWidth */
         w[2] = g_gdi[i].h;                           /* bmHeight */
-        w[3] = g_gdi[i].w * 4;                       /* bmWidthBytes (32bpp, DWORD-aligned) */
+        w[3] = ((g_gdi[i].w * g_gdi[i].bpp + 15) / 16) * 2;  /* bmWidthBytes (WORD-aligned) */
         *(uint16_t *)(lpv + 16) = 1;                 /* bmPlanes */
-        *(uint16_t *)(lpv + 18) = 32;                /* bmBitsPixel */
+        *(uint16_t *)(lpv + 18) = (uint16_t)g_gdi[i].bpp;    /* bmBitsPixel */
         *(uint32_t *)(lpv + 20) = (uint32_t)(uintptr_t)g_gdi[i].bits;  /* bmBits */
         return 24;
     }
@@ -2615,3 +2615,36 @@ uint32_t aret_ScreenToClient(uint32_t esp) {
     pt[0] -= g_u32_win[i].x; pt[1] -= g_u32_win[i].y;
     return 1;
 }
+
+/* ================================================================== */
+/* Long-tail tail: CreateBitmap, cursor/popup, registry delete         */
+/* ================================================================== */
+/* CreateBitmap(w, h, planes, bpp, lpBits) -> HBITMAP. A device-dependent bitmap;
+ * we back it with a 32-bit buffer (drawing is only pixel-exact for 32bpp) but
+ * report the requested bpp/dims via GetObject. */
+uint32_t aret_CreateBitmap(uint32_t esp) {
+    int w = WI(0), h = WI(1), bpp = WI(3);
+    if (w <= 0 || h <= 0) return 0;
+    int i = gdi_alloc(GDIT_BITMAP); if (!i) return 0;
+    g_gdi[i].w = w; g_gdi[i].h = h; g_gdi[i].topdown = 1; g_gdi[i].bpp = bpp ? bpp : 32;
+    g_gdi[i].bits = (uint8_t *)calloc((size_t)w * h, 4); g_gdi[i].owns_bits = 1;
+    if (!g_gdi[i].bits) { g_gdi[i].used = 0; return 0; }
+    return gdi_handle(i);
+}
+
+/* Cursor: a display-count model matching Wine (initial 0 with a mouse present).
+ * SetCursor returns the previous cursor; the actual cursor image is display work. */
+static int g_u32_cursor_show;
+static uint32_t g_u32_cursor;
+uint32_t aret_ShowCursor(uint32_t esp) { g_u32_cursor_show += WU(0) ? 1 : -1; return (uint32_t)g_u32_cursor_show; }
+uint32_t aret_SetCursor(uint32_t esp)  { uint32_t p = g_u32_cursor; g_u32_cursor = WU(0); return p; }
+uint32_t aret_GetCursor(uint32_t esp)  { (void)esp; return g_u32_cursor; }
+/* GetLastActivePopup(hWnd) -> hWnd (no popup owned -> the window itself). */
+uint32_t aret_GetLastActivePopup(uint32_t esp) { return WU(0); }
+
+/* Registry deletes on the empty read-only hive: the value/key never existed ->
+ * ERROR_FILE_NOT_FOUND (2), consistent with RegOpenKeyEx/RegQueryValueEx. */
+uint32_t aret_RegDeleteValueA(uint32_t esp) { (void)esp; return 2; }
+uint32_t aret_RegDeleteValueW(uint32_t esp) { (void)esp; return 2; }
+uint32_t aret_RegDeleteKeyA(uint32_t esp)   { (void)esp; return 2; }
+uint32_t aret_RegDeleteKeyW(uint32_t esp)   { (void)esp; return 2; }

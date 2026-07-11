@@ -1257,4 +1257,20 @@ Détail : **70 §6** (roadmap). Résumé :
 - **Vérifié** : hash transpile **inchangé** `19acad982194bf07`, difftest 271/271, cargo test complet vert,
   winediff **69/69**, table triée.
 
+### 2026-07-10 — [HLE] Long-tail (fin) : MoveFileA, CreateBitmap, cursor/popup, RegDelete
+- **Fait** : `MoveFileA` (rename POSIX, `aret_hle.c`) ; `CreateBitmap` (bitmap 32bpp-backed, bpp/dims rapportés
+  via GetObject — champ `bpp` ajouté à l'objet GDI, GetObjectA calcule bmWidthBytes WORD-aligné) ; `ShowCursor`
+  (compteur, init 0 = Wine-avec-souris), `SetCursor`/`GetCursor` (suivi), `GetLastActivePopup`→hWnd ;
+  `RegDeleteValueA/W`/`RegDeleteKeyA/W`→ERROR_FILE_NOT_FOUND(2) (cohérent hive vide read-only). +11 pops triés.
+- **Oracle** : `winecorpus/win_lasttail.c` (+`.nodisplay`) — MoveFile round-trip, CreateBitmap+GetObject,
+  ShowCursor (**statements séquencés** vs ordre d'éval printf), popup, RegDelete → **bit-identique à Wine**.
+- **Effet mesuré** : MoveFileA 5, CreateBitmap 5, GetLastActivePopup 5, SetCursor 5, RegDeleteValueA 7,
+  RegDeleteKeyA 5 éliminés des 41 Win95.
+- **Vérifié** : hash transpile **inchangé** `19acad982194bf07`, difftest 271/271, cargo test complet vert,
+  winediff **70/70**, table triée.
+- **Bilan long-tail** : après ce lot, le corpus Win95 restant = **RtlUnwind/SEH** (tier EH, froid), **threads/
+  process** (CreateThread/CreateProcess/GetExitCodeThread, §8.3), **FormatMessageA** (texte FROM_SYSTEM ≠ Wine),
+  **ExtTextOutA** (raster police), **tokens/SID** (sécurité, à modéliser en lot), **SystemParametersInfoA**
+  (env). Ce sont des chantiers dédiés ou des oracles durs — plus des « petits ».
+
 <!-- NOUVELLES ENTRÉES ICI (garder l'ordre chronologique, plus récent en bas) -->

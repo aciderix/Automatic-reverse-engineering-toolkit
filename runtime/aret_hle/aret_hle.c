@@ -1055,6 +1055,13 @@ uint32_t aret_GetPrivateProfileIntA(uint32_t esp) {
     if (!found) return (uint32_t)def;
     return (uint32_t)strtol(val, NULL, 10);          /* leading integer; 0 if not numeric */
 }
+/* MoveFileA(existing, new) -> BOOL. POSIX rename (both paths translated). */
+uint32_t aret_MoveFileA(uint32_t esp) {
+    char from[1024], to[1024];
+    translate_path((const char *)(uintptr_t)arg(esp, 0), from, sizeof from);
+    translate_path((const char *)(uintptr_t)arg(esp, 1), to, sizeof to);
+    return (uint32_t)(rename(from, to) == 0);
+}
 uint32_t aret_WritePrivateProfileStringA(uint32_t esp) {
     const char *section = (const char *)(uintptr_t)arg(esp, 0);
     const char *key = (const char *)(uintptr_t)arg(esp, 1);
