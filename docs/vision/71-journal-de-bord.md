@@ -1427,4 +1427,35 @@ Détail : **70 §6** (roadmap). Résumé :
 - **Vérifié** : hash transpile **inchangé** `19acad982194bf07`, difftest-transpile 4/4, `table_is_sorted_by_name`
   vert, winediff **78→79/79**.
 
+### 2026-07-11 — [GUI][INFRA][ORACLE] M7 G7 — 1er sweep du corpus GUI Win95 réel (mesure, pas intuition)
+- **Corpus** : ISO `WIN95_09961.iso` (631 Mo) de `archive.org/download/BestOfWindows95DotCom` (cf. doc 70 §7),
+  extrait via `7z` (`p7zip-full`/`libarchive-tools` installés ; **pas de module noyau iso9660** → mount échoue,
+  `7z x` marche). 155 `.exe` → tri par `file` : **54 NE (Win3.1 16-bit** = hors périmètre PE), ~65 SFX/zip,
+  **26 PE32 i386** (23 GUI + 3 console) = la cible réelle (mIRC 4.6, War-FTP, mailnews, cchat, finger, nslookup…).
+- **Wallsweep statique** (`--mode walls`, 26 bins) — **top imports non implémentés par nb de binaires** :
+  `RtlUnwind` **22**, `CreateProcessA` **18**, `CreateThread` **15**, `FormatMessageA` **13**, `ExitWindowsEx` **11**,
+  `TerminateThread` **11**, puis `ExtTextOutA`/`TextOutA`/`TerminateProcess` (3), et une longue traîne (2/1) :
+  `LZ*`, `Dde*`, `GetOpenFileNameA`, `GetVolumeInformationA`, `CreateDCA`, `DialogBoxIndirectParamA`, MDI…
+  ⇒ **confirme la prédiction doc §5** : les murs restants = **chantiers profonds différés** (EH/`RtlUnwind`,
+  threads/process) + traîne de shims. Aucune grosse victoire générale « à chaud » facile ne reste.
+- **`FormatMessageA` (13) analysé, PAS retenu comme fix propre** : Wine renvoie **son propre catalogue court**
+  (code 2→`File not found.\r\n`, ≠ Windows) ; matcher Wine bit-à-bit = transcrire des **centaines** de chaînes
+  Wine-spécifiques par code = rustine fragile, non générale. `FROM_SYSTEM` = abort sound honnête ; seul
+  `FROM_STRING` (substitution `%1..%99`, sans catalogue) serait général — à faire si un binaire l'exige.
+- **Découverte runtime décisive (plus informative que les imports froids)** : les 2 plus simples (finger/nslookup,
+  ~65 fn, **seul import manquant = `RtlUnwind` = froid**) **abortent au runtime** non sur RtlUnwind mais sur un
+  **`indirect call to unrecovered function 0x401700`**. Cause racine tracée : 0x401700 est une fn CRT réelle dont
+  l'adresse n'apparaît **que** comme **pointeur dans `.data`** (VA 0x40600c), dans une **table `_initterm`
+  statique** — le code fait `push 0x406010; push 0x406008; call 0x4023d0` = `_initterm(pfbegin,pfend)` **linké en
+  statique** (fn locale 0x4023d0 qui boucle sur `[begin,end)` et appelle chaque pointeur non-nul). ARET ne
+  reconnaît `_initterm` **que comme import** → la table `.data` n'est pas marquée address-taken → 0x401700/0x4017d0
+  non récupérées → abort sound (« refusing to guess »).
+- **⇒ Prochain chantier ciblé (général, mais recovery = correctness-critique → session dédiée, batterie complète)** :
+  reconnaître l'idiome **`_initterm(start,end)` statique** — un `call` précédé de `push ptrEnd; push ptrBegin`
+  (deux immédiats bornant une plage de la **même section data**, contenu = pointeurs de code alignés vers `.text`)
+  → marquer chaque entrée non-nulle **address-taken**. Gating strict (byte-identique sinon), régression totale
+  (difftest/cpudiff/funcdiff/winediff/sweeps) obligatoire — une fausse entrée tronque une vraie fn (doc §7). Débloque
+  potentiellement finger/nslookup (et tout static-CRT MSVC-like du corpus) bout-en-bout.
+- **Mesuré, non deviné.** Aucun code changé cet incrément (mesure pure) ; corpus/ISO en scratchpad éphémère.
+
 <!-- NOUVELLES ENTRÉES ICI (garder l'ordre chronologique, plus récent en bas) -->
