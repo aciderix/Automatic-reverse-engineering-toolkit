@@ -2648,3 +2648,72 @@ uint32_t aret_RegDeleteValueA(uint32_t esp) { (void)esp; return 2; }
 uint32_t aret_RegDeleteValueW(uint32_t esp) { (void)esp; return 2; }
 uint32_t aret_RegDeleteKeyA(uint32_t esp)   { (void)esp; return 2; }
 uint32_t aret_RegDeleteKeyW(uint32_t esp)   { (void)esp; return 2; }
+
+/* ================================================================== */
+/* advapi32 — SID / token model (structural)                          */
+/* ================================================================== */
+/* A SID is Revision(1) + SubAuthorityCount(1) + IdentifierAuthority(6) +
+ * SubAuthority[N]*4. The structural APIs (build/compare/length/subauthorities)
+ * are exact and oracle-able; token contents (the user's SID) are environment-
+ * dependent, so those calls are modelled soundly but not bit-compared. */
+static int u32_sid_len(const uint8_t *sid) { return 8 + 4 * sid[1]; }
+
+uint32_t aret_AllocateAndInitializeSid(uint32_t esp) {
+    const uint8_t *auth = (const uint8_t *)WP(0);    /* SID_IDENTIFIER_AUTHORITY */
+    uint32_t count = WU(1) & 0xFF;
+    uint32_t *pSid = (uint32_t *)WP(10);
+    if (!auth || !pSid || count > 8) return 0;
+    uint8_t *sid = (uint8_t *)malloc(8 + 4 * count);
+    if (!sid) return 0;
+    sid[0] = 1; sid[1] = (uint8_t)count;
+    memcpy(sid + 2, auth, 6);
+    for (uint32_t i = 0; i < count; i++) *(uint32_t *)(sid + 8 + 4 * i) = WU(2 + i);
+    *pSid = (uint32_t)(uintptr_t)sid;
+    return 1;
+}
+uint32_t aret_InitializeSid(uint32_t esp) {
+    uint8_t *sid = (uint8_t *)WP(0); const uint8_t *auth = (const uint8_t *)WP(1);
+    if (!sid || !auth) return 0;
+    sid[0] = 1; sid[1] = (uint8_t)(WU(2) & 0xFF); memcpy(sid + 2, auth, 6);
+    return 1;
+}
+uint32_t aret_GetLengthSid(uint32_t esp) { const uint8_t *s = (const uint8_t *)WP(0); return s ? (uint32_t)u32_sid_len(s) : 0; }
+uint32_t aret_GetSidLengthRequired(uint32_t esp) { return 8 + 4 * (WU(0) & 0xFF); }
+uint32_t aret_IsValidSid(uint32_t esp) { const uint8_t *s = (const uint8_t *)WP(0); return (s && s[0] == 1 && s[1] <= 15) ? 1u : 0u; }
+uint32_t aret_EqualSid(uint32_t esp) {
+    const uint8_t *a = (const uint8_t *)WP(0), *b = (const uint8_t *)WP(1);
+    if (!a || !b) return 0;
+    int la = u32_sid_len(a);
+    return (la == u32_sid_len(b) && memcmp(a, b, la) == 0) ? 1u : 0u;
+}
+uint32_t aret_GetSidSubAuthorityCount(uint32_t esp)  { return WU(0) ? WU(0) + 1 : 0; }        /* &sid[1] */
+uint32_t aret_GetSidSubAuthority(uint32_t esp)       { return WU(0) ? WU(0) + 8 + 4 * WU(1) : 0; }
+uint32_t aret_GetSidIdentifierAuthority(uint32_t esp) { return WU(0) ? WU(0) + 2 : 0; }
+uint32_t aret_FreeSid(uint32_t esp) { free(WP(0)); return 0; }
+uint32_t aret_CopySid(uint32_t esp) {
+    uint32_t cap = WU(0); uint8_t *dst = (uint8_t *)WP(1); const uint8_t *src = (const uint8_t *)WP(2);
+    if (!dst || !src) return 0;
+    int n = u32_sid_len(src);
+    if ((uint32_t)n > cap) return 0;
+    memcpy(dst, src, n);
+    return 1;
+}
+
+/* Tokens: a single-user, non-elevated process model. A token handle is opaque. */
+uint32_t aret_OpenProcessToken(uint32_t esp) { uint32_t *pt = (uint32_t *)WP(2); if (pt) *pt = 0x2A2A2A2Au; return 1; }
+uint32_t aret_OpenThreadToken(uint32_t esp)  { uint32_t *pt = (uint32_t *)WP(3); if (pt) *pt = 0x2A2A2A2Au; return 1; }
+uint32_t aret_AdjustTokenPrivileges(uint32_t esp) { (void)esp; return 1; }
+uint32_t aret_LookupPrivilegeValueA(uint32_t esp) {
+    uint32_t *luid = (uint32_t *)WP(2);              /* LUID {LowPart, HighPart} */
+    if (luid) { luid[0] = 0x13; luid[1] = 0; }
+    return 1;
+}
+uint32_t aret_LookupPrivilegeValueW(uint32_t esp) { return aret_LookupPrivilegeValueA(esp); }
+/* GetTokenInformation: model TokenElevation (not elevated — the common UAC check).
+ * Unhandled classes return FALSE (honest: we don't model that token data). */
+uint32_t aret_GetTokenInformation(uint32_t esp) {
+    uint32_t cls = WU(1); uint8_t *buf = (uint8_t *)WP(2); uint32_t len = WU(3); uint32_t *ret = (uint32_t *)WP(4);
+    if (cls == 20 /* TokenElevation */) { if (buf && len >= 4) *(uint32_t *)buf = 0; if (ret) *ret = 4; return 1; }
+    if (cls == 18 /* TokenElevationType */) { if (buf && len >= 4) *(uint32_t *)buf = 1; if (ret) *ret = 4; return 1; } /* Default */
+    return 0;                                        /* class not modelled */
+}

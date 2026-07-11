@@ -1273,4 +1273,21 @@ Détail : **70 §6** (roadmap). Résumé :
   **ExtTextOutA** (raster police), **tokens/SID** (sécurité, à modéliser en lot), **SystemParametersInfoA**
   (env). Ce sont des chantiers dédiés ou des oracles durs — plus des « petits ».
 
+### 2026-07-10 — [HLE-WIN32] advapi32 : modèle SID / token (structurel)
+- **Mesuré** : SID = Revision(1)+SubAuthorityCount(1)+IdentifierAuthority(6)+SubAuthority[N]·4 ;
+  AllocateAndInitializeSid(2 subauth)→len=16, EqualSid content-compare, subcount=2 sub0=32 sub1=544, len(1 sub)=12.
+  *(LookupPrivilegeValue **hang** sous Wine — service sécurité requis — donc non oraclé.)*
+- **Fait** (`aret_win32.c`, +17 `stdcall_pops`) : APIs SID **structurelles exactes** — `AllocateAndInitializeSid`/
+  `InitializeSid`/`GetLengthSid`/`GetSidLengthRequired`/`IsValidSid`/`EqualSid` (compare octets)/`CopySid`/
+  `GetSidSubAuthority(Count)`/`GetSidIdentifierAuthority`/`FreeSid`. Tokens (modèle mono-user non-élevé, sound,
+  non oraclé) : `OpenProcessToken`/`OpenThreadToken` (handle opaque), `AdjustTokenPrivileges`→TRUE,
+  `LookupPrivilegeValueA/W` (LUID fixe), `GetTokenInformation` (TokenElevation→non élevé ; classes non modélisées
+  → FALSE honnête).
+- **Oracle** : `winecorpus/win_sid.c` (+`.nodisplay`) — alloc/len/valid/eq/subauth round-trip → **bit-identique
+  à Wine**.
+- **Effet mesuré** : AllocateAndInitializeSid/EqualSid/FreeSid/OpenProcessToken/GetTokenInformation/
+  AdjustTokenPrivileges/LookupPrivilegeValueA (5-7 binaires chacun) éliminés/avancés des 41 Win95.
+- **Vérifié** : hash transpile **inchangé** `19acad982194bf07`, difftest 271/271, cargo test complet vert,
+  winediff **71/71**, table triée.
+
 <!-- NOUVELLES ENTRÉES ICI (garder l'ordre chronologique, plus récent en bas) -->
