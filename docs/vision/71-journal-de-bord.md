@@ -1648,4 +1648,24 @@ Détail : **70 §6** (roadmap). Résumé :
 - **Suite** : décision **Winelib** (router GDI/USER32/stdio vers Wine natif = bit-identique, la seule voie *sound*
   pour le GUI-texte sans substitution) — à cadrer.
 
+### 2026-07-11 — [GUI][ORACLE] Spike **FreeType autonome** : glyphe bit-identique à Wine (débloque le texte SANS Wine)
+- **Décision** : rester **autonome** (pas de dépendance runtime Wine). Question : piquer chez Wine sans en dépendre ?
+- **Spike concluant** : un programme **`-m32`** liant **FreeType** (lib standard, i386 `.so` présent) rasterise le
+  glyphe `'A'` (DejaVu Sans, 16px, mono/hinté) → **bitmap 11×12 STRICTEMENT identique** à celui du `TextOut` de
+  Wine (mêmes réglages, `NONANTIALIASED_QUALITY`), vérifié par crop bbox + diff programmatique (`IDENTICAL: True`).
+- **Pourquoi ça marche** : **Wine *utilise* FreeType** pour le rendu de police. Donc en liant FreeType
+  **nous-mêmes** (statique → ELF autonome ; FreeType compile aussi en **WASM** → universalité préservée), on
+  obtient le **même glyphe que Wine, bit-à-bit**, avec la **vraie police** (original, pas substitution) — et
+  **winediff reste un oracle valide** (on partage le même rasterizer que la vérité-terrain Wine).
+- **Ce que ça valide** (doctrine §1 « réutilisation vérifiée », au niveau *brique* pas *runtime*) : le mur du
+  **texte GDI**, réputé « pas d'oracle pixel propre », est en fait **franchissable en restant autonome** — le
+  point dur (le rasterizer) = FreeType, réutilisable. Reste à bâtir le **pipeline GDI texte** autour (mapping
+  logical-font→face comme Wine, positionnement/advances de `TextOut`, application couleur/bkmode, table de
+  substitution de polices de Wine pour choisir la MÊME face) — tout **déterministe et documenté dans la source Wine**.
+- **Méthode générale émergente** : pour chaque mur profond (texte, lowio/finger, SEH), **miner la source Wine**
+  (le « corrigé ») + **réutiliser ses briques autonomes** (FreeType) ou **porter sa logique** dans notre HLE.
+  Binaires **autonomes + universels + bit-exacts**, sans dépendre de Wine au runtime.
+- **Reste à cadrer** : static-link i386 `libfreetype.a` (autonomie totale), licences (FreeType FTL ok en static ;
+  code porté de Wine = LGPL, à isoler), et le pipeline GDI-texte complet. **Aucun code produit** (spike scratchpad).
+
 <!-- NOUVELLES ENTRÉES ICI (garder l'ordre chronologique, plus récent en bas) -->
