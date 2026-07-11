@@ -33,6 +33,17 @@
 #endif
 #include <sys/ioctl.h>
 
+/* G2b (doc 72): a *visible* window is presented via SDL2 (portable: Linux/macOS,
+ * and WASM via Emscripten later). SDL2 is linked ONLY when the program creates a
+ * window (builder gates `-DARET_HAVE_SDL` on a window-creating import + pkg-config
+ * sdl2). When absent, the whole window layer stays display-free (sound no-op
+ * drawing), exactly as before. The SDL layer is strictly *additive*: it never
+ * injects a message that Wine would not, so the deterministic message/geometry
+ * oracles stay bit-identical. */
+#ifdef ARET_HAVE_SDL
+#include <SDL.h>
+#endif
+
 static inline uint32_t w32_arg(uint32_t esp, int i) {
     return ((const uint32_t *)(uintptr_t)esp)[i];
 }
@@ -1140,7 +1151,25 @@ static struct {
     char title[256];         /* window text (ANSI) */
     int ctrl_id;             /* dialog control id (0 = not a control) */
     char classname[64];      /* registered class name (for GetClassName) */
+#ifdef ARET_HAVE_SDL
+    void *sdl_win, *sdl_ren, *sdl_tex;  /* SDL window/renderer/streaming texture */
+    uint32_t client_bmp;     /* HBITMAP of the client-area framebuffer (GDI draws here) */
+    int cw, ch;              /* client framebuffer size (pixels) */
+#endif
 } g_u32_win[U32_MAX_WIN];
+
+#ifdef ARET_HAVE_SDL
+/* G2b window-presentation helpers (defined after the GDI object model, which they
+ * use for the client framebuffer). Show creates the real SDL window on first
+ * visibility; present blits the client framebuffer; pump drains SDL input events
+ * into WM_* messages. All are no-ops when there is no usable display. */
+static void sdl_window_show(int i);
+static void sdl_window_present(int i);
+static void sdl_window_destroy(int i);
+static void sdl_pump(void);
+static int  sdl_win_idx_from_id(uint32_t winid);
+static int  sdl_any_window(void);
+#endif
 
 #define U32_MAX_MSG 8192
 static struct { uint32_t hwnd, message, wParam, lParam, time, ptx, pty; } g_u32_q[U32_MAX_MSG];
@@ -1213,6 +1242,12 @@ static uint32_t u32_window_create(uint32_t wndproc, uint32_t exstyle, uint32_t s
             g_u32_win[i].classname[0] = 0;
             int k = 0; if (title) for (; title[k] && k < 255; k++) g_u32_win[i].title[k] = title[k];
             g_u32_win[i].title[k] = 0;
+#ifdef ARET_HAVE_SDL
+            /* A visible top-level window (no parent, not a child control) gets a
+             * real SDL window. Child/message-only windows never do. */
+            if (g_u32_win[i].visible && parent == 0 && !(style & 0x40000000u /* WS_CHILD */))
+                sdl_window_show(i);
+#endif
             return (uint32_t)(i + 1);
         }
     }
@@ -1365,7 +1400,12 @@ uint32_t aret_CreateWindowExA(uint32_t esp) {
 /* DestroyWindow(HWND) -> BOOL. */
 uint32_t aret_DestroyWindow(uint32_t esp) {
     uint32_t h = WU(0);
-    if (h >= 1 && h <= U32_MAX_WIN && g_u32_win[h - 1].used) g_u32_win[h - 1].used = 0;
+    if (h >= 1 && h <= U32_MAX_WIN && g_u32_win[h - 1].used) {
+#ifdef ARET_HAVE_SDL
+        sdl_window_destroy((int)h - 1);
+#endif
+        g_u32_win[h - 1].used = 0;
+    }
     return 1;
 }
 /* Default handling for the window-text messages (WM_SETTEXT/GETTEXT/GETTEXTLENGTH),
@@ -1434,6 +1474,9 @@ uint32_t aret_TranslateMessage(uint32_t esp) { (void)esp; return 0; }
 uint32_t aret_PeekMessageW(uint32_t esp) {
     uint32_t *m = (uint32_t *)WP(0);
     uint32_t remove = WU(4);
+#ifdef ARET_HAVE_SDL
+    sdl_pump();          /* drain real keyboard/mouse/close events into the queue */
+#endif
     u32_pump_timers();
     if (!u32_q_empty()) { u32_q_peek_copy(m, (remove & U32_PM_REMOVE) != 0); return 1; }
     if (g_u32_quit)    { u32_fill_quit(m); return 1; }
@@ -1446,9 +1489,19 @@ uint32_t aret_PeekMessageW(uint32_t esp) {
 uint32_t aret_GetMessageW(uint32_t esp) {
     uint32_t *m = (uint32_t *)WP(0);
     for (;;) {
+#ifdef ARET_HAVE_SDL
+        sdl_pump();      /* drain real keyboard/mouse/close events into the queue */
+#endif
         u32_pump_timers();
         if (!u32_q_empty()) { u32_q_peek_copy(m, 1); return 1; }
         if (g_u32_quit)    { u32_fill_quit(m); return 0; }
+#ifdef ARET_HAVE_SDL
+        /* A real visible window is a message source (its close button, input): the
+         * queue can wake even with no timer, so block on SDL events instead of
+         * aborting. When no window is shown either, fall through to the honest
+         * mono-thread abort below. */
+        if (sdl_any_window()) { usleep(2000); continue; }
+#endif
         if (!u32_any_timer())
             aret_unimpl("GetMessageW: empty queue, no WM_QUIT, no timer (would block forever in mono-thread model)");
         usleep(1000);                        /* wait for the next timer to come due */
@@ -1573,11 +1626,23 @@ uint32_t aret_ShowWindow(uint32_t esp) {
     if (i < 0) return 0;
     int was = g_u32_win[i].visible;
     g_u32_win[i].visible = (WU(1) == 0 /* SW_HIDE */) ? 0 : 1;
+#ifdef ARET_HAVE_SDL
+    if (g_u32_win[i].visible && g_u32_win[i].parent == 0 && !(g_u32_win[i].style & 0x40000000u))
+        sdl_window_show(i);
+    else if (!g_u32_win[i].visible && g_u32_win[i].sdl_win)
+        SDL_HideWindow((SDL_Window *)g_u32_win[i].sdl_win);
+#endif
     return (uint32_t)was;
 }
 /* UpdateWindow(HWND) -> BOOL. No invalid region is tracked yet (GDI paint is G6),
  * so there is nothing to repaint; report success for a valid window. */
-uint32_t aret_UpdateWindow(uint32_t esp) { return u32_win_idx(WU(0)) >= 0 ? 1u : 0u; }
+uint32_t aret_UpdateWindow(uint32_t esp) {
+    int i = u32_win_idx(WU(0));
+#ifdef ARET_HAVE_SDL
+    if (i >= 0) sdl_window_present(i);   /* flush the client framebuffer to screen */
+#endif
+    return i >= 0 ? 1u : 0u;
+}
 /* EnableWindow(HWND, bEnable) -> BOOL (nonzero = was previously DISABLED). */
 uint32_t aret_EnableWindow(uint32_t esp) {
     int i = u32_win_idx(WU(0));
@@ -2007,14 +2072,194 @@ static uint32_t gdi_getpx(struct gdi_obj *bm, int x, int y) {
     return (uint32_t)p[2] | ((uint32_t)p[1] << 8) | ((uint32_t)p[0] << 16);
 }
 
+/* ================================================================== */
+/* G2b — SDL2 window presentation (doc 72). Compiled only when the      */
+/* program creates a window (`-DARET_HAVE_SDL`). Each visible top-level  */
+/* window gets: (1) a client-area DIB framebuffer that GetDC/BeginPaint  */
+/* bind to, so the program's GDI draws land in it; (2) a real           */
+/* SDL_Window it is blitted to on UpdateWindow/EndPaint; (3) SDL input   */
+/* events pumped into WM_* messages. Everything degrades to a sound      */
+/* display-free no-op when there is no usable display (SDL_Init fails).  */
+/* ================================================================== */
+#ifdef ARET_HAVE_SDL
+static int g_sdl_ready = 0;   /* 0 = not tried, 1 = video up, -1 = unavailable */
+static int sdl_ensure(void) {
+    if (g_sdl_ready) return g_sdl_ready > 0;
+    /* Video only; no audio/events subsystems we don't drive. A missing display
+     * (no DISPLAY, no dummy driver) is not an error here — we fall back to the
+     * display-free path, never abort. */
+    g_sdl_ready = (SDL_InitSubSystem(SDL_INIT_VIDEO) == 0) ? 1 : -1;
+    return g_sdl_ready > 0;
+}
+/* Create the client framebuffer + real SDL window for window i (idempotent). */
+static void sdl_window_show(int i) {
+    if (i < 0 || i >= U32_MAX_WIN || !g_u32_win[i].used) return;
+    if (g_u32_win[i].sdl_win) { SDL_ShowWindow((SDL_Window *)g_u32_win[i].sdl_win); return; }
+    int w = g_u32_win[i].w, h = g_u32_win[i].h;
+    if (w <= 0) w = 320; if (h <= 0) h = 240;        /* sane default if unsized */
+    if (w > 8192) w = 8192; if (h > 8192) h = 8192;
+    /* Client-area framebuffer (a top-down 32bpp DIB) is allocated even if the
+     * real window can't be created (headless): GetDC still gives the program a
+     * surface to draw into, and the drawing round-trips like Wine's. */
+    int b = gdi_alloc(GDIT_BITMAP);
+    if (b) {
+        g_gdi[b].w = w; g_gdi[b].h = h; g_gdi[b].topdown = 1; g_gdi[b].bpp = 32;
+        g_gdi[b].bits = (uint8_t *)calloc((size_t)w * h, 4); g_gdi[b].owns_bits = 1;
+        if (!g_gdi[b].bits) { g_gdi[b].used = 0; b = 0; }
+    }
+    g_u32_win[i].client_bmp = b ? gdi_handle(b) : 0;
+    g_u32_win[i].cw = w; g_u32_win[i].ch = h;
+    if (!sdl_ensure()) return;                       /* no display: framebuffer only */
+    int px = g_u32_win[i].x, py = g_u32_win[i].y;
+    SDL_Window *win = SDL_CreateWindow(g_u32_win[i].title[0] ? g_u32_win[i].title : "",
+                                       px > 0 ? px : (int)SDL_WINDOWPOS_CENTERED,
+                                       py > 0 ? py : (int)SDL_WINDOWPOS_CENTERED,
+                                       w, h, SDL_WINDOW_SHOWN);
+    if (!win) return;                                /* creation failed: framebuffer only */
+    SDL_Renderer *ren = SDL_CreateRenderer(win, -1, 0);
+    SDL_Texture  *tex = ren ? SDL_CreateTexture(ren, SDL_PIXELFORMAT_RGB888,
+                                                SDL_TEXTUREACCESS_STREAMING, w, h) : NULL;
+    g_u32_win[i].sdl_win = win; g_u32_win[i].sdl_ren = ren; g_u32_win[i].sdl_tex = tex;
+    sdl_window_present(i);
+}
+/* Blit the client framebuffer to the SDL window (no-op if not shown). The DIB
+ * bytes are [B,G,R,0] which is exactly SDL_PIXELFORMAT_RGB888 memory order. */
+static void sdl_window_present(int i) {
+    if (i < 0 || i >= U32_MAX_WIN) return;
+    SDL_Renderer *ren = (SDL_Renderer *)g_u32_win[i].sdl_ren;
+    SDL_Texture  *tex = (SDL_Texture *)g_u32_win[i].sdl_tex;
+    if (!ren || !tex) return;
+    int b = gdi_idx(g_u32_win[i].client_bmp);
+    if (b < 0 || !g_gdi[b].bits) return;
+    SDL_UpdateTexture(tex, NULL, g_gdi[b].bits, g_u32_win[i].cw * 4);
+    SDL_RenderClear(ren);
+    SDL_RenderCopy(ren, tex, NULL, NULL);
+    SDL_RenderPresent(ren);
+}
+static void sdl_window_destroy(int i) {
+    if (i < 0 || i >= U32_MAX_WIN) return;
+    if (g_u32_win[i].sdl_tex) SDL_DestroyTexture((SDL_Texture *)g_u32_win[i].sdl_tex);
+    if (g_u32_win[i].sdl_ren) SDL_DestroyRenderer((SDL_Renderer *)g_u32_win[i].sdl_ren);
+    if (g_u32_win[i].sdl_win) SDL_DestroyWindow((SDL_Window *)g_u32_win[i].sdl_win);
+    g_u32_win[i].sdl_tex = g_u32_win[i].sdl_ren = g_u32_win[i].sdl_win = NULL;
+    int b = gdi_idx(g_u32_win[i].client_bmp);
+    if (b >= 0) { if (g_gdi[b].owns_bits) free(g_gdi[b].bits); g_gdi[b].used = 0; }
+    g_u32_win[i].client_bmp = 0;
+}
+static int sdl_any_window(void) {
+    for (int i = 0; i < U32_MAX_WIN; i++)
+        if (g_u32_win[i].used && g_u32_win[i].sdl_win) return 1;
+    return 0;
+}
+static int sdl_win_idx_from_id(uint32_t winid) {
+    for (int i = 0; i < U32_MAX_WIN; i++)
+        if (g_u32_win[i].used && g_u32_win[i].sdl_win &&
+            SDL_GetWindowID((SDL_Window *)g_u32_win[i].sdl_win) == winid) return i;
+    return -1;
+}
+/* Map an SDL key symbol to a Win32 virtual-key code (the subset a GUI app tends
+ * to test). Letters/digits share the ASCII value with their VK code. */
+static uint32_t sdl_vk(SDL_Keycode k) {
+    if (k >= 'a' && k <= 'z') return (uint32_t)(k - 'a' + 'A');   /* VK_A..VK_Z */
+    if (k >= '0' && k <= '9') return (uint32_t)k;                 /* VK_0..VK_9 */
+    switch (k) {
+    case SDLK_ESCAPE: return 0x1B; case SDLK_RETURN: return 0x0D;
+    case SDLK_SPACE:  return 0x20; case SDLK_TAB:    return 0x09;
+    case SDLK_BACKSPACE: return 0x08;
+    case SDLK_LEFT: return 0x25; case SDLK_UP: return 0x26;
+    case SDLK_RIGHT: return 0x27; case SDLK_DOWN: return 0x28;
+    default: return (uint32_t)(k & 0xFF);
+    }
+}
+/* Drain SDL input into the Win32 message queue. Only real user input (close,
+ * mouse, keyboard) becomes a message; window-manager noise (expose/focus) does
+ * NOT synthesise WM_PAINT/WM_ACTIVATE — those stay driven by the Win32
+ * invalidation model, so the deterministic message oracle is untouched. */
+static void sdl_pump(void) {
+    if (g_sdl_ready <= 0) return;
+    SDL_Event e;
+    while (SDL_PollEvent(&e)) {
+        int wi; uint32_t lp;
+        switch (e.type) {
+        case SDL_QUIT:
+            for (int i = 0; i < U32_MAX_WIN; i++)
+                if (g_u32_win[i].used && g_u32_win[i].sdl_win)
+                    u32_q_push((uint32_t)(i + 1), 0x0010u /* WM_CLOSE */, 0, 0);
+            break;
+        case SDL_WINDOWEVENT:
+            if (e.window.event == SDL_WINDOWEVENT_CLOSE) {
+                wi = sdl_win_idx_from_id(e.window.windowID);
+                if (wi >= 0) u32_q_push((uint32_t)(wi + 1), 0x0010u /* WM_CLOSE */, 0, 0);
+            }
+            break;
+        case SDL_MOUSEMOTION:
+            wi = sdl_win_idx_from_id(e.motion.windowID);
+            if (wi >= 0) { lp = ((uint32_t)(e.motion.x & 0xFFFF)) | ((uint32_t)(e.motion.y & 0xFFFF) << 16);
+                           u32_q_push((uint32_t)(wi + 1), 0x0200u /* WM_MOUSEMOVE */, 0, lp); }
+            break;
+        case SDL_MOUSEBUTTONDOWN:
+        case SDL_MOUSEBUTTONUP: {
+            wi = sdl_win_idx_from_id(e.button.windowID);
+            if (wi < 0) break;
+            lp = ((uint32_t)(e.button.x & 0xFFFF)) | ((uint32_t)(e.button.y & 0xFFFF) << 16);
+            int down = (e.type == SDL_MOUSEBUTTONDOWN);
+            uint32_t msg = (e.button.button == SDL_BUTTON_RIGHT)
+                         ? (down ? 0x0204u : 0x0205u)   /* WM_RBUTTONDOWN/UP */
+                         : (down ? 0x0201u : 0x0202u);  /* WM_LBUTTONDOWN/UP */
+            u32_q_push((uint32_t)(wi + 1), msg, 0, lp);
+            break; }
+        case SDL_KEYDOWN:
+        case SDL_KEYUP:
+            wi = sdl_win_idx_from_id(e.key.windowID);
+            if (wi >= 0)
+                u32_q_push((uint32_t)(wi + 1),
+                           e.type == SDL_KEYDOWN ? 0x0100u : 0x0101u /* WM_KEYDOWN/UP */,
+                           sdl_vk(e.key.keysym.sym), 0);
+            break;
+        default: break;
+        }
+    }
+}
+/* The client-framebuffer HBITMAP a window DC should draw into, or 0. */
+static uint32_t u32_win_client_bmp(uint32_t hwnd) {
+    if (hwnd >= 1 && hwnd <= U32_MAX_WIN && g_u32_win[hwnd - 1].used)
+        return g_u32_win[hwnd - 1].client_bmp;
+    return 0;
+}
+#endif  /* ARET_HAVE_SDL */
+
 /* ---- DC lifecycle ---- */
 static void u32_dc_defaults(int d);   /* selects the DC's default stock objects */
 /* GetDC/GetWindowDC(hwnd) -> HDC. A screen/window DC (no offscreen surface: no
  * display, so its drawing is a sound no-op). */
-uint32_t aret_GetDC(uint32_t esp) { (void)esp; int i = gdi_alloc(GDIT_DC); if (i) u32_dc_defaults(i); return i ? gdi_handle(i) : 0; }
+uint32_t aret_GetDC(uint32_t esp) {
+    int i = gdi_alloc(GDIT_DC); if (!i) return 0;
+    u32_dc_defaults(i);
+#ifdef ARET_HAVE_SDL
+    /* A window DC draws into that window's client framebuffer (G2b), so GDI paints
+     * land on the visible surface; a screen/NULL DC stays a sound no-op. */
+    uint32_t cb = u32_win_client_bmp(WU(0));
+    if (cb) g_gdi[i].sel_bitmap = cb;
+#endif
+    return gdi_handle(i);
+}
 uint32_t aret_GetWindowDC(uint32_t esp) { return aret_GetDC(esp); }
-/* ReleaseDC(hwnd, hdc) -> int (1). */
-uint32_t aret_ReleaseDC(uint32_t esp) { int i = gdi_idx(WU(1)); if (i >= 0 && !g_gdi[i].sel_bitmap) g_gdi[i].used = 0; return 1; }
+/* ReleaseDC(hwnd, hdc) -> int (1). Presents the window's framebuffer if a window
+ * DC was released (a program often draws to GetDC then expects it on screen). */
+uint32_t aret_ReleaseDC(uint32_t esp) {
+    int i = gdi_idx(WU(1));
+#ifdef ARET_HAVE_SDL
+    { int wi = u32_win_idx(WU(0));
+      if (wi >= 0) {
+          sdl_window_present(wi);
+          /* A window DC has the window's shared framebuffer "selected"; free the
+           * DC object but never the framebuffer (owned by the window). */
+          if (i >= 0 && g_gdi[i].sel_bitmap == g_u32_win[wi].client_bmp) { g_gdi[i].used = 0; return 1; }
+      } }
+#endif
+    if (i >= 0 && !g_gdi[i].sel_bitmap) g_gdi[i].used = 0;
+    return 1;
+}
 /* CreateCompatibleDC(hdc) -> HDC (a memory DC; select a bitmap before drawing). */
 uint32_t aret_CreateCompatibleDC(uint32_t esp) { (void)esp; int i = gdi_alloc(GDIT_DC); if (i) u32_dc_defaults(i); return i ? gdi_handle(i) : 0; }
 /* DeleteDC(hdc) -> BOOL. */
@@ -2024,12 +2269,19 @@ uint32_t aret_BeginPaint(uint32_t esp) {
     uint8_t *ps = (uint8_t *)WP(1);
     int i = gdi_alloc(GDIT_DC); if (i) u32_dc_defaults(i);
     uint32_t hdc = i ? gdi_handle(i) : 0;
+#ifdef ARET_HAVE_SDL
+    /* Paint into the window's client framebuffer, like GetDC. */
+    if (i) { uint32_t cb = u32_win_client_bmp(WU(0)); if (cb) g_gdi[i].sel_bitmap = cb; }
+#endif
     if (ps) { memset(ps, 0, 64); *(uint32_t *)ps = hdc; }   /* PAINTSTRUCT.hdc @0 */
     return hdc;
 }
-/* EndPaint(hwnd, const PAINTSTRUCT*) -> BOOL. Release the paint DC. */
+/* EndPaint(hwnd, const PAINTSTRUCT*) -> BOOL. Present the window, release the DC. */
 uint32_t aret_EndPaint(uint32_t esp) {
     const uint8_t *ps = (const uint8_t *)WP(1);
+#ifdef ARET_HAVE_SDL
+    { int wi = u32_win_idx(WU(0)); if (wi >= 0) sdl_window_present(wi); }
+#endif
     if (ps) { int i = gdi_idx(*(const uint32_t *)ps); if (i >= 0) g_gdi[i].used = 0; }
     return 1;
 }

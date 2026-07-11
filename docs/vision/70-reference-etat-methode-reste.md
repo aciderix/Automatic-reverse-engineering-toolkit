@@ -165,7 +165,7 @@ bash bench/regression.sh    # PORTE unifiée : difftest 271/271, in-place 3/3,
                             # recompilabilité gzip/ls/cat 100%
 bash bench/difftest.sh              # décompile O0→O3
 bash bench/difftest_transpile.sh    # transpile (hash 19acad982194bf07)
-bash bench/winediff.sh              # axe 2 vs Wine (74/74)
+bash bench/winediff.sh              # axe 2 vs Wine (75/75)
 bash bench/funcdiff.sh              # lift-closure + opt-diff vs Unicorn (0 div)
 # Sweeps de vrais binaires (téléchargent + comparent à Wine) :
 bash bench/sqlite_sweep.sh   bash bench/busybox_sweep.sh   bash bench/corpus_sweep.sh
@@ -185,7 +185,7 @@ bash bench/wallsweep.sh <dir1> [dir2…]  # AGRÈGE --mode walls sur un corpus :
 
 ### État régression (référence — doit rester vert)
 difftest **271/271** · transpile-diff **4/4** (H=`19acad982194bf07`) · winediff
-**74/74** · cpudiff vert (per-instruction + séquences génératives) · funcdiff corpus **0 divergence** (lift ~12k scorées /
+**75/75** · cpudiff vert (per-instruction + séquences génératives) · funcdiff corpus **0 divergence** (lift ~12k scorées /
 ~6k appels, opt ~10k scorées) · SMT **11/11** · in-place **3/3** · magicdiv **2³²** ·
 recompilabilité **100 %** · WASM **7/7**.
 
@@ -374,6 +374,19 @@ recompilabilité **100 %** · WASM **7/7**.
   `EnableWindow`/`Get`-`SetWindowLongA/W` ; texte `Set`/`GetWindowTextA/W`+`GetWindowTextLengthA/W` **via
   WM_SETTEXT/GETTEXT** (le WNDPROC lifté les voit) ; `GetSystemMetrics`/`GetDesktopWindow`/`IsWindow(Visible/
   Enabled)`/`IsIconic`/`GetParent`. Valeurs écran env-dépendantes = **invariant** (écran virtuel 1024×768).
+- **Fenêtre VISIBLE via SDL2** (M7 G2b, doc 72, **la 1ʳᵉ marche graphique**) : une fenêtre Win32 visible
+  **s'affiche réellement**. Build (`builder/mod.rs`) : `-DARET_HAVE_SDL`+cflags SDL à la compile et `-lSDL2` au
+  link **seulement** si le binaire importe `CreateWindowExA/W` **et** `pkg-config sdl2` (i386) répond — sinon
+  compile/link **byte-identiques** (dégradation display-free : CLI/message-only/wasm/hôte sans SDL). Runtime
+  (`aret_win32.c`, `#ifdef ARET_HAVE_SDL`) : chaque **fenêtre top-level visible** reçoit un **framebuffer client**
+  (DIB 32bpp) que `GetDC(hwnd)`/`BeginPaint` **lient** (le GDI du programme y dessine, comme Wine) + une vraie
+  **`SDL_Window`+Renderer+Texture** (`RGB888` = octets DIB `[B,G,R,0]`), présentée sur `UpdateWindow`/`EndPaint`/
+  `ReleaseDC` ; **pompe `SDL_PollEvent`** → `WM_CLOSE`/`WM_MOUSE*`/`WM_KEY*`. **Strictement additif** : seule
+  l'entrée réelle devient un message (le bruit WM expose/focus **n'est pas** synthétisé) → séquence déterministe
+  **inchangée** ; pas d'écran ⇒ repli display-free sound, jamais d'abort. Oracle `winecorpus/user32_sdlwindow.c`
+  (client-rect + `GetDC`/`SetPixel`/`GetPixel` round-trip + cycle paint) **bit-identique à Wine** headless ; **et**
+  les fixtures GUI existantes **relient SDL** en winediff sans rien perturber (preuve d'additivité). Reste :
+  widgets natifs (BUTTON/EDIT), GDI raster (TextOut/DrawText), WASM-GUI (Emscripten).
 
 ### 4.6 Démonstrateurs prouvés (bit-identiques à Wine)
 - **Lua 5.4.7** (mingw, 650 Ko) **symbolé ET strippé** → ELF natif : batterie
@@ -518,7 +531,7 @@ bornée** : `WSAStartup`/Winsock, `CreateEventW`, `wcschr`, `LoadLibraryW`, et l
 | CRT+/W32 | Vrai CRT (forward libc) + Win32 native (kernel32→POSIX) | prog. C large + Win32 hors-GUI | ✅ |
 | UNPACK | Déballage dynamique Unicorn (émule stub → OEP → dump) | packers non-VM | ✅ |
 | M6 | Cible **WebAssembly** (`--target wasm`, wasmtime) | cible universelle | ✅ (7/7) |
-| **M7** | **GUI / graphisme** (USER32/GDI via **SDL2** portable, puis DXVK/vkd3d) | applis fenêtrées, puis **jeux** | 🚧 **plan doc 72** — **couche USER32/GDI display-free quasi complète** : fenêtres/classes/messages (A+W), modèle fenêtre étendu, ressources/LoadString, MessageBox, **dialogs (DLGTEMPLATE+modal)**, **GDI DIB bit-exact**, menus, helpers, SID/token, rect/char/… (winediff **72/72**). **Reste** : G2b (fenêtre SDL **visible** + pompe SDL_PollEvent), GDI raster (TextOut/DrawText/font-metrics), + hors-GUI : **EH/RtlUnwind**, **threads** |
+| **M7** | **GUI / graphisme** (USER32/GDI via **SDL2** portable, puis DXVK/vkd3d) | applis fenêtrées, puis **jeux** | 🚧 **plan doc 72** — **couche USER32/GDI display-free quasi complète** : fenêtres/classes/messages (A+W), modèle fenêtre étendu, ressources/LoadString, MessageBox, **dialogs (DLGTEMPLATE+modal)**, **GDI DIB bit-exact**, menus, helpers, SID/token, rect/char/…, **+ fenêtre SDL VISIBLE (G2b : `SDL_Window`+présentation framebuffer+pompe `SDL_PollEvent`)** (winediff **75/75**). **Reste** : widgets natifs (BUTTON/EDIT), GDI raster (TextOut/DrawText/font-metrics), + hors-GUI : **EH/RtlUnwind**, **threads** |
 
 > **Règle** : on ne s'engage pas sur M_n+1 tant que M_n ne tourne pas proprement ;
 > chaque palier = un artefact démontrable + un test de non-régression.

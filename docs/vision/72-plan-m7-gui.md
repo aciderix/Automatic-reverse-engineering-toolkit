@@ -62,7 +62,7 @@ moment de M7-WASM, non bloquant pour Linux/macOS.)*
 |---|-----------|-------------------|--------|
 | **G1** | **Jumeaux A** du modèle fenêtre/classe/message (RegisterClassA, CreateWindowExA, DefWindowProcA, Get/Peek/Dispatch/Translate/Post/SendMessageA, GetMessageA) — ANSI, **toujours message-only** | RegisterClassA 26, SendMessageA 32, DefWindowProcA 24, DispatchMessageA 24, PeekMessageA 22, CreateWindowExA 20… | fixture message-only ANSI vs Wine (comme `user32_msgwindow.c` en A) |
 | **G2a** ✅ | **Modèle fenêtre étendu (display-free)** : GetWindowRect/SetWindowPos/MoveWindow/ShowWindow/UpdateWindow/EnableWindow/Get-SetWindowLong ; Get-SetWindowText via WM_SETTEXT/GETTEXT ; GetSystemMetrics/GetDesktopWindow/IsWindow(Visible/Enabled)/GetParent | GetWindowRect 35, SetWindowPos 34, ShowWindow 21, GetSystemMetrics 17, GetDesktopWindow 21 | `user32_windowstate_a.c` : géométrie/état/texte round-trip, métriques par invariant — headless vs Wine ✅ |
-| **G2b** | **Fenêtre visible via SDL2** : CreateWindowEx(WS_VISIBLE) → SDL_CreateWindow ; pompe messages ↔ SDL_PollEvent (clavier/souris/close → WM_*) ; `-DARET_HAVE_SDL` via pkg-config, dégradation propre si absent | (visible windows) | fixture : créer fenêtre visible, poster WM_CLOSE, vérifier séquence — SDL headless (`SDL_VIDEODRIVER=dummy`) vs Wine |
+| **G2b** ✅ | **Fenêtre visible via SDL2** : CreateWindowEx(WS_VISIBLE)→SDL_CreateWindow+Renderer+Texture ; **framebuffer client** (DIB 32bpp) lié par GetDC(hwnd)/BeginPaint (le GDI y dessine), présenté sur UpdateWindow/EndPaint/ReleaseDC ; pompe SDL_PollEvent → WM_CLOSE/WM_MOUSE*/WM_KEY* ; `-DARET_HAVE_SDL` via pkg-config i386, gaté sur import CreateWindowEx*, **dégradation display-free propre** si absent (compile/link byte-identiques). **Additif** : seul l'input réel devient message (pas de WM_PAINT/ACTIVATE synthétisé) → séquence déterministe inchangée | visible windows | `user32_sdlwindow.c` : client-rect + GetDC/SetPixel/GetPixel round-trip + cycle paint, **bit-identique Wine** headless ✅ ; **+ toutes les fixtures GUI relient SDL sans perturbation** (preuve d'additivité) |
 | **G3** | **Texte fenêtre + widgets simples** : SetWindowTextA/GetWindowTextA, WM_SETTEXT ; contrôles STATIC/BUTTON/EDIT (classes prédéfinies) ; GetDlgItem/SetDlgItemText/GetDlgItemText | SetWindowTextA 34, GetDlgItem 33, SetDlgItemTextA 19, EnableWindow 19 | round-trip texte + état contrôles vs Wine |
 | **G4** ✅ (partiel) | **Ressources** : FindResourceA/LoadResource/SizeofResource/LockResource/FreeResource (walker `IMAGE_RESOURCE_DIRECTORY` en mémoire ; en-têtes PE déjà mappés → 0 changement loader), **LoadStringA**. *Reste : LoadIconA/LoadCursorA (handles opaques), W-variants.* | LoadStringA 32, FindResourceA/LoadResource/SizeofResource 26, LockResource 24, FreeResource 25 | `user32_resources.{c,rc}` : blob RCDATA + table de chaînes multi-blocs + troncature vs Wine (octets/valeurs exacts) ✅ |
 | **G5** ✅ | **Dialogs + MessageBox** : **MessageBoxA/W = -1 display-free** (repli sound = Wine-sans-écran) ; **DialogBoxParamA/W + CreateDialogParamA/W** parsent le **DLGTEMPLATE(EX)** → contrôles enfants + **pompe modale** (WM_INITDIALOG via aret_call) ; **EndDialog**, **GetDlgItem/GetDlgCtrlID**, **Set-GetDlgItemText A/W**, **Set-GetDlgItemInt**, **SendDlgItemMessageA/W** | MessageBoxA 37, GetDlgItem 33, CreateDialogParamA 23, EndDialog 20, SetDlgItemTextA 19, DialogBoxParamA 17, SendDlgItemMessageA 16 | `user32_messagebox` (`.nodisplay`) ✅ + `user32_dialog.{c,rc}` (DLGTEMPLATE + WM_INITDIALOG + EndDialog, texte/int round-trip) vs Wine sous Xvfb ✅ |
@@ -120,9 +120,14 @@ post-G2a montre que les plus gros murs sont **display-free** (ressources/LoadStr
 MessageBox), oracle **exact**, alors que G2b (fenêtre SDL) a un oracle dur (tempête
 de messages `CreateWindow` non bit-reproductible). Ressources `.rsrc` indexées
 (walker mémoire, en-têtes PE déjà mappés) + LoadStringA, `user32_resources` 59/59.
-Le reste par la donnée (re-sweep après chaque incrément). Ordre révisé : **G4
-(ressources/LoadString) ✅ → G5 (dialogs/MessageBox, display-free) → G2b (fenêtre
-SDL visible) → G6 (GDI)** — les tranches display-free (oracle exact) d'abord, la
-marche SDL quand un binaire mesuré l'exige. Chaque incrément : fixture minimale →
+Le reste par la donnée (re-sweep après chaque incrément). Ordre suivi : **G4
+(ressources/LoadString) ✅ → G5 (dialogs/MessageBox, display-free) ✅ → G6 (GDI DIB) ✅
+→ G2b (fenêtre SDL visible) ✅** — les tranches display-free (oracle exact) d'abord,
+puis **G2b livré** (2026-07-11) : « un transpilé doit afficher à l'écran pour être
+utilisable ». Fenêtre visible réelle + framebuffer client + présentation + pompe
+SDL_PollEvent, **strictement additif** (les oracles déterministes restent
+bit-identiques, les fixtures GUI relient SDL sans perturbation). Reste : widgets
+natifs (BUTTON/EDIT), GDI raster (TextOut/DrawText), G7 (re-sweep appli réelle),
+WASM-GUI (Emscripten). Chaque incrément : fixture minimale →
 implément → **oracle Wine** → régression complète → commit + doc (70 §4.5 / §5, 71
 daté). Aucune régression tolérée.

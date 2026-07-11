@@ -841,6 +841,26 @@ fn lower(prog: &Program, f: &Function) -> ir::types::IrFunction {
     irf
 }
 
+/// Query pkg-config for SDL2's compile/link flags (looking under the i386
+/// multiarch pkgconfig dir too). Returns `(cflags, libs)`, or `None` when SDL2
+/// isn't installed — the GUI presentation layer (G2b) then degrades to
+/// display-free (a sound no-op), never a build failure.
+fn sdl2_flags() -> Option<(Vec<String>, Vec<String>)> {
+    let extra = "/usr/lib/i386-linux-gnu/pkgconfig";
+    let mut pc_path = std::env::var("PKG_CONFIG_PATH").unwrap_or_default();
+    if !pc_path.split(':').any(|p| p == extra) {
+        pc_path = if pc_path.is_empty() { extra.to_string() } else { format!("{extra}:{pc_path}") };
+    }
+    let run = |arg: &str| -> Option<Vec<String>> {
+        let o = Command::new("pkg-config")
+            .env("PKG_CONFIG_PATH", &pc_path)
+            .arg(arg).arg("sdl2").output().ok()?;
+        if !o.status.success() { return None; }
+        Some(String::from_utf8_lossy(&o.stdout).split_whitespace().map(str::to_string).collect())
+    };
+    Some((run("--cflags")?, run("--libs")?))
+}
+
 /// Transpile `funcs` to C, link with the HLE runtime, and produce a native
 /// executable in `out_dir`. When `run` is set, execute it and capture stdout.
 #[allow(clippy::too_many_arguments)]
@@ -1160,6 +1180,27 @@ pub fn transpile(
     let cc = std::env::var("CC").unwrap_or_else(|_| "cc".to_string());
     let binary = if wasm { out_dir.join("app.wasm") } else { out_dir.join("app") };
 
+    // G2b (doc 72): a program that creates a window links SDL2 so its visible GUI
+    // actually shows on screen. Gated on a window-creating import AND pkg-config
+    // finding SDL2 (32-bit only, native target). A non-GUI program, a wasm build,
+    // or a host without SDL2 gets the exact same compile/link as before (the
+    // window layer stays display-free), so this is byte-identical for them.
+    let sdl = if !wasm && bits == 32
+        && prog.imports.values().any(|n| n == "CreateWindowExA" || n == "CreateWindowExW")
+    {
+        sdl2_flags()
+    } else {
+        None
+    };
+    // Extra C flags for every compile when SDL is in play: SDL's own cflags plus
+    // the feature switch that activates the `#ifdef ARET_HAVE_SDL` window layer.
+    let sdl_cflags: Vec<String> = sdl.as_ref().map(|(c, _)| {
+        let mut v = c.clone();
+        v.push("-DARET_HAVE_SDL".to_string());
+        v
+    }).unwrap_or_default();
+    let sdl_libs: Vec<String> = sdl.as_ref().map(|(_, l)| l.clone()).unwrap_or_default();
+
     let mut sources: Vec<std::path::PathBuf> = vec![
         out_dir.join("aret_hle.c"),
         out_dir.join("aret_crt.c"),
@@ -1250,6 +1291,7 @@ pub fn transpile(
             } else {
                 Command::new(&cc)
                     .args([march, "-w", "-fno-strict-aliasing", "-fno-builtin", "-fno-pie", "-O0", "-c"])
+                    .args(&sdl_cflags)
                     .arg(src)
                     .arg("-I")
                     .arg(out_dir)
@@ -1274,6 +1316,7 @@ pub fn transpile(
         .args([march, "-no-pie"])
         .args(&objs)
         .arg("-lm") // the float helpers use sqrtf/sqrtl
+        .args(&sdl_libs) // SDL2 for a visible GUI (G2b); empty for non-GUI programs
         .arg("-o")
         .arg(&binary)
         .output()

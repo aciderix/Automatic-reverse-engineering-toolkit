@@ -1332,4 +1332,36 @@ Détail : **70 §6** (roadmap). Résumé :
 - **Vérifié** : hash transpile **inchangé** `19acad982194bf07`, difftest 271/271, cargo test complet vert,
   winediff **74/74**, table triée.
 
+### 2026-07-11 — [GUI][HLE-WIN32][RECOMPILE] M7 — G2b : fenêtre VISIBLE via SDL2 (la 1ʳᵉ marche graphique)
+- **Pourquoi** : « un transpilé doit être *utilisable* → afficher à l'écran est obligatoire ». G2b est la
+  vraie marche archi de M7 : une fenêtre Win32 visible **s'affiche réellement** (Linux/macOS, WASM plus tard).
+- **Fait — build (`src/builder/mod.rs`)** : `sdl2_flags()` interroge `pkg-config sdl2` (chemin i386
+  `/usr/lib/i386-linux-gnu/pkgconfig` ajouté au `PKG_CONFIG_PATH`). `-DARET_HAVE_SDL` + cflags SDL injectés à la
+  compile **et** `-lSDL2` au link **uniquement si** le binaire importe `CreateWindowExA/W` **et** SDL2 est
+  présent (32-bit, cible native). Sinon **compile/link byte-identiques** à avant (dégradation propre : CLI,
+  message-only, wasm, hôte sans SDL → couche fenêtre reste display-free). ⇒ hash transpile **inchangé**.
+- **Fait — runtime (`aret_win32.c`, tout sous `#ifdef ARET_HAVE_SDL`)** : chaque **fenêtre top-level visible**
+  (parent==0, pas `WS_CHILD`, pas message-only) reçoit (1) un **framebuffer client** (DIB 32bpp top-down) que
+  `GetDC(hwnd)`/`BeginPaint(hwnd)` **lient** (le GDI du programme dessine dedans, comme Wine) ; (2) une vraie
+  **`SDL_Window`+Renderer+Texture** (`SDL_PIXELFORMAT_RGB888` = octets DIB `[B,G,R,0]` exacts) ; (3) une **pompe
+  `SDL_PollEvent`** → `WM_CLOSE`/`WM_MOUSE*`/`WM_KEY*` (VK mappé). Présentation sur `UpdateWindow`/`EndPaint`/
+  `ReleaseDC`. `DestroyWindow`→destruction SDL. Câblé dans `CreateWindowEx`/`ShowWindow`/`Peek`-`GetMessage`.
+- **Soundness — strictement additif** : la pompe ne synthétise **que** l'entrée réelle (close/souris/clavier) ;
+  le bruit window-manager (expose/focus) **ne** devient **pas** `WM_PAINT`/`WM_ACTIVATE` (ceux-ci restent pilotés
+  par le modèle d'invalidation Win32) → la séquence de messages déterministe est **inchangée**. SDL absent /
+  `SDL_Init` échoue (pas d'écran) → repli display-free (no-op sound), **jamais** d'abort. `GetMessageW` ne
+  s'abort plus quand une fenêtre SDL vit (source de messages réelle) : il bloque sur les events.
+- **Oracle** : `winecorpus/user32_sdlwindow.c` — `WS_POPUP|WS_VISIBLE` (client==window, `GetClientRect`
+  déterministe), `GetDC(hwnd)`+`SetPixel`+`GetPixel` round-trip (3 points dont coin), cycle `BeginPaint`/
+  `EndPaint`+relecture → **bit-identique à Wine** (ARET SDL headless dummy/x11-Xvfb vs Wine réel sous Xvfb).
+  **Preuve de l'additivité** : les fixtures GUI existantes (windowstate/dialog/gdi/…) **relient SDL et créent de
+  vraies fenêtres** pendant winediff → **toujours** bit-identiques ⇒ la couche SDL n'a **rien** perturbé.
+- **Vérifié** : hash transpile **inchangé** `19acad982194bf07`, difftest **271/271**, cargo test complet vert
+  (dont wasm_target = chemin sans SDL compile propre), winediff **74→75/75**, `regression.sh` vert (gzip/ls/cat
+  recompilés byte-identiques : non-GUI = 0 flag SDL).
+- **Portée honnête** : les *pixels à l'écran* sont la marche archi (non bit-comparés en portable) ; ce qu'on
+  **prouve** = le modèle fenêtre visible + GDI-dans-le-DC-fenêtre + présentation, bit-identique Wine, headless.
+  Reste (mesuré si un binaire l'exige) : widgets natifs (BUTTON/EDIT), GDI raster (TextOut/DrawText), WASM-GUI
+  (Emscripten, 2ᵉ toolchain).
+
 <!-- NOUVELLES ENTRÉES ICI (garder l'ordre chronologique, plus récent en bas) -->
