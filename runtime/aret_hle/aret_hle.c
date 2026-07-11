@@ -865,6 +865,59 @@ uint32_t aret_CreateFileW(uint32_t esp) {
     return aret_open_named(name, arg(esp, 1), arg(esp, 4));
 }
 
+/* Win16-era file API (_lopen/_lcreat/_lclose/_lread/_lwrite/_llseek + _hread/
+ * _hwrite): an HFILE is a POSIX fd in this model, so these map straight onto
+ * open/read/write/lseek/close, sharing translate_path. HFILE_ERROR = -1. */
+#define ARET_HFILE_ERROR 0xFFFFFFFFu
+uint32_t aret_lopen(uint32_t esp) {
+    char path[1024];
+    translate_path((const char *)(uintptr_t)arg(esp, 0), path, sizeof path);
+    uint32_t rw = arg(esp, 1) & 3;      /* OF_READ=0, OF_WRITE=1, OF_READWRITE=2 */
+    int flags = rw == 0 ? O_RDONLY : (rw == 1 ? O_WRONLY : O_RDWR);
+    int fd = open(path, flags);
+    return fd < 0 ? ARET_HFILE_ERROR : (uint32_t)fd;
+}
+uint32_t aret_lcreat(uint32_t esp) {
+    char path[1024];
+    translate_path((const char *)(uintptr_t)arg(esp, 0), path, sizeof path);
+    make_parents(path);
+    int ro = arg(esp, 1) & 1;           /* iAttribute bit0 = FILE_ATTRIBUTE_READONLY */
+    int fd = open(path, O_RDWR | O_CREAT | O_TRUNC, ro ? 0444 : 0666);
+    return fd < 0 ? ARET_HFILE_ERROR : (uint32_t)fd;
+}
+uint32_t aret_lclose(uint32_t esp) {
+    int fd = (int)arg(esp, 0);
+    return close(fd) == 0 ? (uint32_t)fd : ARET_HFILE_ERROR;
+}
+uint32_t aret_lread(uint32_t esp) {
+    ssize_t r = read((int)arg(esp, 0), (void *)(uintptr_t)arg(esp, 1), arg(esp, 2));
+    return r < 0 ? ARET_HFILE_ERROR : (uint32_t)r;
+}
+uint32_t aret_lwrite(uint32_t esp) {
+    ssize_t r = write((int)arg(esp, 0), (const void *)(uintptr_t)arg(esp, 1), arg(esp, 2));
+    return r < 0 ? ARET_HFILE_ERROR : (uint32_t)r;
+}
+uint32_t aret_hread(uint32_t esp)  { return aret_lread(esp); }   /* _hread: same, LONG count */
+uint32_t aret_hwrite(uint32_t esp) { return aret_lwrite(esp); }
+uint32_t aret_llseek(uint32_t esp) {
+    int origin = (int)arg(esp, 2);      /* 0=SEEK_SET, 1=SEEK_CUR, 2=SEEK_END */
+    off_t r = lseek((int)arg(esp, 0), (int32_t)arg(esp, 1),
+                    origin == 1 ? SEEK_CUR : (origin == 2 ? SEEK_END : SEEK_SET));
+    return r < 0 ? ARET_HFILE_ERROR : (uint32_t)r;
+}
+/* lstrcpynA(dst, src, iMaxLength) -> dst: copy at most iMaxLength-1 chars + NUL
+ * (iMaxLength counts the NUL). */
+uint32_t aret_lstrcpynA(uint32_t esp) {
+    char *dst = (char *)(uintptr_t)arg(esp, 0);
+    const char *src = (const char *)(uintptr_t)arg(esp, 1);
+    int n = (int)arg(esp, 2);
+    if (!dst || n <= 0) return (uint32_t)(uintptr_t)dst;
+    int i = 0;
+    if (src) for (; i < n - 1 && src[i]; i++) dst[i] = src[i];
+    dst[i] = 0;
+    return (uint32_t)(uintptr_t)dst;
+}
+
 /* File mapping (CreateFileMapping/MapViewOfFile/UnmapViewOfFile) — bridged to
  * host mmap. The guest runs natively with flat pointers, so a host mmap address
  * is directly usable by the guest. A mapping HANDLE is a heap pointer (not an

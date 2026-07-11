@@ -1170,4 +1170,18 @@ Détail : **70 §6** (roadmap). Résumé :
 - **Vérifié** : hash transpile **inchangé** `19acad982194bf07`, difftest 271/271, cargo test complet vert,
   winediff **63/63**, table triée.
 
+### 2026-07-10 — [HLE-FILE] Win16 file API (_lopen/_lcreat/_lclose/_lread/_lwrite/_llseek) + lstrcpynA
+- **Contexte** : long-tail post-GUI — les vieilles APIs fichier Win16 (`_lopen` 7, `_lclose`/`_lcreat` ~10)
+  reviennent dans le corpus Win95. Pur POSIX-mappable, oracle propre (round-trip fichier).
+- **Fait** (`aret_hle.c`, +9 `stdcall_pops`) : un HFILE = **fd POSIX** (modèle handle existant), donc `_lopen`
+  (OF_READ/WRITE/READWRITE → O_RDONLY/WRONLY/RDWR), `_lcreat` (O_RDWR|CREAT|TRUNC, bit READONLY→mode 0444),
+  `_lclose`/`_lread`/`_lwrite`/`_hread`/`_hwrite`/`_llseek` (SEEK_SET/CUR/END) mappent direct sur open/read/
+  write/lseek/close, partageant `translate_path`. HFILE_ERROR=-1. + `lstrcpynA` (copie ≤ n-1 + NUL). Clés pop
+  sans underscore de tête (`stdcall_pop_bytes` strip un `_` : `_lopen`→`lopen`).
+- **Oracle** : `winecorpus/win16_file.c` — round-trip create/write/reopen/seek(SET & END)/read + lstrcpynA
+  troncature → **bit-identique à Wine**.
+- **Effet mesuré** : `_lopen`/`_lclose`/`_lcreat`/`lstrcpynA` éliminés des 41 Win95.
+- **Vérifié** : hash transpile **inchangé** `19acad982194bf07`, difftest 271/271, cargo test complet vert,
+  winediff **64/64**, table triée.
+
 <!-- NOUVELLES ENTRÉES ICI (garder l'ordre chronologique, plus récent en bas) -->
