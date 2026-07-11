@@ -1968,6 +1968,8 @@ static struct gdi_obj {
     uint32_t text_color, bk_color; int bk_mode;          /* DC */
     int w, h, topdown, bpp; uint8_t *bits; int owns_bits; /* BITMAP */
     uint32_t color;                                      /* BRUSH/PEN */
+    int mapmode, savetop;                                /* DC map mode + save-stack depth */
+    struct { uint32_t font, brush, pen, tc, bc; int bm, mm; } sstk[8];  /* SaveDC/RestoreDC */
 } g_gdi[GDI_MAX];
 
 static uint32_t gdi_handle(int i) { return GDI_BASE | (uint32_t)i; }
@@ -2108,6 +2110,38 @@ static void u32_dc_defaults(int d) {
     g_gdi[d].sel_font  = u32_stock(13);   /* SYSTEM_FONT */
     g_gdi[d].sel_brush = u32_stock(0);    /* WHITE_BRUSH */
     g_gdi[d].sel_pen   = u32_stock(7);    /* BLACK_PEN */
+    g_gdi[d].mapmode   = 1;               /* MM_TEXT */
+}
+/* SaveDC(hdc) -> level. RestoreDC(hdc, level) -> BOOL. Get/SetMapMode. GetClipBox. */
+uint32_t aret_SaveDC(uint32_t esp) {
+    int d = gdi_idx(WU(0)); if (d < 0 || g_gdi[d].type != GDIT_DC || g_gdi[d].savetop >= 8) return 0;
+    int t = g_gdi[d].savetop;
+    g_gdi[d].sstk[t].font = g_gdi[d].sel_font; g_gdi[d].sstk[t].brush = g_gdi[d].sel_brush;
+    g_gdi[d].sstk[t].pen = g_gdi[d].sel_pen;   g_gdi[d].sstk[t].tc = g_gdi[d].text_color;
+    g_gdi[d].sstk[t].bc = g_gdi[d].bk_color;   g_gdi[d].sstk[t].bm = g_gdi[d].bk_mode;
+    g_gdi[d].sstk[t].mm = g_gdi[d].mapmode;
+    return (uint32_t)(++g_gdi[d].savetop);
+}
+uint32_t aret_RestoreDC(uint32_t esp) {
+    int d = gdi_idx(WU(0)); if (d < 0 || g_gdi[d].type != GDIT_DC) return 0;
+    int level = WI(1);
+    int idx = level < 0 ? g_gdi[d].savetop + level : level - 1;
+    if (idx < 0 || idx >= g_gdi[d].savetop) return 0;
+    g_gdi[d].sel_font = g_gdi[d].sstk[idx].font; g_gdi[d].sel_brush = g_gdi[d].sstk[idx].brush;
+    g_gdi[d].sel_pen = g_gdi[d].sstk[idx].pen;   g_gdi[d].text_color = g_gdi[d].sstk[idx].tc;
+    g_gdi[d].bk_color = g_gdi[d].sstk[idx].bc;   g_gdi[d].bk_mode = g_gdi[d].sstk[idx].bm;
+    g_gdi[d].mapmode = g_gdi[d].sstk[idx].mm;
+    g_gdi[d].savetop = idx;
+    return 1;
+}
+uint32_t aret_SetMapMode(uint32_t esp) { int d = gdi_idx(WU(0)); if (d < 0) return 0; int p = g_gdi[d].mapmode; g_gdi[d].mapmode = WI(1); return (uint32_t)p; }
+uint32_t aret_GetMapMode(uint32_t esp) { int d = gdi_idx(WU(0)); return d < 0 ? 0 : (uint32_t)g_gdi[d].mapmode; }
+uint32_t aret_GetClipBox(uint32_t esp) {
+    int32_t *r = (int32_t *)WP(1); if (!r) return 0;   /* ERROR */
+    struct gdi_obj *bm = gdi_dc_surface(WU(0));
+    if (bm) { r[0] = 0; r[1] = 0; r[2] = bm->w; r[3] = bm->h; }
+    else    { r[0] = 0; r[1] = 0; r[2] = U32_SCREEN_W; r[3] = U32_SCREEN_H; }
+    return 2;   /* SIMPLEREGION */
 }
 /* SelectObject(hdc, hgdiobj) -> previous object of that kind. */
 uint32_t aret_SelectObject(uint32_t esp) {
@@ -2892,3 +2926,20 @@ uint32_t aret_CreateFontIndirectW(uint32_t esp) { return aret_CreateFontIndirect
  * input to translate, so no message is consumed as a dialog message. */
 uint32_t aret_IsDialogMessageA(uint32_t esp) { (void)esp; return 0; }
 uint32_t aret_IsDialogMessageW(uint32_t esp) { (void)esp; return 0; }
+
+/* ================================================================== */
+/* Registry (older forms) + Windows hooks — sound stubs               */
+/* ================================================================== */
+/* RegOpenKeyA(hKey, lpSubKey, phkResult) -> ERROR_FILE_NOT_FOUND (empty hive). */
+uint32_t aret_RegOpenKeyA(uint32_t esp) { uint32_t *r = (uint32_t *)WP(2); if (r) *r = 0; return 2; }
+/* RegQueryInfoKeyA(...) -> ERROR_SUCCESS with an empty key (0 subkeys/values). The
+ * count out-params (args 4..) are left as the caller initialised them; we report
+ * success so a caller that only checks the return proceeds over an empty key. */
+uint32_t aret_RegQueryInfoKeyA(uint32_t esp) { (void)esp; return 0; }
+
+/* Windows hooks: install accepted (opaque handle), CallNextHookEx passes through
+ * (no next hook -> 0), unhook succeeds. No real hook chain in this model. */
+uint32_t aret_SetWindowsHookExA(uint32_t esp)   { (void)esp; return 0x484F4F4Bu; }  /* opaque HHOOK */
+uint32_t aret_SetWindowsHookExW(uint32_t esp)   { (void)esp; return 0x484F4F4Bu; }
+uint32_t aret_UnhookWindowsHookEx(uint32_t esp) { (void)esp; return 1; }
+uint32_t aret_CallNextHookEx(uint32_t esp)      { (void)esp; return 0; }

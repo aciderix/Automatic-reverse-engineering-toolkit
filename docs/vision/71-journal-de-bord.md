@@ -1319,4 +1319,17 @@ Détail : **70 §6** (roadmap). Résumé :
 - **Vérifié** : hash transpile **inchangé** `19acad982194bf07`, difftest 271/271, cargo test complet vert,
   winediff **73/73**, table triée.
 
+### 2026-07-10 — [GUI][HLE-WIN32] GDI état DC (Save/Restore/MapMode/ClipBox) + stubs registre/hooks
+- **Mesuré** : `SetMapMode`→ancien MM_TEXT(1) ; `SaveDC`→niveau 1 ; `RestoreDC(1)`→1, restaure la couleur texte
+  (0x030201) ; `GetClipBox`→SIMPLEREGION(2), rect = bornes DIB {0,0,8,4}.
+- **Fait** (`aret_win32.c`, +11 `stdcall_pops`) : **pile d'état DC** (champs `mapmode`/`savetop`/`sstk[8]` sur
+  l'objet GDI) → `SaveDC`/`RestoreDC` (font/brush/pen/textcol/bkcol/bkmode/mapmode ; niveau absolu ou relatif),
+  `Set`/`GetMapMode`, `GetClipBox` (surface DIB ou écran virtuel). Stubs sound : `RegOpenKeyA`→NOT_FOUND(2)
+  (hive vide), `RegQueryInfoKeyA`→SUCCESS (clé vide), `SetWindowsHookExA/W` (HHOOK opaque), `CallNextHookEx`→0,
+  `UnhookWindowsHookEx`→TRUE.
+- **Oracle** : `winecorpus/gdi_dcstate.c` — mapmode/save/restore/textcolor/clipbox → **bit-identique à Wine**.
+- **Effet mesuré** : SaveDC/RestoreDC/SetMapMode/GetClipBox/RegOpenKeyA/CallNextHookEx (3-4 binaires) éliminés.
+- **Vérifié** : hash transpile **inchangé** `19acad982194bf07`, difftest 271/271, cargo test complet vert,
+  winediff **74/74**, table triée.
+
 <!-- NOUVELLES ENTRÉES ICI (garder l'ordre chronologique, plus récent en bas) -->
