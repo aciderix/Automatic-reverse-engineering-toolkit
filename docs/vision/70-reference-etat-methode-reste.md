@@ -636,9 +636,17 @@ la **vitesse** change.
   ⇒ **commit + push après chaque incrément.**
 - **Réseau** : `github.com` est **BLOQUÉ** par la policy proxy. Joignables :
   `ftp.gnu.org`, `nasm.us`, `curl.se`, `zlib.net`, `sourceware.org`, `sqlite.org`,
-  `pypi.org`. Cross-compile : `i686-w64-mingw32-gcc` (mingw). Pas de `mingw g++`
-  ni de toolchain MSVC → binaires MSVC **téléchargés prébuild** (nasm.us, sqlite.org
-  précompilés). `winetest.exe` (WineHQ) bundle ~367 modules de conformance.
+  `pypi.org`, **`archive.org`** (HTTP/2 200 via proxy, vérifié 2026-07-11). Cross-compile :
+  `i686-w64-mingw32-gcc` (mingw). Pas de `mingw g++` ni de toolchain MSVC → binaires MSVC
+  **téléchargés prébuild** (nasm.us, sqlite.org précompilés). `winetest.exe` (WineHQ) bundle
+  ~367 modules de conformance.
+- **Corpus GUI Win95 (pour le re-sweep M7/G7)** : `https://archive.org/download/BestOfWindows95DotCom`
+  — collection « Best of Windows95.com », **4 ISO** `WIN95_09961.iso`…`WIN95_09964.iso` (vraies
+  applis GUI Win95 shareware). Reachable via proxy ; extraire les `.exe` (HTTP-range sur l'ISO
+  ou `7z x`/`bsdtar` en local) → `--mode walls` + `wallsweep.sh` pour prioriser les murs GUI
+  restants **par la donnée**. (Le corpus « 41 exe Win95 » d'une session antérieure venait d'une
+  source ISO similaire, non committée — conteneur éphémère.) Listing/metadata :
+  `https://archive.org/metadata/BestOfWindows95DotCom`.
 - Binaires de test committés : `bench/.cache/` (busybox/sqlite3/winetest, négations
   `.gitignore` + README sha256) et `bench/gauntlet/gauntlet-bins.tar.gz` (21 PE,
   auto-extrait par `score.sh`).
