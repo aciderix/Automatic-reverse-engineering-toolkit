@@ -2877,6 +2877,37 @@ uint32_t aret_LineTo(uint32_t esp) {
     g_gdi[d].cur_x = WI(1); g_gdi[d].cur_y = WI(2);
     return 1;
 }
+/* The DC's selected brush colour; returns 0 for a NULL/HOLLOW brush (no fill). */
+static int gdi_brush(int d, uint32_t *color) {
+    int b = gdi_idx(g_gdi[d].sel_brush);
+    if (b < 0 || g_gdi[b].null_obj) return 0;
+    if (color) *color = g_gdi[b].color;
+    return 1;
+}
+/* Rectangle(hdc, l, t, r, b) -> BOOL. Interior [l+1,r-1)×[t+1,b-1) filled with the
+ * brush; outline [l,r-1]×[t,b-1] drawn with the pen (measured Wine semantics). */
+uint32_t aret_Rectangle(uint32_t esp) {
+    int d = gdi_idx(WU(0)); if (d < 0 || g_gdi[d].type != GDIT_DC) return 0;
+    struct gdi_obj *bm = gdi_dc_surface(WU(0));
+    int l = WI(1), t = WI(2), r = WI(3), b = WI(4);
+    uint32_t pc; int pr = gdi_pen(d, &pc);
+    if (pr < 0) return 0;
+    uint32_t bc; int hf = gdi_brush(d, &bc);
+    if (bm && bm->bpp == 32 && r > l && b > t) {
+        if (hf)
+            for (int y = t + 1; y < b - 1; y++)
+                for (int x = l + 1; x < r - 1; x++)
+                    if (gdi_px(bm, x, y)) gdi_put(bm, x, y, bc);
+        if (pr) {
+            int r1 = r - 1, b1 = b - 1;
+            for (int x = l; x <= r1; x++) { if (gdi_px(bm, x, t))  gdi_put(bm, x, t,  pc);
+                                            if (gdi_px(bm, x, b1)) gdi_put(bm, x, b1, pc); }
+            for (int y = t; y <= b1; y++) { if (gdi_px(bm, l, y))  gdi_put(bm, l,  y, pc);
+                                            if (gdi_px(bm, r1, y)) gdi_put(bm, r1, y, pc); }
+        }
+    }
+    return 1;
+}
 /* FillRect(hdc, const RECT*, hbrush) -> int. [left,right) x [top,bottom). */
 uint32_t aret_FillRect(uint32_t esp) {
     struct gdi_obj *bm = gdi_dc_surface(WU(0));

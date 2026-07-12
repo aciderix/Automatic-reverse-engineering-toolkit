@@ -364,6 +364,7 @@ static TABLE: &[(&str, u32)] = &[
     ("ReadConsoleInputW", 16),
     ("ReadDirectoryChangesW", 32),
     ("ReadProcessMemory", 20),
+    ("Rectangle", 20),
     ("RedrawWindow", 16),
     ("RegCloseKey", 4),
     ("RegCreateKeyExA", 36),

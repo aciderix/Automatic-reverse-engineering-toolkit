@@ -1930,6 +1930,14 @@ Détail : **70 §6** (roadmap). Résumé :
 - **Vérifié bit-identique Wine** : 6 lignes multi-octants (peu/très pentues, dx<0, verticale, horizontale, stylo
   coloré) + position courante. Oracle `gdi_lineto.c`. `stdcall_pops` : LineTo=12, MoveToEx=16, GetCurrentPositionEx=8.
 - **Vérifié** : hash transpile inchangé, difftest-transpile 4/4, `table_is_sorted` vert, winediff (voir chiffre).
-- **Suite GDI vectoriel** : Polyline/PolylineTo, Rectangle (bord stylo + remplissage pinceau), Ellipse.
+- **Suite GDI vectoriel** : Polyline/PolylineTo, Ellipse.
+
+### 2026-07-12 — [GUI][HLE-WIN32] GDI vectoriel : **Rectangle** (bord stylo + remplissage pinceau) bit-identique Wine
+- **`Rectangle(hdc,l,t,r,b)`** : intérieur `[l+1,r-1)×[t+1,b-1)` rempli du **pinceau** sélectionné ; contour
+  `[l,r-1]×[t,b-1]` tracé au **stylo** (1px). Sémantique mesurée sur Wine (bord au pixel r-1/b-1, pas r/b).
+  `gdi_brush` : couleur du pinceau, 0 si NULL/HOLLOW (pas de remplissage). Réutilise `gdi_pen`.
+- **Vérifié bit-identique Wine** : rempli (vert/stylo noir), creux (NULL_BRUSH/stylo rouge), blanc/noir. Oracle
+  `gdi_rectangle.c`. `stdcall_pops` : Rectangle=20.
+- **Vérifié** : hash transpile inchangé, difftest-transpile 4/4, `table_is_sorted` vert, winediff (voir chiffre).
 
 <!-- NOUVELLES ENTRÉES ICI (garder l'ordre chronologique, plus récent en bas) -->
