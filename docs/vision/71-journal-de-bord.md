@@ -1889,4 +1889,17 @@ Détail : **70 §6** (roadmap). Résumé :
 - **Vérifié bit-identique Wine** (4 cas : underline -16/-32, strikeout -16, both -24). Oracle `gdi_underline.c`.
 - **Vérifié** : hash transpile inchangé, difftest-transpile 4/4, `table_is_sorted` vert, winediff (voir chiffre).
 
+### 2026-07-12 — [GUI][HLE-WIN32] Texte GDI : **DrawText préfixe `&`** (souligné d'accélérateur) bit-identique Wine
+- **Préfixe `&`** (sauf `DT_NOPREFIX`) : un `&` seul est retiré et marque le caractère suivant comme
+  **accélérateur souligné** ; `&&` = `&` littéral ; un `&` final est ignoré. Prétraitement dans `u32_drawtext`
+  (single-line ; accélérateur en multi-ligne = abort, rare).
+- **Souligné d'accélérateur = trait au pen de Wine** (distinct du soulignement de police lfUnderline) : **1px**
+  d'épaisseur à **`baseline + 1`**, s'étendant sur l'**extent du caractère moins un** (`LineTo` exclut son point
+  final) — formules mesurées sur 3 tailles (`row=baseline+1`, `w=ext-1`).
+- **Vérifié bit-identique Wine** (5 cas : `&File`, DT_NOPREFIX, `File`, `Save &As`, `A && B`). Oracle
+  `gdi_drawtext_amp.c`.
+- **Vérifié** : hash transpile inchangé, difftest-transpile 4/4, `table_is_sorted` vert, winediff (voir chiffre).
+- **Reste texte (abort sound)** : grayscale ANTIALIASED, tabs/ellipsis DrawText, synthèse gras/italique, sérif/mono
+  legacy, SYSTEM_FONT bitmap, surrogates, CP1252 0x80-0x9F.
+
 <!-- NOUVELLES ENTRÉES ICI (garder l'ordre chronologique, plus récent en bas) -->

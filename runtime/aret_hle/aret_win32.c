@@ -3324,7 +3324,26 @@ static uint32_t u32_drawtext(uint32_t hdc, const uint32_t *cps, int len, uint32_
            DT_EXPANDTABS=0x40, DT_TABSTOP=0x80, DT_NOCLIP=0x100, DT_CALCRECT=0x400, DT_NOPREFIX=0x800 };
     if (fmt & (DT_EXPANDTABS|DT_TABSTOP|0x8000/*DT_END_ELLIPSIS*/|0x40000/*DT_PATH_ELLIPSIS*/|0x20000/*DT_WORD_ELLIPSIS*/))
         { aret_unimpl("DrawText: tabs/ellipsis pending"); return 0; }
-    if (!(fmt & DT_NOPREFIX)) { for (int i = 0; i < len; i++) if (cps[i] == '&') { aret_unimpl("DrawText: '&' prefix underline pending (use DT_NOPREFIX)"); return 0; } }
+    /* '&' prefix (unless DT_NOPREFIX): a single '&' is removed and marks the next
+     * char as the underlined accelerator; '&&' is a literal '&'; a trailing '&' is
+     * dropped. Single-line only (accelerators in wrapped text are rare → abort). */
+    int acc = -1;
+    uint32_t pcps[1024];
+    if (!(fmt & DT_NOPREFIX)) {
+        int has_amp = 0; for (int i = 0; i < len; i++) if (cps[i] == '&') { has_amp = 1; break; }
+        if (has_amp) {
+            if (!(fmt & DT_SINGLELINE)) { aret_unimpl("DrawText: '&' accelerator in multi-line text pending"); return 0; }
+            int o = 0;
+            for (int i = 0; i < len && o < 1024; ) {
+                if (cps[i] == '&') {
+                    if (i + 1 < len && cps[i + 1] == '&') { pcps[o++] = '&'; i += 2; }
+                    else if (i + 1 < len) { if (acc < 0) acc = o; pcps[o++] = cps[i + 1]; i += 2; }
+                    else i++;   /* trailing '&' dropped */
+                } else pcps[o++] = cps[i++];
+            }
+            cps = pcps; len = o;
+        }
+    }
     int32_t *rc = (int32_t *)(uintptr_t)prc;
     if (!rc) return 0;
     int d = gdi_idx(hdc);
@@ -3396,6 +3415,23 @@ static uint32_t u32_drawtext(uint32_t hdc, const uint32_t *cps, int len, uint32_
     if (fmt & DT_VCENTER) y = rc[1] + (rh - textH + 1) / 2;   /* Wine rounds up */
     else if (fmt & DT_BOTTOM) y = rc[3] - textH;
     u32_textout_full(hdc, x, y, cps, len, NULL, rc, 0, clip);
+    /* Accelerator underline: DrawText draws a 1px pen line (not the font's underline)
+     * at baseline+1, spanning the char's extent minus one (LineTo excludes its
+     * endpoint) — measured across sizes. */
+    if (acc >= 0) {
+        struct gdi_obj *surf = gdi_dc_surface(hdc);
+        if (surf && surf->bpp == 32) {
+            int pre_w = u32_text_width(ftf, cps, acc);
+            int char_w = u32_text_width(ftf, cps + acc, 1);
+            int Y = y + ascent + 1;             /* baseline + 1 */
+            int x0 = x + pre_w, x1 = x0 + char_w - 1;
+            uint32_t fg = g_gdi[d].text_color;
+            int cl = clip ? rc[0] : 0, ct = clip ? rc[1] : 0, crr = clip ? rc[2] : surf->w, cbb = clip ? rc[3] : surf->h;
+            for (int X = x0; X < x1; X++)
+                if (X >= cl && X < crr && Y >= ct && Y < cbb && X >= 0 && X < surf->w && Y >= 0 && Y < surf->h)
+                    gdi_put(surf, X, Y, fg);
+        }
+    }
     g_gdi[d].text_align = saved_align;
     if (fmt & (DT_VCENTER|DT_BOTTOM)) return (uint32_t)(y + textH - rc[1]);
     return (uint32_t)textH;
