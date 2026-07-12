@@ -231,6 +231,8 @@ static TABLE: &[(&str, u32)] = &[
     ("GetTextExtentPoint32W", 16),
     ("GetTextExtentPointA", 16),
     ("GetTextExtentPointW", 16),
+    ("GetTextMetricsA", 8),
+    ("GetTextMetricsW", 8),
     ("GetTimeZoneInformation", 4),
     ("GetTokenInformation", 20),
     ("GetUserNameA", 8),

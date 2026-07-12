@@ -43,6 +43,13 @@ int main(void) {
      * cell rect with bkColor first). These share the metric core with TextOut. */
     SIZE sz; GetTextExtentPoint32A(dc, "Hello, ARET!", 12, &sz);
     printf("extent=%ldx%ld\n", sz.cx, sz.cy);
+    /* full TEXTMETRIC: every field mined from Wine (usWinAscent/Descent, lineGap,
+     * xAvgCharWidth, bbox width, weight, family). Hash the struct to compare exactly. */
+    TEXTMETRICA tm; memset(&tm, 0xAA, sizeof tm); GetTextMetricsA(dc, &tm);
+    { unsigned char *tp = (unsigned char *)&tm; unsigned th = 2166136261u;
+      for (int i = 0; i < 53; i++) { th ^= tp[i]; th *= 16777619u; }
+      printf("tm H=%ld asc=%ld desc=%ld ave=%ld max=%ld hash=%08x\n",
+             tm.tmHeight, tm.tmAscent, tm.tmDescent, tm.tmAveCharWidth, tm.tmMaxCharWidth, th); }
     SetTextColor(dc, RGB(0, 0, 0));
     SetBkColor(dc, RGB(0x30, 0xC0, 0xF0));
     SetBkMode(dc, OPAQUE);

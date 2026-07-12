@@ -3196,6 +3196,56 @@ uint32_t aret_GetTextExtentPoint32W(uint32_t esp) {
 }
 uint32_t aret_GetTextExtentPointW(uint32_t esp) { return aret_GetTextExtentPoint32W(esp); }
 
+/* Fill a TEXTMETRIC{A,W} for the DC's selected font, every field matching Wine
+ * (formulas mined + verified against GetTextMetrics across DejaVu/Liberation at
+ * several sizes). `wide` selects the W layout (WCHAR char fields at +44). */
+static int u32_fill_textmetric(int d, int wide, uint32_t out) {
+#ifdef ARET_HAVE_FREETYPE
+    if (!out) return 0;
+    int ascent, descent;
+    FT_Face f = u32_dc_font(d, &ascent, &descent);
+    if (!f) return 0;
+    TT_OS2 *os2 = (TT_OS2 *)FT_Get_Sfnt_Table(f, FT_SFNT_OS2);
+    TT_HoriHeader *hh = (TT_HoriHeader *)FT_Get_Sfnt_Table(f, FT_SFNT_HHEA);
+    FT_Fixed ys = f->size->metrics.y_scale, xs = f->size->metrics.x_scale;
+    int EM = f->units_per_EM ? f->units_per_EM : 2048;
+    int32_t H  = ascent + descent;
+    int32_t IL = (int32_t)((FT_MulFix(os2->usWinAscent + os2->usWinDescent - EM, ys) + 32) >> 6);
+    int32_t EL = hh ? (int32_t)((FT_MulFix(hh->Line_Gap, ys) + 32) >> 6) : 0;
+    int32_t ave  = (int32_t)((FT_MulFix(os2->xAvgCharWidth, xs) + 32) >> 6);
+    int32_t maxw = (int32_t)((FT_MulFix((FT_Long)(f->bbox.xMax - f->bbox.xMin), xs) + 32) >> 6);
+    int32_t weight = os2->usWeightClass;
+    int fam;
+    switch ((os2->sFamilyClass >> 8) & 0xff) {           /* IBM font-class → FF_* */
+        case 1: case 2: case 3: case 4: case 5: case 7: fam = 0x10; break; /* FF_ROMAN  */
+        case 8:  fam = 0x20; break;                       /* FF_SWISS      */
+        case 10: fam = 0x40; break;                       /* FF_SCRIPT     */
+        case 12: fam = 0x50; break;                       /* FF_DECORATIVE */
+        default: fam = 0x20; break;                       /* FF_SWISS (Wine's default for unclassified) */
+    }
+    uint8_t pf = (uint8_t)(0x06 /*TMPF_VECTOR|TMPF_TRUETYPE*/ | (FT_IS_FIXED_WIDTH(f) ? 0 : 0x01) | fam);
+    int fi = gdi_idx(g_gdi[d].sel_font);
+    uint8_t italic = (fi >= 0 && g_gdi[fi].lf_italic) ? 1 : 0;
+    int32_t *L = (int32_t *)(uintptr_t)out;
+    L[0]=H; L[1]=ascent; L[2]=descent; L[3]=IL; L[4]=EL; L[5]=ave; L[6]=maxw; L[7]=weight;
+    L[8]=0; L[9]=96; L[10]=96;                            /* overhang, digitized aspect X/Y */
+    uint8_t *B = (uint8_t *)(uintptr_t)out;
+    if (!wide) {
+        B[44]=30; B[45]=255; B[46]=31; B[47]=32;          /* first/last/default/break (ANSI) */
+        B[48]=italic; B[49]=0; B[50]=0; B[51]=pf; B[52]=0;
+    } else {
+        uint16_t *W = (uint16_t *)(uintptr_t)(B + 44);
+        W[0]=30; W[1]=255; W[2]=31; W[3]=32;
+        B[52]=italic; B[53]=0; B[54]=0; B[55]=pf; B[56]=0;
+    }
+    return 1;
+#else
+    (void)d; (void)wide; (void)out; aret_unimpl("GetTextMetrics: FreeType not linked"); return 0;
+#endif
+}
+uint32_t aret_GetTextMetricsA(uint32_t esp) { int d = gdi_idx(WU(0)); return (d >= 0 && u32_fill_textmetric(d, 0, WU(1))) ? 1 : 0; }
+uint32_t aret_GetTextMetricsW(uint32_t esp) { int d = gdi_idx(WU(0)); return (d >= 0 && u32_fill_textmetric(d, 1, WU(1))) ? 1 : 0; }
+
 /* ---- DC attributes ---- */
 uint32_t aret_SetTextColor(uint32_t esp) { int d = gdi_idx(WU(0)); if (d < 0) return 0xFFFFFFFFu; uint32_t p = g_gdi[d].text_color; g_gdi[d].text_color = WU(1) & 0xFFFFFFu; return p; }
 uint32_t aret_SetBkColor(uint32_t esp)   { int d = gdi_idx(WU(0)); if (d < 0) return 0xFFFFFFFFu; uint32_t p = g_gdi[d].bk_color; g_gdi[d].bk_color = WU(1) & 0xFFFFFFu; return p; }

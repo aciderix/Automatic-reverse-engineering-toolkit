@@ -1725,4 +1725,18 @@ Détail : **70 §6** (roadmap). Résumé :
 - **Vérifié** : hash transpile **inchangé** `19acad982194bf07`, difftest-transpile 4/4, `table_is_sorted` vert,
   winediff **86/86**.
 
+### 2026-07-12 — [GUI][HLE-WIN32] Texte GDI (suite) : **GetTextMetrics** struct complète bit-identique Wine
+- **GetTextMetricsA/W** : struct `TEXTMETRIC` entière remplie, **chaque champ** matchant Wine (hash de struct
+  identique sur DejaVu-16/Arial-16/DejaVu-24). Formules minées + vérifiées sur plusieurs polices/tailles :
+  - `tmHeight=asc+desc`, `tmAscent/Descent` (usWin*), `tmInternalLeading=round(MulFix(usWinAsc+usWinDesc-EM,ys))`,
+    `tmExternalLeading=round(MulFix(hhea.lineGap,ys))`, `tmAveCharWidth=round(MulFix(xAvgCharWidth,xs))`,
+    `tmMaxCharWidth=round(MulFix(bbox.xMax-xMin,xs))`, `tmWeight=usWeightClass`.
+  - `tmDigitizedAspectX/Y=96`, `tmOverhang=0`, `tmFirst/Last/Default/Break=30/255/31/32` (constantes ANSI),
+    `tmPitchAndFamily` = `VECTOR|TRUETYPE|(pitch variable ? 0x01)|famille` (famille depuis `OS/2.sFamilyClass`,
+    défaut FF_SWISS comme Wine) → **0x27** vérifié, `tmItalic` depuis le LOGFONT, `tmCharSet=0`.
+- **Oracle** : `gdi_textout.c` étendu (hash de la struct `TEXTMETRIC`) → bit-identique Wine.
+- **Vérifié** : hash transpile **inchangé**, difftest-transpile 4/4, `table_is_sorted` vert, winediff **86/86**.
+- **Reste (abort sound)** : antialiasing, gras/italique, alignements, stock font, substitution legacy, Unicode,
+  DrawText/ExtTextOut.
+
 <!-- NOUVELLES ENTRÉES ICI (garder l'ordre chronologique, plus récent en bas) -->
