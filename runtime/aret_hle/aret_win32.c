@@ -3115,21 +3115,32 @@ static int u32_textout_core(uint32_t hdc, int x, int y, const char *str, int len
     int fi = gdi_idx(g_gdi[d].sel_font);
     int quality = (fi >= 0) ? g_gdi[fi].lf_quality : 0;
     if (quality != 3 /*NONANTIALIASED_QUALITY*/) { aret_unimpl("TextOut: antialiased text pending (use NONANTIALIASED_QUALITY)"); return 0; }
-    if (g_gdi[d].text_align != 0) { aret_unimpl("TextOut: only TA_TOP|TA_LEFT alignment modelled"); return 0; }
+    uint32_t ta = g_gdi[d].text_align;
+    if (ta & ~0x1Eu) { aret_unimpl("TextOut: TA_UPDATECP/RTL alignment pending"); return 0; }  /* only TA_{LEFT,RIGHT,CENTER,TOP,BASELINE,BOTTOM} */
     int bkmode = g_gdi[d].bk_mode;
     if (bkmode != 1 /*TRANSPARENT*/ && bkmode != 2 /*OPAQUE*/) { aret_unimpl("TextOut: unknown background mode"); return 0; }
     int ascent, descent;
     FT_Face ftf = u32_dc_font(d, &ascent, &descent);
     if (!ftf) return 0;
-    /* OPAQUE: fill the text cell rectangle with bkColor before drawing glyphs. */
+    /* Alignment origin (Wine's rules, measured): horizontal LEFT=x, RIGHT=x-width,
+     * CENTER=x-width/2; vertical TOP baseline=y+ascent, BASELINE=y, BOTTOM=y-descent. */
+    int need_width = (ta & 6) || (bkmode == 2);
+    int width = need_width ? u32_text_width(ftf, str, len) : 0;
+    int penx = x;
+    if ((ta & 6) == 2) penx = x - width;              /* TA_RIGHT  */
+    else if ((ta & 6) == 6) penx = x - width / 2;     /* TA_CENTER */
+    int baseline;
+    if ((ta & 24) == 8) baseline = y - descent;       /* TA_BOTTOM   */
+    else if ((ta & 24) == 24) baseline = y;           /* TA_BASELINE */
+    else baseline = y + ascent;                       /* TA_TOP      */
+    /* OPAQUE: fill the (aligned) text cell rectangle with bkColor before glyphs. */
     if (bkmode == 2) {
-        int wpx = u32_text_width(ftf, str, len), hpx = ascent + descent;
+        int top = baseline - ascent;
         uint32_t bg = g_gdi[d].bk_color;
-        for (int Y = y; Y < y + hpx; Y++)
-            for (int X = x; X < x + wpx; X++)
+        for (int Y = top; Y < top + ascent + descent; Y++)
+            for (int X = penx; X < penx + width; X++)
                 if (X >= 0 && X < surf->w && Y >= 0 && Y < surf->h) gdi_put(surf, X, Y, bg);
     }
-    int penx = x, baseline = y + ascent;
     uint32_t fg = g_gdi[d].text_color;   /* 0x00BBGGRR, matches DIB [B,G,R,0] */
     for (int k = 0; k < len; k++) {
         unsigned char ch = (unsigned char)str[k];

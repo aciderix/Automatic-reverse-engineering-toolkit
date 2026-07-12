@@ -165,7 +165,7 @@ bash bench/regression.sh    # PORTE unifiée : difftest 271/271, in-place 3/3,
                             # recompilabilité gzip/ls/cat 100%
 bash bench/difftest.sh              # décompile O0→O3
 bash bench/difftest_transpile.sh    # transpile (hash 19acad982194bf07)
-bash bench/winediff.sh              # axe 2 vs Wine (86/86)
+bash bench/winediff.sh              # axe 2 vs Wine (87/87)
 bash bench/funcdiff.sh              # lift-closure + opt-diff vs Unicorn (0 div)
 # Sweeps de vrais binaires (téléchargent + comparent à Wine) :
 bash bench/sqlite_sweep.sh   bash bench/busybox_sweep.sh   bash bench/corpus_sweep.sh
@@ -185,7 +185,7 @@ bash bench/wallsweep.sh <dir1> [dir2…]  # AGRÈGE --mode walls sur un corpus :
 
 ### État régression (référence — doit rester vert)
 difftest **271/271** · transpile-diff **4/4** (H=`19acad982194bf07`) · winediff
-**86/86** · cpudiff vert (per-instruction + séquences génératives) · funcdiff corpus **0 divergence** (lift ~12k scorées /
+**87/87** · cpudiff vert (per-instruction + séquences génératives) · funcdiff corpus **0 divergence** (lift ~12k scorées /
 ~6k appels, opt ~10k scorées) · SMT **11/11** · in-place **3/3** · magicdiv **2³²** ·
 recompilabilité **100 %** · WASM **7/7**.
 
@@ -561,7 +561,7 @@ bornée** : `WSAStartup`/Winsock, `CreateEventW`, `wcschr`, `LoadLibraryW`, et l
 | CRT+/W32 | Vrai CRT (forward libc) + Win32 native (kernel32→POSIX) | prog. C large + Win32 hors-GUI | ✅ |
 | UNPACK | Déballage dynamique Unicorn (émule stub → OEP → dump) | packers non-VM | ✅ |
 | M6 | Cible **WebAssembly** (`--target wasm`, wasmtime) | cible universelle | ✅ (7/7) |
-| **M7** | **GUI / graphisme** (USER32/GDI via **SDL2** portable, puis DXVK/vkd3d) | applis fenêtrées, puis **jeux** | 🚧 **plan doc 72** — **couche USER32/GDI display-free quasi complète** : fenêtres/classes/messages (A+W), modèle fenêtre étendu, ressources/LoadString, MessageBox, **dialogs (DLGTEMPLATE+modal)**, **GDI DIB bit-exact**, menus, helpers, SID/token, rect/char/…, **+ fenêtre SDL VISIBLE (G2b : `SDL_Window`+présentation framebuffer+pompe `SDL_PollEvent`)** **+ GDI texte FreeType bit-identique Wine (G3, autonome)** (winediff **86/86**). **Reste** : widgets natifs (BUTTON/EDIT), texte étendu (antialiasing/gras/fond opaque/substitution), + hors-GUI : **EH/RtlUnwind**, **threads** |
+| **M7** | **GUI / graphisme** (USER32/GDI via **SDL2** portable, puis DXVK/vkd3d) | applis fenêtrées, puis **jeux** | 🚧 **plan doc 72** — **couche USER32/GDI display-free quasi complète** : fenêtres/classes/messages (A+W), modèle fenêtre étendu, ressources/LoadString, MessageBox, **dialogs (DLGTEMPLATE+modal)**, **GDI DIB bit-exact**, menus, helpers, SID/token, rect/char/…, **+ fenêtre SDL VISIBLE (G2b : `SDL_Window`+présentation framebuffer+pompe `SDL_PollEvent`)** **+ GDI texte FreeType bit-identique Wine (G3, autonome)** (winediff **87/87**). **Reste** : widgets natifs (BUTTON/EDIT), texte étendu (antialiasing/gras/fond opaque/substitution), + hors-GUI : **EH/RtlUnwind**, **threads** |
 
 > **Règle** : on ne s'engage pas sur M_n+1 tant que M_n ne tourne pas proprement ;
 > chaque palier = un artefact démontrable + un test de non-régression.

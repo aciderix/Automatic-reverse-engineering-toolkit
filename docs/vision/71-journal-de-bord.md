@@ -1754,4 +1754,14 @@ Détail : **70 §6** (roadmap). Résumé :
 - **Reste (abort sound)** : antialiasing, alignements, stock font, substitution legacy, Unicode, DrawText/
   ExtTextOut, **synthèse gras/italique**.
 
+### 2026-07-12 — [GUI][HLE-WIN32] Texte GDI (suite) : **alignements** (SetTextAlign) bit-identiques Wine
+- **`SetTextAlign`** appliqué dans `TextOut` (règles mesurées sur Wine) : horizontal **LEFT** `penx=x`, **RIGHT**
+  `penx=x-width`, **CENTER** `penx=x-width/2` (trunc) ; vertical **TOP** `baseline=y+ascent`, **BASELINE**
+  `baseline=y`, **BOTTOM** `baseline=y-descent`. `width` = extent (avances default). Le fill opaque suit l'origine
+  alignée. `TA_UPDATECP`/`TA_RTLREADING` = **abort sound**.
+- **Oracle** : `winecorpus/gdi_textalign.c` (5 modes hashés) → bit-identique Wine. winediff **86→87/87**.
+- **Vérifié** : hash transpile inchangé, difftest-transpile 4/4, `table_is_sorted` vert.
+- **Reste (abort sound)** : antialiasing, stock font, substitution legacy, Unicode, DrawText/ExtTextOut, synthèse
+  gras/italique, TA_UPDATECP.
+
 <!-- NOUVELLES ENTRÉES ICI (garder l'ordre chronologique, plus récent en bas) -->
