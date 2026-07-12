@@ -2686,7 +2686,16 @@ static uint32_t u32_stock(int id) {
         case 6: g_gdi[i].color = 0xFFFFFF; break;         /* WHITE_PEN */
         case 7: g_gdi[i].color = 0x000000; break;         /* BLACK_PEN */
         case 8: g_gdi[i].null_obj = 1; break;             /* NULL_PEN */
-        default: break;                                   /* fonts: opaque */
+        /* Stock fonts: assign the LOGFONT Wine reports (measured via GetObject).
+         * The sans ones resolve (via u32_face_subst) to Liberation Sans and render
+         * bit-exactly like Wine; DEFAULT_GUI_FONT is by far the most used. Quality
+         * DEFAULT (0) → subpixel. Fixed-pitch/OEM stocks keep no face (sound abort). */
+        case 12: /* ANSI_VAR_FONT   */ strcpy(g_gdi[i].lf_face, "MS Sans Serif"); g_gdi[i].lf_height = 12; g_gdi[i].lf_weight = 400; break;
+        case 17: /* DEFAULT_GUI_FONT*/ strcpy(g_gdi[i].lf_face, "MS Shell Dlg");  g_gdi[i].lf_height = -11; g_gdi[i].lf_weight = 400; break;
+        /* SYSTEM_FONT/SYSTEM_FIXED/OEM/ANSI_FIXED: legacy 'System'/'Courier' bitmap
+         * fonts render specially in Wine (not a plain Liberation resolve) → no face,
+         * abort soundly rather than mis-render. */
+        default: break;
         }
         g_gdi_stock[id] = gdi_handle(i);
     }
@@ -3018,10 +3027,30 @@ static int ft_ensure(void) {
 static inline uint8_t u32_blend1(int fg, int old, int cov) {
     return (uint8_t)((fg * cov + old * (255 - cov) + 127) / 255);
 }
+/* Map the classic Windows UI *sans* face names to their metric-compatible
+ * replacement (Liberation Sans) — the same substitution Wine applies. fontconfig
+ * alone routes these to its generic default (DejaVu), which diverges from Wine for
+ * the exact faces real GUI apps use (MS Sans Serif, MS Shell Dlg, Tahoma…). Only
+ * the sans UI family is remapped here; serif/mono legacy names keep fontconfig's
+ * (correct) metric-compatible answer (Times→Liberation Serif, etc.). Case-
+ * insensitive; returns the original face when not a known UI-sans name. */
+static const char *u32_face_subst(const char *face) {
+    if (!face || !face[0]) return face;
+    static const char *ui_sans[] = {
+        "MS Sans Serif", "MS Shell Dlg", "MS Shell Dlg 2", "Microsoft Sans Serif",
+        "Tahoma", "Helv", "Helvetica", "System", "Segoe UI", "Arial", NULL };
+    for (int i = 0; ui_sans[i]; i++) {
+        const char *a = face, *b = ui_sans[i];
+        while (*a && *b && (*a | 0x20) == (*b | 0x20)) { a++; b++; }
+        if (!*a && !*b) return "Liberation Sans";
+    }
+    return face;
+}
 /* Resolve a logical face name to a font file path with fontconfig — the same
  * mechanism Wine uses on Linux, so we pick the same file Wine picks (Arial→
  * Liberation Sans, etc.). Returns 1 + fills `out` on success. */
 static int ft_resolve_face(const char *face, int bold, int italic, char *out, size_t outsz) {
+    face = u32_face_subst(face);
     FcPattern *pat = FcPatternCreate();
     if (!pat) return 0;
     if (face && face[0]) FcPatternAddString(pat, FC_FAMILY, (const FcChar8 *)face);
@@ -3086,11 +3115,21 @@ static FT_Face u32_dc_font(int d, int *ascent, int *descent) {
         { aret_unimpl("GDI text: synthesized bold (no real bold face) pending"); return NULL; }
     if (italic && !(ftf->style_flags & FT_STYLE_FLAG_ITALIC))
         { aret_unimpl("GDI text: synthesized italic (no real italic face) pending"); return NULL; }
-    int ppem = height < 0 ? -height : height;
-    if (ppem <= 0) ppem = 16;
-    if (FT_Set_Pixel_Sizes(ftf, 0, (FT_UInt)ppem) != 0) { aret_unimpl("GDI text: set pixel size failed"); return NULL; }
     TT_OS2 *os2 = (TT_OS2 *)FT_Get_Sfnt_Table(ftf, FT_SFNT_OS2);
     if (!os2 || os2->version == 0xFFFF) { aret_unimpl("GDI text: font has no OS/2 table (metrics undefined)"); return NULL; }
+    /* ppem from LOGFONT height: negative = em/character height (ppem = |height|);
+     * positive = cell height → Wine maps ppem = round(height·upm/(winAsc+winDesc))
+     * so the resulting tmHeight equals the requested cell height (measured: for
+     * Liberation Sans, height 16 → ppem 14). */
+    int upm = ftf->units_per_EM ? ftf->units_per_EM : 2048;
+    int ppem;
+    if (height < 0) ppem = -height;
+    else if (height > 0) {
+        int cell = os2->usWinAscent + os2->usWinDescent;
+        ppem = cell ? (height * upm + cell / 2) / cell : height;
+    } else ppem = 16;
+    if (ppem <= 0) ppem = 1;
+    if (FT_Set_Pixel_Sizes(ftf, 0, (FT_UInt)ppem) != 0) { aret_unimpl("GDI text: set pixel size failed"); return NULL; }
     FT_Fixed ys = ftf->size->metrics.y_scale;
     if (ascent)  *ascent  = (int)((FT_MulFix(os2->usWinAscent,  ys) + 32) >> 6);
     if (descent) *descent = (int)((FT_MulFix(os2->usWinDescent, ys) + 32) >> 6);

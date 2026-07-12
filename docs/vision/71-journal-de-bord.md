@@ -1838,4 +1838,27 @@ Détail : **70 §6** (roadmap). Résumé :
 - **Note env** : subpixel-on/off suit le réglage de font-smoothing du système (comme Wine) ; l'oracle le vérifie.
   Reste : **grayscale `ANTIALIASED_QUALITY`** (pipeline Wine distinct), + les 2 autres murs durs (stock/substitution).
 
+### 2026-07-12 — [GUI][HLE-WIN32] **Murs durs #2/#3 : substitution UI-sans + stock fonts** (bit-identique Wine)
+- **Débloqué par le subpixel** : le « mismatch stock font » d'avant était une **confusion mono vs subpixel**
+  (les stock fonts utilisent `DEFAULT_QUALITY` = subpixel). Une fois la qualité alignée :
+  `DEFAULT_GUI_FONT` == `CreateFontIndirect(son LOGFONT)` == `CreateFont("Liberation Sans")` (tous `408911be`).
+- **Forensics substitution** (`GetTextFaceA` + trace) : Wine mappe **toutes** les faces UI sans indispo
+  (MS Sans Serif, MS Shell Dlg, Tahoma, System, Helv, Segoe UI…) → **Liberation Sans** (le remplaçant
+  métrique-compatible). fontconfig seul les route vers son défaut générique (DejaVu) → **divergence mesurée**
+  (Wine `4640d291` vs ARET-avant `a06270be`) = faux silencieux pour les faces exactes qu'utilisent les vraies GUI.
+- **Fait** :
+  - **Table de substitution UI-sans** (`u32_face_subst`) : {MS Sans Serif, MS Shell Dlg(/2), Microsoft Sans Serif,
+    Tahoma, Helv, Helvetica, System, Segoe UI, Arial} → « Liberation Sans » (comme Wine ; sérif/mono legacy gardent
+    la réponse *correcte* de fontconfig — pas d'overfit au quirk « tout→sans » de ce prefix minimal). → **match Wine**.
+  - **Hauteur positive→ppem** (`u32_dc_font`) : `ppem = round(height·upm/(winAsc+winDesc))` (Wine : height 16 →
+    ppem 14 pour Liberation Sans ; tmHeight résultant = hauteur demandée). La négative reste `|height|`.
+  - **Stock fonts** : `GetStockObject(DEFAULT_GUI_FONT)` = « MS Shell Dlg » -11, `ANSI_VAR_FONT` = « MS Sans Serif »
+    12 → LOGFONT assigné, rendu subpixel **bit-identique à Wine**. `SYSTEM_FONT`/fixed/OEM (« System »/« Courier »
+    bitmap legacy, rendu spécial Wine) = **pas de face → abort sound**.
+- **Oracle** : `winecorpus/gdi_uifont.c` (4 faces UI-sans + 2 stock fonts hashés) → bit-identique Wine.
+- **Vérifié** : hash transpile inchangé, difftest-transpile 4/4, `table_is_sorted` vert, winediff (voir chiffre).
+- **Bilan des 3 murs durs** : **antialiasing** (subpixel LCD) ✅, **substitution UI-sans** ✅, **stock fonts**
+  (DEFAULT_GUI_FONT/ANSI_VAR) ✅. Restes bornés (abort sound) : grayscale `ANTIALIASED_QUALITY`, sérif/mono legacy
+  sur ce prefix quirk, SYSTEM_FONT bitmap, synthèse gras/italique.
+
 <!-- NOUVELLES ENTRÉES ICI (garder l'ordre chronologique, plus récent en bas) -->
