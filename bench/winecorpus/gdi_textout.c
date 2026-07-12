@@ -15,7 +15,7 @@
 #include <stdio.h>
 
 int main(void) {
-    const int W = 96, H = 40;
+    const int W = 96, H = 60;
     HDC dc = CreateCompatibleDC(NULL);
     BITMAPINFO bi; memset(&bi, 0, sizeof bi);
     bi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
@@ -54,6 +54,20 @@ int main(void) {
     SetBkColor(dc, RGB(0x30, 0xC0, 0xF0));
     SetBkMode(dc, OPAQUE);
     ok = TextOutA(dc, 40, 21, "Op", 2) && ok;
+    /* real bold and italic faces (fontconfig picks the bold / italic file; Wine
+     * uses the same) — bit-exact. Synthesized styles (no real face) abort soundly. */
+    SetBkMode(dc, TRANSPARENT);
+    HFONT fb = CreateFontA(-16, 0, 0, 0, FW_BOLD, 0, 0, 0, ANSI_CHARSET,
+        OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, NONANTIALIASED_QUALITY,
+        DEFAULT_PITCH | FF_DONTCARE, "DejaVu Sans");
+    SelectObject(dc, fb);
+    ok = TextOutA(dc, 2, 39, "Bold", 4) && ok;
+    HFONT fi = CreateFontA(-16, 0, 0, 0, FW_NORMAL, 1, 0, 0, ANSI_CHARSET,
+        OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, NONANTIALIASED_QUALITY,
+        DEFAULT_PITCH | FF_DONTCARE, "Arial");
+    SelectObject(dc, fi);
+    ok = TextOutA(dc, 44, 39, "It", 2) && ok;
+    DeleteObject(fb); DeleteObject(fi);
     GdiFlush();
     printf("textout ok=%d\n", ok != 0);
 

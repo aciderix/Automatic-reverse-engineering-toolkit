@@ -3061,13 +3061,21 @@ static FT_Face u32_dc_font(int d, int *ascent, int *descent) {
     int weight = (fi >= 0) ? g_gdi[fi].lf_weight : 0;
     int italic = (fi >= 0) ? g_gdi[fi].lf_italic : 0;
     const char *face = (fi >= 0) ? g_gdi[fi].lf_face : "";
-    if (weight >= 700 || italic) { aret_unimpl("GDI text: bold/italic pending"); return NULL; }
+    int bold = weight >= 700;   /* FW_BOLD; fontconfig picks the bold/italic face */
     if (!face[0]) { aret_unimpl("GDI text: stock font (no face name) pending"); return NULL; }
     if (!ft_ensure()) { aret_unimpl("GDI text: FreeType/fontconfig init failed"); return NULL; }
     char path[256];
-    if (!ft_resolve_face(face, 0, 0, path, sizeof path)) { aret_unimpl("GDI text: face not resolvable by fontconfig"); return NULL; }
+    if (!ft_resolve_face(face, bold, italic ? 1 : 0, path, sizeof path)) { aret_unimpl("GDI text: face not resolvable by fontconfig"); return NULL; }
     FT_Face ftf = ft_get_face(path);
     if (!ftf) { aret_unimpl("GDI text: font file load failed"); return NULL; }
+    /* Real bold/italic faces render bit-exactly. When no real face exists, Wine
+     * *synthesizes* the style (embolden / oblique shear with a specific matrix);
+     * replicating that exactly is a follow-up, so abort soundly rather than render
+     * an upright/unemboldened glyph (which would be silently wrong). */
+    if (bold && !(ftf->style_flags & FT_STYLE_FLAG_BOLD))
+        { aret_unimpl("GDI text: synthesized bold (no real bold face) pending"); return NULL; }
+    if (italic && !(ftf->style_flags & FT_STYLE_FLAG_ITALIC))
+        { aret_unimpl("GDI text: synthesized italic (no real italic face) pending"); return NULL; }
     int ppem = height < 0 ? -height : height;
     if (ppem <= 0) ppem = 16;
     if (FT_Set_Pixel_Sizes(ftf, 0, (FT_UInt)ppem) != 0) { aret_unimpl("GDI text: set pixel size failed"); return NULL; }

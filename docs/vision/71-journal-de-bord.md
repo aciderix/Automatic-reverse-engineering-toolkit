@@ -1739,4 +1739,19 @@ Détail : **70 §6** (roadmap). Résumé :
 - **Reste (abort sound)** : antialiasing, gras/italique, alignements, stock font, substitution legacy, Unicode,
   DrawText/ExtTextOut.
 
+### 2026-07-12 — [GUI][HLE-WIN32] Texte GDI (suite) : **gras / italique** (vraies faces), synthèse = abort sound
+- **Gras/italique** via fontconfig : `u32_dc_font` passe `bold=(weight>=700)` et `italic` à `ft_resolve_face` →
+  fontconfig choisit la face grasse/italique (la même que Wine). `tmWeight` suit `usWeightClass` de la face
+  résolue, `tmItalic` suit le LOGFONT. Vérifié **bit-identique à Wine** : gras (DejaVu-Bold), italique
+  (Arial→LiberationSans-Italic), gras+italique (Arial→BoldItalic).
+- **Découverte** : DejaVu Sans **n'a pas** de face italique → fontconfig retombe sur la régulière, mais **Wine
+  synthétise** l'italique (cisaillement oblique, matrice spécifique). Rendre la régulière droite = **faux
+  silencieux**. **Garde sound** : si gras/italique demandé mais la face résolue n'a pas le style réel
+  (`FT_STYLE_FLAG_BOLD/ITALIC`), **abort** (« synthesized bold/italic pending ») — la synthèse exacte
+  (embolden / matrice de shear de Wine) = incrément suivant vérifié.
+- **Oracle** : `gdi_textout.c` étendu (dessin gras DejaVu + italique Arial). **Vérifié** : hash transpile
+  inchangé, difftest-transpile 4/4, `table_is_sorted` vert, winediff **86/86**.
+- **Reste (abort sound)** : antialiasing, alignements, stock font, substitution legacy, Unicode, DrawText/
+  ExtTextOut, **synthèse gras/italique**.
+
 <!-- NOUVELLES ENTRÉES ICI (garder l'ordre chronologique, plus récent en bas) -->
