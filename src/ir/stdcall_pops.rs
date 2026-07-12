@@ -100,6 +100,8 @@ static TABLE: &[(&str, u32)] = &[
     ("DispatchMessageA", 4),
     ("DispatchMessageW", 4),
     ("DosDateTimeToFileTime", 12),
+    ("DrawTextA", 20),
+    ("DrawTextW", 20),
     ("DuplicateHandle", 28),
     ("DuplicateToken", 12),
     ("EnableMenuItem", 12),

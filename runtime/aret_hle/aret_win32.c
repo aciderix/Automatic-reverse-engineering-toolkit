@@ -3205,6 +3205,63 @@ uint32_t aret_ExtTextOutA(uint32_t esp) {
 uint32_t aret_ExtTextOutW(uint32_t esp) {
     return u32_exttextout(WU(0), WI(1), WI(2), WU(3), WU(4), WP(5), WI(6), WU(7), 1) ? 1 : 0;
 }
+
+/* DrawText{A,W}(hdc, text, count, lprc, format) -> text height. Single-line layout
+ * within lprc (measured Wine rules): horizontal DT_LEFT/CENTER/RIGHT, vertical
+ * DT_TOP/VCENTER/BOTTOM, DT_CALCRECT (measure only). Returns the text height, or
+ * for DT_VCENTER/DT_BOTTOM the offset from lprc->top to the text bottom. Outside
+ * the modelled subset aborts *soundly*: multi-line/word-break, tabs, ellipsis, and
+ * '&' prefix processing (without DT_NOPREFIX). */
+static uint32_t u32_drawtext(uint32_t hdc, const uint32_t *cps, int len, uint32_t prc, uint32_t fmt) {
+#ifdef ARET_HAVE_FREETYPE
+    enum { DT_CENTER=1, DT_RIGHT=2, DT_VCENTER=4, DT_BOTTOM=8, DT_WORDBREAK=0x10, DT_SINGLELINE=0x20,
+           DT_EXPANDTABS=0x40, DT_TABSTOP=0x80, DT_NOCLIP=0x100, DT_CALCRECT=0x400, DT_NOPREFIX=0x800 };
+    if (!(fmt & DT_SINGLELINE)) { aret_unimpl("DrawText: only DT_SINGLELINE modelled (multi-line/word-break pending)"); return 0; }
+    if (fmt & (DT_WORDBREAK|DT_EXPANDTABS|DT_TABSTOP|0x8000/*DT_END_ELLIPSIS*/|0x40000/*DT_PATH_ELLIPSIS*/|0x20000/*DT_WORD_ELLIPSIS*/))
+        { aret_unimpl("DrawText: tabs/ellipsis pending"); return 0; }
+    if (!(fmt & DT_NOPREFIX)) { for (int i = 0; i < len; i++) if (cps[i] == '&') { aret_unimpl("DrawText: '&' prefix underline pending (use DT_NOPREFIX)"); return 0; } }
+    int32_t *rc = (int32_t *)(uintptr_t)prc;
+    if (!rc) return 0;
+    int d = gdi_idx(hdc);
+    if (d < 0 || g_gdi[d].type != GDIT_DC) return 0;
+    int ascent, descent;
+    FT_Face ftf = u32_dc_font(d, &ascent, &descent);
+    if (!ftf) return 0;
+    int textW = u32_text_width(ftf, cps, len);
+    int textH = ascent + descent;
+    if (fmt & DT_CALCRECT) { rc[2] = rc[0] + textW; rc[3] = rc[1] + textH; return (uint32_t)textH; }
+    int rw = rc[2] - rc[0], rh = rc[3] - rc[1];
+    int x = rc[0];
+    if (fmt & DT_CENTER) x = rc[0] + (rw - textW) / 2;
+    else if (fmt & DT_RIGHT) x = rc[2] - textW;
+    int y = rc[1];
+    if (fmt & DT_VCENTER) y = rc[1] + (rh - textH + 1) / 2;   /* Wine rounds up */
+    else if (fmt & DT_BOTTOM) y = rc[3] - textH;
+    /* draw (TA_TOP|TA_LEFT origin); clip to the rect unless DT_NOCLIP */
+    int clip = !(fmt & DT_NOCLIP);
+    uint32_t saved_align = g_gdi[d].text_align; g_gdi[d].text_align = 0;
+    u32_textout_full(hdc, x, y, cps, len, NULL, rc, 0, clip);
+    g_gdi[d].text_align = saved_align;
+    if (fmt & (DT_VCENTER|DT_BOTTOM)) return (uint32_t)(y + textH - rc[1]);
+    return (uint32_t)textH;
+#else
+    (void)hdc; (void)cps; (void)len; (void)prc; (void)fmt;
+    aret_unimpl("DrawText: FreeType not linked"); return 0;
+#endif
+}
+uint32_t aret_DrawTextA(uint32_t esp) {
+    const char *s = WCS(1); int n = WI(2); if (n < 0) n = s ? (int)strlen(s) : 0;
+    uint32_t cps[1024]; int m = n < 1024 ? n : 1024;
+    for (int i = 0; i < m; i++) cps[i] = s ? (unsigned char)s[i] : 0;
+    return u32_drawtext(WU(0), cps, s ? m : 0, WU(3), WU(4));
+}
+uint32_t aret_DrawTextW(uint32_t esp) {
+    const uint16_t *ws = (const uint16_t *)(uintptr_t)WU(1); int n = WI(2);
+    if (n < 0) { n = 0; if (ws) while (ws[n]) n++; }
+    uint32_t cps[1024]; int m = n < 1024 ? n : 1024;
+    for (int i = 0; i < m; i++) cps[i] = ws ? ws[i] : 0;
+    return u32_drawtext(WU(0), cps, ws ? m : 0, WU(3), WU(4));
+}
 /* ANSI bytes → codepoints: ASCII and 0xA0-0xFF are Latin-1 == the Windows-1252
  * codepage (bit-exact); 0x80-0x9F (the CP1252-specific slots) are a follow-up. */
 static int u32_textout_ansi(uint32_t hdc, int x, int y, const char *str, int len) {

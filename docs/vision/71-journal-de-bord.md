@@ -1801,4 +1801,21 @@ Détail : **70 §6** (roadmap). Résumé :
 - **Vérifié** : hash transpile inchangé, difftest-transpile 4/4, `table_is_sorted` vert.
 - **Reste (abort sound)** : antialiasing (mur dur), DrawText, stock font, substitution legacy, synthèse gras/italique.
 
+### 2026-07-12 — [GUI][HLE-WIN32] Texte GDI (suite) : **DrawTextA/W** (single-line) + murs durs identifiés
+- **DrawTextA/W** single-line, bit-identique à Wine : mise en page dans le rect (règles mesurées) — horizontal
+  `DT_LEFT/CENTER/RIGHT`, vertical `DT_TOP/VCENTER/BOTTOM` (VCENTER arrondit au sup `(rh-th+1)/2`), `DT_CALCRECT`
+  (mesure : rect → `{l,t,l+w,t+h}`). Valeur de retour = hauteur du texte, ou offset top→bas du texte pour
+  VCENTER/BOTTOM. Bâti sur le cœur métriques + `u32_textout_full` (clip au rect sauf `DT_NOCLIP`). **Abort sound** :
+  multi-ligne/word-break, tabs, ellipsis, préfixe `&` sans `DT_NOPREFIX`. Vérifié 4 cas (retour+rect+pixels).
+- **Oracle** : `winecorpus/gdi_drawtext.c`. winediff **89→90/90**. `stdcall_pops` DrawText=20.
+- **Murs durs identifiés (mesurés, restent abort sound — non shippables bit-exact sans recherche)** :
+  - **Antialiasing** (cf. entrée dédiée) : pipeline rasterizer de Wine.
+  - **Stock fonts** : `GetStockObject(DEFAULT_GUI_FONT)` ≠ `CreateFont(-11,"MS Shell Dlg")` ≠ DejaVu-11 (3 hashes
+    distincts) → le rendu stock de Wine ne se réduit pas à un resolve fontconfig.
+  - **Substitution legacy** : à -16, Wine mappe **toutes** les faces indispo (MS Sans Serif/Shell Dlg/System/
+    Courier/Tahoma/Helv/Arial) vers **le même** défaut (Liberation Sans, `cf4e610c`) ≠ réponse per-nom de
+    fontconfig (MS Sans Serif→DejaVu). **Dépend de l'environnement** (fontes installées dans le prefix Wine).
+  Ces trois = comme l'AA, un chantier de recherche (registre interne Wine / config rasterizer), pas un minage rapide.
+- **Vérifié** : hash transpile inchangé, difftest-transpile 4/4, `table_is_sorted` vert.
+
 <!-- NOUVELLES ENTRÉES ICI (garder l'ordre chronologique, plus récent en bas) -->
