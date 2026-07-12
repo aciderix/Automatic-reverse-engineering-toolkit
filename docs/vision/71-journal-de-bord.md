@@ -1940,4 +1940,15 @@ Détail : **70 §6** (roadmap). Résumé :
   `gdi_rectangle.c`. `stdcall_pops` : Rectangle=20.
 - **Vérifié** : hash transpile inchangé, difftest-transpile 4/4, `table_is_sorted` vert, winediff (voir chiffre).
 
+### 2026-07-12 — [GUI][HLE-WIN32] GDI vectoriel : **Polyline** bit-identique Wine ; Ellipse = mur (abort sound)
+- **`Polyline(hdc, pts, count)`** : count-1 segments Bresenham connectés au stylo (chaque point final exclu →
+  sommets partagés dessinés par le départ du segment suivant, point final global non dessiné). Mesuré sur Wine
+  (contour ouvert : le sommet est peint par le segment suivant). N'utilise/ne met pas à jour la position courante.
+- **Vérifié bit-identique Wine** : contour de boîte ouvert + zig-zag multi-octant coloré. Oracle `gdi_polyline.c`.
+  `stdcall_pops` : Polyline=12.
+- **Ellipse mesurée = mur** : Wine trace un vrai midpoint-ellipse (régions plate + pentue) avec **centre
+  demi-entier** pour les boîtes impaires ; la rasterisation exacte = un match niveau-recherche (comme le grayscale
+  AA), pas un minage rapide. **Reste abort sound** (non implémenté → stub faible). Idem Polygon/RoundRect/Arc.
+- **Vérifié** : hash transpile inchangé, difftest-transpile 4/4, `table_is_sorted` vert, winediff (voir chiffre).
+
 <!-- NOUVELLES ENTRÉES ICI (garder l'ordre chronologique, plus récent en bas) -->

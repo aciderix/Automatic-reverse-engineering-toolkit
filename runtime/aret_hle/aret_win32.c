@@ -2884,6 +2884,21 @@ static int gdi_brush(int d, uint32_t *color) {
     if (color) *color = g_gdi[b].color;
     return 1;
 }
+/* Polyline(hdc, POINT* pts, int count) -> BOOL. Draws count-1 connected Bresenham
+ * segments with the pen (each endpoint excluded, so shared vertices are drawn once
+ * by the next segment's start; the final endpoint is not drawn). Does not use or
+ * update the current position. */
+uint32_t aret_Polyline(uint32_t esp) {
+    int d = gdi_idx(WU(0)); if (d < 0 || g_gdi[d].type != GDIT_DC) return 0;
+    struct gdi_obj *bm = gdi_dc_surface(WU(0));
+    const int32_t *pts = (const int32_t *)(uintptr_t)WU(1); int n = WI(2);
+    uint32_t c; int pr = gdi_pen(d, &c);
+    if (pr < 0) return 0;
+    if (pr && bm && bm->bpp == 32 && pts && n >= 2)
+        for (int i = 0; i < n - 1; i++)
+            gdi_bres(bm, pts[2 * i], pts[2 * i + 1], pts[2 * i + 2], pts[2 * i + 3], c);
+    return 1;
+}
 /* Rectangle(hdc, l, t, r, b) -> BOOL. Interior [l+1,r-1)×[t+1,b-1) filled with the
  * brush; outline [l,r-1]×[t,b-1] drawn with the pen (measured Wine semantics). */
 uint32_t aret_Rectangle(uint32_t esp) {

@@ -354,6 +354,7 @@ static TABLE: &[(&str, u32)] = &[
     ("PeekMessageA", 20),
     ("PeekMessageW", 20),
     ("PeekNamedPipe", 24),
+    ("Polyline", 12),
     ("PostMessageA", 16),
     ("PostMessageW", 16),
     ("PostQuitMessage", 4),
