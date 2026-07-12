@@ -56,6 +56,7 @@
 #include <ft2build.h>
 #include FT_FREETYPE_H
 #include FT_TRUETYPE_TABLES_H
+#include FT_LCD_FILTER_H
 #include <fontconfig/fontconfig.h>
 #endif
 
@@ -3005,8 +3006,17 @@ static int g_ft_ready = -1;   /* -1 unknown, 0 failed, 1 ready */
 static int ft_ensure(void) {
     if (g_ft_ready >= 0) return g_ft_ready;
     g_ft_ready = 0;
-    if (FT_Init_FreeType(&g_ft_lib) == 0 && FcInit()) g_ft_ready = 1;
+    if (FT_Init_FreeType(&g_ft_lib) == 0 && FcInit()) {
+        /* Wine's subpixel (ClearType) path uses FreeType's default LCD filter. */
+        FT_Library_SetLcdFilter(g_ft_lib, FT_LCD_FILTER_DEFAULT);
+        g_ft_ready = 1;
+    }
     return g_ft_ready;
+}
+/* Alpha-over one channel: dst = round((fg*cov + old*(255-cov)) / 255). Matches
+ * Wine's GDI text blend (verified against measured RGB on coloured cases). */
+static inline uint8_t u32_blend1(int fg, int old, int cov) {
+    return (uint8_t)((fg * cov + old * (255 - cov) + 127) / 255);
 }
 /* Resolve a logical face name to a font file path with fontconfig — the same
  * mechanism Wine uses on Linux, so we pick the same file Wine picks (Arial→
@@ -3116,7 +3126,18 @@ static int u32_textout_full(uint32_t hdc, int x, int y, const uint32_t *cps, int
     if (!surf || surf->bpp != 32) { aret_unimpl("TextOut: only 32bpp DIB target modelled"); return 0; }
     int fi = gdi_idx(g_gdi[d].sel_font);
     int quality = (fi >= 0) ? g_gdi[fi].lf_quality : 0;
-    if (quality != 3 /*NONANTIALIASED_QUALITY*/) { aret_unimpl("TextOut: antialiased text pending (use NONANTIALIASED_QUALITY)"); return 0; }
+    /* Wine's render mode by CreateFont quality (measured): NONANTIALIASED→mono,
+     * ANTIALIASED→grayscale, DEFAULT/DRAFT/PROOF/CLEARTYPE→subpixel LCD (ClearType).
+     * The subpixel path is FreeType's LCD render (the same rasterizer + default LCD
+     * filter Wine uses); RGB values match Wine bit-for-bit. */
+    enum { AA_MONO, AA_GRAY, AA_LCD };
+    int aa = (quality == 3) ? AA_MONO : (quality == 4) ? AA_GRAY : AA_LCD;
+    /* Grayscale ANTIALIASED_QUALITY renders differently from FreeType's NORMAL/LIGHT
+     * (Wine's grayscale has harder edges — a distinct pipeline) → abort soundly until
+     * matched. Mono and subpixel (the DEFAULT/ClearType path) are bit-exact. */
+    if (aa == AA_GRAY) { aret_unimpl("TextOut: grayscale ANTIALIASED_QUALITY pending (mono + subpixel done)"); return 0; }
+    int load_target = (aa == AA_MONO) ? FT_LOAD_TARGET_MONO
+                    : (aa == AA_GRAY) ? FT_LOAD_TARGET_NORMAL : FT_LOAD_TARGET_LCD;
     uint32_t ta = g_gdi[d].text_align;
     if (ta & ~0x1Eu) { aret_unimpl("TextOut: TA_UPDATECP/RTL alignment pending"); return 0; }  /* only TA_{LEFT,RIGHT,CENTER,TOP,BASELINE,BOTTOM} */
     int bkmode = g_gdi[d].bk_mode;
@@ -3157,19 +3178,32 @@ static int u32_textout_full(uint32_t hdc, int x, int y, const uint32_t *cps, int
     /* ETO_CLIPPED: restrict glyph pixels to the rectangle. */
     int cl = rect && do_clip ? rect[0] : 0, ct = rect && do_clip ? rect[1] : 0;
     int cr = rect && do_clip ? rect[2] : surf->w, cb = rect && do_clip ? rect[3] : surf->h;
-    uint32_t fg = g_gdi[d].text_color;   /* 0x00BBGGRR, matches DIB [B,G,R,0] */
+    uint32_t fg = g_gdi[d].text_color;   /* 0x00BBGGRR = (fg_R, fg_G, fg_B) low→high */
+    int fR = fg & 0xFF, fG = (fg >> 8) & 0xFF, fB = (fg >> 16) & 0xFF;
     for (int k = 0; k < len; k++) {
-        if (FT_Load_Char(ftf, cps[k], FT_LOAD_RENDER | FT_LOAD_TARGET_MONO) != 0) { if (dx) penx += dx[k]; continue; }
+        if (FT_Load_Char(ftf, cps[k], FT_LOAD_RENDER | load_target) != 0) { if (dx) penx += dx[k]; continue; }
         FT_GlyphSlot g = ftf->glyph; FT_Bitmap *b = &g->bitmap;
         int ox = penx + g->bitmap_left, oy = baseline - g->bitmap_top;
+        int pxw = (aa == AA_LCD) ? (int)b->width / 3 : (int)b->width;   /* LCD bitmap is 3× wide */
         for (int r = 0; r < (int)b->rows; r++)
-            for (int c = 0; c < (int)b->width; c++) {
-                int bit = (b->buffer[r * b->pitch + (c >> 3)] >> (7 - (c & 7))) & 1;
-                if (!bit) continue;              /* non-ink: OPAQUE bg already filled, TRANSPARENT untouched */
+            for (int c = 0; c < pxw; c++) {
                 int X = ox + c, Y = oy + r;
-                if (X >= cl && X < cr && Y >= ct && Y < cb && X >= 0 && X < surf->w && Y >= 0 && Y < surf->h) gdi_put(surf, X, Y, fg);
+                if (!(X >= cl && X < cr && Y >= ct && Y < cb && X >= 0 && X < surf->w && Y >= 0 && Y < surf->h)) continue;
+                uint8_t *p = gdi_px(surf, X, Y);   /* DIB bytes [B,G,R,0] */
+                if (!p) continue;
+                if (aa == AA_MONO) {
+                    if ((b->buffer[r * b->pitch + (c >> 3)] >> (7 - (c & 7))) & 1) { p[0] = (uint8_t)fB; p[1] = (uint8_t)fG; p[2] = (uint8_t)fR; }
+                } else if (aa == AA_GRAY) {
+                    int cov = b->buffer[r * b->pitch + c];
+                    if (cov) { p[2] = u32_blend1(fR, p[2], cov); p[1] = u32_blend1(fG, p[1], cov); p[0] = u32_blend1(fB, p[0], cov); }
+                } else { /* AA_LCD: 3 subpixel coverages (R,G,B) per pixel */
+                    int covR = b->buffer[r * b->pitch + c * 3 + 0];
+                    int covG = b->buffer[r * b->pitch + c * 3 + 1];
+                    int covB = b->buffer[r * b->pitch + c * 3 + 2];
+                    if (covR | covG | covB) { p[2] = u32_blend1(fR, p[2], covR); p[1] = u32_blend1(fG, p[1], covG); p[0] = u32_blend1(fB, p[0], covB); }
+                }
             }
-        penx += dx ? dx[k] : (int)(g->advance.x >> 6);   /* lpDx spacing, else mono pen advance */
+        penx += dx ? dx[k] : (int)(g->advance.x >> 6);   /* lpDx spacing, else pen advance */
     }
     return 1;
 #else

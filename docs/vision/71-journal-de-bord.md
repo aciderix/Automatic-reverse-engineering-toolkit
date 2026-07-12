@@ -1818,4 +1818,24 @@ Détail : **70 §6** (roadmap). Résumé :
   Ces trois = comme l'AA, un chantier de recherche (registre interne Wine / config rasterizer), pas un minage rapide.
 - **Vérifié** : hash transpile inchangé, difftest-transpile 4/4, `table_is_sorted` vert.
 
+### 2026-07-12 — [GUI][HLE-WIN32] **Mur dur #1 franchi : antialiasing = LCD subpixel** (bit-identique Wine)
+- **Percée par le forensics Wine** (trace `WINEDEBUG=+font`) : deux révélations —
+  1. `is_subpixel_rendering_enabled: subpixel rendering is enabled` → l'AA de Wine (`DEFAULT_QUALITY`) est du
+     **rendu LCD subpixel (ClearType)**, PAS du grayscale. C'est pour ça qu'aucun `FT_LOAD_TARGET_*` grayscale ne
+     matchait (mesuré : R≠G≠B dans le DIB de Wine).
+  2. `height -16 => ppem 16` (le ppem était bon ; le « 14 » vu au début était une police positive-height).
+- **Recette exacte reproduite** (glyphe 'A' → **chaque valeur RGB identique à Wine**) : `FT_Library_SetLcdFilter(
+  FT_LCD_FILTER_DEFAULT)` (le filtre par défaut de Wine) + `FT_Load_Char(FT_LOAD_RENDER|FT_LOAD_TARGET_LCD)` →
+  bitmap 3× large (R,G,B par pixel) ; blend par canal `dst=(fg*cov+old*(255-cov)+127)/255` **vérifié sur 3 cas
+  colorés** (rouge/blanc, noir/bleu clair : R/G/B au bit près).
+- **Mapping qualité→mode mesuré** : `NONANTIALIASED`→mono, `ANTIALIASED`→**grayscale** (pipeline distinct, encore
+  abort sound), `DEFAULT/DRAFT/PROOF/CLEARTYPE`→**subpixel LCD**. Implémenté : le renderer branche mono/gray/LCD ;
+  gray abort proprement (bords plus durs que NORMAL/LIGHT, ni la moyenne LCD — reste à cerner).
+- **Vérifié bit-identique Wine** : subpixel 'A' seul, `Hello, ARET!` multi-glyphe (avances correctes), coloré,
+  ClearType, descendantes `gyjpq`. Le prefix Wine frais du harness a le subpixel **activé** → l'oracle valide.
+- **Oracle** : `winecorpus/gdi_textaa.c` (4 rendus subpixel hashés). winediff **90→91/91**.
+- **Vérifié** : hash transpile inchangé, difftest-transpile 4/4, `table_is_sorted` vert.
+- **Note env** : subpixel-on/off suit le réglage de font-smoothing du système (comme Wine) ; l'oracle le vérifie.
+  Reste : **grayscale `ANTIALIASED_QUALITY`** (pipeline Wine distinct), + les 2 autres murs durs (stock/substitution).
+
 <!-- NOUVELLES ENTRÉES ICI (garder l'ordre chronologique, plus récent en bas) -->
