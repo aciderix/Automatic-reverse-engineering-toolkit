@@ -1248,7 +1248,9 @@ pub fn transpile(
     let ft = if !wasm && bits == 32
         && prog.imports.values().any(|n| matches!(n.as_str(),
             "TextOutA" | "TextOutW" | "ExtTextOutA" | "ExtTextOutW"
-            | "DrawTextA" | "DrawTextW" | "TabbedTextOutA" | "TabbedTextOutW"))
+            | "DrawTextA" | "DrawTextW" | "TabbedTextOutA" | "TabbedTextOutW"
+            | "GetTextExtentPoint32A" | "GetTextExtentPoint32W"
+            | "GetTextExtentPointA" | "GetTextExtentPointW" | "GetTextMetricsA" | "GetTextMetricsW"))
     {
         freetype_flags()
     } else {

@@ -3048,13 +3048,56 @@ static FT_Face ft_get_face(const char *path) {
 }
 #endif /* ARET_HAVE_FREETYPE */
 
+#ifdef ARET_HAVE_FREETYPE
+/* Resolve the DC's selected font to an FT_Face sized to its LOGFONT, plus Wine's
+ * tmAscent/tmDescent (from OS/2 usWinAscent/usWinDescent scaled). Returns the face
+ * (NULL ⇒ a sound abort, `aret_unimpl` already called). Shared by TextOut and the
+ * text-measurement APIs so they agree exactly. Gates the subset we render/measure
+ * exactly: real face name, regular upright weight, OS/2 table present. Quality,
+ * alignment and background are *render-only* concerns handled by TextOut itself. */
+static FT_Face u32_dc_font(int d, int *ascent, int *descent) {
+    int fi = gdi_idx(g_gdi[d].sel_font);
+    int height = (fi >= 0) ? g_gdi[fi].lf_height : 0;
+    int weight = (fi >= 0) ? g_gdi[fi].lf_weight : 0;
+    int italic = (fi >= 0) ? g_gdi[fi].lf_italic : 0;
+    const char *face = (fi >= 0) ? g_gdi[fi].lf_face : "";
+    if (weight >= 700 || italic) { aret_unimpl("GDI text: bold/italic pending"); return NULL; }
+    if (!face[0]) { aret_unimpl("GDI text: stock font (no face name) pending"); return NULL; }
+    if (!ft_ensure()) { aret_unimpl("GDI text: FreeType/fontconfig init failed"); return NULL; }
+    char path[256];
+    if (!ft_resolve_face(face, 0, 0, path, sizeof path)) { aret_unimpl("GDI text: face not resolvable by fontconfig"); return NULL; }
+    FT_Face ftf = ft_get_face(path);
+    if (!ftf) { aret_unimpl("GDI text: font file load failed"); return NULL; }
+    int ppem = height < 0 ? -height : height;
+    if (ppem <= 0) ppem = 16;
+    if (FT_Set_Pixel_Sizes(ftf, 0, (FT_UInt)ppem) != 0) { aret_unimpl("GDI text: set pixel size failed"); return NULL; }
+    TT_OS2 *os2 = (TT_OS2 *)FT_Get_Sfnt_Table(ftf, FT_SFNT_OS2);
+    if (!os2 || os2->version == 0xFFFF) { aret_unimpl("GDI text: font has no OS/2 table (metrics undefined)"); return NULL; }
+    FT_Fixed ys = ftf->size->metrics.y_scale;
+    if (ascent)  *ascent  = (int)((FT_MulFix(os2->usWinAscent,  ys) + 32) >> 6);
+    if (descent) *descent = (int)((FT_MulFix(os2->usWinDescent, ys) + 32) >> 6);
+    return ftf;
+}
+/* Text extent width (pixels) = sum of the *default*-hinted advances — Wine's
+ * GetTextExtentPoint32 / opaque-fill regime, which is distinct from the mono
+ * render-pen advance (measured: 'Hi!' extent 22 but mono pen sum 21). */
+static int u32_text_width(FT_Face f, const char *s, int len) {
+    int w = 0;
+    for (int i = 0; i < len; i++)
+        if (FT_Load_Char(f, (unsigned char)s[i], FT_LOAD_DEFAULT) == 0)
+            w += (int)(f->glyph->advance.x >> 6);
+    return w;
+}
+#endif /* ARET_HAVE_FREETYPE */
+
 /* Render an ANSI string with the DC's selected font into the DC's 32bpp DIB
  * surface, bit-identically to Wine: FreeType mono raster (the rasterizer Wine
- * uses) + Wine's usWinAscent baseline + mono foreground/background blend. Returns
- * 1 on success. Anything outside the proven-exact subset aborts *soundly* (never a
- * silent wrong render): no FreeType linked, antialiased/bold/italic, non-default
- * alignment, opaque background, stock font (no face), non-32bpp target. Each of
- * those is a follow-up increment, verified against Wine before it ships. */
+ * uses) + Wine's usWinAscent baseline + mono blend; OPAQUE background fills the
+ * cell rect [x,y .. x+extentWidth, y+tmHeight] with bkColor first (measured Wine
+ * behaviour). Returns 1 on success. Outside the proven-exact subset it aborts
+ * *soundly* (never a silent wrong render): no FreeType linked, antialiased/bold/
+ * italic, non-default alignment, stock font (no face), non-32bpp target. Each is a
+ * follow-up increment, verified against Wine before it ships. */
 static int u32_textout_core(uint32_t hdc, int x, int y, const char *str, int len) {
 #ifdef ARET_HAVE_FREETYPE
     int d = gdi_idx(hdc);
@@ -3062,28 +3105,22 @@ static int u32_textout_core(uint32_t hdc, int x, int y, const char *str, int len
     struct gdi_obj *surf = gdi_dc_surface(hdc);
     if (!surf || surf->bpp != 32) { aret_unimpl("TextOut: only 32bpp DIB target modelled"); return 0; }
     int fi = gdi_idx(g_gdi[d].sel_font);
-    int height  = (fi >= 0) ? g_gdi[fi].lf_height  : 0;
-    int weight  = (fi >= 0) ? g_gdi[fi].lf_weight  : 0;
-    int italic  = (fi >= 0) ? g_gdi[fi].lf_italic  : 0;
     int quality = (fi >= 0) ? g_gdi[fi].lf_quality : 0;
-    const char *face = (fi >= 0) ? g_gdi[fi].lf_face : "";
     if (quality != 3 /*NONANTIALIASED_QUALITY*/) { aret_unimpl("TextOut: antialiased text pending (use NONANTIALIASED_QUALITY)"); return 0; }
-    if (weight >= 700 || italic) { aret_unimpl("TextOut: bold/italic text pending"); return 0; }
-    if (!face[0]) { aret_unimpl("TextOut: stock font (no face name) pending"); return 0; }
     if (g_gdi[d].text_align != 0) { aret_unimpl("TextOut: only TA_TOP|TA_LEFT alignment modelled"); return 0; }
-    if (g_gdi[d].bk_mode != 1 /*TRANSPARENT*/) { aret_unimpl("TextOut: opaque background pending (use TRANSPARENT)"); return 0; }
-    if (!ft_ensure()) { aret_unimpl("TextOut: FreeType/fontconfig init failed"); return 0; }
-    char path[256];
-    if (!ft_resolve_face(face, 0, 0, path, sizeof path)) { aret_unimpl("TextOut: face not resolvable by fontconfig"); return 0; }
-    FT_Face ftf = ft_get_face(path);
-    if (!ftf) { aret_unimpl("TextOut: font file load failed"); return 0; }
-    int ppem = height < 0 ? -height : height;
-    if (ppem <= 0) ppem = 16;
-    if (FT_Set_Pixel_Sizes(ftf, 0, (FT_UInt)ppem) != 0) { aret_unimpl("TextOut: set pixel size failed"); return 0; }
-    TT_OS2 *os2 = (TT_OS2 *)FT_Get_Sfnt_Table(ftf, FT_SFNT_OS2);
-    if (!os2 || os2->version == 0xFFFF) { aret_unimpl("TextOut: font has no OS/2 table (baseline undefined)"); return 0; }
-    FT_Fixed ys = ftf->size->metrics.y_scale;
-    int ascent = (int)((FT_MulFix(os2->usWinAscent, ys) + 32) >> 6); /* Wine's tmAscent */
+    int bkmode = g_gdi[d].bk_mode;
+    if (bkmode != 1 /*TRANSPARENT*/ && bkmode != 2 /*OPAQUE*/) { aret_unimpl("TextOut: unknown background mode"); return 0; }
+    int ascent, descent;
+    FT_Face ftf = u32_dc_font(d, &ascent, &descent);
+    if (!ftf) return 0;
+    /* OPAQUE: fill the text cell rectangle with bkColor before drawing glyphs. */
+    if (bkmode == 2) {
+        int wpx = u32_text_width(ftf, str, len), hpx = ascent + descent;
+        uint32_t bg = g_gdi[d].bk_color;
+        for (int Y = y; Y < y + hpx; Y++)
+            for (int X = x; X < x + wpx; X++)
+                if (X >= 0 && X < surf->w && Y >= 0 && Y < surf->h) gdi_put(surf, X, Y, bg);
+    }
     int penx = x, baseline = y + ascent;
     uint32_t fg = g_gdi[d].text_color;   /* 0x00BBGGRR, matches DIB [B,G,R,0] */
     for (int k = 0; k < len; k++) {
@@ -3094,16 +3131,36 @@ static int u32_textout_core(uint32_t hdc, int x, int y, const char *str, int len
         for (int r = 0; r < (int)b->rows; r++)
             for (int c = 0; c < (int)b->width; c++) {
                 int bit = (b->buffer[r * b->pitch + (c >> 3)] >> (7 - (c & 7))) & 1;
-                if (!bit) continue;                              /* TRANSPARENT: bg untouched */
+                if (!bit) continue;              /* non-ink: OPAQUE bg already filled, TRANSPARENT untouched */
                 int X = ox + c, Y = oy + r;
                 if (X >= 0 && X < surf->w && Y >= 0 && Y < surf->h) gdi_put(surf, X, Y, fg);
             }
-        penx += (int)(g->advance.x >> 6);
+        penx += (int)(g->advance.x >> 6);       /* mono pen advance (render regime) */
     }
     return 1;
 #else
     (void)hdc; (void)x; (void)y; (void)str; (void)len;
     aret_unimpl("TextOut: FreeType not linked (rebuild with freetype2+fontconfig)");
+    return 0;
+#endif
+}
+
+/* GetTextExtentPoint32A(hdc, str, count, lpSize) -> BOOL. cx = sum of default
+ * advances (Wine's extent regime), cy = tmHeight. Shares u32_dc_font so it agrees
+ * with TextOut's OPAQUE fill exactly. */
+static int u32_text_extent(uint32_t hdc, const char *s, int len, uint32_t psize) {
+#ifdef ARET_HAVE_FREETYPE
+    int d = gdi_idx(hdc);
+    if (d < 0 || g_gdi[d].type != GDIT_DC) return 0;
+    int ascent, descent;
+    FT_Face ftf = u32_dc_font(d, &ascent, &descent);
+    if (!ftf) return 0;
+    int w = u32_text_width(ftf, s, len);
+    if (psize) { int32_t *sz = (int32_t *)(uintptr_t)psize; sz[0] = w; sz[1] = ascent + descent; }
+    return 1;
+#else
+    (void)hdc; (void)s; (void)len; (void)psize;
+    aret_unimpl("GetTextExtentPoint32: FreeType not linked");
     return 0;
 #endif
 }
@@ -3124,6 +3181,20 @@ uint32_t aret_TextOutW(uint32_t esp) {
     for (int i = 0; i < m; i++) buf[i] = (char)(ws[i] & 0xFF);
     return u32_textout_core(WU(0), WI(1), WI(2), buf, m) ? 1 : 0;
 }
+
+/* GetTextExtentPoint32A / GetTextExtentPointA(hdc, str, count, lpSize) -> BOOL.
+ * (The non-32 variant has the same signature; both share one path.) */
+uint32_t aret_GetTextExtentPoint32A(uint32_t esp) {
+    return u32_text_extent(WU(0), WCS(1), WI(2), WU(3)) ? 1 : 0;
+}
+uint32_t aret_GetTextExtentPointA(uint32_t esp) { return aret_GetTextExtentPoint32A(esp); }
+uint32_t aret_GetTextExtentPoint32W(uint32_t esp) {
+    const uint16_t *ws = (const uint16_t *)(uintptr_t)WU(1);
+    int n = WI(2); char buf[512]; int m = 0;
+    if (ws && n > 0) { m = n < (int)sizeof buf ? n : (int)sizeof buf; for (int i = 0; i < m; i++) buf[i] = (char)(ws[i] & 0xFF); }
+    return u32_text_extent(WU(0), buf, m, WU(3)) ? 1 : 0;
+}
+uint32_t aret_GetTextExtentPointW(uint32_t esp) { return aret_GetTextExtentPoint32W(esp); }
 
 /* ---- DC attributes ---- */
 uint32_t aret_SetTextColor(uint32_t esp) { int d = gdi_idx(WU(0)); if (d < 0) return 0xFFFFFFFFu; uint32_t p = g_gdi[d].text_color; g_gdi[d].text_color = WU(1) & 0xFFFFFFu; return p; }

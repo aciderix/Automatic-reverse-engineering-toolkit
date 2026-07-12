@@ -39,6 +39,14 @@ int main(void) {
      * red/blue swap would be invisible with black text alone). */
     SetTextColor(dc, RGB(0xE0, 0x20, 0x40));
     ok = TextOutA(dc, 2, 21, "rgb", 3) && ok;
+    /* measurement APIs (Wine's default-advance regime) + an OPAQUE draw (fills the
+     * cell rect with bkColor first). These share the metric core with TextOut. */
+    SIZE sz; GetTextExtentPoint32A(dc, "Hello, ARET!", 12, &sz);
+    printf("extent=%ldx%ld\n", sz.cx, sz.cy);
+    SetTextColor(dc, RGB(0, 0, 0));
+    SetBkColor(dc, RGB(0x30, 0xC0, 0xF0));
+    SetBkMode(dc, OPAQUE);
+    ok = TextOutA(dc, 40, 21, "Op", 2) && ok;
     GdiFlush();
     printf("textout ok=%d\n", ok != 0);
 

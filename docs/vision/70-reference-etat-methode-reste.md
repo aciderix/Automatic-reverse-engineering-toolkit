@@ -362,7 +362,7 @@ recompilabilité **100 %** · WASM **7/7**.
   sous Linux ; `Arial`→Liberation Sans = mesuré identique), ligne de base `tmAscent=(FT_MulFix(usWinAscent,
   y_scale)+32)>>6` (Wine lit `OS/2.usWinAscent`, pas l'ascender hhea). `CreateFontA/W`+`CreateFontIndirectA/W`
   parsent le LOGFONT. **Sous-ensemble prouvé exact** ; le reste = **abort sound** (jamais faux silencieux) :
-  antialiasing, gras/italique, fond opaque, alignements ≠ TA_TOP|TA_LEFT, stock font sans face, cible ≠ DIB 32bpp
+  antialiasing, gras/italique, alignements ≠ TA_TOP|TA_LEFT, stock font sans face, cible ≠ DIB 32bpp
   — chacun un incrément suivant vérifié vs Wine. Build : `builder` gate `-DARET_HAVE_FREETYPE` sur un import texte
   + pkg-config (sonames i386 liés explicitement), **dégradation propre** (byte-identique) sinon. Gardé
   `winecorpus/gdi_textout.c` (carte ASCII + hash FNV du DIB, bbox `3 6 92 19`, `hash=79741f6c`).

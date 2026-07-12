@@ -1704,4 +1704,25 @@ Détail : **70 §6** (roadmap). Résumé :
 - **Vérifié** : hash transpile **inchangé** `19acad982194bf07`, difftest-transpile 4/4, `table_is_sorted` vert,
   winediff **84→86/86** (gdi_textout + gui_paint_text). **Additif** : les binaires sans texte ne lient pas FreeType → byte-identiques.
 
+### 2026-07-12 — [GUI][HLE-WIN32] Texte GDI (suite) : **fond opaque + APIs de mesure** (cœur métriques partagé)
+- **Objectif** : compléter le texte GDI (pas juste un sous-ensemble). 1ʳᵉ tranche après le mono transparent :
+  **fond opaque** (défaut Windows) + **GetTextExtentPoint32** (les programmes mesurent pour placer leur texte).
+  Une brique — le **cœur métriques** — tombe les deux (et prépare les alignements).
+- **Recette Wine minée** (mesurée puis répliquée) :
+  - **Métriques** : `tmAscent=(FT_MulFix(usWinAscent,ys)+32)>>6`, `tmDescent` idem avec `usWinDescent`,
+    `tmHeight=asc+desc`. DejaVu -16 → 15/4/19 = **identique à `GetTextMetrics` de Wine**.
+  - **Deux régimes d'avance distincts** (découverte clé) : le **rendu** avance au glyphe **mono** (`advance>>6`
+    après `FT_LOAD_TARGET_MONO`), mais l'**extent / largeur du fond opaque** = somme des avances **`FT_LOAD_DEFAULT`**
+    (mesuré : `'Hi!'` extent **22** mais pen mono **21** ; `default-sum` matche Wine sur 4 chaînes : 22/35/98/27).
+  - **Fond opaque** : remplir le rectangle du cell `[x,y .. x+extentWidth, y+tmHeight]` avec `bkColor` **avant**
+    les glyphes (mesuré : origine (10,6) → fill x[10..31]=22, y[6..24]=19). Ink dessiné par-dessus.
+- **Fait** (`aret_win32.c`) : helper partagé `u32_dc_font` (résout face+taille+asc/desc, gates communs) +
+  `u32_text_width` (avances default) ; `TextOut` gère `OPAQUE` (remplit le cell) ; `GetTextExtentPoint32A/W` +
+  `GetTextExtentPointA/W`. `stdcall_pops` : les 4 extent = 16. `builder` : gate texte élargi aux extent/metrics.
+- **Reste (abort sound)** : antialiasing, gras/italique, alignements ≠ TA_TOP|TA_LEFT, stock font, `GetTextMetrics`
+  (struct complète), substitution legacy, Unicode, DrawText/ExtTextOut — incréments suivants, chacun vérifié vs Wine.
+- **Oracle** : `gdi_textout.c` étendu (extent `Hello, ARET!`=98×19 + draw `OPAQUE`) → bit-identique Wine.
+- **Vérifié** : hash transpile **inchangé** `19acad982194bf07`, difftest-transpile 4/4, `table_is_sorted` vert,
+  winediff **86/86**.
+
 <!-- NOUVELLES ENTRÉES ICI (garder l'ordre chronologique, plus récent en bas) -->
