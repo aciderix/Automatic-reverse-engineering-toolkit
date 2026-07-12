@@ -3289,8 +3289,7 @@ static uint32_t u32_drawtext(uint32_t hdc, const uint32_t *cps, int len, uint32_
 #ifdef ARET_HAVE_FREETYPE
     enum { DT_CENTER=1, DT_RIGHT=2, DT_VCENTER=4, DT_BOTTOM=8, DT_WORDBREAK=0x10, DT_SINGLELINE=0x20,
            DT_EXPANDTABS=0x40, DT_TABSTOP=0x80, DT_NOCLIP=0x100, DT_CALCRECT=0x400, DT_NOPREFIX=0x800 };
-    if (!(fmt & DT_SINGLELINE)) { aret_unimpl("DrawText: only DT_SINGLELINE modelled (multi-line/word-break pending)"); return 0; }
-    if (fmt & (DT_WORDBREAK|DT_EXPANDTABS|DT_TABSTOP|0x8000/*DT_END_ELLIPSIS*/|0x40000/*DT_PATH_ELLIPSIS*/|0x20000/*DT_WORD_ELLIPSIS*/))
+    if (fmt & (DT_EXPANDTABS|DT_TABSTOP|0x8000/*DT_END_ELLIPSIS*/|0x40000/*DT_PATH_ELLIPSIS*/|0x20000/*DT_WORD_ELLIPSIS*/))
         { aret_unimpl("DrawText: tabs/ellipsis pending"); return 0; }
     if (!(fmt & DT_NOPREFIX)) { for (int i = 0; i < len; i++) if (cps[i] == '&') { aret_unimpl("DrawText: '&' prefix underline pending (use DT_NOPREFIX)"); return 0; } }
     int32_t *rc = (int32_t *)(uintptr_t)prc;
@@ -3300,9 +3299,62 @@ static uint32_t u32_drawtext(uint32_t hdc, const uint32_t *cps, int len, uint32_
     int ascent, descent;
     FT_Face ftf = u32_dc_font(d, &ascent, &descent);
     if (!ftf) return 0;
+    int lineH = ascent + descent;
+    int clip = !(fmt & DT_NOCLIP);
+    uint32_t saved_align = g_gdi[d].text_align; g_gdi[d].text_align = 0;
+
+    if (!(fmt & DT_SINGLELINE)) {
+        /* Multi-line: split on '\n' (hard breaks); within a segment, DT_WORDBREAK
+         * wraps greedily at the last space that keeps the line within the rect
+         * width (a lone over-long word breaks at the character). Each line is drawn
+         * at rc.top + i*tmHeight, horizontally aligned; vertical alignment does not
+         * apply to multi-line (per Win32). ret / DT_CALCRECT = lines*tmHeight. */
+        int rw = rc[2] - rc[0];
+        int nlines = 0, maxw = 0, drawn = 0;
+        int i = 0;
+        while (i <= len) {
+            int segEnd = i; while (segEnd < len && cps[segEnd] != '\n') segEnd++;
+            int pos = i;
+            do {
+                int lineEnd;
+                if (fmt & DT_WORDBREAK) {
+                    int lastSpaceEnd = -1, k = pos;
+                    lineEnd = segEnd;
+                    while (k < segEnd) {
+                        if (u32_text_width(ftf, cps + pos, k + 1 - pos) > rw && k > pos) {
+                            lineEnd = (lastSpaceEnd > pos) ? lastSpaceEnd : k;
+                            break;
+                        }
+                        if (cps[k] == ' ') lastSpaceEnd = k + 1;
+                        k++;
+                    }
+                } else lineEnd = segEnd;
+                /* Wine excludes trailing spaces from a line's width (for CALCRECT
+                 * width and for center/right alignment). */
+                int te = lineEnd; while (te > pos && cps[te - 1] == ' ') te--;
+                int lw = u32_text_width(ftf, cps + pos, te - pos);
+                if (lw > maxw) maxw = lw;
+                int y = rc[1] + nlines * lineH;
+                if (!(fmt & DT_CALCRECT) && y < rc[3]) {   /* draw lines starting within the rect */
+                    int x = rc[0];
+                    if (fmt & DT_CENTER) x = rc[0] + (rw - lw) / 2;
+                    else if (fmt & DT_RIGHT) x = rc[2] - lw;
+                    u32_textout_full(hdc, x, y, cps + pos, te - pos, NULL, rc, 0, clip);
+                    drawn++;
+                }
+                nlines++;
+                pos = lineEnd;
+            } while (pos < segEnd);
+            i = segEnd + 1;   /* skip the '\n' */
+        }
+        g_gdi[d].text_align = saved_align;
+        if (fmt & DT_CALCRECT) { rc[2] = rc[0] + maxw; rc[3] = rc[1] + nlines * lineH; return (uint32_t)(nlines * lineH); }
+        return (uint32_t)(drawn * lineH);   /* DRAW: height of the lines that fit */
+    }
+
     int textW = u32_text_width(ftf, cps, len);
-    int textH = ascent + descent;
-    if (fmt & DT_CALCRECT) { rc[2] = rc[0] + textW; rc[3] = rc[1] + textH; return (uint32_t)textH; }
+    int textH = lineH;
+    if (fmt & DT_CALCRECT) { g_gdi[d].text_align = saved_align; rc[2] = rc[0] + textW; rc[3] = rc[1] + textH; return (uint32_t)textH; }
     int rw = rc[2] - rc[0], rh = rc[3] - rc[1];
     int x = rc[0];
     if (fmt & DT_CENTER) x = rc[0] + (rw - textW) / 2;
@@ -3310,9 +3362,6 @@ static uint32_t u32_drawtext(uint32_t hdc, const uint32_t *cps, int len, uint32_
     int y = rc[1];
     if (fmt & DT_VCENTER) y = rc[1] + (rh - textH + 1) / 2;   /* Wine rounds up */
     else if (fmt & DT_BOTTOM) y = rc[3] - textH;
-    /* draw (TA_TOP|TA_LEFT origin); clip to the rect unless DT_NOCLIP */
-    int clip = !(fmt & DT_NOCLIP);
-    uint32_t saved_align = g_gdi[d].text_align; g_gdi[d].text_align = 0;
     u32_textout_full(hdc, x, y, cps, len, NULL, rc, 0, clip);
     g_gdi[d].text_align = saved_align;
     if (fmt & (DT_VCENTER|DT_BOTTOM)) return (uint32_t)(y + textH - rc[1]);

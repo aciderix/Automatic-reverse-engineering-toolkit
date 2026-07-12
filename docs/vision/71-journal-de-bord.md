@@ -1861,4 +1861,20 @@ Détail : **70 §6** (roadmap). Résumé :
   (DEFAULT_GUI_FONT/ANSI_VAR) ✅. Restes bornés (abort sound) : grayscale `ANTIALIASED_QUALITY`, sérif/mono legacy
   sur ce prefix quirk, SYSTEM_FONT bitmap, synthèse gras/italique.
 
+### 2026-07-12 — [GUI][HLE-WIN32] Texte GDI : **DrawText multi-ligne** (word-wrap + `\n`) bit-identique Wine
+- **DrawText multi-ligne** (hors `DT_SINGLELINE`) : découpe sur `\n` (sauts durs) + **word-wrap `DT_WORDBREAK`**
+  (glouton : casse au dernier espace qui garde la ligne ≤ largeur du rect ; un mot seul trop long casse au
+  caractère). Chaque ligne dessinée à `rc.top + i·tmHeight`, alignée (LEFT/CENTER/RIGHT) ; l'alignement vertical
+  ne s'applique pas au multi-ligne (Win32). Recette Wine mesurée :
+  - **Retour DRAW** = hauteur des lignes qui **démarrent dans le rect** (`top < rc.bottom`) ×`tmHeight` (les lignes
+    au-delà sont comptées hors, mais dessinées clippées) ; **DT_CALCRECT** = toutes les lignes, rect → `{l, t,
+    l+largeurMax, t+total}`.
+  - **Espaces de fin exclus** de la largeur d'une ligne (pour CALCRECT et l'alignement centre/droite).
+- **Vérifié bit-identique Wine** (5 cas : wordbreak, wb|calc, `\n` explicite, wb|center, wb|right — retour + rect +
+  pixels). Oracle `winecorpus/gdi_drawtext_ml.c`.
+- **Vérifié** : hash transpile inchangé, difftest-transpile 4/4, `table_is_sorted` vert, winediff (voir chiffre).
+- **Note widgets** : mesuré que `WM_PRINTCLIENT` sur un STATIC headless Wine ne peint rien → l'oracle de peinture
+  des widgets n'est **pas viable** headless (nécessite un cycle `WM_PAINT` sur fenêtre visible, fragile). Les
+  widgets natifs = chantier à oracle fragile, reporté ; on complète le texte (oracle propre) d'abord.
+
 <!-- NOUVELLES ENTRÉES ICI (garder l'ordre chronologique, plus récent en bas) -->
