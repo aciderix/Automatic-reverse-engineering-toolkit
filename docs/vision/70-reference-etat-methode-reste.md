@@ -13,6 +13,7 @@
 | **71-journal-de-bord** | **Journal structuré & cherchable** : fiches par sous-système + entrées datées, détail technique complet de chaque fix | Pour **retrouver une info précise** (grep par tag/sous-système) |
 | **50-plan-execution** | **Archive** : journal chronologique append-only historique (3500 l.) | Uniquement pour le récit détaillé d'un vieux fix non encore migré en 71 |
 | **00 / 01 / 30** | **Vision stratégique** : roadmap UBT, design, intégration briques (Wine/DXVK/LLVM) | Résumé intégré ici §6 ; ouvrir pour la vision d'origine |
+| **80-orientations-architecturales** | **Design des grands chantiers à venir** : fibers (threads), lifting DLL binaire, SEH in-HLE, PGL, SoftFloat — verdicts + conformité au principe sacré | Avant d'engager threads/DLL/SEH/indirects/x87-universel |
 | **HANDOFF / 40** | Architecture détaillée, pièges, état des lieux | Complément |
 
 **Comment un agent trouve une info** : `grep` le tag de sous-système dans **71**
