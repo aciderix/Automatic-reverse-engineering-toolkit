@@ -1764,4 +1764,31 @@ Détail : **70 §6** (roadmap). Résumé :
 - **Reste (abort sound)** : antialiasing, stock font, substitution legacy, Unicode, DrawText/ExtTextOut, synthèse
   gras/italique, TA_UPDATECP.
 
+### 2026-07-12 — [GUI][ORACLE] Texte GDI : **antialiasing = mur dur** (mesuré non-trivial), reste abort sound
+- **Mesuré** : le rendu antialiasé (`DEFAULT_QUALITY`) de Wine **ne matche AUCUN** `FT_LOAD_TARGET_*` naïf
+  (NORMAL/LIGHT/NO_HINTING/FORCE_AUTOHINT) — comparé pixel-à-pixel sur 'A' 16px. Deux écarts : (1) **position**
+  sous-pixel (le glyphe de Wine est 1px à gauche de tous les variants FT), (2) **couverture** différente (bords
+  « plus durs » : Wine `247 32` vs FT `255 107`). C'est le **pipeline de rasterisation** de Wine (arrondi d'origine
+  + hinting + cache de glyphes), pas juste des load flags.
+- **Contraste avec le mono** (qui matche au bit) : le mono arrondit au pixel entier (grille 1-bit déterministe,
+  identique des deux côtés) ; l'AA a de la couverture sous-pixel où le pipeline exact de Wine diverge d'un rendu FT
+  direct. **Bit-exactitude AA = problème de recherche** (répliquer la config rasterizer exacte de Wine), pas un
+  minage rapide.
+- **Verdict (principe sacré)** : l'AA **reste un abort sound** (`quality != NONANTIALIASED` → abort) — on ne shippe
+  **pas** un AA non-conforme. Borné, documenté. Les programmes qui demandent `NONANTIALIASED_QUALITY` ont un texte
+  correct ; les autres s'arrêtent proprement. Reprise possible : tracer la config FreeType exacte de Wine
+  (`dlls/win32u/freetype.c` : load flags par GASP, origine sous-pixel, éventuel gamma).
+
+### 2026-07-12 — [GUI][HLE-WIN32] Texte GDI (suite) : **Unicode `TextOutW`** (codepoints réels) bit-identique Wine
+- **Refactor** : le cœur texte (`u32_textout_core`, `u32_text_width`, `u32_text_extent`) prend désormais des
+  **codepoints** (`uint32_t`) au lieu d'octets. `TextOutW`/`GetTextExtentPoint32W` passent le **vrai codepoint**
+  UTF-16 (BMP) à `FT_Load_Char` (cmap de la police) au lieu de tronquer au low-byte. `TextOutA` inchangé (octet =
+  codepoint Latin-1 == CP1252 pour 0x00-0x7F et 0xA0-0xFF ; 0x80-0x9F = suite).
+- **Vérifié bit-identique Wine** : accentué latin (é è ü ñ) **et** grec (α β γ) via `TextOutW`, + `extentW`.
+  ASCII non régressé. Surrogates (hors BMP) = suite.
+- **Oracle** : `winecorpus/gdi_textunicode.c` (accent + grec hashés + extentW). winediff **87→88/88**.
+- **Vérifié** : hash transpile inchangé, difftest-transpile 4/4, `table_is_sorted` vert.
+- **Reste (abort sound)** : antialiasing (mur dur), stock font, substitution legacy, DrawText/ExtTextOut, synthèse
+  gras/italique, TA_UPDATECP, TextOutA 0x80-0x9F (CP1252), surrogates.
+
 <!-- NOUVELLES ENTRÉES ICI (garder l'ordre chronologique, plus récent en bas) -->

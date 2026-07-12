@@ -3088,11 +3088,12 @@ static FT_Face u32_dc_font(int d, int *ascent, int *descent) {
 }
 /* Text extent width (pixels) = sum of the *default*-hinted advances — Wine's
  * GetTextExtentPoint32 / opaque-fill regime, which is distinct from the mono
- * render-pen advance (measured: 'Hi!' extent 22 but mono pen sum 21). */
-static int u32_text_width(FT_Face f, const char *s, int len) {
+ * render-pen advance (measured: 'Hi!' extent 22 but mono pen sum 21). Codepoints
+ * (not bytes) so wide text with real Unicode works. */
+static int u32_text_width(FT_Face f, const uint32_t *cps, int len) {
     int w = 0;
     for (int i = 0; i < len; i++)
-        if (FT_Load_Char(f, (unsigned char)s[i], FT_LOAD_DEFAULT) == 0)
+        if (FT_Load_Char(f, cps[i], FT_LOAD_DEFAULT) == 0)
             w += (int)(f->glyph->advance.x >> 6);
     return w;
 }
@@ -3106,7 +3107,7 @@ static int u32_text_width(FT_Face f, const char *s, int len) {
  * *soundly* (never a silent wrong render): no FreeType linked, antialiased/bold/
  * italic, non-default alignment, stock font (no face), non-32bpp target. Each is a
  * follow-up increment, verified against Wine before it ships. */
-static int u32_textout_core(uint32_t hdc, int x, int y, const char *str, int len) {
+static int u32_textout_core(uint32_t hdc, int x, int y, const uint32_t *cps, int len) {
 #ifdef ARET_HAVE_FREETYPE
     int d = gdi_idx(hdc);
     if (d < 0 || g_gdi[d].type != GDIT_DC) return 0;
@@ -3125,7 +3126,7 @@ static int u32_textout_core(uint32_t hdc, int x, int y, const char *str, int len
     /* Alignment origin (Wine's rules, measured): horizontal LEFT=x, RIGHT=x-width,
      * CENTER=x-width/2; vertical TOP baseline=y+ascent, BASELINE=y, BOTTOM=y-descent. */
     int need_width = (ta & 6) || (bkmode == 2);
-    int width = need_width ? u32_text_width(ftf, str, len) : 0;
+    int width = need_width ? u32_text_width(ftf, cps, len) : 0;
     int penx = x;
     if ((ta & 6) == 2) penx = x - width;              /* TA_RIGHT  */
     else if ((ta & 6) == 6) penx = x - width / 2;     /* TA_CENTER */
@@ -3143,8 +3144,7 @@ static int u32_textout_core(uint32_t hdc, int x, int y, const char *str, int len
     }
     uint32_t fg = g_gdi[d].text_color;   /* 0x00BBGGRR, matches DIB [B,G,R,0] */
     for (int k = 0; k < len; k++) {
-        unsigned char ch = (unsigned char)str[k];
-        if (FT_Load_Char(ftf, ch, FT_LOAD_RENDER | FT_LOAD_TARGET_MONO) != 0) continue;
+        if (FT_Load_Char(ftf, cps[k], FT_LOAD_RENDER | FT_LOAD_TARGET_MONO) != 0) continue;
         FT_GlyphSlot g = ftf->glyph; FT_Bitmap *b = &g->bitmap;
         int ox = penx + g->bitmap_left, oy = baseline - g->bitmap_top;
         for (int r = 0; r < (int)b->rows; r++)
@@ -3158,60 +3158,72 @@ static int u32_textout_core(uint32_t hdc, int x, int y, const char *str, int len
     }
     return 1;
 #else
-    (void)hdc; (void)x; (void)y; (void)str; (void)len;
+    (void)hdc; (void)x; (void)y; (void)cps; (void)len;
     aret_unimpl("TextOut: FreeType not linked (rebuild with freetype2+fontconfig)");
     return 0;
 #endif
+}
+/* ANSI bytes → codepoints: ASCII and 0xA0-0xFF are Latin-1 == the Windows-1252
+ * codepage (bit-exact); 0x80-0x9F (the CP1252-specific slots) are a follow-up. */
+static int u32_textout_ansi(uint32_t hdc, int x, int y, const char *str, int len) {
+    uint32_t cps[1024]; int m = len < 1024 ? len : 1024;
+    if (m < 0) m = 0;
+    for (int i = 0; i < m; i++) cps[i] = (unsigned char)str[i];
+    return u32_textout_core(hdc, x, y, cps, m);
 }
 
 /* GetTextExtentPoint32A(hdc, str, count, lpSize) -> BOOL. cx = sum of default
  * advances (Wine's extent regime), cy = tmHeight. Shares u32_dc_font so it agrees
  * with TextOut's OPAQUE fill exactly. */
-static int u32_text_extent(uint32_t hdc, const char *s, int len, uint32_t psize) {
+static int u32_text_extent(uint32_t hdc, const uint32_t *cps, int len, uint32_t psize) {
 #ifdef ARET_HAVE_FREETYPE
     int d = gdi_idx(hdc);
     if (d < 0 || g_gdi[d].type != GDIT_DC) return 0;
     int ascent, descent;
     FT_Face ftf = u32_dc_font(d, &ascent, &descent);
     if (!ftf) return 0;
-    int w = u32_text_width(ftf, s, len);
+    int w = u32_text_width(ftf, cps, len);
     if (psize) { int32_t *sz = (int32_t *)(uintptr_t)psize; sz[0] = w; sz[1] = ascent + descent; }
     return 1;
 #else
-    (void)hdc; (void)s; (void)len; (void)psize;
+    (void)hdc; (void)cps; (void)len; (void)psize;
     aret_unimpl("GetTextExtentPoint32: FreeType not linked");
     return 0;
 #endif
 }
+static int u32_text_extent_ansi(uint32_t hdc, const char *s, int len, uint32_t psize) {
+    uint32_t cps[1024]; int m = len < 1024 ? len : 1024; if (m < 0) m = 0;
+    for (int i = 0; i < m; i++) cps[i] = (unsigned char)s[i];
+    return u32_text_extent(hdc, cps, m, psize);
+}
 
 /* TextOutA(hdc, x, y, lpString, cbCount) -> BOOL. */
 uint32_t aret_TextOutA(uint32_t esp) {
-    return u32_textout_core(WU(0), WI(1), WI(2), WCS(3), WI(4)) ? 1 : 0;
+    return u32_textout_ansi(WU(0), WI(1), WI(2), WCS(3), WI(4)) ? 1 : 0;
 }
-/* TextOutW(hdc, x, y, lpWideString, cchCount) -> BOOL. Narrow the low byte of each
- * WCHAR (ASCII text); non-ASCII code points are a follow-up (needs cmap by
- * codepoint, which FT_Load_Char already does — but the ANSI blend path is proven
- * first). */
+/* TextOutW(hdc, x, y, lpWideString, cchCount) -> BOOL. Full Unicode: each UTF-16
+ * unit is a codepoint FT_Load_Char maps through the font's cmap (BMP; surrogate
+ * pairs are a follow-up). */
 uint32_t aret_TextOutW(uint32_t esp) {
     const uint16_t *ws = (const uint16_t *)(uintptr_t)WU(3);
-    int n = WI(4);
-    if (!ws || n <= 0) return u32_textout_core(WU(0), WI(1), WI(2), "", 0) ? 1 : 0;
-    char buf[512]; int m = n < (int)sizeof buf ? n : (int)sizeof buf;
-    for (int i = 0; i < m; i++) buf[i] = (char)(ws[i] & 0xFF);
-    return u32_textout_core(WU(0), WI(1), WI(2), buf, m) ? 1 : 0;
+    int n = WI(4); if (n < 0) n = 0;
+    uint32_t cps[1024]; int m = n < 1024 ? n : 1024;
+    for (int i = 0; i < m; i++) cps[i] = ws ? ws[i] : 0;
+    return u32_textout_core(WU(0), WI(1), WI(2), cps, ws ? m : 0) ? 1 : 0;
 }
 
 /* GetTextExtentPoint32A / GetTextExtentPointA(hdc, str, count, lpSize) -> BOOL.
  * (The non-32 variant has the same signature; both share one path.) */
 uint32_t aret_GetTextExtentPoint32A(uint32_t esp) {
-    return u32_text_extent(WU(0), WCS(1), WI(2), WU(3)) ? 1 : 0;
+    return u32_text_extent_ansi(WU(0), WCS(1), WI(2), WU(3)) ? 1 : 0;
 }
 uint32_t aret_GetTextExtentPointA(uint32_t esp) { return aret_GetTextExtentPoint32A(esp); }
 uint32_t aret_GetTextExtentPoint32W(uint32_t esp) {
     const uint16_t *ws = (const uint16_t *)(uintptr_t)WU(1);
-    int n = WI(2); char buf[512]; int m = 0;
-    if (ws && n > 0) { m = n < (int)sizeof buf ? n : (int)sizeof buf; for (int i = 0; i < m; i++) buf[i] = (char)(ws[i] & 0xFF); }
-    return u32_text_extent(WU(0), buf, m, WU(3)) ? 1 : 0;
+    int n = WI(2); if (n < 0) n = 0;
+    uint32_t cps[1024]; int m = n < 1024 ? n : 1024;
+    for (int i = 0; i < m; i++) cps[i] = ws ? ws[i] : 0;
+    return u32_text_extent(WU(0), cps, ws ? m : 0, WU(3)) ? 1 : 0;
 }
 uint32_t aret_GetTextExtentPointW(uint32_t esp) { return aret_GetTextExtentPoint32W(esp); }
 
