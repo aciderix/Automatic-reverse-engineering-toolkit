@@ -1916,4 +1916,20 @@ Détail : **70 §6** (roadmap). Résumé :
   hauteurs ±. **Restes bornés (abort sound, niche ou pipeline Wine distinct)** : grayscale ANTIALIASED_QUALITY,
   DrawText tabs/ellipsis, synthèse gras/italique, sérif/mono legacy (quirk prefix), SYSTEM_FONT bitmap, surrogates.
 
+### 2026-07-12 — [GUI][HLE-WIN32] GDI vectoriel : **MoveToEx / LineTo** (Bresenham) bit-identique Wine
+- **Pivot d'oracle** : widgets natifs = **pas d'oracle viable headless** (mesuré : ni `WM_PRINTCLIENT`, ni la
+  peinture d'un contrôle enfant dans une fenêtre visible ne sont lisibles via `GetPixel` sous Xvfb) ; **SEH** =
+  binaires de test non constructibles ici (mingw i686 ne compile pas `__try/__except`, modèle DWARF/SjLj). Le
+  chantier propre-et-vérifiable restant = le **GDI vectoriel** (oracle DIB-hash, comme `gdi_dib`).
+- **`MoveToEx`/`LineTo`/`GetCurrentPositionEx`** : `LineTo` = **Bresenham entier** de la position courante vers
+  (x,y), **point final exclu** (sémantique GDI, cohérent avec le trait d'accélérateur), couleur du stylo
+  sélectionné. Algorithme vérifié = Bresenham standard (`err=2·d_mineur−d_majeur`, seuil `>0`), tracé colonne par
+  colonne exactement comme Wine. Position courante suivie sur le DC (`cur_x/cur_y`).
+- **Stylo** : `gdi_pen` — solide largeur ≤1 seulement ; `PS_NULL` ne dessine rien ; styles/largeurs > 1 = **abort
+  sound** (rasterisation exacte = suite). `CreatePen` stocke style/largeur.
+- **Vérifié bit-identique Wine** : 6 lignes multi-octants (peu/très pentues, dx<0, verticale, horizontale, stylo
+  coloré) + position courante. Oracle `gdi_lineto.c`. `stdcall_pops` : LineTo=12, MoveToEx=16, GetCurrentPositionEx=8.
+- **Vérifié** : hash transpile inchangé, difftest-transpile 4/4, `table_is_sorted` vert, winediff (voir chiffre).
+- **Suite GDI vectoriel** : Polyline/PolylineTo, Rectangle (bord stylo + remplissage pinceau), Ellipse.
+
 <!-- NOUVELLES ENTRÉES ICI (garder l'ordre chronologique, plus récent en bas) -->

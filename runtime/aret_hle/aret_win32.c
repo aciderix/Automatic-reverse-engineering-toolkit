@@ -2356,10 +2356,11 @@ static struct gdi_obj {
     uint32_t text_color, bk_color; int bk_mode; uint32_t text_align;  /* DC */
     int w, h, topdown, bpp; uint8_t *bits; int owns_bits; /* BITMAP */
     uint32_t color;                                      /* BRUSH/PEN */
+    int pen_style, pen_width;                            /* PEN */
     int lf_height, lf_weight, lf_italic, lf_quality;     /* FONT (LOGFONT) */
     int lf_underline, lf_strikeout;                      /* FONT (LOGFONT) */
     char lf_face[64];                                    /* FONT face name */
-    int mapmode, savetop;                                /* DC map mode + save-stack depth */
+    int mapmode, savetop; int cur_x, cur_y;              /* DC map mode + save-stack + current pos */
     struct { uint32_t font, brush, pen, tc, bc; int bm, mm; } sstk[8];  /* SaveDC/RestoreDC */
 } g_gdi[GDI_MAX];
 
@@ -2666,7 +2667,10 @@ uint32_t aret_CreateSolidBrush(uint32_t esp) {
 }
 uint32_t aret_CreatePen(uint32_t esp) {
     int i = gdi_alloc(GDIT_PEN); if (!i) return 0;
-    g_gdi[i].color = WU(2) & 0x00FFFFFFu;                 /* (style, width, color) */
+    g_gdi[i].pen_style = (int)WU(0);                      /* (style, width, color) */
+    g_gdi[i].pen_width = (int)WU(1);
+    g_gdi[i].color = WU(2) & 0x00FFFFFFu;
+    if ((int)WU(0) == 5) g_gdi[i].null_obj = 1;          /* PS_NULL */
     return gdi_handle(i);
 }
 /* GetStockObject(i) -> HGDIOBJ. Distinct, cached handle per stock id (opaque). */
@@ -2807,6 +2811,71 @@ uint32_t aret_GetPixel(uint32_t esp) {
     struct gdi_obj *bm = gdi_dc_surface(WU(0));
     if (!bm) return 0xFFFFFFFFu;
     return gdi_getpx(bm, WI(1), WI(2));
+}
+
+/* The DC's currently-selected pen: fills *color (COLORREF) and returns 1 if it is
+ * a solid width≤1 pen we can draw exactly (Bresenham). Returns 0 for NULL_PEN (no
+ * draw) and aborts soundly for wide/styled pens (their exact rasterisation is a
+ * follow-up). */
+static int gdi_pen(int d, uint32_t *color) {
+    int p = gdi_idx(g_gdi[d].sel_pen);
+    if (p < 0) { if (color) *color = 0; return 1; }        /* default black */
+    if (g_gdi[p].null_obj) return 0;                        /* NULL_PEN: draws nothing */
+    if (!g_gdi[p].stock && (g_gdi[p].pen_style != 0 || g_gdi[p].pen_width > 1)) {
+        aret_unimpl("GDI pen: only PS_SOLID width<=1 modelled (styled/wide pens pending)");
+        return -1;
+    }
+    if (color) *color = g_gdi[p].color;
+    return 1;
+}
+/* Bresenham line from (x0,y0) to (x1,y1), *excluding* the endpoint (GDI LineTo
+ * semantics), in the pen colour. Matches Wine's integer line rasteriser (verified
+ * against measured output). */
+static void gdi_bres(struct gdi_obj *bm, int x0, int y0, int x1, int y1, uint32_t c) {
+    int dx = x1 - x0, dy = y1 - y0;
+    int sx = dx < 0 ? -1 : 1, sy = dy < 0 ? -1 : 1;
+    int adx = dx < 0 ? -dx : dx, ady = dy < 0 ? -dy : dy;
+    int x = x0, y = y0;
+    if (adx >= ady) {                                       /* x-major */
+        int err = 2 * ady - adx;
+        for (int i = 0; i < adx; i++) {                     /* endpoint excluded */
+            if (gdi_px(bm, x, y)) gdi_put(bm, x, y, c);
+            if (err > 0) { y += sy; err -= 2 * adx; }
+            err += 2 * ady; x += sx;
+        }
+    } else {                                                /* y-major */
+        int err = 2 * adx - ady;
+        for (int i = 0; i < ady; i++) {
+            if (gdi_px(bm, x, y)) gdi_put(bm, x, y, c);
+            if (err > 0) { x += sx; err -= 2 * ady; }
+            err += 2 * adx; y += sy;
+        }
+    }
+}
+/* MoveToEx(hdc, x, y, LPPOINT old) -> BOOL. Sets the current position. */
+uint32_t aret_MoveToEx(uint32_t esp) {
+    int d = gdi_idx(WU(0)); if (d < 0) return 0;
+    uint32_t po = WU(3);
+    if (po) { int32_t *pt = (int32_t *)(uintptr_t)po; pt[0] = g_gdi[d].cur_x; pt[1] = g_gdi[d].cur_y; }
+    g_gdi[d].cur_x = WI(1); g_gdi[d].cur_y = WI(2);
+    return 1;
+}
+uint32_t aret_GetCurrentPositionEx(uint32_t esp) {
+    int d = gdi_idx(WU(0)); if (d < 0) return 0;
+    uint32_t po = WU(1);
+    if (po) { int32_t *pt = (int32_t *)(uintptr_t)po; pt[0] = g_gdi[d].cur_x; pt[1] = g_gdi[d].cur_y; }
+    return 1;
+}
+/* LineTo(hdc, x, y) -> BOOL. Draws from the current position to (x,y) (endpoint
+ * excluded) with the selected pen, then moves the current position to (x,y). */
+uint32_t aret_LineTo(uint32_t esp) {
+    int d = gdi_idx(WU(0)); if (d < 0 || g_gdi[d].type != GDIT_DC) return 0;
+    struct gdi_obj *bm = gdi_dc_surface(WU(0));
+    uint32_t c; int pr = gdi_pen(d, &c);
+    if (pr < 0) return 0;                                   /* sound abort already raised */
+    if (pr && bm && bm->bpp == 32) gdi_bres(bm, g_gdi[d].cur_x, g_gdi[d].cur_y, WI(1), WI(2), c);
+    g_gdi[d].cur_x = WI(1); g_gdi[d].cur_y = WI(2);
+    return 1;
 }
 /* FillRect(hdc, const RECT*, hbrush) -> int. [left,right) x [top,bottom). */
 uint32_t aret_FillRect(uint32_t esp) {
