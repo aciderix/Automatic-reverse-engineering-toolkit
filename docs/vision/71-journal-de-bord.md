@@ -1695,7 +1695,13 @@ Détail : **70 §6** (roadmap). Résumé :
   dépendance runtime Wine** — Wine reste seulement l'**oracle** (winediff), jamais un composant du produit.
 - **Oracle** : `winecorpus/gdi_textout.c` — `CreateFontA(-16, DejaVu Sans, NONANTIALIASED)` → `TextOutA` dans un DIB
   32bpp → carte ASCII des pixels + hash FNV du buffer → **bit-identique à Wine** (bbox `3 6 92 19`, `hash=79741f6c`).
+- **Test intégré bout-en-bout** (`winecorpus/gui_paint_text.c`) : **une vraie appli fenêtrée** —
+  `RegisterClassA` → `CreateWindowExA(WS_VISIBLE)` → boucle de messages → `WM_PAINT` dispatché au WndProc
+  **lifté** → `BeginPaint`/`CreateFontA`/`SelectObject`/`TextOutA` (raster FreeType dans le framebuffer client de
+  la fenêtre SDL) → `EndPaint` → relecture `GetPixel` — rend **bit-identique à Wine** (`text_pixels=186`,
+  `bbox=4,7,76,18`), sous Xvfb (Wine) / SDL réel (ARET). **Toute la chaîne GUI marche** : fenêtre + messages +
+  peinture + texte GDI, en ELF natif autonome, sans runtime Wine. Ajouté comme fixture de régression permanente.
 - **Vérifié** : hash transpile **inchangé** `19acad982194bf07`, difftest-transpile 4/4, `table_is_sorted` vert,
-  winediff **84→85/85**. **Additif** : les binaires sans texte ne lient pas FreeType → byte-identiques.
+  winediff **84→86/86** (gdi_textout + gui_paint_text). **Additif** : les binaires sans texte ne lient pas FreeType → byte-identiques.
 
 <!-- NOUVELLES ENTRÉES ICI (garder l'ordre chronologique, plus récent en bas) -->
