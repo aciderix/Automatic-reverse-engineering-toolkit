@@ -2953,17 +2953,48 @@ uint32_t aret_PatBlt(uint32_t esp) {
     return 1;
 }
 /* BitBlt(hdcDst, x, y, w, h, hdcSrc, x1, y1, rop) -> BOOL. SRCCOPY only. */
+/* Combine source/destination pixels per a binary raster-op (the common S,D BitBlt
+ * ROP3 codes — pattern-based ROPs that read the brush are a follow-up). */
+static int gdi_rop_needs_src(uint32_t rop) {
+    return !(rop == 0x00550009u /*DSTINVERT*/ || rop == 0x00000042u /*BLACKNESS*/ || rop == 0x00FF0062u /*WHITENESS*/);
+}
+static int gdi_rop_apply(uint32_t rop, uint32_t s, uint32_t d, uint32_t *out) {
+    switch (rop) {
+    case 0x00CC0020u: *out = s;        return 1;   /* SRCCOPY    */
+    case 0x008800C6u: *out = s & d;    return 1;   /* SRCAND     */
+    case 0x00EE0086u: *out = s | d;    return 1;   /* SRCPAINT   */
+    case 0x00660046u: *out = s ^ d;    return 1;   /* SRCINVERT  */
+    case 0x00330008u: *out = ~s;       return 1;   /* NOTSRCCOPY */
+    case 0x00440328u: *out = s & ~d;   return 1;   /* SRCERASE   */
+    case 0x001100A6u: *out = ~(s | d); return 1;   /* NOTSRCERASE*/
+    case 0x00BB0226u: *out = ~s | d;   return 1;   /* MERGEPAINT */
+    case 0x00550009u: *out = ~d;       return 1;   /* DSTINVERT  */
+    case 0x00000042u: *out = 0;        return 1;   /* BLACKNESS  */
+    case 0x00FF0062u: *out = ~0u;      return 1;   /* WHITENESS  */
+    default: return 0;
+    }
+}
 uint32_t aret_BitBlt(uint32_t esp) {
     struct gdi_obj *dst = gdi_dc_surface(WU(0));
-    if (WU(8) != 0x00CC0020u /* SRCCOPY */) { aret_unimpl("BitBlt: only SRCCOPY modelled"); return 0; }
-    struct gdi_obj *src = gdi_dc_surface(WU(5));
-    if (!dst || !src) return 0;
+    uint32_t rop = WU(8), tmp;
+    if (!gdi_rop_apply(rop, 0, 0, &tmp)) { aret_unimpl("BitBlt: unmodelled raster-op"); return 0; }
+    int needs = gdi_rop_needs_src(rop);
+    struct gdi_obj *src = needs ? gdi_dc_surface(WU(5)) : NULL;
+    if (!dst || (needs && !src)) return 0;
     int dx = WI(1), dy = WI(2), w = WI(3), h = WI(4), sx = WI(6), sy = WI(7);
     for (int j = 0; j < h; j++)
         for (int i = 0; i < w; i++) {
-            uint8_t *s = gdi_px(src, sx + i, sy + j);
             uint8_t *d = gdi_px(dst, dx + i, dy + j);
-            if (s && d) { d[0] = s[0]; d[1] = s[1]; d[2] = s[2]; d[3] = s[3]; }
+            if (!d) continue;
+            uint32_t S = 0;
+            if (needs) {
+                uint8_t *s = gdi_px(src, sx + i, sy + j);
+                if (!s) continue;
+                S = (uint32_t)s[0] | s[1] << 8 | s[2] << 16 | (uint32_t)s[3] << 24;
+            }
+            uint32_t D = (uint32_t)d[0] | d[1] << 8 | d[2] << 16 | (uint32_t)d[3] << 24, R;
+            gdi_rop_apply(rop, S, D, &R);
+            d[0] = (uint8_t)R; d[1] = (uint8_t)(R >> 8); d[2] = (uint8_t)(R >> 16); d[3] = (uint8_t)(R >> 24);
         }
     return 1;
 }

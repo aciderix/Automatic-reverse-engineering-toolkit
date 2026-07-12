@@ -1951,4 +1951,13 @@ Détail : **70 §6** (roadmap). Résumé :
   AA), pas un minage rapide. **Reste abort sound** (non implémenté → stub faible). Idem Polygon/RoundRect/Arc.
 - **Vérifié** : hash transpile inchangé, difftest-transpile 4/4, `table_is_sorted` vert, winediff (voir chiffre).
 
+### 2026-07-12 — [GUI][HLE-WIN32] GDI : **BitBlt raster-ops** (ROP3 binaires S,D) bit-identique Wine
+- **`BitBlt`** gère désormais les ROP3 binaires (source,destination) courants comme combinaisons booléennes
+  par pixel des pixels 32bpp (les 4 octets, alpha compris — vérifié match Wine) : `SRCCOPY`(D=S), `SRCAND`(S&D),
+  `SRCPAINT`(S|D), `SRCINVERT`(S^D), `NOTSRCCOPY`(~S), `SRCERASE`(S&~D), `NOTSRCERASE`(~(S|D)), `MERGEPAINT`(~S|D),
+  `DSTINVERT`(~D), `BLACKNESS`(0), `WHITENESS`(~0). Les ROP à motif (lisant le pinceau) = suite → **abort sound**.
+- **Vérifié bit-identique Wine** : 8 ROPs (copy/and/paint/invert/notsrc/dstinv/black/white) sur deux DIB. Oracle
+  `gdi_bitblt_rop.c`.
+- **Vérifié** : hash transpile inchangé, difftest-transpile 4/4, `table_is_sorted` vert, winediff (voir chiffre).
+
 <!-- NOUVELLES ENTRÉES ICI (garder l'ordre chronologique, plus récent en bas) -->
