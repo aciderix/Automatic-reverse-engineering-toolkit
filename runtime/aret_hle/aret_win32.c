@@ -3107,7 +3107,8 @@ static int u32_text_width(FT_Face f, const uint32_t *cps, int len) {
  * *soundly* (never a silent wrong render): no FreeType linked, antialiased/bold/
  * italic, non-default alignment, stock font (no face), non-32bpp target. Each is a
  * follow-up increment, verified against Wine before it ships. */
-static int u32_textout_core(uint32_t hdc, int x, int y, const uint32_t *cps, int len) {
+static int u32_textout_full(uint32_t hdc, int x, int y, const uint32_t *cps, int len,
+                            const int32_t *dx, const int32_t *rect, int do_opaque, int do_clip) {
 #ifdef ARET_HAVE_FREETYPE
     int d = gdi_idx(hdc);
     if (d < 0 || g_gdi[d].type != GDIT_DC) return 0;
@@ -3123,10 +3124,21 @@ static int u32_textout_core(uint32_t hdc, int x, int y, const uint32_t *cps, int
     int ascent, descent;
     FT_Face ftf = u32_dc_font(d, &ascent, &descent);
     if (!ftf) return 0;
+    /* ETO_OPAQUE: fill the *explicit* rectangle with bkColor first (independent of
+     * the bkmode cell fill below). */
+    if (rect && do_opaque) {
+        uint32_t bg = g_gdi[d].bk_color;
+        for (int Y = rect[1]; Y < rect[3]; Y++)
+            for (int X = rect[0]; X < rect[2]; X++)
+                if (X >= 0 && X < surf->w && Y >= 0 && Y < surf->h) gdi_put(surf, X, Y, bg);
+    }
+    /* Text width: sum of per-char spacing (lpDx) if given, else the extent. */
+    int need_width = (ta & 6) || (bkmode == 2);
+    int width = 0;
+    if (dx) { for (int k = 0; k < len; k++) width += dx[k]; }
+    else if (need_width) width = u32_text_width(ftf, cps, len);
     /* Alignment origin (Wine's rules, measured): horizontal LEFT=x, RIGHT=x-width,
      * CENTER=x-width/2; vertical TOP baseline=y+ascent, BASELINE=y, BOTTOM=y-descent. */
-    int need_width = (ta & 6) || (bkmode == 2);
-    int width = need_width ? u32_text_width(ftf, cps, len) : 0;
     int penx = x;
     if ((ta & 6) == 2) penx = x - width;              /* TA_RIGHT  */
     else if ((ta & 6) == 6) penx = x - width / 2;     /* TA_CENTER */
@@ -3134,7 +3146,7 @@ static int u32_textout_core(uint32_t hdc, int x, int y, const uint32_t *cps, int
     if ((ta & 24) == 8) baseline = y - descent;       /* TA_BOTTOM   */
     else if ((ta & 24) == 24) baseline = y;           /* TA_BASELINE */
     else baseline = y + ascent;                       /* TA_TOP      */
-    /* OPAQUE: fill the (aligned) text cell rectangle with bkColor before glyphs. */
+    /* OPAQUE bkmode: fill the (aligned) text cell rectangle with bkColor. */
     if (bkmode == 2) {
         int top = baseline - ascent;
         uint32_t bg = g_gdi[d].bk_color;
@@ -3142,9 +3154,12 @@ static int u32_textout_core(uint32_t hdc, int x, int y, const uint32_t *cps, int
             for (int X = penx; X < penx + width; X++)
                 if (X >= 0 && X < surf->w && Y >= 0 && Y < surf->h) gdi_put(surf, X, Y, bg);
     }
+    /* ETO_CLIPPED: restrict glyph pixels to the rectangle. */
+    int cl = rect && do_clip ? rect[0] : 0, ct = rect && do_clip ? rect[1] : 0;
+    int cr = rect && do_clip ? rect[2] : surf->w, cb = rect && do_clip ? rect[3] : surf->h;
     uint32_t fg = g_gdi[d].text_color;   /* 0x00BBGGRR, matches DIB [B,G,R,0] */
     for (int k = 0; k < len; k++) {
-        if (FT_Load_Char(ftf, cps[k], FT_LOAD_RENDER | FT_LOAD_TARGET_MONO) != 0) continue;
+        if (FT_Load_Char(ftf, cps[k], FT_LOAD_RENDER | FT_LOAD_TARGET_MONO) != 0) { if (dx) penx += dx[k]; continue; }
         FT_GlyphSlot g = ftf->glyph; FT_Bitmap *b = &g->bitmap;
         int ox = penx + g->bitmap_left, oy = baseline - g->bitmap_top;
         for (int r = 0; r < (int)b->rows; r++)
@@ -3152,16 +3167,43 @@ static int u32_textout_core(uint32_t hdc, int x, int y, const uint32_t *cps, int
                 int bit = (b->buffer[r * b->pitch + (c >> 3)] >> (7 - (c & 7))) & 1;
                 if (!bit) continue;              /* non-ink: OPAQUE bg already filled, TRANSPARENT untouched */
                 int X = ox + c, Y = oy + r;
-                if (X >= 0 && X < surf->w && Y >= 0 && Y < surf->h) gdi_put(surf, X, Y, fg);
+                if (X >= cl && X < cr && Y >= ct && Y < cb && X >= 0 && X < surf->w && Y >= 0 && Y < surf->h) gdi_put(surf, X, Y, fg);
             }
-        penx += (int)(g->advance.x >> 6);       /* mono pen advance (render regime) */
+        penx += dx ? dx[k] : (int)(g->advance.x >> 6);   /* lpDx spacing, else mono pen advance */
     }
     return 1;
 #else
-    (void)hdc; (void)x; (void)y; (void)cps; (void)len;
+    (void)hdc; (void)x; (void)y; (void)cps; (void)len; (void)dx; (void)rect; (void)do_opaque; (void)do_clip;
     aret_unimpl("TextOut: FreeType not linked (rebuild with freetype2+fontconfig)");
     return 0;
 #endif
+}
+static int u32_textout_core(uint32_t hdc, int x, int y, const uint32_t *cps, int len) {
+    return u32_textout_full(hdc, x, y, cps, len, NULL, NULL, 0, 0);
+}
+/* ExtTextOut shared path: parse options/rect/dx, then render. `wide` picks A vs W
+ * for the string; only ETO_OPAQUE|ETO_CLIPPED are modelled (glyph-index/PDY/RTL/
+ * numeric-shaping abort soundly). */
+static int u32_exttextout(uint32_t hdc, int x, int y, uint32_t opts, uint32_t prect,
+                          const void *str, int count, uint32_t pdx, int wide) {
+    if (opts & ~0x6u) { aret_unimpl("ExtTextOut: only ETO_OPAQUE|ETO_CLIPPED modelled"); return 0; }
+    if (count < 0) count = 0;
+    uint32_t cps[1024]; int m = count < 1024 ? count : 1024;
+    if (str) {
+        if (wide) { const uint16_t *w = (const uint16_t *)str; for (int i = 0; i < m; i++) cps[i] = w[i]; }
+        else      { const uint8_t  *b = (const uint8_t  *)str; for (int i = 0; i < m; i++) cps[i] = b[i]; }
+    } else m = 0;
+    int32_t rectbuf[4]; const int32_t *rect = NULL;
+    if (prect) { const int32_t *r = (const int32_t *)(uintptr_t)prect; rectbuf[0]=r[0];rectbuf[1]=r[1];rectbuf[2]=r[2];rectbuf[3]=r[3]; rect = rectbuf; }
+    int32_t dxbuf[1024]; const int32_t *dx = NULL;
+    if (pdx) { const int32_t *p = (const int32_t *)(uintptr_t)pdx; for (int i = 0; i < m; i++) dxbuf[i] = p[i]; dx = dxbuf; }
+    return u32_textout_full(hdc, x, y, cps, m, dx, rect, (opts & 2) != 0, (opts & 4) != 0);
+}
+uint32_t aret_ExtTextOutA(uint32_t esp) {
+    return u32_exttextout(WU(0), WI(1), WI(2), WU(3), WU(4), WP(5), WI(6), WU(7), 0) ? 1 : 0;
+}
+uint32_t aret_ExtTextOutW(uint32_t esp) {
+    return u32_exttextout(WU(0), WI(1), WI(2), WU(3), WU(4), WP(5), WI(6), WU(7), 1) ? 1 : 0;
 }
 /* ANSI bytes → codepoints: ASCII and 0xA0-0xFF are Latin-1 == the Windows-1252
  * codepage (bit-exact); 0x80-0x9F (the CP1252-specific slots) are a follow-up. */

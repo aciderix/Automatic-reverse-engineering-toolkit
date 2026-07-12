@@ -1791,4 +1791,14 @@ Détail : **70 §6** (roadmap). Résumé :
 - **Reste (abort sound)** : antialiasing (mur dur), stock font, substitution legacy, DrawText/ExtTextOut, synthèse
   gras/italique, TA_UPDATECP, TextOutA 0x80-0x9F (CP1252), surrogates.
 
+### 2026-07-12 — [GUI][HLE-WIN32] Texte GDI (suite) : **ExtTextOutA/W** (options + rect + lpDx) bit-identique Wine
+- **ExtTextOutA/W** : le cœur `u32_textout_full` gagne 3 paramètres (`dx`, `rect`, `do_opaque`, `do_clip`) ;
+  `TextOut` = cas dégénéré. Recette Wine mesurée : **ETO_OPAQUE** remplit le **rect explicite** `[l,r)×[t,b)` avec
+  bkColor (indépendant du fill de cell du bkmode OPAQUE) ; **lpDx** impose l'avance par glyphe ; **ETO_CLIPPED**
+  restreint les pixels au rect. `options & ~(ETO_OPAQUE|ETO_CLIPPED)` (glyph-index/PDY/RTL/numeric) = **abort sound**.
+- **Vérifié bit-identique Wine** : plain (==TextOut), ETO_OPAQUE (fill x[5..59] y[4..23]), lpDx=12.
+- **Oracle** : `winecorpus/gdi_exttextout.c` (3 cas hashés). winediff **88→89/89**. `stdcall_pops` ExtTextOut=32.
+- **Vérifié** : hash transpile inchangé, difftest-transpile 4/4, `table_is_sorted` vert.
+- **Reste (abort sound)** : antialiasing (mur dur), DrawText, stock font, substitution legacy, synthèse gras/italique.
+
 <!-- NOUVELLES ENTRÉES ICI (garder l'ordre chronologique, plus récent en bas) -->

@@ -112,6 +112,8 @@ static TABLE: &[(&str, u32)] = &[
     ("EqualRect", 8),
     ("EqualSid", 8),
     ("ExitWindowsEx", 8),
+    ("ExtTextOutA", 32),
+    ("ExtTextOutW", 32),
     ("FileTimeToSystemTime", 8),
     ("FillConsoleOutputAttribute", 20),
     ("FillConsoleOutputCharacterA", 20),
