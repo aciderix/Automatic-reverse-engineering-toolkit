@@ -1902,4 +1902,18 @@ Détail : **70 §6** (roadmap). Résumé :
 - **Reste texte (abort sound)** : grayscale ANTIALIASED, tabs/ellipsis DrawText, synthèse gras/italique, sérif/mono
   legacy, SYSTEM_FONT bitmap, surrogates, CP1252 0x80-0x9F.
 
+### 2026-07-12 — [GUI][HLE-WIN32] Texte GDI : **codepage ANSI CP1252** (TextOutA 0x80-0x9F) bit-identique Wine
+- **`TextOutA` (et ExtTextOut/DrawText/extent ANSI)** mappent l'octet → codepoint Unicode via **CP1252** (l'ACP
+  Windows ; vérifié `GetACP()==1252`). 0x00-0x7F et 0xA0-0xFF = Latin-1 ; **0x80-0x9F = les slots CP1252**
+  (€, guillemets courbes, tirets, ™, œ…) → leur vrai codepoint, pas Latin-1. Slots indéfinis (0x81/0x8D/0x8F/0x90/
+  0x9D) → valeur de l'octet (comme MultiByteToWideChar). Helper `u32_ansi_cp` partagé par tous les chemins ANSI.
+- **Vérifié bit-identique Wine** : `TextOutA(0x80,0x92,0x99…)` == `TextOutW(0x20AC,0x2019,0x2122…)`. Oracle
+  `gdi_cp1252.c`.
+- **Vérifié** : hash transpile inchangé, difftest-transpile 4/4, `table_is_sorted` vert, winediff (voir chiffre).
+- **Milestone texte GDI — état** : le pipeline texte est **très complet, tout bit-identique à Wine, autonome** :
+  mono/subpixel(ClearType)/opaque/aligné/Unicode/CP1252/souligné-barré ; TextOut/ExtTextOut/DrawText(mono+multi-
+  ligne+`&`+CALCRECT)/GetTextExtentPoint32/GetTextMetrics ; gras-italique réels/substitution UI/stock fonts/
+  hauteurs ±. **Restes bornés (abort sound, niche ou pipeline Wine distinct)** : grayscale ANTIALIASED_QUALITY,
+  DrawText tabs/ellipsis, synthèse gras/italique, sérif/mono legacy (quirk prefix), SYSTEM_FONT bitmap, surrogates.
+
 <!-- NOUVELLES ENTRÉES ICI (garder l'ordre chronologique, plus récent en bas) -->

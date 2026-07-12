@@ -3149,6 +3149,18 @@ static int u32_text_width(FT_Face f, const uint32_t *cps, int len) {
 }
 #endif /* ARET_HAVE_FREETYPE */
 
+/* ANSI byte → Unicode codepoint via CP1252 (Windows ACP, verified GetACP()=1252):
+ * ASCII and 0xA0-0xFF are identical to Latin-1; 0x80-0x9F are the CP1252-specific
+ * slots (€, curly quotes, dashes…). Undefined slots (0x81/0x8D/0x8F/0x90/0x9D) map
+ * to the byte value (as MultiByteToWideChar does). */
+static uint32_t u32_ansi_cp(unsigned char b) {
+    static const uint16_t hi[32] = {
+        0x20AC,0x0081,0x201A,0x0192,0x201E,0x2026,0x2020,0x2021,
+        0x02C6,0x2030,0x0160,0x2039,0x0152,0x008D,0x017D,0x008F,
+        0x0090,0x2018,0x2019,0x201C,0x201D,0x2022,0x2013,0x2014,
+        0x02DC,0x2122,0x0161,0x203A,0x0153,0x009D,0x017E,0x0178 };
+    return (b >= 0x80 && b <= 0x9F) ? hi[b - 0x80] : (uint32_t)b;
+}
 /* Render an ANSI string with the DC's selected font into the DC's 32bpp DIB
  * surface, bit-identically to Wine: FreeType mono raster (the rasterizer Wine
  * uses) + Wine's usWinAscent baseline + mono blend; OPAQUE background fills the
@@ -3297,7 +3309,7 @@ static int u32_exttextout(uint32_t hdc, int x, int y, uint32_t opts, uint32_t pr
     uint32_t cps[1024]; int m = count < 1024 ? count : 1024;
     if (str) {
         if (wide) { const uint16_t *w = (const uint16_t *)str; for (int i = 0; i < m; i++) cps[i] = w[i]; }
-        else      { const uint8_t  *b = (const uint8_t  *)str; for (int i = 0; i < m; i++) cps[i] = b[i]; }
+        else      { const uint8_t  *b = (const uint8_t  *)str; for (int i = 0; i < m; i++) cps[i] = u32_ansi_cp(b[i]); }
     } else m = 0;
     int32_t rectbuf[4]; const int32_t *rect = NULL;
     if (prect) { const int32_t *r = (const int32_t *)(uintptr_t)prect; rectbuf[0]=r[0];rectbuf[1]=r[1];rectbuf[2]=r[2];rectbuf[3]=r[3]; rect = rectbuf; }
@@ -3443,7 +3455,7 @@ static uint32_t u32_drawtext(uint32_t hdc, const uint32_t *cps, int len, uint32_
 uint32_t aret_DrawTextA(uint32_t esp) {
     const char *s = WCS(1); int n = WI(2); if (n < 0) n = s ? (int)strlen(s) : 0;
     uint32_t cps[1024]; int m = n < 1024 ? n : 1024;
-    for (int i = 0; i < m; i++) cps[i] = s ? (unsigned char)s[i] : 0;
+    for (int i = 0; i < m; i++) cps[i] = s ? u32_ansi_cp((unsigned char)s[i]) : 0;
     return u32_drawtext(WU(0), cps, s ? m : 0, WU(3), WU(4));
 }
 uint32_t aret_DrawTextW(uint32_t esp) {
@@ -3453,12 +3465,10 @@ uint32_t aret_DrawTextW(uint32_t esp) {
     for (int i = 0; i < m; i++) cps[i] = ws ? ws[i] : 0;
     return u32_drawtext(WU(0), cps, ws ? m : 0, WU(3), WU(4));
 }
-/* ANSI bytes → codepoints: ASCII and 0xA0-0xFF are Latin-1 == the Windows-1252
- * codepage (bit-exact); 0x80-0x9F (the CP1252-specific slots) are a follow-up. */
 static int u32_textout_ansi(uint32_t hdc, int x, int y, const char *str, int len) {
     uint32_t cps[1024]; int m = len < 1024 ? len : 1024;
     if (m < 0) m = 0;
-    for (int i = 0; i < m; i++) cps[i] = (unsigned char)str[i];
+    for (int i = 0; i < m; i++) cps[i] = u32_ansi_cp((unsigned char)str[i]);
     return u32_textout_core(hdc, x, y, cps, m);
 }
 
@@ -3483,7 +3493,7 @@ static int u32_text_extent(uint32_t hdc, const uint32_t *cps, int len, uint32_t 
 }
 static int u32_text_extent_ansi(uint32_t hdc, const char *s, int len, uint32_t psize) {
     uint32_t cps[1024]; int m = len < 1024 ? len : 1024; if (m < 0) m = 0;
-    for (int i = 0; i < m; i++) cps[i] = (unsigned char)s[i];
+    for (int i = 0; i < m; i++) cps[i] = u32_ansi_cp((unsigned char)s[i]);
     return u32_text_extent(hdc, cps, m, psize);
 }
 
