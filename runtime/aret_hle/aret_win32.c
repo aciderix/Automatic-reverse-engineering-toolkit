@@ -2357,6 +2357,7 @@ static struct gdi_obj {
     int w, h, topdown, bpp; uint8_t *bits; int owns_bits; /* BITMAP */
     uint32_t color;                                      /* BRUSH/PEN */
     int lf_height, lf_weight, lf_italic, lf_quality;     /* FONT (LOGFONT) */
+    int lf_underline, lf_strikeout;                      /* FONT (LOGFONT) */
     char lf_face[64];                                    /* FONT face name */
     int mapmode, savetop;                                /* DC map mode + save-stack depth */
     struct { uint32_t font, brush, pen, tc, bc; int bm, mm; } sstk[8];  /* SaveDC/RestoreDC */
@@ -3219,6 +3220,7 @@ static int u32_textout_full(uint32_t hdc, int x, int y, const uint32_t *cps, int
     int cr = rect && do_clip ? rect[2] : surf->w, cb = rect && do_clip ? rect[3] : surf->h;
     uint32_t fg = g_gdi[d].text_color;   /* 0x00BBGGRR = (fg_R, fg_G, fg_B) low→high */
     int fR = fg & 0xFF, fG = (fg >> 8) & 0xFF, fB = (fg >> 16) & 0xFF;
+    int penx0 = penx;   /* start of the run — underline/strikeout span [penx0, penx) */
     for (int k = 0; k < len; k++) {
         if (FT_Load_Char(ftf, cps[k], FT_LOAD_RENDER | load_target) != 0) { if (dx) penx += dx[k]; continue; }
         FT_GlyphSlot g = ftf->glyph; FT_Bitmap *b = &g->bitmap;
@@ -3243,6 +3245,37 @@ static int u32_textout_full(uint32_t hdc, int x, int y, const uint32_t *cps, int
                 }
             }
         penx += dx ? dx[k] : (int)(g->advance.x >> 6);   /* lpDx spacing, else pen advance */
+    }
+    /* Underline / strikeout bars (lfUnderline / lfStrikeOut): solid fg rectangles
+     * spanning the run [penx0, penx). Positions match Wine's OUTLINETEXTMETRIC:
+     * underline top = baseline - round(MulFix(post.underline_pos + thickness/2, ys));
+     * strikeout top = baseline - round(MulFix(OS/2 yStrikeoutPosition, ys)); both
+     * thicknesses from the scaled font metrics, min 1px. */
+    int f_ul = (fi >= 0) ? g_gdi[fi].lf_underline : 0;
+    int f_so = (fi >= 0) ? g_gdi[fi].lf_strikeout : 0;
+    /* The bar spans the text *extent* (default advances) from the run origin, not
+     * the mono pen advance (they differ by ~1px at small sizes). With lpDx the span
+     * follows the dx-driven pen. */
+    int span_end = dx ? penx : penx0 + u32_text_width(ftf, cps, len);
+    if ((f_ul || f_so) && span_end > penx0) {
+        FT_Fixed ys = ftf->size->metrics.y_scale;
+        TT_OS2 *os2b = (TT_OS2 *)FT_Get_Sfnt_Table(ftf, FT_SFNT_OS2);
+        struct { int top, thk; } bars[2]; int nb = 0;
+        if (f_ul) {
+            int thk = (int)((FT_MulFix(ftf->underline_thickness, ys) + 32) >> 6); if (thk < 1) thk = 1;
+            int pos = (int)((FT_MulFix(ftf->underline_position + ftf->underline_thickness / 2, ys) + 32) >> 6);
+            bars[nb].top = baseline - pos; bars[nb].thk = thk; nb++;
+        }
+        if (f_so && os2b) {
+            int thk = (int)((FT_MulFix(os2b->yStrikeoutSize, ys) + 32) >> 6); if (thk < 1) thk = 1;
+            int pos = (int)((FT_MulFix(os2b->yStrikeoutPosition, ys) + 32) >> 6);
+            bars[nb].top = baseline - pos; bars[nb].thk = thk; nb++;
+        }
+        for (int bi = 0; bi < nb; bi++)
+            for (int Y = bars[bi].top; Y < bars[bi].top + bars[bi].thk; Y++)
+                for (int X = penx0; X < span_end; X++)
+                    if (X >= cl && X < cr && Y >= ct && Y < cb && X >= 0 && X < surf->w && Y >= 0 && Y < surf->h)
+                        gdi_put(surf, X, Y, fg);
     }
     return 1;
 #else
@@ -4186,47 +4219,49 @@ uint32_t aret_GetClassNameW(uint32_t esp) {
 /* Store LOGFONT params onto a freshly-allocated GDIT_FONT and return its handle.
  * Face name is copied (ASCII); wide names are narrowed low-byte (font names are
  * ASCII in practice). These feed the FreeType text raster (G3-text). */
-static uint32_t font_make(int height, int weight, int italic, int quality, const char *face) {
+static uint32_t font_make(int height, int weight, int italic, int underline, int strikeout, int quality, const char *face) {
     int i = gdi_alloc(GDIT_FONT);
     if (!i) return 0;
     g_gdi[i].lf_height = height;
     g_gdi[i].lf_weight = weight;
     g_gdi[i].lf_italic = italic;
+    g_gdi[i].lf_underline = underline;
+    g_gdi[i].lf_strikeout = strikeout;
     g_gdi[i].lf_quality = quality;
     if (face) { size_t n = strnlen(face, sizeof g_gdi[i].lf_face - 1); memcpy(g_gdi[i].lf_face, face, n); g_gdi[i].lf_face[n] = 0; }
     return gdi_handle(i);
 }
-/* CreateFontA(cHeight,cWidth,cEsc,cOrient,cWeight,bItalic,bU,bS,charset,outp,
- *   clip,quality,pitch,pszFace). Only height/weight/italic/quality/face feed the
- *   raster; the rest (escapement/orientation etc.) are unmodelled → if non-default
- *   the raster aborts soundly rather than render wrong. */
+/* CreateFontA(cHeight,cWidth,cEsc,cOrient,cWeight,bItalic,bUnderline,bStrikeOut,
+ *   charset,outp,clip,quality,pitch,pszFace). height/weight/italic/underline/
+ *   strikeout/quality/face feed the raster; the rest (escapement/orientation etc.)
+ *   are unmodelled → if non-default the raster aborts soundly rather than render wrong. */
 uint32_t aret_CreateFontA(uint32_t esp) {
-    return font_make(WI(0), WI(4), (int)WU(5), (int)WU(11), WCS(13));
+    return font_make(WI(0), WI(4), (int)WU(5), (int)WU(6), (int)WU(7), (int)WU(11), WCS(13));
 }
 uint32_t aret_CreateFontW(uint32_t esp) {
     const uint16_t *wf = (const uint16_t *)(uintptr_t)WU(13);
     char face[64]; int n = 0;
     if (wf) { for (; n < (int)sizeof face - 1 && wf[n]; n++) face[n] = (char)(wf[n] & 0xFF); }
     face[n] = 0;
-    return font_make(WI(0), WI(4), (int)WU(5), (int)WU(11), wf ? face : NULL);
+    return font_make(WI(0), WI(4), (int)WU(5), (int)WU(6), (int)WU(7), (int)WU(11), wf ? face : NULL);
 }
 uint32_t aret_CreateFontIndirectA(uint32_t esp) {
     const uint8_t *lf = (const uint8_t *)(uintptr_t)WU(0);
-    if (!lf) return font_make(0, 0, 0, 0, NULL);
+    if (!lf) return font_make(0, 0, 0, 0, 0, 0, NULL);
     int32_t height = (int32_t)(lf[0] | lf[1]<<8 | lf[2]<<16 | (uint32_t)lf[3]<<24);
     int32_t weight = (int32_t)(lf[16] | lf[17]<<8 | lf[18]<<16 | (uint32_t)lf[19]<<24);
-    return font_make(height, weight, lf[20], lf[26], (const char *)(lf + 28));
+    return font_make(height, weight, lf[20], lf[21], lf[22], lf[26], (const char *)(lf + 28));
 }
 uint32_t aret_CreateFontIndirectW(uint32_t esp) {
     const uint8_t *lf = (const uint8_t *)(uintptr_t)WU(0);
-    if (!lf) return font_make(0, 0, 0, 0, NULL);
+    if (!lf) return font_make(0, 0, 0, 0, 0, 0, NULL);
     int32_t height = (int32_t)(lf[0] | lf[1]<<8 | lf[2]<<16 | (uint32_t)lf[3]<<24);
     int32_t weight = (int32_t)(lf[16] | lf[17]<<8 | lf[18]<<16 | (uint32_t)lf[19]<<24);
     const uint16_t *wf = (const uint16_t *)(lf + 28);
     char face[64]; int n = 0;
     for (; n < (int)sizeof face - 1 && wf[n]; n++) face[n] = (char)(wf[n] & 0xFF);
     face[n] = 0;
-    return font_make(height, weight, lf[20], lf[26], face);
+    return font_make(height, weight, lf[20], lf[21], lf[22], lf[26], face);
 }
 
 /* IsDialogMessageA/W(hDlg, lpMsg) -> BOOL. Headless keyboard navigation has no

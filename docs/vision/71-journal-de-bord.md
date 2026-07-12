@@ -1877,4 +1877,16 @@ Détail : **70 §6** (roadmap). Résumé :
   des widgets n'est **pas viable** headless (nécessite un cycle `WM_PAINT` sur fenêtre visible, fragile). Les
   widgets natifs = chantier à oracle fragile, reporté ; on complète le texte (oracle propre) d'abord.
 
+### 2026-07-12 — [GUI][HLE-WIN32] Texte GDI : **soulignement / barré** (lfUnderline / lfStrikeOut) bit-identique Wine
+- **lfUnderline / lfStrikeOut** : barres pleines couleur-texte couvrant l'**extent** du texte (avances default,
+  pas l'avance mono du pen — diffèrent d'~1px aux petites tailles ; avec lpDx la barre suit le pen dx).
+- **Positions minées via `GetOutlineTextMetrics`** (valeurs autoritaires de Wine, vérifiées sur ppem 16/24/32) :
+  - soulignement : haut = `baseline - round(MulFix(post.underline_position + underline_thickness/2, ys))`
+    (= `otmsUnderscorePosition` : 0/0/-1) ; épaisseur `round(MulFix(underline_thickness, ys))` min 1.
+  - barré : haut = `baseline - round(MulFix(OS/2.yStrikeoutPosition, ys))` ; épaisseur idem, min 1.
+- **Champs LOGFONT** : `lf_underline`/`lf_strikeout` ajoutés à l'objet FONT, parsés dans CreateFontA/W (WU6/WU7)
+  et CreateFontIndirectA/W (offsets 21/22).
+- **Vérifié bit-identique Wine** (4 cas : underline -16/-32, strikeout -16, both -24). Oracle `gdi_underline.c`.
+- **Vérifié** : hash transpile inchangé, difftest-transpile 4/4, `table_is_sorted` vert, winediff (voir chiffre).
+
 <!-- NOUVELLES ENTRÉES ICI (garder l'ordre chronologique, plus récent en bas) -->
