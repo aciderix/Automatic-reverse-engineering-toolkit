@@ -841,11 +841,13 @@ fn lower(prog: &Program, f: &Function) -> ir::types::IrFunction {
     irf
 }
 
-/// Query pkg-config for SDL2's compile/link flags (looking under the i386
-/// multiarch pkgconfig dir too). Returns `(cflags, libs)`, or `None` when SDL2
-/// isn't installed — the GUI presentation layer (G2b) then degrades to
-/// display-free (a sound no-op), never a build failure.
-fn sdl2_flags() -> Option<(Vec<String>, Vec<String>)> {
+/// Query pkg-config for a set of packages' compile/link flags (looking under the
+/// i386 multiarch pkgconfig dir too). Returns `(cflags, libs)`, or `None` when
+/// *any* package is missing — the dependent feature layer then degrades to its
+/// sound fallback (a no-op / abort), never a build failure. All packages must be
+/// present for the feature to activate (e.g. FreeType text needs both freetype2
+/// and fontconfig).
+fn pkgconfig_flags(pkgs: &[&str]) -> Option<(Vec<String>, Vec<String>)> {
     let extra = "/usr/lib/i386-linux-gnu/pkgconfig";
     let mut pc_path = std::env::var("PKG_CONFIG_PATH").unwrap_or_default();
     if !pc_path.split(':').any(|p| p == extra) {
@@ -854,11 +856,46 @@ fn sdl2_flags() -> Option<(Vec<String>, Vec<String>)> {
     let run = |arg: &str| -> Option<Vec<String>> {
         let o = Command::new("pkg-config")
             .env("PKG_CONFIG_PATH", &pc_path)
-            .arg(arg).arg("sdl2").output().ok()?;
+            .arg(arg).args(pkgs).output().ok()?;
         if !o.status.success() { return None; }
         Some(String::from_utf8_lossy(&o.stdout).split_whitespace().map(str::to_string).collect())
     };
     Some((run("--cflags")?, run("--libs")?))
+}
+
+/// SDL2 flags for the visible-window layer (G2b). `None` ⇒ display-free fallback.
+fn sdl2_flags() -> Option<(Vec<String>, Vec<String>)> { pkgconfig_flags(&["sdl2"]) }
+
+/// In `dir`, find the shortest filename matching `<stem>.*` — i.e. the soname
+/// symlink (`libfreetype.so.6`) rather than the fully-versioned real file
+/// (`libfreetype.so.6.20.1`). Used to link the i386 runtime `.so.N` explicitly
+/// when no unversioned `-dev` symlink is installed.
+fn find_soname(dir: &str, stem: &str) -> Option<String> {
+    let prefix = format!("{stem}.");
+    std::fs::read_dir(dir).ok()?
+        .filter_map(|e| e.ok())
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .filter(|n| n.starts_with(&prefix))
+        .min_by_key(|n| n.len())
+}
+
+/// FreeType + fontconfig flags for the GDI text-raster layer (G3-text). FreeType
+/// rasterizes glyphs bit-identically to Wine (Wine uses FreeType too); fontconfig
+/// resolves a logical face name to a real font file the same way Wine does on
+/// Linux. Include paths come from pkg-config; the libs are the i386 runtime
+/// sonames linked explicitly (the multiarch dir ships `.so.N` but often no
+/// unversioned `-dev` symlink, so bare `-lfreetype` would grab the wrong arch).
+/// `None` (headers or i386 libs absent) ⇒ TextOut stays a sound abort, never a
+/// build failure. Statically linkable later for full autonomy (the `.so` here
+/// mirrors how SDL2 is linked); the binary carries the real font glyphs, no Wine
+/// runtime dependency.
+fn freetype_flags() -> Option<(Vec<String>, Vec<String>)> {
+    let (cflags, _) = pkgconfig_flags(&["freetype2", "fontconfig"])?;
+    let dir = "/usr/lib/i386-linux-gnu";
+    let ft = find_soname(dir, "libfreetype.so")?;
+    let fc = find_soname(dir, "libfontconfig.so")?;
+    let libs = vec![format!("-L{dir}"), format!("-l:{ft}"), format!("-l:{fc}")];
+    Some((cflags, libs))
 }
 
 /// Transpile `funcs` to C, link with the HLE runtime, and produce a native
@@ -1201,6 +1238,32 @@ pub fn transpile(
     }).unwrap_or_default();
     let sdl_libs: Vec<String> = sdl.as_ref().map(|(_, l)| l.clone()).unwrap_or_default();
 
+    // G3-text (doc 72): a program that draws text (TextOut/ExtTextOut/DrawText/
+    // TabbedText) links FreeType+fontconfig so GDI text rasterizes bit-identically
+    // to Wine (Wine rasterizes with FreeType too). Gated on a text-drawing import
+    // AND pkg-config finding both libs (32-bit only, native target). A program that
+    // draws no text, a wasm build, or a host without the libs gets the exact same
+    // compile/link as before (TextOut stays a sound abort), so this is byte-identical
+    // for them.
+    let ft = if !wasm && bits == 32
+        && prog.imports.values().any(|n| matches!(n.as_str(),
+            "TextOutA" | "TextOutW" | "ExtTextOutA" | "ExtTextOutW"
+            | "DrawTextA" | "DrawTextW" | "TabbedTextOutA" | "TabbedTextOutW"))
+    {
+        freetype_flags()
+    } else {
+        None
+    };
+    let ft_cflags: Vec<String> = ft.as_ref().map(|(c, _)| {
+        let mut v = c.clone();
+        v.push("-DARET_HAVE_FREETYPE".to_string());
+        v
+    }).unwrap_or_default();
+    let ft_libs: Vec<String> = ft.as_ref().map(|(_, l)| l.clone()).unwrap_or_default();
+    // Merge the optional feature flags: both are additive and empty when inactive.
+    let feat_cflags: Vec<String> = sdl_cflags.iter().chain(ft_cflags.iter()).cloned().collect();
+    let feat_libs: Vec<String> = sdl_libs.iter().chain(ft_libs.iter()).cloned().collect();
+
     let mut sources: Vec<std::path::PathBuf> = vec![
         out_dir.join("aret_hle.c"),
         out_dir.join("aret_crt.c"),
@@ -1291,7 +1354,7 @@ pub fn transpile(
             } else {
                 Command::new(&cc)
                     .args([march, "-w", "-fno-strict-aliasing", "-fno-builtin", "-fno-pie", "-O0", "-c"])
-                    .args(&sdl_cflags)
+                    .args(&feat_cflags)
                     .arg(src)
                     .arg("-I")
                     .arg(out_dir)
@@ -1316,7 +1379,7 @@ pub fn transpile(
         .args([march, "-no-pie"])
         .args(&objs)
         .arg("-lm") // the float helpers use sqrtf/sqrtl
-        .args(&sdl_libs) // SDL2 for a visible GUI (G2b); empty for non-GUI programs
+        .args(&feat_libs) // SDL2 (G2b) + FreeType/fontconfig (G3-text); empty when unused
         .arg("-o")
         .arg(&binary)
         .output()

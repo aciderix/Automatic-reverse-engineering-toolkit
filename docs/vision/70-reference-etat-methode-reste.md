@@ -165,7 +165,7 @@ bash bench/regression.sh    # PORTE unifiée : difftest 271/271, in-place 3/3,
                             # recompilabilité gzip/ls/cat 100%
 bash bench/difftest.sh              # décompile O0→O3
 bash bench/difftest_transpile.sh    # transpile (hash 19acad982194bf07)
-bash bench/winediff.sh              # axe 2 vs Wine (84/84)
+bash bench/winediff.sh              # axe 2 vs Wine (85/85)
 bash bench/funcdiff.sh              # lift-closure + opt-diff vs Unicorn (0 div)
 # Sweeps de vrais binaires (téléchargent + comparent à Wine) :
 bash bench/sqlite_sweep.sh   bash bench/busybox_sweep.sh   bash bench/corpus_sweep.sh
@@ -185,7 +185,7 @@ bash bench/wallsweep.sh <dir1> [dir2…]  # AGRÈGE --mode walls sur un corpus :
 
 ### État régression (référence — doit rester vert)
 difftest **271/271** · transpile-diff **4/4** (H=`19acad982194bf07`) · winediff
-**84/84** · cpudiff vert (per-instruction + séquences génératives) · funcdiff corpus **0 divergence** (lift ~12k scorées /
+**85/85** · cpudiff vert (per-instruction + séquences génératives) · funcdiff corpus **0 divergence** (lift ~12k scorées /
 ~6k appels, opt ~10k scorées) · SMT **11/11** · in-place **3/3** · magicdiv **2³²** ·
 recompilabilité **100 %** · WASM **7/7**.
 
@@ -354,8 +354,18 @@ recompilabilité **100 %** · WASM **7/7**.
   `SetPixel`/`GetPixel`/`FillRect`/`PatBlt`/`BitBlt`(SRCCOPY), `CreateSolidBrush`/`Pen`, `GetStockObject`/
   `GetSysColor`/`GetDeviceCaps` (métriques par invariant), `GetDC`/`ReleaseDC`/`BeginPaint`/`EndPaint`. Cible
   vérifiée = un **DIB qu'on possède** (COLORREF↔`[B,G,R,0]`) → oracle = **hash du framebuffer** vs Wine. Hors
-  périmètre (abort sound) : TextOut (raster police), Rectangle/LineTo (bords stylo), <32bpp. Gardé
-  `winecorpus/gdi_dib.c`.
+  périmètre (abort sound) : Rectangle/LineTo (bords stylo), <32bpp. Gardé `winecorpus/gdi_dib.c`.
+- **GDI texte via FreeType** (M7 G3, doc 72, **bit-identique à Wine, autonome**) : `TextOutA/W` rastérise avec
+  **FreeType** — le rasterizer **que Wine utilise** — donc glyphes, ligne de base, positionnement, avances
+  **identiques à Wine au pixel**, sans dépendance runtime Wine (FreeType lié dans l'ELF, statiquement liable →
+  WASM ; **vraie police**, pas substitution). Recette minée de Wine : face résolue par **fontconfig** (comme Wine
+  sous Linux ; `Arial`→Liberation Sans = mesuré identique), ligne de base `tmAscent=(FT_MulFix(usWinAscent,
+  y_scale)+32)>>6` (Wine lit `OS/2.usWinAscent`, pas l'ascender hhea). `CreateFontA/W`+`CreateFontIndirectA/W`
+  parsent le LOGFONT. **Sous-ensemble prouvé exact** ; le reste = **abort sound** (jamais faux silencieux) :
+  antialiasing, gras/italique, fond opaque, alignements ≠ TA_TOP|TA_LEFT, stock font sans face, cible ≠ DIB 32bpp
+  — chacun un incrément suivant vérifié vs Wine. Build : `builder` gate `-DARET_HAVE_FREETYPE` sur un import texte
+  + pkg-config (sonames i386 liés explicitement), **dégradation propre** (byte-identique) sinon. Gardé
+  `winecorpus/gdi_textout.c` (carte ASCII + hash FNV du DIB, bbox `3 6 92 19`, `hash=79741f6c`).
 - **USER32 menus** (M7 G7, doc 72, display-free) : modèle de données (items id/flags/submenu/texte) →
   `CreateMenu`/`CreatePopupMenu`/`AppendMenuA/W`/`InsertMenuA`/`Delete`/`Remove`, `EnableMenuItem`/`CheckMenuItem`
   (renvoient l'ancien état), `GetMenuState`/`GetMenuStringA/W`/`GetMenuItemCount`/`GetSubMenu`, `GetMenu`/`SetMenu`/
@@ -402,7 +412,7 @@ recompilabilité **100 %** · WASM **7/7**.
   **double-buffering** (DIB offscreen dans un DC mémoire → `BitBlt` SRCCOPY vers le DC fenêtre, l'idiome de rendu
   dominant) compose **out-of-the-box** avec le framebuffer client. Oracles `user32_erasebg.c` (pixel non dessiné =
   couleur du pinceau de classe) + `user32_dbuffer.c` (offscreen→BitBlt→relecture) **bit-identiques à Wine**. Reste :
-  widgets natifs (BUTTON/EDIT), GDI raster (TextOut/DrawText), WASM-GUI (Emscripten).
+  widgets natifs (BUTTON/EDIT), texte étendu (antialiasing/gras/fond opaque/DrawText/substitution), WASM-GUI (Emscripten).
 - **`RegisterClassExA/W`** (WNDCLASSEX — la forme utilisée par **quasi toutes** les applis GUI modernes) : parse
   les offsets décalés (+8 wndproc, +32 hbrBackground, +40 className), partage le registre de classes A/W. Sans lui,
   une appli moderne **abortait** à l'enregistrement de classe. Gardé `winecorpus/user32_classex.c` (RegisterClassEx
@@ -551,7 +561,7 @@ bornée** : `WSAStartup`/Winsock, `CreateEventW`, `wcschr`, `LoadLibraryW`, et l
 | CRT+/W32 | Vrai CRT (forward libc) + Win32 native (kernel32→POSIX) | prog. C large + Win32 hors-GUI | ✅ |
 | UNPACK | Déballage dynamique Unicorn (émule stub → OEP → dump) | packers non-VM | ✅ |
 | M6 | Cible **WebAssembly** (`--target wasm`, wasmtime) | cible universelle | ✅ (7/7) |
-| **M7** | **GUI / graphisme** (USER32/GDI via **SDL2** portable, puis DXVK/vkd3d) | applis fenêtrées, puis **jeux** | 🚧 **plan doc 72** — **couche USER32/GDI display-free quasi complète** : fenêtres/classes/messages (A+W), modèle fenêtre étendu, ressources/LoadString, MessageBox, **dialogs (DLGTEMPLATE+modal)**, **GDI DIB bit-exact**, menus, helpers, SID/token, rect/char/…, **+ fenêtre SDL VISIBLE (G2b : `SDL_Window`+présentation framebuffer+pompe `SDL_PollEvent`)** (winediff **75/75**). **Reste** : widgets natifs (BUTTON/EDIT), GDI raster (TextOut/DrawText/font-metrics), + hors-GUI : **EH/RtlUnwind**, **threads** |
+| **M7** | **GUI / graphisme** (USER32/GDI via **SDL2** portable, puis DXVK/vkd3d) | applis fenêtrées, puis **jeux** | 🚧 **plan doc 72** — **couche USER32/GDI display-free quasi complète** : fenêtres/classes/messages (A+W), modèle fenêtre étendu, ressources/LoadString, MessageBox, **dialogs (DLGTEMPLATE+modal)**, **GDI DIB bit-exact**, menus, helpers, SID/token, rect/char/…, **+ fenêtre SDL VISIBLE (G2b : `SDL_Window`+présentation framebuffer+pompe `SDL_PollEvent`)** **+ GDI texte FreeType bit-identique Wine (G3, autonome)** (winediff **85/85**). **Reste** : widgets natifs (BUTTON/EDIT), texte étendu (antialiasing/gras/fond opaque/substitution), + hors-GUI : **EH/RtlUnwind**, **threads** |
 
 > **Règle** : on ne s'engage pas sur M_n+1 tant que M_n ne tourne pas proprement ;
 > chaque palier = un artefact démontrable + un test de non-régression.

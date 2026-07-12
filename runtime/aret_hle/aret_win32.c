@@ -44,6 +44,21 @@
 #include <SDL.h>
 #endif
 
+/* G3-text (doc 72): GDI text (TextOut/…) is rasterized with FreeType — the SAME
+ * rasterizer Wine uses, so glyphs are bit-identical to Wine's ground truth — and
+ * the logical face name is resolved to a real font file with fontconfig, the SAME
+ * mechanism Wine uses on Linux. Linked ONLY when the program draws text (builder
+ * gates `-DARET_HAVE_FREETYPE` on a text import + pkg-config freetype2/fontconfig).
+ * When absent, TextOut is a sound abort (never a silent wrong render). The binary
+ * stays autonomous: it carries the real font glyphs, no Wine runtime dependency
+ * (FreeType is statically linkable and WASM-capable). */
+#ifdef ARET_HAVE_FREETYPE
+#include <ft2build.h>
+#include FT_FREETYPE_H
+#include FT_TRUETYPE_TABLES_H
+#include <fontconfig/fontconfig.h>
+#endif
+
 static inline uint32_t w32_arg(uint32_t esp, int i) {
     return ((const uint32_t *)(uintptr_t)esp)[i];
 }
@@ -2340,6 +2355,8 @@ static struct gdi_obj {
     uint32_t text_color, bk_color; int bk_mode; uint32_t text_align;  /* DC */
     int w, h, topdown, bpp; uint8_t *bits; int owns_bits; /* BITMAP */
     uint32_t color;                                      /* BRUSH/PEN */
+    int lf_height, lf_weight, lf_italic, lf_quality;     /* FONT (LOGFONT) */
+    char lf_face[64];                                    /* FONT face name */
     int mapmode, savetop;                                /* DC map mode + save-stack depth */
     struct { uint32_t font, brush, pen, tc, bc; int bm, mm; } sstk[8];  /* SaveDC/RestoreDC */
 } g_gdi[GDI_MAX];
@@ -2978,6 +2995,135 @@ uint32_t aret_LoadImageA(uint32_t esp) {
     return 0;
 }
 uint32_t aret_LoadImageW(uint32_t esp) { return aret_LoadImageA(esp); }
+
+/* ------------------------------------------------------------------ */
+/* GDI text raster (G3-text) — FreeType, bit-identical to Wine          */
+/* ------------------------------------------------------------------ */
+#ifdef ARET_HAVE_FREETYPE
+static FT_Library g_ft_lib;
+static int g_ft_ready = -1;   /* -1 unknown, 0 failed, 1 ready */
+static int ft_ensure(void) {
+    if (g_ft_ready >= 0) return g_ft_ready;
+    g_ft_ready = 0;
+    if (FT_Init_FreeType(&g_ft_lib) == 0 && FcInit()) g_ft_ready = 1;
+    return g_ft_ready;
+}
+/* Resolve a logical face name to a font file path with fontconfig — the same
+ * mechanism Wine uses on Linux, so we pick the same file Wine picks (Arial→
+ * Liberation Sans, etc.). Returns 1 + fills `out` on success. */
+static int ft_resolve_face(const char *face, int bold, int italic, char *out, size_t outsz) {
+    FcPattern *pat = FcPatternCreate();
+    if (!pat) return 0;
+    if (face && face[0]) FcPatternAddString(pat, FC_FAMILY, (const FcChar8 *)face);
+    FcPatternAddInteger(pat, FC_WEIGHT, bold ? FC_WEIGHT_BOLD : FC_WEIGHT_REGULAR);
+    FcPatternAddInteger(pat, FC_SLANT, italic ? FC_SLANT_ITALIC : FC_SLANT_ROMAN);
+    FcConfigSubstitute(NULL, pat, FcMatchPattern);
+    FcDefaultSubstitute(pat);
+    FcResult res;
+    FcPattern *m = FcFontMatch(NULL, pat, &res);
+    int ok = 0;
+    if (m) {
+        FcChar8 *file = NULL;
+        if (FcPatternGetString(m, FC_FILE, 0, &file) == FcResultMatch && file) {
+            strncpy(out, (const char *)file, outsz - 1); out[outsz - 1] = 0; ok = 1;
+        }
+        FcPatternDestroy(m);
+    }
+    FcPatternDestroy(pat);
+    return ok;
+}
+/* Face cache keyed by path (avoid reparsing the TTF per TextOut). */
+static struct { char path[256]; FT_Face face; } g_face_cache[8];
+static int g_face_n;
+static FT_Face ft_get_face(const char *path) {
+    for (int i = 0; i < g_face_n; i++)
+        if (strcmp(g_face_cache[i].path, path) == 0) return g_face_cache[i].face;
+    if (g_face_n >= (int)(sizeof g_face_cache / sizeof g_face_cache[0])) return NULL;
+    FT_Face f;
+    if (FT_New_Face(g_ft_lib, path, 0, &f) != 0) return NULL;
+    strncpy(g_face_cache[g_face_n].path, path, sizeof g_face_cache[0].path - 1);
+    g_face_cache[g_face_n].path[sizeof g_face_cache[0].path - 1] = 0;
+    g_face_cache[g_face_n].face = f;
+    return g_face_cache[g_face_n++].face;
+}
+#endif /* ARET_HAVE_FREETYPE */
+
+/* Render an ANSI string with the DC's selected font into the DC's 32bpp DIB
+ * surface, bit-identically to Wine: FreeType mono raster (the rasterizer Wine
+ * uses) + Wine's usWinAscent baseline + mono foreground/background blend. Returns
+ * 1 on success. Anything outside the proven-exact subset aborts *soundly* (never a
+ * silent wrong render): no FreeType linked, antialiased/bold/italic, non-default
+ * alignment, opaque background, stock font (no face), non-32bpp target. Each of
+ * those is a follow-up increment, verified against Wine before it ships. */
+static int u32_textout_core(uint32_t hdc, int x, int y, const char *str, int len) {
+#ifdef ARET_HAVE_FREETYPE
+    int d = gdi_idx(hdc);
+    if (d < 0 || g_gdi[d].type != GDIT_DC) return 0;
+    struct gdi_obj *surf = gdi_dc_surface(hdc);
+    if (!surf || surf->bpp != 32) { aret_unimpl("TextOut: only 32bpp DIB target modelled"); return 0; }
+    int fi = gdi_idx(g_gdi[d].sel_font);
+    int height  = (fi >= 0) ? g_gdi[fi].lf_height  : 0;
+    int weight  = (fi >= 0) ? g_gdi[fi].lf_weight  : 0;
+    int italic  = (fi >= 0) ? g_gdi[fi].lf_italic  : 0;
+    int quality = (fi >= 0) ? g_gdi[fi].lf_quality : 0;
+    const char *face = (fi >= 0) ? g_gdi[fi].lf_face : "";
+    if (quality != 3 /*NONANTIALIASED_QUALITY*/) { aret_unimpl("TextOut: antialiased text pending (use NONANTIALIASED_QUALITY)"); return 0; }
+    if (weight >= 700 || italic) { aret_unimpl("TextOut: bold/italic text pending"); return 0; }
+    if (!face[0]) { aret_unimpl("TextOut: stock font (no face name) pending"); return 0; }
+    if (g_gdi[d].text_align != 0) { aret_unimpl("TextOut: only TA_TOP|TA_LEFT alignment modelled"); return 0; }
+    if (g_gdi[d].bk_mode != 1 /*TRANSPARENT*/) { aret_unimpl("TextOut: opaque background pending (use TRANSPARENT)"); return 0; }
+    if (!ft_ensure()) { aret_unimpl("TextOut: FreeType/fontconfig init failed"); return 0; }
+    char path[256];
+    if (!ft_resolve_face(face, 0, 0, path, sizeof path)) { aret_unimpl("TextOut: face not resolvable by fontconfig"); return 0; }
+    FT_Face ftf = ft_get_face(path);
+    if (!ftf) { aret_unimpl("TextOut: font file load failed"); return 0; }
+    int ppem = height < 0 ? -height : height;
+    if (ppem <= 0) ppem = 16;
+    if (FT_Set_Pixel_Sizes(ftf, 0, (FT_UInt)ppem) != 0) { aret_unimpl("TextOut: set pixel size failed"); return 0; }
+    TT_OS2 *os2 = (TT_OS2 *)FT_Get_Sfnt_Table(ftf, FT_SFNT_OS2);
+    if (!os2 || os2->version == 0xFFFF) { aret_unimpl("TextOut: font has no OS/2 table (baseline undefined)"); return 0; }
+    FT_Fixed ys = ftf->size->metrics.y_scale;
+    int ascent = (int)((FT_MulFix(os2->usWinAscent, ys) + 32) >> 6); /* Wine's tmAscent */
+    int penx = x, baseline = y + ascent;
+    uint32_t fg = g_gdi[d].text_color;   /* 0x00BBGGRR, matches DIB [B,G,R,0] */
+    for (int k = 0; k < len; k++) {
+        unsigned char ch = (unsigned char)str[k];
+        if (FT_Load_Char(ftf, ch, FT_LOAD_RENDER | FT_LOAD_TARGET_MONO) != 0) continue;
+        FT_GlyphSlot g = ftf->glyph; FT_Bitmap *b = &g->bitmap;
+        int ox = penx + g->bitmap_left, oy = baseline - g->bitmap_top;
+        for (int r = 0; r < (int)b->rows; r++)
+            for (int c = 0; c < (int)b->width; c++) {
+                int bit = (b->buffer[r * b->pitch + (c >> 3)] >> (7 - (c & 7))) & 1;
+                if (!bit) continue;                              /* TRANSPARENT: bg untouched */
+                int X = ox + c, Y = oy + r;
+                if (X >= 0 && X < surf->w && Y >= 0 && Y < surf->h) gdi_put(surf, X, Y, fg);
+            }
+        penx += (int)(g->advance.x >> 6);
+    }
+    return 1;
+#else
+    (void)hdc; (void)x; (void)y; (void)str; (void)len;
+    aret_unimpl("TextOut: FreeType not linked (rebuild with freetype2+fontconfig)");
+    return 0;
+#endif
+}
+
+/* TextOutA(hdc, x, y, lpString, cbCount) -> BOOL. */
+uint32_t aret_TextOutA(uint32_t esp) {
+    return u32_textout_core(WU(0), WI(1), WI(2), WCS(3), WI(4)) ? 1 : 0;
+}
+/* TextOutW(hdc, x, y, lpWideString, cchCount) -> BOOL. Narrow the low byte of each
+ * WCHAR (ASCII text); non-ASCII code points are a follow-up (needs cmap by
+ * codepoint, which FT_Load_Char already does — but the ANSI blend path is proven
+ * first). */
+uint32_t aret_TextOutW(uint32_t esp) {
+    const uint16_t *ws = (const uint16_t *)(uintptr_t)WU(3);
+    int n = WI(4);
+    if (!ws || n <= 0) return u32_textout_core(WU(0), WI(1), WI(2), "", 0) ? 1 : 0;
+    char buf[512]; int m = n < (int)sizeof buf ? n : (int)sizeof buf;
+    for (int i = 0; i < m; i++) buf[i] = (char)(ws[i] & 0xFF);
+    return u32_textout_core(WU(0), WI(1), WI(2), buf, m) ? 1 : 0;
+}
 
 /* ---- DC attributes ---- */
 uint32_t aret_SetTextColor(uint32_t esp) { int d = gdi_idx(WU(0)); if (d < 0) return 0xFFFFFFFFu; uint32_t p = g_gdi[d].text_color; g_gdi[d].text_color = WU(1) & 0xFFFFFFu; return p; }
@@ -3664,10 +3810,51 @@ uint32_t aret_GetClassNameW(uint32_t esp) {
 
 /* Fonts: opaque GDI font objects (glyph rendering is display work; a program uses
  * the handle as a token — SelectObject/DeleteObject/GetObject-LOGFONT). */
-uint32_t aret_CreateFontA(uint32_t esp)         { (void)esp; int i = gdi_alloc(GDIT_FONT); return i ? gdi_handle(i) : 0; }
-uint32_t aret_CreateFontW(uint32_t esp)         { return aret_CreateFontA(esp); }
-uint32_t aret_CreateFontIndirectA(uint32_t esp) { (void)esp; int i = gdi_alloc(GDIT_FONT); return i ? gdi_handle(i) : 0; }
-uint32_t aret_CreateFontIndirectW(uint32_t esp) { return aret_CreateFontIndirectA(esp); }
+/* Store LOGFONT params onto a freshly-allocated GDIT_FONT and return its handle.
+ * Face name is copied (ASCII); wide names are narrowed low-byte (font names are
+ * ASCII in practice). These feed the FreeType text raster (G3-text). */
+static uint32_t font_make(int height, int weight, int italic, int quality, const char *face) {
+    int i = gdi_alloc(GDIT_FONT);
+    if (!i) return 0;
+    g_gdi[i].lf_height = height;
+    g_gdi[i].lf_weight = weight;
+    g_gdi[i].lf_italic = italic;
+    g_gdi[i].lf_quality = quality;
+    if (face) { size_t n = strnlen(face, sizeof g_gdi[i].lf_face - 1); memcpy(g_gdi[i].lf_face, face, n); g_gdi[i].lf_face[n] = 0; }
+    return gdi_handle(i);
+}
+/* CreateFontA(cHeight,cWidth,cEsc,cOrient,cWeight,bItalic,bU,bS,charset,outp,
+ *   clip,quality,pitch,pszFace). Only height/weight/italic/quality/face feed the
+ *   raster; the rest (escapement/orientation etc.) are unmodelled → if non-default
+ *   the raster aborts soundly rather than render wrong. */
+uint32_t aret_CreateFontA(uint32_t esp) {
+    return font_make(WI(0), WI(4), (int)WU(5), (int)WU(11), WCS(13));
+}
+uint32_t aret_CreateFontW(uint32_t esp) {
+    const uint16_t *wf = (const uint16_t *)(uintptr_t)WU(13);
+    char face[64]; int n = 0;
+    if (wf) { for (; n < (int)sizeof face - 1 && wf[n]; n++) face[n] = (char)(wf[n] & 0xFF); }
+    face[n] = 0;
+    return font_make(WI(0), WI(4), (int)WU(5), (int)WU(11), wf ? face : NULL);
+}
+uint32_t aret_CreateFontIndirectA(uint32_t esp) {
+    const uint8_t *lf = (const uint8_t *)(uintptr_t)WU(0);
+    if (!lf) return font_make(0, 0, 0, 0, NULL);
+    int32_t height = (int32_t)(lf[0] | lf[1]<<8 | lf[2]<<16 | (uint32_t)lf[3]<<24);
+    int32_t weight = (int32_t)(lf[16] | lf[17]<<8 | lf[18]<<16 | (uint32_t)lf[19]<<24);
+    return font_make(height, weight, lf[20], lf[26], (const char *)(lf + 28));
+}
+uint32_t aret_CreateFontIndirectW(uint32_t esp) {
+    const uint8_t *lf = (const uint8_t *)(uintptr_t)WU(0);
+    if (!lf) return font_make(0, 0, 0, 0, NULL);
+    int32_t height = (int32_t)(lf[0] | lf[1]<<8 | lf[2]<<16 | (uint32_t)lf[3]<<24);
+    int32_t weight = (int32_t)(lf[16] | lf[17]<<8 | lf[18]<<16 | (uint32_t)lf[19]<<24);
+    const uint16_t *wf = (const uint16_t *)(lf + 28);
+    char face[64]; int n = 0;
+    for (; n < (int)sizeof face - 1 && wf[n]; n++) face[n] = (char)(wf[n] & 0xFF);
+    face[n] = 0;
+    return font_make(height, weight, lf[20], lf[26], face);
+}
 
 /* IsDialogMessageA/W(hDlg, lpMsg) -> BOOL. Headless keyboard navigation has no
  * input to translate, so no message is consumed as a dialog message. */

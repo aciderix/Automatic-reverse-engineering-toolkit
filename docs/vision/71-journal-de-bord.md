@@ -1668,4 +1668,34 @@ Détail : **70 §6** (roadmap). Résumé :
 - **Reste à cadrer** : static-link i386 `libfreetype.a` (autonomie totale), licences (FreeType FTL ok en static ;
   code porté de Wine = LGPL, à isoler), et le pipeline GDI-texte complet. **Aucun code produit** (spike scratchpad).
 
+### 2026-07-12 — [GUI][HLE-WIN32] M7 G3-texte : `TextOut` FreeType **bit-identique à Wine**, autonome (1ʳᵉ marche texte)
+- **Suite du spike FreeType** (2026-07-11) : le spike prouvait qu'un glyphe isolé matchait Wine ; ici on livre le
+  **pipeline GDI-texte** intégré dans le HLE, vérifié bout-en-bout, binaire **autonome** (pas de runtime Wine).
+- **Recette Wine minée + reproduite** (mesurée sur Wine puis répliquée octet-à-octet) :
+  - **Sélection de police** : `fontconfig` (le mécanisme même de Wine sous Linux) résout le nom logique → fichier.
+    Mesuré : Wine `TextOut("Arial")` == Liberation Sans == réponse fontconfig (bit-identique). (Les noms raster
+    legacy « MS Sans Serif » où Wine substitue autrement = incrément suivant, table de substitution Wine.)
+  - **Ligne de base** : `tmAscent = (FT_MulFix(usWinAscent, y_scale) + 32) >> 6` — Wine lit **`OS/2.usWinAscent`**
+    (pas l'ascender `hhea` que renvoie `size->metrics.ascender`). Vérifié : DejaVu **et** Liberation matchent Wine
+    au pixel (Liberation divergeait de 1px avec la formule hhea → corrigé par usWinAscent).
+  - **Raster mono** : `FT_LOAD_RENDER|FT_LOAD_TARGET_MONO`, glyphe posé `penx+bitmap_left, baseline-bitmap_top`,
+    avance `advance.x>>6` ; fond `TRANSPARENT` (pixels de fond intacts), couleur texte = `text_color` (DIB `[B,G,R,0]`).
+- **Sous-ensemble prouvé exact** (le reste = **abort sound**, jamais un rendu faux silencieux) : `NONANTIALIASED_QUALITY`
+  (mono), poids régulier droit, fond `TRANSPARENT`, alignement `TA_TOP|TA_LEFT`, cible DIB 32bpp, face résoluble par
+  fontconfig. Antialiasing / gras-italique / fond opaque (fill du cell) / alignements / stock font (SYSTEM_FONT sans
+  face) = incréments suivants, chacun vérifié vs Wine avant d'être shippé.
+- **Fait** : `aret_win32.c` — `CreateFontA/W` + `CreateFontIndirectA/W` parsent le LOGFONT (height/weight/italic/
+  quality/face) sur l'objet GDIT_FONT ; renderer FreeType+fontconfig (`#ifdef ARET_HAVE_FREETYPE`, cache de faces) ;
+  `TextOutA/W`. `builder/mod.rs` — `freetype_flags()` (pkg-config cflags + sonames i386 `-l:libfreetype.so.6`/
+  `-l:libfontconfig.so.1` liés explicitement, car pas de symlink `-dev` i386), gaté sur un import texte + `-DARET_HAVE_FREETYPE` ;
+  **dégradation propre** (compile/link byte-identiques) si pas d'import texte, pas de libs, wasm, ou host sans FreeType →
+  `TextOut` reste un abort sound. `stdcall_pops` : `TextOutA/W` = 20.
+- **Autonomie préservée** : FreeType est **lié dans l'ELF** (comme SDL2 ; statiquement liable ensuite pour l'autonomie
+  totale, compile aussi en WASM). Le binaire porte les **vrais glyphes** (police originale, pas substitution) ; **aucune
+  dépendance runtime Wine** — Wine reste seulement l'**oracle** (winediff), jamais un composant du produit.
+- **Oracle** : `winecorpus/gdi_textout.c` — `CreateFontA(-16, DejaVu Sans, NONANTIALIASED)` → `TextOutA` dans un DIB
+  32bpp → carte ASCII des pixels + hash FNV du buffer → **bit-identique à Wine** (bbox `3 6 92 19`, `hash=79741f6c`).
+- **Vérifié** : hash transpile **inchangé** `19acad982194bf07`, difftest-transpile 4/4, `table_is_sorted` vert,
+  winediff **84→85/85**. **Additif** : les binaires sans texte ne lient pas FreeType → byte-identiques.
+
 <!-- NOUVELLES ENTRÉES ICI (garder l'ordre chronologique, plus récent en bas) -->

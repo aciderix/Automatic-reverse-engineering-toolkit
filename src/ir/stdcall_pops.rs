@@ -442,6 +442,8 @@ static TABLE: &[(&str, u32)] = &[
     ("SleepEx", 8),
     ("SystemFunction036", 8),
     ("TerminateProcess", 8),
+    ("TextOutA", 20),
+    ("TextOutW", 20),
     ("TlsGetValue", 4),
     ("TrackPopupMenu", 28),
     ("TrackPopupMenuEx", 24),
