@@ -2257,4 +2257,21 @@ Détail : **70 §6** (roadmap). Résumé :
   `co-op`/`e-mail`…), hash **`63c659d1`** = Wine ; `readme/read-me=-1`, `coop/co-op=-1`, `OBrien/O'Brien=-1`. Portes :
   hash transpile inchangé, winediff (voir chiffre). ⇒ l'abort ne reste que pour le **non-ASCII** (Latin-1/Unicode).
 
+### 2026-07-16 — [HLE-WIN32][HLE-STDIO] Cluster de petits shims généraux (piloté par la donnée)
+- **Après la collation** (dernière grande famille), la mesure ne laisse qu'un **cluster de petits shims généraux**.
+  Batch des exacts-vérifiables + widening sound :
+  - **`MulDiv(a,b,c)`** : `round(a*b/c)`, **arrondi au plus proche, égalité vers l'extérieur** (mesuré Wine :
+    `10*3/4=8`, `-10*3/4=-8`, `x/0=-1`, overflow 32-bit `-1`).
+  - **`GetUserDefaultLangID`/`GetSystemDefaultLangID`/`GetSystemDefaultUILanguage`** = `0x0409` (en-US, cohérent
+    avec `GetThreadLocale`/`GetUserDefaultLCID`).
+  - **`wcstoul`/`wcstol`** (wide 16-bit) : copie octet-bas → `strtol/strtoul` hôte, endptr remappé en code-units
+    (mesuré : `wcstoul("0xFF hi",16)=255` reste `" hi"`, `wcstol("-42abc")=−42` reste `"abc"`).
+  - **Widening sound** (additifs, non oracle-testés car dépendants de l'env) : `LoadLibraryW`, `SleepEx`,
+    `GetSystemDirectoryW`/`GetWindowsDirectoryW`/`GetCurrentDirectoryW`/`SetCurrentDirectoryW`.
+- **stdcall_pops** : MulDiv=12, LoadLibraryW=4, +Get/SetCurrentDirectoryA/W, GetSystemDirectoryW, GetWindows
+  DirectoryA/W (plusieurs A-versions **étaient absentes** — bug latent d'esp-drift, jamais testé).
+- **Piège** : `aret_GetUserDefaultUILanguage` existait déjà (doublon retiré).
+- **Vérifié bit-identique Wine** : `winecorpus/win_smallshims.c` (MulDiv, lang, wcstoul/wcstol). Portes : hash
+  transpile inchangé (`19acad982194bf07`), `table_is_sorted` vert, winediff **109→110/110**.
+
 <!-- NOUVELLES ENTRÉES ICI (garder l'ordre chronologique, plus récent en bas) -->

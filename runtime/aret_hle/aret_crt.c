@@ -530,6 +530,21 @@ uint32_t aret_wcsstr(uint32_t esp) {
     }
     return 0;
 }
+/* Wide numeric parse (wcstol/wcstoul): copy the low byte of each 16-bit unit into a
+ * narrow buffer (numeric text is ASCII), parse with the host strtol/strtoul, then map
+ * the end pointer back to the original wide string (1 code unit == 1 narrow char). */
+static uint32_t aret_wcsto_impl(uint32_t esp, int sign) {
+    const uint16_t *s = (const uint16_t *)(uintptr_t)a32(esp, 0);
+    uint32_t pend = a32(esp, 1); int base = AI(2);
+    char nb[128]; int i = 0;
+    if (s) for (; s[i] && i < 127; i++) nb[i] = (char)(uint8_t)s[i];
+    nb[i] = 0;
+    char *end; unsigned long v = sign ? (unsigned long)strtol(nb, &end, base) : strtoul(nb, &end, base);
+    if (pend) *(uint32_t *)(uintptr_t)pend = a32(esp, 0) + (uint32_t)(end - nb) * 2u;
+    return (uint32_t)v;
+}
+uint32_t aret_wcstol(uint32_t esp)  { return aret_wcsto_impl(esp, 1); }
+uint32_t aret_wcstoul(uint32_t esp) { return aret_wcsto_impl(esp, 0); }
 
 /* ------------------------------------------------------------------ */
 /* <time.h> calendar — struct tm marshalling (host/guest ABI)         */

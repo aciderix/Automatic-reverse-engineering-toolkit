@@ -813,6 +813,53 @@ static uint32_t fill_path(uint32_t esp, const char *path) {
 }
 uint32_t aret_GetSystemDirectoryA(uint32_t esp)  { return fill_path(esp, "C:\\Windows\\System32"); }
 uint32_t aret_GetWindowsDirectoryA(uint32_t esp) { return fill_path(esp, "C:\\Windows"); }
+/* MulDiv(a,b,c) = round(a*b/c) to nearest, ties AWAY from zero; -1 on c==0 or a
+ * 32-bit overflow (measured on Wine: 10*3/4=8, -10*3/4=-8, x/0=-1). */
+uint32_t aret_MulDiv(uint32_t esp) {
+    int64_t a = (int32_t)WU(0), b = (int32_t)WU(1), c = (int32_t)WU(2);
+    if (c == 0) return (uint32_t)-1;
+    int64_t num = a * b, q = num / c, rem = num % c;
+    int64_t ac = c < 0 ? -c : c, arem = rem < 0 ? -rem : rem;
+    if (2 * arem >= ac) q += ((num < 0) ^ (c < 0)) ? -1 : 1;
+    if (q > 2147483647LL || q < -2147483648LL) return (uint32_t)-1;
+    return (uint32_t)(int32_t)q;
+}
+/* Locale/UI language: this runtime fixes en-US (0x0409), consistent with GetThreadLocale. */
+uint32_t aret_GetUserDefaultLangID(uint32_t esp)       { (void)esp; return 0x0409; }
+uint32_t aret_GetSystemDefaultLangID(uint32_t esp)     { (void)esp; return 0x0409; }
+uint32_t aret_GetSystemDefaultUILanguage(uint32_t esp) { (void)esp; return 0x0409; }
+/* LoadLibraryW — same non-NULL pseudo-module handle as LoadLibraryA. */
+uint32_t aret_LoadLibraryW(uint32_t esp) { (void)esp; return 0x10000000u; }
+/* SleepEx(ms, alertable) -> 0 (no APC/IO completion modelled). Yields like Sleep. */
+uint32_t aret_SleepEx(uint32_t esp) {
+    uint32_t ms = WU(0);
+    if (!aret_fiber_sleep(ms)) usleep((useconds_t)ms * 1000u);
+    return 0;
+}
+/* Wide (16-bit) directory helpers — widen the narrow results (consistent with the A
+ * versions; paths are ASCII). */
+static uint32_t u32_fill_pathw(uint32_t esp, const char *path) {
+    uint16_t *buf = (uint16_t *)WP(0); uint32_t size = WU(1);
+    uint32_t len = (uint32_t)strlen(path);
+    if (buf && size > len) { for (uint32_t i = 0; i <= len; i++) buf[i] = (uint8_t)path[i]; return len; }
+    return len + 1;
+}
+uint32_t aret_GetSystemDirectoryW(uint32_t esp)  { return u32_fill_pathw(esp, "C:\\Windows\\System32"); }
+uint32_t aret_GetWindowsDirectoryW(uint32_t esp) { return u32_fill_pathw(esp, "C:\\Windows"); }
+uint32_t aret_GetCurrentDirectoryW(uint32_t esp) {
+    uint32_t size = WU(0); uint16_t *buf = (uint16_t *)WP(1);
+    char tmp[4096]; if (!getcwd(tmp, sizeof tmp)) return 0;
+    uint32_t len = (uint32_t)strlen(tmp);
+    if (buf && size > len) { for (uint32_t i = 0; i <= len; i++) buf[i] = (uint8_t)tmp[i]; return len; }
+    return len + 1;
+}
+uint32_t aret_SetCurrentDirectoryW(uint32_t esp) {
+    const uint16_t *w = (const uint16_t *)WP(0);
+    char p[4096]; int i = 0;
+    if (w) for (; w[i] && i < 4095; i++) p[i] = (char)w[i];
+    p[i] = 0;
+    return (uint32_t)(chdir(p) == 0);
+}
 
 /* GetModuleFileNameA(hModule, buf, size) — report a stable fake image path. */
 uint32_t aret_GetModuleFileNameA(uint32_t esp) {
