@@ -2045,4 +2045,29 @@ Détail : **70 §6** (roadmap). Résumé :
   (les fixtures existantes utilisant CS restent bit-identiques ⇒ additivité préservée).
 - **Suite** : Events (Set/Reset/Wait), puis Mutex/Semaphore/TLS/`_beginthreadex` (doc 80 §2, incr. 3-4).
 
+### 2026-07-16 — [THREAD][HLE-WIN32] Fibers incrément 3 : Events (manual/auto-reset) — signalisation déterministe, bit-identique Wine
+- **Suite du chantier fibers** (doc 80 §2, incr. 3). Les stubs event (CreateEventA→`0x101`, Set/Reset→1, no-op)
+  deviennent de **vrais objets événement** intégrés au scheduler.
+- **Table** `g_event[128]` (range handle `0x71……`) : `manual` (reste signalé jusqu'à `ResetEvent`) vs auto-reset
+  (**libère un seul waiter puis se réarme**), `signaled`, `name_hash` (FNV). `CreateEventA/W(attrs, bManualReset,
+  bInitialState, lpName)` ; nom non-NULL → partage intra-process (retour du handle existant + `ERROR_ALREADY_EXISTS`).
+  `SetEvent`=`signaled=1`, `ResetEvent`=`signaled=0` (idempotents booléens, pas un sémaphore).
+- **Intégration attente** : `u32_handle_signaled` reconnaît les events (signalé = `signaled`) ; `WaitForSingle/
+  MultipleObjects` bloquent tant que non satisfait. **Point clé auto-reset** : `SetEvent` peut réveiller plusieurs
+  waiters (tous marqués runnable par le scheduler), mais l'attente **re-vérifie la condition après chaque réveil**
+  (`do{ block; yield; }while(!wait_ok)`) ⇒ seul celui qui la trouve encore vraie **consomme** l'event (auto-reset →
+  `signaled=0`), les autres se re-bloquent ⇒ **exactement un libéré par SetEvent**. Consommation à la sortie de
+  l'attente (waitAll : tous les auto-events ; waitAny : le premier signalé = l'index rendu). `WaitForMultiple`
+  rend `WAIT_OBJECT_0+idx`.
+- **Déplacement** : `CreateEventA/W`/`SetEvent`/`ResetEvent` définis avec le scheduler (`aret_win32.c`) ; anciens
+  stubs retirés. WASM (`#else`) : events = fakes sound (pas de threads). Handles non-thread/non-event = immédiat legacy.
+- **Soundness** : un Wait INFINITE sur un event jamais signalé (aucun signaleur possible) = deadlock → **abort
+  sound** (mieux que l'ancien faux « succès immédiat »). Les fixtures existantes ne régressent pas (winediff).
+- **Oracle** : `winecorpus/thread_event.c` — (1) **gate manual-reset** : 3 workers bloquent, un thread releaser
+  `SetEvent` une fois → **tous** libérés (`gate_sum=60` ; s'il n'en libérait qu'un, le join deadlockerait → abort) ;
+  (2) **ping-pong auto-reset** : producteur/consommateur alternent via 2 auto-events, handoff strict `pp_sum=15`.
+  Déterministe sur Wine (préemptif) **et** ARET (coopératif). `stdcall_pops` : CreateEventW=16, SetEvent=4.
+- **Vérifié** : hash transpile inchangé (`19acad982194bf07`), `table_is_sorted` vert, winediff **103→104/104**.
+- **Suite (doc 80 §2, incr. 4)** : Mutex/Semaphore/`WaitForMultipleObjects(FALSE)`, TLS par-fiber, `_beginthreadex`.
+
 <!-- NOUVELLES ENTRÉES ICI (garder l'ordre chronologique, plus récent en bas) -->

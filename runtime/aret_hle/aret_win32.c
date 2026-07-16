@@ -827,6 +827,37 @@ static int u32_cs_owner(uint32_t cs) {
     return s < 0 ? 0 : g_cs[s].owner;
 }
 
+/* Event objects (doc 80 incr. 3). manual-reset stays signaled until ResetEvent;
+ * auto-reset releases exactly one waiter then self-resets (consumed at wait). */
+#define U32_EVENT_BASE 0x71000000u
+#define U32_MAX_EVENT  128
+static struct { int used, manual, signaled; uint32_t name_hash; } g_event[U32_MAX_EVENT];
+static int g_nevent;
+static int u32_event_idx(uint32_t h) {
+    if ((h & 0xFF000000u) != U32_EVENT_BASE) return -1;
+    uint32_t i = h & 0x00FFFFFFu;
+    return (i < (uint32_t)g_nevent && g_event[i].used) ? (int)i : -1;
+}
+/* FNV hash of an event name (for intra-process named-event sharing); 0 = no name. */
+static uint32_t u32_name_hash(const void *p, int wide) {
+    if (!p) return 0;
+    uint32_t h = 2166136261u;
+    if (wide) { const uint16_t *w = p; while (*w) { h ^= (*w & 0xFF); h *= 16777619u; w++; } }
+    else      { const uint8_t  *s = p; while (*s) { h ^= *s;          h *= 16777619u; s++; } }
+    return h ? h : 1u;
+}
+static uint32_t u32_create_event(int manual, int initial, uint32_t nh) {
+    if (nh) for (int i = 0; i < g_nevent; i++)
+        if (g_event[i].used && g_event[i].name_hash == nh) {
+            g_last_error = 183u /*ERROR_ALREADY_EXISTS*/; return U32_EVENT_BASE | (uint32_t)i;
+        }
+    if (g_nevent >= U32_MAX_EVENT) { g_last_error = 8u; return 0; }
+    int i = g_nevent++;
+    g_event[i].used = 1; g_event[i].manual = manual ? 1 : 0;
+    g_event[i].signaled = initial ? 1 : 0; g_event[i].name_hash = nh;
+    return U32_EVENT_BASE | (uint32_t)i;
+}
+
 /* handle -> fiber index, or -1 if it is not one of our thread handles. */
 static int u32_thread_idx(uint32_t h) {
     if ((h & 0xFF000000u) != U32_THREAD_BASE) return -1;
@@ -839,7 +870,9 @@ static int u32_thread_idx(uint32_t h) {
 static int u32_handle_signaled(uint32_t h) {
     int fi = u32_thread_idx(h);
     if (fi >= 0) return g_fiber[fi].state == FST_DONE;
-    return 1;
+    int ei = u32_event_idx(h);
+    if (ei >= 0) return g_event[ei].signaled;
+    return 1;                          /* other handles: legacy always-signaled */
 }
 static int u32_wait_ok(struct u32_fiber *f) {
     if (f->wait_n == 0) return 1;
@@ -913,11 +946,22 @@ static uint32_t u32_wait(const uint32_t *handles, int n, int all, int poll) {
     if (!u32_wait_ok(f)) {
         if (poll) { f->wait_n = 0; return U32_WAIT_TIMEOUT; }
         u32_sched_ensure();
-        f->state = FST_BLOCKED;
-        u32_to_sched();
+        /* Re-check after every wake: with auto-reset events several waiters may be
+         * woken for one signal, but only the one that still finds it satisfied may
+         * proceed (and consume it below); the others re-block. */
+        do { f->state = FST_BLOCKED; u32_to_sched(); } while (!u32_wait_ok(f));
     }
     f->wait_n = 0;
-    return 0;                          /* WAIT_OBJECT_0 */
+    /* Consume auto-reset events that satisfied the wait (waitAll: all of them;
+     * waitAny: only the first signaled — the index we report). */
+    int idx = 0;
+    if (!all) for (int i = 0; i < n; i++) if (u32_handle_signaled(handles[i])) { idx = i; break; }
+    if (all) {
+        for (int i = 0; i < n; i++) { int ei = u32_event_idx(handles[i]); if (ei >= 0 && !g_event[ei].manual) g_event[ei].signaled = 0; }
+    } else {
+        int ei = u32_event_idx(handles[idx]); if (ei >= 0 && !g_event[ei].manual) g_event[ei].signaled = 0;
+    }
+    return (uint32_t)idx;              /* WAIT_OBJECT_0 + idx */
 }
 /* Trampoline a fresh fiber: lay a __stdcall thread-proc frame on its machine
  * stack and dispatch the lifted proc; on return, record the exit code, mark the
@@ -988,23 +1032,23 @@ uint32_t aret_GetExitCodeThread(uint32_t esp) {
     if (out) *out = (g_fiber[fi].state == FST_DONE) ? g_fiber[fi].exit_code : 259u /*STILL_ACTIVE*/;
     return 1;
 }
+/* A handle this layer actually waits on (thread or event); others keep the legacy
+ * immediate WAIT_OBJECT_0 (sound in the mono-thread model). */
+static int u32_waitable(uint32_t h) { return u32_thread_idx(h) >= 0 || u32_event_idx(h) >= 0; }
 uint32_t aret_WaitForSingleObject(uint32_t esp) {
     uint32_t h = WU(0);
-    if (u32_thread_idx(h) < 0) return 0;                   /* legacy immediate WAIT_OBJECT_0 */
-    return u32_wait(&h, 1, 1, WU(1) == 0);
+    if (!u32_waitable(h)) return 0;
+    uint32_t r = u32_wait(&h, 1, 1, WU(1) == 0);
+    return (r == U32_WAIT_TIMEOUT) ? r : 0;                /* WAIT_OBJECT_0 */
 }
 uint32_t aret_WaitForMultipleObjects(uint32_t esp) {
     uint32_t n = WU(0), ph = WU(1); int all = WI(2);
     const uint32_t *h = (const uint32_t *)(uintptr_t)ph;
     if (!h || n == 0) return 0;
-    int anyT = 0;
-    for (uint32_t i = 0; i < n; i++) if (u32_thread_idx(h[i]) >= 0) anyT = 1;
-    if (!anyT) return 0;                                   /* legacy immediate WAIT_OBJECT_0 */
-    uint32_t r = u32_wait(h, (int)n, all, WU(3) == 0);
-    if (r == U32_WAIT_TIMEOUT) return r;
-    if (all) return 0;                                     /* WAIT_OBJECT_0 */
-    for (uint32_t i = 0; i < n; i++) if (u32_handle_signaled(h[i])) return i;  /* WAIT_OBJECT_0 + i */
-    return 0;
+    int any = 0;
+    for (uint32_t i = 0; i < n; i++) if (u32_waitable(h[i])) any = 1;
+    if (!any) return 0;                                    /* legacy immediate WAIT_OBJECT_0 */
+    return u32_wait(h, (int)n, all, WU(3) == 0);           /* WAIT_OBJECT_0(+idx), or WAIT_TIMEOUT */
 }
 /* -------- CRITICAL_SECTION (doc 80 incr. 2) -------- */
 /* Cooperative fibers: only one fiber runs at a time, but a fiber that yields
@@ -1059,8 +1103,25 @@ uint32_t aret_LeaveCriticalSection(uint32_t esp) {
         if (--g_cs[s].rec == 0) g_cs[s].owner = 0;     /* fully released → waiters may take it */
     return 0;
 }
+/* -------- Event objects (doc 80 incr. 3) -------- */
+uint32_t aret_CreateEventA(uint32_t esp) { return u32_create_event(WI(1), WI(2), u32_name_hash(WP(3), 0)); }
+uint32_t aret_CreateEventW(uint32_t esp) { return u32_create_event(WI(1), WI(2), u32_name_hash(WP(3), 1)); }
+uint32_t aret_SetEvent(uint32_t esp) {
+    int ei = u32_event_idx(WU(0));
+    if (ei >= 0) g_event[ei].signaled = 1;             /* auto-reset: a waiter consumes it */
+    return 1;
+}
+uint32_t aret_ResetEvent(uint32_t esp) {
+    int ei = u32_event_idx(WU(0));
+    if (ei >= 0) g_event[ei].signaled = 0;
+    return 1;
+}
 #else  /* __wasm__ : no ucontext. Threads are a sound abort, never a fake. */
 int aret_fiber_yield(void) { return 0; }
+uint32_t aret_CreateEventA(uint32_t esp) { (void)esp; return 0x101; }
+uint32_t aret_CreateEventW(uint32_t esp) { (void)esp; return 0x101; }
+uint32_t aret_SetEvent(uint32_t esp) { (void)esp; return 1; }
+uint32_t aret_ResetEvent(uint32_t esp) { (void)esp; return 1; }
 /* No threads under WASM → CriticalSection is a correct no-op (never contended). */
 uint32_t aret_InitializeCriticalSection(uint32_t esp) { (void)esp; return 0; }
 uint32_t aret_InitializeCriticalSectionAndSpinCount(uint32_t esp) { (void)esp; return 1; }
@@ -1085,9 +1146,8 @@ uint32_t aret_WaitForMultipleObjects(uint32_t esp) { (void)esp; return 0; }
 uint32_t aret_CreateMutexA(uint32_t esp)        { (void)esp; return 0x100; } /* fake handle */
 uint32_t aret_OpenMutexA(uint32_t esp)          { (void)esp; return 0x100; }
 uint32_t aret_ReleaseMutex(uint32_t esp)        { (void)esp; return 1; }
-uint32_t aret_CreateEventA(uint32_t esp)        { (void)esp; return 0x101; }
-uint32_t aret_SetEvent(uint32_t esp)            { (void)esp; return 1; }
-uint32_t aret_ResetEvent(uint32_t esp)          { (void)esp; return 1; }
+/* CreateEvent{A,W}/SetEvent/ResetEvent = real event objects (doc 80 incr. 3),
+ * defined with the fiber scheduler above. */
 uint32_t aret_SetConsoleCtrlHandler(uint32_t esp) { (void)esp; return 1; }
 uint32_t aret_FlushFileBuffers(uint32_t esp)    { (void)esp; return 1; }
 /* File byte-range locks (LockFile/LockFileEx and their Unlock counterparts):

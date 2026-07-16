@@ -170,7 +170,7 @@ bash bench/regression.sh    # PORTE unifiée : difftest 271/271, in-place 3/3,
                             # recompilabilité gzip/ls/cat 100%
 bash bench/difftest.sh              # décompile O0→O3
 bash bench/difftest_transpile.sh    # transpile (hash 19acad982194bf07)
-bash bench/winediff.sh              # axe 2 vs Wine (103/103)
+bash bench/winediff.sh              # axe 2 vs Wine (104/104)
 bash bench/funcdiff.sh              # lift-closure + opt-diff vs Unicorn (0 div)
 # Sweeps de vrais binaires (téléchargent + comparent à Wine) :
 bash bench/sqlite_sweep.sh   bash bench/busybox_sweep.sh   bash bench/corpus_sweep.sh
@@ -190,7 +190,7 @@ bash bench/wallsweep.sh <dir1> [dir2…]  # AGRÈGE --mode walls sur un corpus :
 
 ### État régression (référence — doit rester vert)
 difftest **271/271** · transpile-diff **4/4** (H=`19acad982194bf07`) · winediff
-**103/103** · cpudiff vert (per-instruction + séquences génératives) · funcdiff corpus **0 divergence** (lift ~12k scorées /
+**104/104** · cpudiff vert (per-instruction + séquences génératives) · funcdiff corpus **0 divergence** (lift ~12k scorées /
 ~6k appels, opt ~10k scorées) · SMT **11/11** · in-place **3/3** · magicdiv **2³²** ·
 recompilabilité **100 %** · WASM **7/7**.
 
@@ -476,12 +476,18 @@ recompilabilité **100 %** · WASM **7/7**.
   même si l'owner yield en la tenant**. `TryEnter` (non bloquant), `Leave` (rec--→ libère à 0, réservé à l'owner),
   `Initialize`(+SpinCount/Ex)/`Delete`. Récursif. Table pleine → abort sound. WASM : no-op correct (jamais de
   contention). `Sleep`/Wait dans la CS restent des points de yield sûrs.
-- **Vérifié bit-identique Wine** : `thread_join.c` (join, somme `25800`, `last_error` par-thread) **et**
-  `thread_critsec.c` (**`counter=4000`** — RMW *coupé par un yield sous le lock*, discriminant réel : un lock no-op
-  perdrait des incréments ; + récursion `rec_ok=1`). `stdcall_pops` : CreateThread=24, ExitThread/Resume/Suspend=4,
-  GetExitCodeThread=8, TryEnterCriticalSection=4. Portes : hash transpile inchangé, winediff **103/103**.
-- **Reste (incréments 3-4, doc 80 §2)** : Events (Set/Reset/Wait), Mutex/Semaphore/`WaitForMultipleObjects(FALSE)`,
-  TLS par-fiber, `_beginthreadex`.
+- **Incrément 3 — Events** (`CreateEventA/W`/`SetEvent`/`ResetEvent`) : table d'événements (range handle
+  `0x71……`) portant **manual-reset** (reste signalé jusqu'à `ResetEvent`) ou **auto-reset** (libère **exactement
+  un** waiter puis se réarme, **consommé à l'attente**). `WaitForSingle/MultipleObjects` reconnaissent les events
+  (et les threads) : bloquent tant que non signalé, **re-vérifient après chaque réveil** (auto-reset : plusieurs
+  réveillés, un seul consomme, les autres se re-bloquent). Noms intra-process partagés (hash FNV,
+  `ERROR_ALREADY_EXISTS`). Handles non-thread/non-event gardent l'immédiat legacy.
+- **Vérifié bit-identique Wine** : `thread_join.c` (join, `25800`), `thread_critsec.c` (**`4000`** + récursion),
+  `thread_event.c` (**manual gate** = release-all `gate_sum=60` ; **auto-reset ping-pong** = handoff strict
+  `pp_sum=15`). `stdcall_pops` : CreateThread=24, ExitThread/Resume/Suspend=4, GetExitCodeThread=8,
+  TryEnterCriticalSection=4, CreateEventW=16, SetEvent=4. Portes : hash transpile inchangé, winediff **104/104**.
+- **Reste (incrément 4, doc 80 §2)** : Mutex/Semaphore/`WaitForMultipleObjects(FALSE)`, TLS par-fiber,
+  `_beginthreadex`.
 
 ---
 
@@ -625,7 +631,8 @@ scheduler** à chaque bascule. Plan incrémental piloté par fixture :
    Oracle `thread_join.c` (somme déterministe vs Wine). Détail §4.7.
 2. ✅ **FAIT** — **CriticalSection réelle** (owner + récursion, blocage sur CS tenue) — oracle
    `thread_critsec.c` `counter=4000` (RMW coupé par un yield sous le lock = discriminant réel).
-3. **Events** (Set/Reset/Wait) — signalisation déterministe.
+3. ✅ **FAIT** — **Events** (manual/auto-reset, Set/Reset/Wait) — oracle `thread_event.c`
+   (gate release-all `60` + ping-pong auto-reset `15`).
 4. **Mutex/Semaphore/`WaitForMultipleObjects(FALSE)`, TLS par-fiber, `_beginthreadex`.
 *Frontière dure* : `CreateProcessA/W` (lancer un `.exe` enfant) — pas de Windows pour
 l'exécuter ; reste **échec sound**, pas simulé. `CreatePipe` (anonyme) est déjà fidèle

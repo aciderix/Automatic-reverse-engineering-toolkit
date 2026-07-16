@@ -149,7 +149,11 @@ récursion + file d'attente), `SetEvent/ResetEvent`, Mutex, Semaphore.
    Leave pas ; Try/Delete/Init*). Oracle `thread_critsec.c` : **`counter=4000`** avec le
    read-modify-write **coupé par un yield sous le lock** (discriminant réel — un lock
    no-op perdrait des incréments), + récursion. Bit-identique Wine, winediff 103/103.
-3. Events (Set/Reset/Wait) — signalisation déterministe.
+3. ✅ **FAIT (2026-07-16)** — Events (`CreateEventA/W`, manual-reset/auto-reset,
+   `SetEvent`/`ResetEvent`) intégrés à `WaitForSingle/MultipleObjects` : bloque tant que
+   non signalé, re-vérifie après chaque réveil (auto-reset = un seul waiter consomme).
+   Oracle `thread_event.c` : gate manual release-all (`60`) + ping-pong auto-reset (`15`),
+   bit-identique Wine, winediff 104/104.
 4. Mutex / Semaphore / `WaitForMultipleObjects(FALSE)`, TLS par-fiber, `_beginthreadex`.
 
 Chaque incrément : fixture minimale → oracle Wine → régression complète → commit + doc.
