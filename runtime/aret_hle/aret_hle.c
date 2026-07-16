@@ -2711,6 +2711,27 @@ void aret_register_atexit(uint32_t va) {
 uint32_t aret_atexit(uint32_t esp) { aret_register_atexit(arg(esp, 0)); return 0; }
 uint32_t aret_setlocale(uint32_t esp) { (void)esp; return (uint32_t)(uintptr_t)"C"; }
 uint32_t aret_abort(uint32_t esp) { (void)esp; abort(); return 0; }
+/* _assert(expr, file, line) — msvcrt assertion-failure reporter. MEASURED vs Wine:
+ * writes "Assertion failed: <expr>, file <file>, line <line>\n" to stderr, then
+ * aborts. The weak stub would return 0, letting the program run on past a violated
+ * invariant (a silent wrong result) — this is the sound fix: report and terminate.
+ * (_wassert is the wide-arg twin.) */
+uint32_t aret_assert(uint32_t esp) {
+    const char *expr = (const char *)(uintptr_t)arg(esp, 0);
+    const char *file = (const char *)(uintptr_t)arg(esp, 1);
+    fprintf(stderr, "Assertion failed: %s, file %s, line %u\n",
+            expr ? expr : "", file ? file : "", (unsigned)arg(esp, 2));
+    abort();
+    return 0;
+}
+uint32_t aret_wassert(uint32_t esp) {
+    char e[512], f[1024];
+    aret_w2n((const uint16_t *)(uintptr_t)arg(esp, 0), e, sizeof e);
+    aret_w2n((const uint16_t *)(uintptr_t)arg(esp, 1), f, sizeof f);
+    fprintf(stderr, "Assertion failed: %s, file %s, line %u\n", e, f, (unsigned)arg(esp, 2));
+    abort();
+    return 0;
+}
 uint32_t aret_exit(uint32_t esp) { exit((int)arg(esp, 0)); return 0; }
 uint32_t aret__exit(uint32_t esp) { _exit((int)arg(esp, 0)); return 0; }
 uint32_t aret_strerror(uint32_t esp) { return (uint32_t)(uintptr_t)strerror((int)arg(esp, 0)); }

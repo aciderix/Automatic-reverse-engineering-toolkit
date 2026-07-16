@@ -2326,4 +2326,22 @@ Détail : **70 §6** (roadmap). Résumé :
   attrib+size, wildcard `*.TXT` insensible casse, no-match+ENOENT). Portes : hash transpile inchangé
   (`19acad982194bf07`), winediff **112→113/113**.
 
+### 2026-07-16 — [HLE-CRT][ORACLE] `_assert` (msvcrt) — gain de soundness + correction d'une asymétrie de l'oracle winediff
+- **Piloté par la donnée** : après findfirst, l'import manquant #1 par largeur du wallsweep gauntlet = **`_assert`
+  (11 binaires)**. Ce n'est **pas** un simple shim : le stub faible renvoyait 0, donc un programme **continuait après
+  une assertion violée** = **faux silencieux** (viole le principe sacré). L'implémenter *est* la correction.
+- **Mesuré vs Wine** (sonde) : `_assert(expr, file, line)` écrit `Assertion failed: <expr>, file <file>, line <n>\n`
+  sur **stderr** puis `abort` (exit 3, stdout tronqué). Fix (`aret_hle.c`) : `aret_assert` (+`aret_wassert` wide)
+  reproduisant le message exact + `abort()`. Cdecl.
+- **Asymétrie d'oracle découverte et corrigée (cause générale, `src/builder/mod.rs`)** : `--run` **capturait** le
+  stdout enfant via `.output()` **et y appendait le stderr** → winediff comparait stdout+stderr **mêlés** d'ARET
+  contre le stdout-**seul** de Wine (dont le stderr est jeté par `2>/dev/null`). Tout fixture dont le comportement
+  correct écrit sur stderr (assert, diagnostic) apparaissait faussement divergent. Fix : `--run` **hérite** le
+  stderr enfant (→ fd2 d'ARET, jeté identiquement pour les deux moteurs) et ne capture/encadre que **stdout** — le
+  flux que winediff compare réellement. Les sweeps (busybox/sqlite) lancent l'`app` recompilée **directement** avec
+  flux séparés → **non affectés**. Chemin WASM inchangé (7/7).
+- **Vérifié bit-identique Wine** : `winecorpus/crt_assert.c` (« before » sur stdout, `abort` à l'assertion → « after »
+  jamais atteint). Portes : **régression unifiée PASS** (difftest 272, funcdiff 0 div, SMT 11/11, recompil. 100 %),
+  hash transpile inchangé (`19acad982194bf07`), winediff **113→114/114**.
+
 <!-- NOUVELLES ENTRÉES ICI (garder l'ordre chronologique, plus récent en bas) -->

@@ -170,7 +170,7 @@ bash bench/regression.sh    # PORTE unifiée : difftest 271/271, in-place 3/3,
                             # recompilabilité gzip/ls/cat 100%
 bash bench/difftest.sh              # décompile O0→O3
 bash bench/difftest_transpile.sh    # transpile (hash 19acad982194bf07)
-bash bench/winediff.sh              # axe 2 vs Wine (113/113)
+bash bench/winediff.sh              # axe 2 vs Wine (114/114)
 bash bench/funcdiff.sh              # lift-closure + opt-diff vs Unicorn (0 div)
 # Sweeps de vrais binaires (téléchargent + comparent à Wine) :
 bash bench/sqlite_sweep.sh   bash bench/busybox_sweep.sh   bash bench/corpus_sweep.sh
@@ -190,7 +190,7 @@ bash bench/wallsweep.sh <dir1> [dir2…]  # AGRÈGE --mode walls sur un corpus :
 
 ### État régression (référence — doit rester vert)
 difftest **272/272** · transpile-diff **4/4** (H=`19acad982194bf07`) · winediff
-**113/113** · cpudiff vert (per-instruction + séquences génératives) · funcdiff corpus **0 divergence** (lift ~12k scorées /
+**114/114** · cpudiff vert (per-instruction + séquences génératives) · funcdiff corpus **0 divergence** (lift ~12k scorées /
 ~6k appels, opt ~10k scorées) · SMT **11/11** · in-place **3/3** · magicdiv **2³²** ·
 recompilabilité **100 %** · WASM **7/7**.
 
@@ -342,7 +342,10 @@ recompilabilité **100 %** · WASM **7/7**.
 - **CRT** : printf/scanf complets + **`%I64`/`%I32`** MSVC, `snprintf` C99,
   strtoll/strtoull/div/ldiv (retour **edx:eax** via `import_returns_u64`), `atexit`
   (via `_onexit`), setjmp/longjmp, `_getcwd`/`_chdir`/`_fullpath`, rand LCG msvcrt,
-  gmtime/localtime/mktime/strftime (struct tm Windows).
+  gmtime/localtime/mktime/strftime (struct tm Windows). **`_assert`/`_wassert`**
+  (11 binaires du gauntlet — **gain de soundness** : le stub faible renvoyait 0, le
+  programme **continuait après une assertion violée** ; désormais message stderr au
+  format Wine exact + `abort`). Gardé `winecorpus/crt_assert.c`.
 - **CRT wide-string** (`<wchar.h>`, code-units **16-bit** Windows, **piloté par la donnée** — famille dominante
   d'imports manquants sur le corpus WineHQ) : `wcslen/cpy/cat/cmp/ncmp/ncpy/chr/rchr/str/dup`, `_wcsicmp/_wcsnicmp`
   (**fold ASCII = exact en locale C**, ordinal comme msvcrt — mesuré ≠ collation linguistique), `towlower/towupper`,

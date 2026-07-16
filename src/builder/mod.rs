@@ -1396,16 +1396,26 @@ pub fn transpile(
         // file`, or a shell pipeline) reaches the transpiled program. `.output()`
         // otherwise hands the child a closed stdin → it reads immediate EOF, which
         // silently zeroed every stdin-reading program run this way.
-        let out = Command::new(&binary)
+        //
+        // The child's stderr is *inherited* (flows to ARET's own stderr), NOT
+        // captured into the framed program output. Merging it made the two streams
+        // indistinguishable and broke the winediff oracle's symmetry: Wine's stderr
+        // is discarded (`2>/dev/null`), so a program whose correct behaviour writes
+        // to stderr (a failed `assert`, a diagnostic) looked like a divergence only
+        // because ARET's copy landed in the compared stdout. Keeping stderr on fd2
+        // lets the harness discard it identically for both engines. Only stdout —
+        // the stream winediff actually compares — is captured and framed.
+        let child = Command::new(&binary)
             .args(prog_args)
             .stdin(std::process::Stdio::inherit())
-            .output()
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::inherit())
+            .spawn()
             .with_context(|| format!("failed to run {}", binary.display()))?;
-        let mut s = String::from_utf8_lossy(&out.stdout).into_owned();
-        if !out.stderr.is_empty() {
-            s.push_str(&String::from_utf8_lossy(&out.stderr));
-        }
-        Some(s)
+        let out = child
+            .wait_with_output()
+            .with_context(|| format!("failed to run {}", binary.display()))?;
+        Some(String::from_utf8_lossy(&out.stdout).into_owned())
     } else {
         None
     };
