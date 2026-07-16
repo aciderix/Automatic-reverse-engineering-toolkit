@@ -2220,4 +2220,28 @@ Détail : **70 §6** (roadmap). Résumé :
   avec `%d`/`%08x`/`%s`/`%c`/`%%`, `_snwprintf` tronqué **et** ok, `_vsnwprintf` via va_list). Portes : hash
   transpile inchangé (`19acad982194bf07`), winediff **107→108/108**.
 
+### 2026-07-16 — [HLE-WIN32][ORACLE] Levier dur : collation linguistique (`lstrcmpW`/`CompareStringW`) reproduite bit-à-bit, dans les règles
+- **Le #1 des imports manquants transversaux** (mesuré : `lstrcmpW`×11, `lstrcmpiW`×6), que j'avais **refusé**
+  d'implémenter ordinalement (silencieusement faux). Fait maintenant **proprement**.
+- **Insight** : Windows compare **linguistiquement** (word-sort), et `lstrcmpW(a,b) = sign(memcmp(sortkey(a),
+  sortkey(b)))` où sortkey = `LCMAP_SORTKEY`. Donc si je génère **la même sort-key**, je suis exact.
+- **Forensics** : dumpé `LCMAP_SORTKEY` de Wine pour tout l'ASCII imprimable → **décodé la structure exacte** :
+  `PRI(2 o/car) 01 01 CASE 01 01 00`, où PRI = poids primaire **case-folded** (chiffres `0d..`, lettres `0e..`,
+  ponctuation `07/08..`), CASE = `0x12` par majuscule / `0x02` sinon avec **élagage des `0x02` de queue** (niveau
+  vide si tout minuscule). Les `-` et `'` sont **ignorables au niveau primaire** (forme `ff ff` spéciale).
+- **Implémentation** (`aret_win32.c`) : table `u32_pri[128]` (**poids mesurés, pas devinés**), `u32_sortkey`
+  (génère la clé, retourne -1 hors sous-ensemble), `u32_collate` (`memcmp`), sur `lstrcmpW`/`lstrcmpiW` (insensible
+  = niveau CASE retiré) + `CompareStringW`/`CompareStringA` (widen ASCII ; `NORM_IGNORECASE` seul flag modélisé).
+  **Anciens stubs « ordinal-ish » (subtilement faux sur l'ordre de casse) supprimés.**
+- **Règles respectées** : **juste sur le sous-ensemble prouvé** (bit-à-bit), **abort bruyant hors** (`-`/`'`,
+  contrôles, non-ASCII → `aret_unmodelled`, jamais deviné). **Chemin rapide égalité** : deux chaînes binairement
+  identiques = linguistiquement égales pour **tout** contenu → une comparaison d'égalité **n'aborte jamais**
+  (vérifié : `lstrcmpW("café","café")=0`, mais `lstrcmpW("a-b","axb")` → **abort loud**).
+- **Vérifié bit-identique Wine** : `winecorpus/win_collate.c` — **1444 paires** (38 chaînes × 38, ×3 fonctions),
+  hash `aa8fcadd` = Wine ; spots `Hello/hello=1`, `9/10=1`, `Z/a=1`, **`~/a=-1`** (que l'ordinal ratait :
+  ordinal `~`>`a`, linguistique `~`<`a`). stdcall_pops : lstrcmpW/iW=8 (CompareStringA/W=24 déjà là). Portes : hash
+  transpile inchangé (`19acad982194bf07`), `table_is_sorted` vert, winediff **108→109/109**.
+- **Extensible** : mesurer le niveau spécial de `-`/`'` (et Latin-1) élargirait le sous-ensemble prouvé ; pour
+  l'instant abort sound suffit (le chemin rapide couvre déjà l'égalité de tout contenu).
+
 <!-- NOUVELLES ENTRÉES ICI (garder l'ordre chronologique, plus récent en bas) -->

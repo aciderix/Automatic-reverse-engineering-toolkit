@@ -337,12 +337,7 @@ uint32_t aret_lstrcpyA(uint32_t esp) { return WRP(strcpy(WS(0), WCS(1))); }
 uint32_t aret_lstrcatA(uint32_t esp) { return WRP(strcat(WS(0), WCS(1))); }
 uint32_t aret_lstrcmpA(uint32_t esp) { return (uint32_t)(int32_t)strcmp(WCS(0), WCS(1)); }
 uint32_t aret_lstrcmpiA(uint32_t esp){ return (uint32_t)(int32_t)strcasecmp(WCS(0), WCS(1)); }
-/* Wide (16-bit) kernel32 string length/copy/cat — ordinal, exact. NOTE: lstrcmpW/
- * lstrcmpiW are deliberately NOT implemented here: Wine (like Windows) compares them
- * *linguistically* via CompareStringW (uppercase sorts AFTER lowercase, locale
- * collation), which an ordinal compare does not match (measured) — so they stay a
- * sound abort rather than a silent divergence. The ordinal msvcrt `wcscmp`/`_wcsicmp`
- * cover the ordinal-compare need exactly. */
+/* Wide (16-bit) kernel32 string length/copy/cat — ordinal, exact. */
 uint32_t aret_lstrlenW(uint32_t esp) {
     const uint16_t *s = (const uint16_t *)WP(0);
     if (!s) return 0;
@@ -357,6 +352,126 @@ uint32_t aret_lstrcatW(uint32_t esp) {
     uint16_t *d = (uint16_t *)WP(0); const uint16_t *s = (const uint16_t *)WP(1);
     if (d && s) { while (*d) d++; while ((*d++ = *s++)) {} }
     return WU(0);
+}
+
+/* ------------------------------------------------------------------ */
+/* Linguistic string comparison (CompareStringW / lstrcmpW / lstrcmpiW). */
+/* ------------------------------------------------------------------ */
+/* Windows compares strings *linguistically* (word sort), NOT ordinally: uppercase
+ * sorts after lowercase, digits before letters, etc. The result equals the byte
+ * comparison of the Windows "sort key" (LCMAP_SORTKEY). We reproduce the sort key
+ * BIT-FOR-BIT for a proven ASCII subset — the per-character weights below were
+ * MEASURED from Wine's LCMAP_SORTKEY (not guessed) — and ABORT for any character
+ * outside it (control chars, the primary-ignorable '-'/'\'', non-ASCII), so we are
+ * never silently wrong. Structure: PRI(2 bytes/char) 01 01 CASE(0x12 upper/0x02
+ * else, trailing-0x02 trimmed; dropped when case-insensitive) 01 01 00. */
+static const uint16_t u32_pri[128] = {
+    0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000,
+    0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000,
+    0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000,
+    0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000,
+    0x0702, 0x071c, 0x071d, 0x071f, 0x0721, 0x0723, 0x0725, 0x0000,
+    0x0727, 0x072a, 0x072d, 0x0803, 0x072f, 0x0000, 0x0733, 0x0735,
+    0x0d03, 0x0d1a, 0x0d1c, 0x0d1e, 0x0d20, 0x0d22, 0x0d24, 0x0d26,
+    0x0d28, 0x0d2a, 0x0737, 0x073a, 0x080e, 0x0812, 0x0814, 0x073c,
+    0x073e, 0x0e02, 0x0e09, 0x0e0a, 0x0e1a, 0x0e21, 0x0e23, 0x0e25,
+    0x0e2c, 0x0e32, 0x0e35, 0x0e36, 0x0e48, 0x0e51, 0x0e70, 0x0e7c,
+    0x0e7e, 0x0e89, 0x0e8a, 0x0e91, 0x0e99, 0x0e9f, 0x0ea2, 0x0ea4,
+    0x0ea6, 0x0ea7, 0x0ea9, 0x073f, 0x0741, 0x0742, 0x0743, 0x0744,
+    0x0748, 0x0e02, 0x0e09, 0x0e0a, 0x0e1a, 0x0e21, 0x0e23, 0x0e25,
+    0x0e2c, 0x0e32, 0x0e35, 0x0e36, 0x0e48, 0x0e51, 0x0e70, 0x0e7c,
+    0x0e7e, 0x0e89, 0x0e8a, 0x0e91, 0x0e99, 0x0e9f, 0x0ea2, 0x0ea4,
+    0x0ea6, 0x0ea7, 0x0ea9, 0x074a, 0x074c, 0x074e, 0x0750, 0x0000,
+};
+/* Build the sort key for `len` code units of `s` (len<0 = until NUL). Returns the
+ * key length, or -1 if any unit is outside the proven subset. */
+static int u32_sortkey(uint8_t *dst, const uint16_t *s, int len, int ignore_case) {
+    uint8_t pri[1024], cas[512]; int np = 0, nc = 0;
+    for (int i = 0; (len < 0) ? (s[i] != 0) : (i < len); i++) {
+        uint16_t c = s[i];
+        if (len >= 0 && c == 0) break;
+        if (c >= 128 || u32_pri[c] == 0) return -1;      /* unmodelled -> abort */
+        if (np > 1020 || nc > 508) return -1;            /* too long -> abort */
+        uint16_t w = u32_pri[c];
+        pri[np++] = (uint8_t)(w >> 8); pri[np++] = (uint8_t)w;
+        cas[nc++] = (c >= 'A' && c <= 'Z') ? 0x12 : 0x02;
+    }
+    if (ignore_case) nc = 0;
+    else while (nc > 0 && cas[nc - 1] == 0x02) nc--;     /* trim trailing default case */
+    int o = 0;
+    for (int i = 0; i < np; i++) dst[o++] = pri[i];
+    dst[o++] = 0x01; dst[o++] = 0x01;
+    for (int i = 0; i < nc; i++) dst[o++] = cas[i];
+    dst[o++] = 0x01; dst[o++] = 0x01; dst[o++] = 0x00;
+    return o;
+}
+/* Linguistic compare -> -1/0/1, or -2 = unmodelled (caller aborts sound). */
+static int u32_collate(const uint16_t *a, int na, const uint16_t *b, int nb, int ignore_case) {
+    uint8_t ka[2600], kb[2600];
+    int la = u32_sortkey(ka, a, na, ignore_case);
+    int lb = u32_sortkey(kb, b, nb, ignore_case);
+    if (la < 0 || lb < 0) return -2;
+    int m = la < lb ? la : lb;
+    int c = memcmp(ka, kb, (size_t)m);
+    if (c == 0) c = la - lb;
+    return c < 0 ? -1 : c > 0 ? 1 : 0;
+}
+/* Binary-identical strings are linguistically equal for ANY content, so this fast
+ * path lets equality checks succeed even on strings we could not collate. */
+static int u32_wstr_eq(const uint16_t *a, const uint16_t *b) {
+    int i = 0; while (a[i] && a[i] == b[i]) i++;
+    return a[i] == b[i];
+}
+uint32_t aret_lstrcmpW(uint32_t esp) {
+    const uint16_t *a = (const uint16_t *)WP(0), *b = (const uint16_t *)WP(1);
+    if (!a || !b) return (uint32_t)(int32_t)(a == b ? 0 : a ? 1 : -1);
+    if (u32_wstr_eq(a, b)) return 0;
+    int r = u32_collate(a, -1, b, -1, 0);
+    if (r == -2) { aret_unmodelled("lstrcmpW: unmodelled linguistic collation (non-ASCII or ignorable '-'/apostrophe)"); return 0; }
+    return (uint32_t)(int32_t)r;
+}
+uint32_t aret_lstrcmpiW(uint32_t esp) {
+    const uint16_t *a = (const uint16_t *)WP(0), *b = (const uint16_t *)WP(1);
+    if (!a || !b) return (uint32_t)(int32_t)(a == b ? 0 : a ? 1 : -1);
+    if (u32_wstr_eq(a, b)) return 0;
+    int r = u32_collate(a, -1, b, -1, 1);
+    if (r == -2) { aret_unmodelled("lstrcmpiW: unmodelled linguistic collation"); return 0; }
+    return (uint32_t)(int32_t)r;
+}
+/* CompareStringW(LCID, dwFlags, s1, cch1, s2, cch2) -> CSTR_LESS(1)/EQUAL(2)/
+ * GREATER(3), 0 on failure. Only NORM_IGNORECASE (0x1) is modelled; other flags
+ * change the collation -> abort. */
+uint32_t aret_CompareStringW(uint32_t esp) {
+    uint32_t flags = WU(1);
+    const uint16_t *s1 = (const uint16_t *)WP(2); int n1 = WI(3);
+    const uint16_t *s2 = (const uint16_t *)WP(4); int n2 = WI(5);
+    if (flags & ~0x00000001u) { aret_unmodelled("CompareStringW: unmodelled flags"); return 0; }
+    if (!s1 || !s2) return 0;
+    if (n1 < 0 && n2 < 0 && !(flags & 1) && u32_wstr_eq(s1, s2)) return 2;
+    int r = u32_collate(s1, n1 < 0 ? -1 : n1, s2, n2 < 0 ? -1 : n2, flags & 1);
+    if (r == -2) { aret_unmodelled("CompareStringW: unmodelled linguistic collation"); return 0; }
+    return (uint32_t)(r < 0 ? 1 : r > 0 ? 3 : 2);
+}
+/* CompareStringA — widen the ASCII bytes and defer to the wide collation (abort on
+ * a high byte, which is codepage-dependent). */
+uint32_t aret_CompareStringA(uint32_t esp) {
+    uint32_t flags = WU(1);
+    const uint8_t *s1 = (const uint8_t *)WP(2); int n1 = WI(3);
+    const uint8_t *s2 = (const uint8_t *)WP(4); int n2 = WI(5);
+    if (flags & ~0x00000001u) { aret_unmodelled("CompareStringA: unmodelled flags"); return 0; }
+    if (!s1 || !s2) return 0;
+    uint16_t w1[1200], w2[1200]; int m1 = 0, m2 = 0;
+    for (int i = 0; (n1 < 0) ? (s1[i] != 0) : (i < n1); i++) {
+        if (s1[i] >= 0x80 || m1 >= 1199) { aret_unmodelled("CompareStringA: non-ASCII (codepage)"); return 0; }
+        w1[m1++] = s1[i];
+    }
+    for (int i = 0; (n2 < 0) ? (s2[i] != 0) : (i < n2); i++) {
+        if (s2[i] >= 0x80 || m2 >= 1199) { aret_unmodelled("CompareStringA: non-ASCII (codepage)"); return 0; }
+        w2[m2++] = s2[i];
+    }
+    int r = u32_collate(w1, m1, w2, m2, flags & 1);
+    if (r == -2) { aret_unmodelled("CompareStringA: unmodelled linguistic collation"); return 0; }
+    return (uint32_t)(r < 0 ? 1 : r > 0 ? 3 : 2);
 }
 
 /* ------------------------------------------------------------------ */
@@ -667,40 +782,8 @@ uint32_t aret_LCMapStringA(uint32_t esp) {
     return (uint32_t)n;
 }
 /* CompareStringA/W(Locale, dwCmpFlags, s1, n1, s2, n2) -> CSTR_LESS_THAN(1)/
- * EQUAL(2)/GREATER_THAN(3). Ordinal-ish (matches Wine for ASCII/en-US); honours
- * NORM_IGNORECASE. Deep locale collation of accented text is not modelled. */
-uint32_t aret_CompareStringA(uint32_t esp) {
-    uint32_t flags = WU(1);
-    const char *a = (const char *)WP(2); int na = WI(3);
-    const char *b = (const char *)WP(4); int nb = WI(5);
-    if (!a || !b) return 0;
-    if (na < 0) na = (int)strlen(a);
-    if (nb < 0) nb = (int)strlen(b);
-    int ci = (flags & 0x00000001u) != 0;         /* NORM_IGNORECASE */
-    int i = 0;
-    for (; i < na && i < nb; i++) {
-        int ca = (unsigned char)a[i], cb = (unsigned char)b[i];
-        if (ci) { ca = tolower(ca); cb = tolower(cb); }
-        if (ca != cb) return ca < cb ? 1u : 3u;
-    }
-    return na == nb ? 2u : (na < nb ? 1u : 3u);
-}
-uint32_t aret_CompareStringW(uint32_t esp) {
-    uint32_t flags = WU(1);
-    const uint16_t *a = (const uint16_t *)WP(2); int na = WI(3);
-    const uint16_t *b = (const uint16_t *)WP(4); int nb = WI(5);
-    if (!a || !b) return 0;
-    if (na < 0) { na = 0; while (a[na]) na++; }
-    if (nb < 0) { nb = 0; while (b[nb]) nb++; }
-    int ci = (flags & 0x00000001u) != 0;
-    int i = 0;
-    for (; i < na && i < nb; i++) {
-        int ca = a[i], cb = b[i];
-        if (ci && ca < 256 && cb < 256) { ca = tolower(ca); cb = tolower(cb); }
-        if (ca != cb) return ca < cb ? 1u : 3u;
-    }
-    return na == nb ? 2u : (na < nb ? 1u : 3u);
-}
+ * EQUAL(2)/GREATER_THAN(3). Real linguistic collation (measured sort keys) lives
+ * with lstrcmpW above; these stubs were removed. */
 uint32_t aret_IsProcessorFeaturePresent(uint32_t esp) { (void)esp; return 1; }
 uint32_t aret_IsDebuggerPresent(uint32_t esp) { (void)esp; return 0; }
 uint32_t aret_IsBadReadPtr(uint32_t esp)  { return (uint32_t)(WU(0) == 0); }
