@@ -2304,4 +2304,26 @@ Détail : **70 §6** (roadmap). Résumé :
 - **Reste** : le scanset wide `%[^...]` de mingw a une quirk interne (Wine ⧣ attendu) — hors périmètre ;
   la sémantique scanset reste couverte/prouvée côté `sscanf` narrow.
 
+### 2026-07-16 — [HLE-FILE][ORACLE] Itération de répertoire CRT `_findfirst`/`_findnext`/`_findclose` — piloté par la donnée, bit-identique Wine
+- **Mesure d'abord** (règle §2) : `--mode walls` + `wallsweep.sh` sur les 21 PE du gauntlet → la famille d'imports
+  manquants **dominante par largeur** est `_findfirst`/`_findnext`/`_findclose` (**10 binaires sur 21**, 1 famille).
+  (Le launcher `winetest.exe` = surtout data-décodée-en-code + une famille socket + process/registry hors périmètre.
+  `mul dl` non lifté = **abort sound correct**, 1 site non atteint dans sqlite — pas un bug, laissé.)
+- **Forensics/mesure exacte** (jamais deviné) : sondes cross-compilées lancées **sous Wine** → `struct _finddata_t`
+  = **280 o** (`attrib`@0, `time_create`@4, `time_access`@8, `time_write`@12 en `time_t` 32-bit, `size`@16 en
+  `_fsize_t` 32-bit, `name`@20[260]) ; **encodage `attrib` CRT ≠ Win32** (mesuré) : fichier normal=`_A_ARCH(0x20)`,
+  répertoire=`_A_SUBDIR(0x10)` **taille 0**, read-only ajoute `_A_RDONLY(0x01)` → `0x21` ; `.`/`..` **énumérés** ;
+  no-match → handle `-1` **et** `errno=ENOENT(2)`.
+- **Fix** (`aret_hle.c`) : `aret_findfirst`/`aret_findnext`/`aret_findclose` réutilisent la machinerie
+  `aret_find_t`/`aret_ci_match`/opendir-fnmatch de `FindFirstFileA`, mais une fonction de remplissage **dédiée**
+  (`aret_fill_finddata`, layout 280 o + encodage attrib mesuré) et les **conventions de retour CRT** (`_findnext`
+  → 0/-1, `_findfirst` → handle/-1 avec `errno`). Temps = vrais temps hôte (corrects, non vérifiés bit-à-bit car
+  env-dépendants, comme le find Win32 frère). Tous **cdecl** (pas de `stdcall_pop`). **`_rmdir` ajouté** au passage
+  (rmdir POSIX, 3 binaires du wallsweep, requis par le cleanup du fixture).
+- **Piège rappelé** : le runtime C est `include_str!` dans le binaire Rust → **`cargo build --release` obligatoire**
+  après édition d'`aret_hle.c` (sinon shim non ramassé, stub faible gagne).
+- **Vérifié bit-identique Wine** : `winecorpus/crt_findfirst.c` (7 entrées `.`/`..`/fichiers/dir/read-only avec
+  attrib+size, wildcard `*.TXT` insensible casse, no-match+ENOENT). Portes : hash transpile inchangé
+  (`19acad982194bf07`), winediff **112→113/113**.
+
 <!-- NOUVELLES ENTRÉES ICI (garder l'ordre chronologique, plus récent en bas) -->

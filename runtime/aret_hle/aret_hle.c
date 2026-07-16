@@ -1601,6 +1601,76 @@ uint32_t aret_FindClose(uint32_t esp) {
     return 1;
 }
 
+/* CRT directory iteration: _findfirst / _findnext / _findclose (msvcrt, cdecl),
+ * over `struct _finddata_t` (280 bytes, MEASURED offsets): attrib@0, time_create@4,
+ * time_access@8, time_write@12 (32-bit time_t), size@16 (32-bit _fsize_t), name@20
+ * (char[260]). Same opendir/fnmatch machinery as FindFirstFileA, but a *different*
+ * struct layout and a DIFFERENT attrib encoding — MEASURED against Wine's msvcrt:
+ * a regular file is _A_ARCH(0x20), a directory is _A_SUBDIR(0x10) with no archive
+ * bit, a read-only file adds _A_RDONLY(0x01). '.'/'..' are enumerated (like Wine).
+ * Return conventions also differ: _findfirst -> intptr_t handle or -1 (errno=ENOENT)
+ * on no match; _findnext -> 0 on success, -1 at end; _findclose -> 0. Times are the
+ * real host stat times (correct values; not oracle-verified as they are env-dependent,
+ * exactly like the FindFirstFile sibling). */
+static int aret_fill_finddata(aret_find_t *st, uint8_t *fd) {
+    struct dirent *e;
+    while ((e = readdir(st->d))) {
+        if (aret_ci_match(st->pat, e->d_name) != 0) continue;
+        char full[1300];
+        snprintf(full, sizeof full, "%s/%s", st->dir, e->d_name);
+        struct stat sb;
+        uint32_t attrib = 0x20u;                       /* _A_ARCH (regular file) */
+        uint64_t size = 0;
+        uint32_t tc = 0, ta = 0, tw = 0;
+        if (stat(full, &sb) == 0) {
+            if (S_ISDIR(sb.st_mode)) attrib = 0x10u;   /* _A_SUBDIR (no archive bit) */
+            else {
+                if (!(sb.st_mode & S_IWUSR)) attrib |= 0x01u; /* _A_RDONLY */
+                size = (uint64_t)sb.st_size;            /* Windows dirs report size 0 */
+            }
+            tc = (uint32_t)sb.st_ctime; ta = (uint32_t)sb.st_atime; tw = (uint32_t)sb.st_mtime;
+        }
+        memset(fd, 0, 280);
+        *(uint32_t *)(fd + 0)  = attrib;
+        *(uint32_t *)(fd + 4)  = tc;
+        *(uint32_t *)(fd + 8)  = ta;
+        *(uint32_t *)(fd + 12) = tw;
+        *(uint32_t *)(fd + 16) = (uint32_t)size;        /* _fsize_t is 32-bit */
+        snprintf((char *)(fd + 20), 260, "%s", e->d_name);
+        return 1;
+    }
+    return 0;
+}
+uint32_t aret_findfirst(uint32_t esp) {
+    const char *spec = (const char *)(uintptr_t)arg(esp, 0);
+    uint8_t *fd = (uint8_t *)(uintptr_t)arg(esp, 1);
+    char path[1024];
+    translate_path(spec, path, sizeof path);
+    aret_find_t *st = (aret_find_t *)malloc(sizeof *st);
+    if (!st) { errno = ENOENT; return 0xFFFFFFFFu; }
+    st->wide = 0;
+    char *slash = strrchr(path, '/');
+    if (slash) { *slash = 0; snprintf(st->dir, sizeof st->dir, "%s", path); snprintf(st->pat, sizeof st->pat, "%s", slash + 1); }
+    else { snprintf(st->dir, sizeof st->dir, "."); snprintf(st->pat, sizeof st->pat, "%s", path); }
+    st->d = opendir(st->dir[0] ? st->dir : "/");
+    if (!st->d) { free(st); errno = ENOENT; return 0xFFFFFFFFu; }
+    if (!aret_fill_finddata(st, fd)) { closedir(st->d); free(st); errno = ENOENT; return 0xFFFFFFFFu; }
+    return (uint32_t)(uintptr_t)st;
+}
+uint32_t aret_findnext(uint32_t esp) {
+    aret_find_t *st = (aret_find_t *)(uintptr_t)arg(esp, 0);
+    if (!st) { errno = EINVAL; return 0xFFFFFFFFu; }
+    if (aret_fill_finddata(st, (uint8_t *)(uintptr_t)arg(esp, 1))) return 0;
+    errno = ENOENT;
+    return 0xFFFFFFFFu;                                 /* -1 at end of directory */
+}
+uint32_t aret_findclose(uint32_t esp) {
+    aret_find_t *st = (aret_find_t *)(uintptr_t)arg(esp, 0);
+    if (!st) return 0xFFFFFFFFu;
+    closedir(st->d); free(st);
+    return 0;
+}
+
 /* GetFileAttributesA(name) -> DWORD. Win32 file-existence/type probe (mingw's
  * stat/access, and busybox's path handling, lean on it). stat() the translated
  * path and map the mode to the Win32 attribute bitmask, or return
@@ -1949,6 +2019,12 @@ uint32_t aret_unlink(uint32_t esp) {
     char path[1024];
     translate_path((const char *)(uintptr_t)arg(esp, 0), path, sizeof path);
     return (uint32_t)(unlink(path) == 0 ? 0 : (uint32_t)-1);
+}
+/* _rmdir(path) -> 0 / -1. Remove an empty directory (POSIX rmdir). */
+uint32_t aret_rmdir(uint32_t esp) {
+    char path[1024];
+    translate_path((const char *)(uintptr_t)arg(esp, 0), path, sizeof path);
+    return (uint32_t)(rmdir(path) == 0 ? 0 : (uint32_t)-1);
 }
 /* _getpid() -> process id. */
 uint32_t aret_getpid(uint32_t esp) {

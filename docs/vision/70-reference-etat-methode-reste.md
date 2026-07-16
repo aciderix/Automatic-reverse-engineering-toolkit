@@ -170,7 +170,7 @@ bash bench/regression.sh    # PORTE unifiée : difftest 271/271, in-place 3/3,
                             # recompilabilité gzip/ls/cat 100%
 bash bench/difftest.sh              # décompile O0→O3
 bash bench/difftest_transpile.sh    # transpile (hash 19acad982194bf07)
-bash bench/winediff.sh              # axe 2 vs Wine (112/112)
+bash bench/winediff.sh              # axe 2 vs Wine (113/113)
 bash bench/funcdiff.sh              # lift-closure + opt-diff vs Unicorn (0 div)
 # Sweeps de vrais binaires (téléchargent + comparent à Wine) :
 bash bench/sqlite_sweep.sh   bash bench/busybox_sweep.sh   bash bench/corpus_sweep.sh
@@ -190,7 +190,7 @@ bash bench/wallsweep.sh <dir1> [dir2…]  # AGRÈGE --mode walls sur un corpus :
 
 ### État régression (référence — doit rester vert)
 difftest **272/272** · transpile-diff **4/4** (H=`19acad982194bf07`) · winediff
-**112/112** · cpudiff vert (per-instruction + séquences génératives) · funcdiff corpus **0 divergence** (lift ~12k scorées /
+**113/113** · cpudiff vert (per-instruction + séquences génératives) · funcdiff corpus **0 divergence** (lift ~12k scorées /
 ~6k appels, opt ~10k scorées) · SMT **11/11** · in-place **3/3** · magicdiv **2³²** ·
 recompilabilité **100 %** · WASM **7/7**.
 
@@ -329,10 +329,16 @@ recompilabilité **100 %** · WASM **7/7**.
   `GetFileSize(Ex)`/`GetFileTime`/**`GetFileInformationByHandle`** (fstat → attrs +
   3 FILETIMEs + serial + taille 64-bit + nlink + file-index=inode),
   **Win16 file API** (`_lopen`/`_lcreat`/`_lclose`/`_lread`/`_lwrite`/`_llseek`/`_hread`/`_hwrite` = fd POSIX),
-  `_access`/`_chmod`/`_mkdir`/`_unlink`, mapping mémoire (`CreateFileMapping`/
+  `_access`/`_chmod`/`_mkdir`/`_rmdir`/`_unlink`, mapping mémoire (`CreateFileMapping`/
   `MapViewOfFile` → mmap, `#ifndef __wasm__`), **wide** (`_wfopen`/`CreateFileW`/
   `GetFileAttributesExW`/`GetFullPathNameW`…). **Chemins Unix absolus `/…`
   passent au vrai FS** ; seuls les chemins Windows gardent le préfixe.
+  **Itération de répertoire CRT** (`_findfirst`/`_findnext`/`_findclose`, msvcrt — famille
+  #1 par largeur mesurée : **10 binaires** du gauntlet) sur `struct _finddata_t` (280 o,
+  offsets mesurés) : même machinerie opendir/fnmatch que `FindFirstFileA` mais layout **et**
+  encodage `attrib` **distincts, MESURÉS vs Wine** — fichier=`_A_ARCH(0x20)`, répertoire=
+  `_A_SUBDIR(0x10)` (taille 0), read-only ajoute `_A_RDONLY(0x01)` ; `.`/`..` énumérés ;
+  no-match → handle `-1` + `errno=ENOENT`. Gardé `winecorpus/crt_findfirst.c`.
 - **CRT** : printf/scanf complets + **`%I64`/`%I32`** MSVC, `snprintf` C99,
   strtoll/strtoull/div/ldiv (retour **edx:eax** via `import_returns_u64`), `atexit`
   (via `_onexit`), setjmp/longjmp, `_getcwd`/`_chdir`/`_fullpath`, rand LCG msvcrt,
