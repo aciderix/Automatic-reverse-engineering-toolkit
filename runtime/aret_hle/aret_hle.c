@@ -2170,24 +2170,30 @@ uint32_t aret_VirtualQuery(uint32_t esp) {
     mbi[6] = 0x1000000;   /* Type = MEM_IMAGE                 */
     return 28;
 }
-/* Thread-local storage (single-threaded model): a flat slot table. TlsAlloc
- * hands out distinct indices; Set/Get round-trip per index. */
+/* Thread-local storage (doc 80 incr. 4): index allocation is process-global, but
+ * the *values* are PER-FIBER — each fiber sees its own slot values (a fresh thread
+ * starts with all slots NULL). Rows indexed by the running fiber (0 = main). */
 #define ARET_TLS_MAX 1088
-static uint32_t aret_tls[ARET_TLS_MAX];
+#define ARET_TLS_FIBERS 64          /* must match U32_MAX_FIBER in aret_win32.c */
+static uint32_t aret_tls[ARET_TLS_FIBERS][ARET_TLS_MAX];
 static char aret_tls_used[ARET_TLS_MAX];
 uint32_t aret_TlsAlloc(uint32_t esp) {
     (void)esp;
-    for (int i = 0; i < ARET_TLS_MAX; i++) if (!aret_tls_used[i]) { aret_tls_used[i] = 1; aret_tls[i] = 0; return (uint32_t)i; }
+    for (int i = 0; i < ARET_TLS_MAX; i++) if (!aret_tls_used[i]) {
+        aret_tls_used[i] = 1;
+        for (int f = 0; f < ARET_TLS_FIBERS; f++) aret_tls[f][i] = 0;  /* NULL in every fiber */
+        return (uint32_t)i;
+    }
     return 0xFFFFFFFFu; /* TLS_OUT_OF_INDEXES */
 }
 uint32_t aret_TlsGetValue(uint32_t esp) {
     uint32_t i = arg(esp, 0);
-    return i < ARET_TLS_MAX ? aret_tls[i] : 0;
+    return i < ARET_TLS_MAX ? aret_tls[aret_current_fiber()][i] : 0;
 }
 uint32_t aret_TlsSetValue(uint32_t esp) {
     uint32_t i = arg(esp, 0);
     if (i >= ARET_TLS_MAX) return 0;
-    aret_tls[i] = arg(esp, 1);
+    aret_tls[aret_current_fiber()][i] = arg(esp, 1);
     return 1;
 }
 uint32_t aret_TlsFree(uint32_t esp) {

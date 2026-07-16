@@ -170,7 +170,7 @@ bash bench/regression.sh    # PORTE unifiée : difftest 271/271, in-place 3/3,
                             # recompilabilité gzip/ls/cat 100%
 bash bench/difftest.sh              # décompile O0→O3
 bash bench/difftest_transpile.sh    # transpile (hash 19acad982194bf07)
-bash bench/winediff.sh              # axe 2 vs Wine (104/104)
+bash bench/winediff.sh              # axe 2 vs Wine (105/105)
 bash bench/funcdiff.sh              # lift-closure + opt-diff vs Unicorn (0 div)
 # Sweeps de vrais binaires (téléchargent + comparent à Wine) :
 bash bench/sqlite_sweep.sh   bash bench/busybox_sweep.sh   bash bench/corpus_sweep.sh
@@ -190,7 +190,7 @@ bash bench/wallsweep.sh <dir1> [dir2…]  # AGRÈGE --mode walls sur un corpus :
 
 ### État régression (référence — doit rester vert)
 difftest **271/271** · transpile-diff **4/4** (H=`19acad982194bf07`) · winediff
-**104/104** · cpudiff vert (per-instruction + séquences génératives) · funcdiff corpus **0 divergence** (lift ~12k scorées /
+**105/105** · cpudiff vert (per-instruction + séquences génératives) · funcdiff corpus **0 divergence** (lift ~12k scorées /
 ~6k appels, opt ~10k scorées) · SMT **11/11** · in-place **3/3** · magicdiv **2³²** ·
 recompilabilité **100 %** · WASM **7/7**.
 
@@ -482,12 +482,25 @@ recompilabilité **100 %** · WASM **7/7**.
   (et les threads) : bloquent tant que non signalé, **re-vérifient après chaque réveil** (auto-reset : plusieurs
   réveillés, un seul consomme, les autres se re-bloquent). Noms intra-process partagés (hash FNV,
   `ERROR_ALREADY_EXISTS`). Handles non-thread/non-event gardent l'immédiat legacy.
-- **Vérifié bit-identique Wine** : `thread_join.c` (join, `25800`), `thread_critsec.c` (**`4000`** + récursion),
-  `thread_event.c` (**manual gate** = release-all `gate_sum=60` ; **auto-reset ping-pong** = handoff strict
-  `pp_sum=15`). `stdcall_pops` : CreateThread=24, ExitThread/Resume/Suspend=4, GetExitCodeThread=8,
-  TryEnterCriticalSection=4, CreateEventW=16, SetEvent=4. Portes : hash transpile inchangé, winediff **104/104**.
-- **Reste (incrément 4, doc 80 §2)** : Mutex/Semaphore/`WaitForMultipleObjects(FALSE)`, TLS par-fiber,
-  `_beginthreadex`.
+- **Incrément 4 — Mutex, Semaphore, TLS par-fiber, `_beginthread(ex)`** (clôt le chantier) :
+  - **Mutex** (`CreateMutexA/W`/`OpenMutexA/W`/`ReleaseMutex`, range `0x72……`) : ownable **récursif**, waitable
+    via `WaitForSingle/MultipleObjects` (acquisition = consommation : owner=moi, rec++) ; `ReleaseMutex` réservé
+    à l'owner ; owner mort sans release = **abandonné → traité libre** (pas de faux deadlock). `bInitialOwner`.
+  - **Semaphore** (`CreateSemaphoreA/W`/`ReleaseSemaphore`/`OpenSemaphoreA/W`, range `0x73……`) : compteur borné
+    (signalé si `count>0`, wait décrémente, release ajoute `n` plafonné à `max`, écrit le compte précédent).
+  - **TLS par-fiber** : `aret_tls[fiber][slot]` — allocation d'index process-globale (`aret_tls_used`), **valeurs
+    par-fiber** (un thread frais démarre à NULL) via `aret_current_fiber()`.
+  - **`_beginthreadex`/`_beginthread`** (msvcrt, **cdecl**) : factorisés sur `u32_spawn` = `CreateThread` (même
+    layout d'args / même trampoline). Modèle d'acquisition **unifié** (`u32_handle_signaled_for`/`u32_handle_acquire`
+    par-fiber) : event auto-reset, mutex, sémaphore, avec **re-vérification après chaque réveil** ⇒ un seul consomme.
+- **Vérifié bit-identique Wine** : `thread_join.c` (`25800`), `thread_critsec.c` (`4000`), `thread_event.c`
+  (`60`/`15`), `thread_mutex_sem.c` (**mutex** `mcounter=2000` RMW coupé sous le lock, **TLS par-fiber** `tls_ok=1`,
+  **sémaphore** `ssum=21`, spawné par **`_beginthreadex`**). `stdcall_pops` : +CreateMutexA/W=12, OpenMutexA/W=12,
+  ReleaseMutex=4, CreateSemaphoreA/W=16, OpenSemaphoreA/W=12, ReleaseSemaphore=12 (`_beginthread*` = cdecl, pas de
+  pop). Portes : hash transpile inchangé, winediff **105/105**.
+- **Chantier fibers = complet** (doc 80 §2, incréments 1-4). Reste hors-scope (abort sound) : préemption d'un thread
+  CPU-bound qui ne yield jamais (hang→abort), WAIT_ABANDONED distinct, `SuspendThread` d'un thread courant, WASM
+  (Asyncify).
 
 ---
 
@@ -633,7 +646,8 @@ scheduler** à chaque bascule. Plan incrémental piloté par fixture :
    `thread_critsec.c` `counter=4000` (RMW coupé par un yield sous le lock = discriminant réel).
 3. ✅ **FAIT** — **Events** (manual/auto-reset, Set/Reset/Wait) — oracle `thread_event.c`
    (gate release-all `60` + ping-pong auto-reset `15`).
-4. **Mutex/Semaphore/`WaitForMultipleObjects(FALSE)`, TLS par-fiber, `_beginthreadex`.
+4. ✅ **FAIT** — **Mutex/Semaphore** (waitable, récursif/borné), **TLS par-fiber**,
+   **`_beginthread(ex)`** — oracle `thread_mutex_sem.c` (`2000`/`tls_ok=1`/`21`). **Chantier fibers complet.**
 *Frontière dure* : `CreateProcessA/W` (lancer un `.exe` enfant) — pas de Windows pour
 l'exécuter ; reste **échec sound**, pas simulé. `CreatePipe` (anonyme) est déjà fidèle
 (`pipe()`).

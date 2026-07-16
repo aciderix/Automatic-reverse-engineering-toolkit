@@ -7,7 +7,7 @@
 > conformité au principe sacré, à la doctrine (§1) et aux règles** (doc 70 §0/§1/§2).
 >
 > **Statut** : orientations validées comme *compatibles* avec la philosophie ARET ;
-> ordre de priorité fixé ; seul le chantier **fibers** est engagé pour l'instant.
+> ordre de priorité fixé ; le chantier **fibers est COMPLET** (incréments 1-4, 2026-07-16).
 
 ## 0. Rappel du cadre (ce contre quoi on juge)
 
@@ -154,7 +154,15 @@ récursion + file d'attente), `SetEvent/ResetEvent`, Mutex, Semaphore.
    non signalé, re-vérifie après chaque réveil (auto-reset = un seul waiter consomme).
    Oracle `thread_event.c` : gate manual release-all (`60`) + ping-pong auto-reset (`15`),
    bit-identique Wine, winediff 104/104.
-4. Mutex / Semaphore / `WaitForMultipleObjects(FALSE)`, TLS par-fiber, `_beginthreadex`.
+4. ✅ **FAIT (2026-07-16)** — Mutex (récursif, waitable, abandon=libre), Semaphore
+   (compteur borné), TLS **par-fiber** (`aret_tls[fiber][slot]`, valeurs par-fiber),
+   `_beginthreadex`/`_beginthread` (factorisés sur `CreateThread`). Modèle d'acquisition
+   unifié (event auto-reset/mutex/sem, re-check après réveil ⇒ un seul consomme). Oracle
+   `thread_mutex_sem.c` (mutex `2000`, TLS `ok`, sémaphore `21`), bit-identique Wine,
+   winediff 105/105.
+
+**⇒ Chantier fibers (incréments 1-4) COMPLET.** Reste hors-scope (abort sound) : préemption
+d'un thread CPU-bound (hang→abort), WAIT_ABANDONED distinct, `SuspendThread` courant, WASM (Asyncify).
 
 Chaque incrément : fixture minimale → oracle Wine → régression complète → commit + doc.
 
@@ -179,5 +187,5 @@ Le glissement « traduire factuellement » **réduit** le devinement. La conditi
 5. **Licence = décision externe consciente** (GPL/proprio/LGPL), pas un problème de
    soundness mais à trancher avant d'embarquer du code lifté redistribué.
 
-**Priorité** : (1) **fibers** [engagé] → (2) lifting comctl32 [endgame GUI] → (3) PGL
+**Priorité** : (1) **fibers** ✅ **COMPLET** (incr. 1-4) → (2) lifting comctl32 [endgame GUI] → (3) PGL
 opt-in → (4) SEH in-HLE → (5) SoftFloat floatx80 [ère ARM/WASM].

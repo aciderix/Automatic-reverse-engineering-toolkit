@@ -29,6 +29,7 @@ uint32_t aret_GetLastError(uint32_t esp);   /* () -> DWORD */
 uint32_t aret_SetLastError(uint32_t esp);   /* (DWORD) -> void */
 extern uint32_t g_last_error;               /* per-fiber GetLastError() slot */
 int aret_fiber_yield(void);                 /* cooperative yield; 0 if no threads */
+int aret_current_fiber(void);               /* running fiber index (0 = main / none) */
 uint32_t aret_Sleep(uint32_t esp);          /* (DWORD ms) -> void */
 uint32_t aret_GetCurrentProcessId(uint32_t esp); /* () -> DWORD */
 

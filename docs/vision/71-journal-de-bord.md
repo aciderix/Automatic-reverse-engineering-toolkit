@@ -2070,4 +2070,35 @@ Détail : **70 §6** (roadmap). Résumé :
 - **Vérifié** : hash transpile inchangé (`19acad982194bf07`), `table_is_sorted` vert, winediff **103→104/104**.
 - **Suite (doc 80 §2, incr. 4)** : Mutex/Semaphore/`WaitForMultipleObjects(FALSE)`, TLS par-fiber, `_beginthreadex`.
 
+### 2026-07-16 — [THREAD][HLE-WIN32] Fibers incrément 4 (clôture) : Mutex + Semaphore + TLS par-fiber + `_beginthread(ex)`, bit-identique Wine
+- **Dernier incrément du chantier fibers** (doc 80 §2). Complète les primitives de synchronisation.
+- **Modèle d'acquisition unifié** : `u32_handle_signaled` devient `u32_handle_signaled_for(h, fiber)` (le mutex
+  dépend du fiber demandeur : libre / à moi / abandonné) + `u32_handle_acquire(h, me)` (effet consommateur). Ainsi
+  `WaitForSingle/MultipleObjects` gèrent thread/event/**mutex/sémaphore** uniformément, avec la **re-vérification
+  après réveil** (déjà en place) ⇒ un seul waiter consomme (mutex pris, sémaphore décrémenté, event auto-reset).
+- **Mutex** (`0x72……`, `g_mutex[128]`) : `owner` (fiber+1) + `rec` (récursion), waitable (acquisition dans
+  `u32_handle_acquire`). `CreateMutexA/W(attrs, bInitialOwner, name)` (owner initial = créateur), `OpenMutexA/W`
+  (par nom), `ReleaseMutex` (owner only, `rec--`→ libère à 0). **Owner mort sans release = abandonné → traité
+  comme libre** (pas de faux deadlock ; le distinguo `WAIT_ABANDONED` reste hors-scope).
+- **Semaphore** (`0x73……`, `g_sem[128]`) : `count`/`max`. Signalé si `count>0`, wait décrémente. `CreateSemaphore
+  A/W(attrs, initial, max, name)`, `ReleaseSemaphore(h, n, &prev)` (ajoute `n` plafonné à `max`, écrit l'ancien
+  compte, `ERROR_TOO_MANY_POSTS` si dépassement), `OpenSemaphoreA/W`.
+- **TLS par-fiber** (`aret_hle.c`) : `aret_tls[64][1088]` — l'**allocation d'index** reste process-globale
+  (`aret_tls_used`, `TlsAlloc` zère la colonne dans tous les fibers), mais Get/Set indexent la **ligne du fiber
+  courant** via `aret_current_fiber()` (exposé par `aret_win32.c`). Un thread frais voit tous ses slots à NULL.
+- **`_beginthreadex`/`_beginthread`** (msvcrt, **cdecl** → pas de stdcall_pop) : `CreateThread` factorisé en
+  `u32_spawn(start, param, flags, pTid)` ; `_beginthreadex(sec, stack, start, arg, flag, tid)` = même layout,
+  `_beginthread(start, stack, arg)` = variante cdecl (le trampoline `param@[esp+4]` sert les deux ABI). ⚠️ Le nom
+  d'import `_beginthreadex` **perd son underscore de tête** (`sanitize_import` trim `_`) → shim `aret_beginthreadex`
+  (un seul underscore), pas `aret__beginthreadex` (piège attrapé au 1er run : hit du weak stub → deadlock).
+- **WASM** (`#else`) : mutex/sem = fakes sound, `_beginthread(ex)` = abort sound (pas d'ucontext).
+- **Oracle** : `winecorpus/thread_mutex_sem.c` — 4 workers via **`_beginthreadex`** : (1) **mutex** protège un
+  compteur avec RMW **coupé par `Sleep(0)` sous le lock** → `mcounter=2000` (exclusion réelle) ; (2) **TLS
+  par-fiber** : chacun stocke `id+100`, yield, relit = le sien → `tls_ok=1` (une TLS globale serait écrasée) ;
+  (3) **sémaphore** producteur/consommateur `ssum=21`. `stdcall_pops` : CreateMutexA/W=12, OpenMutexA/W=12,
+  ReleaseMutex=4, CreateSemaphoreA/W=16, OpenSemaphoreA/W=12, ReleaseSemaphore=12.
+- **Vérifié** : hash transpile inchangé (`19acad982194bf07`), `table_is_sorted` vert, winediff **104→105/105**.
+- **⇒ Chantier fibers (doc 80 §2) COMPLET** (incréments 1-4). Prochaine orientation doc 80 : lifting comctl32
+  binaire (endgame GUI) ou PGL opt-in.
+
 <!-- NOUVELLES ENTRÉES ICI (garder l'ordre chronologique, plus récent en bas) -->

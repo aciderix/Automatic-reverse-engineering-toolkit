@@ -858,30 +858,73 @@ static uint32_t u32_create_event(int manual, int initial, uint32_t nh) {
     return U32_EVENT_BASE | (uint32_t)i;
 }
 
+/* Mutex objects (doc 80 incr. 4): ownable, recursive, waitable. owner = fiber
+ * index+1 (0 = free); an owner that exits without releasing => abandoned. */
+#define U32_MUTEX_BASE 0x72000000u
+#define U32_MAX_MUTEX  128
+static struct { int used, owner, rec; uint32_t name_hash; } g_mutex[U32_MAX_MUTEX];
+static int g_nmutex;
+static int u32_mutex_idx(uint32_t h) {
+    if ((h & 0xFF000000u) != U32_MUTEX_BASE) return -1;
+    uint32_t i = h & 0x00FFFFFFu;
+    return (i < (uint32_t)g_nmutex && g_mutex[i].used) ? (int)i : -1;
+}
+/* Semaphore objects (doc 80 incr. 4): a bounded counter; wait decrements, release
+ * increments (capped at max). Signaled when count > 0. */
+#define U32_SEM_BASE 0x73000000u
+#define U32_MAX_SEM  128
+static struct { int used, count, max; uint32_t name_hash; } g_sem[U32_MAX_SEM];
+static int g_nsem;
+static int u32_sem_idx(uint32_t h) {
+    if ((h & 0xFF000000u) != U32_SEM_BASE) return -1;
+    uint32_t i = h & 0x00FFFFFFu;
+    return (i < (uint32_t)g_nsem && g_sem[i].used) ? (int)i : -1;
+}
+
 /* handle -> fiber index, or -1 if it is not one of our thread handles. */
 static int u32_thread_idx(uint32_t h) {
     if ((h & 0xFF000000u) != U32_THREAD_BASE) return -1;
     uint32_t i = h & 0x00FFFFFFu;
     return (i < (uint32_t)g_nfiber) ? (int)i : -1;
 }
-/* Is a wait handle signaled? A thread handle signals when its fiber is DONE. Any
- * other handle (event/mutex/file/process) keeps the legacy always-signaled value
- * — sound in the mono-thread model; real events arrive in a later increment. */
-static int u32_handle_signaled(uint32_t h) {
-    int fi = u32_thread_idx(h);
-    if (fi >= 0) return g_fiber[fi].state == FST_DONE;
+/* Is a wait handle signaled *for fiber fi*? Thread → its fiber is DONE; event →
+ * signaled flag; mutex → free, held by fi (recursive), or abandoned (owner DONE);
+ * semaphore → count>0. Any other handle keeps the legacy always-signaled value
+ * (sound in the mono-thread model). */
+static int u32_handle_signaled_for(uint32_t h, int fi) {
+    int ti = u32_thread_idx(h);
+    if (ti >= 0) return g_fiber[ti].state == FST_DONE;
     int ei = u32_event_idx(h);
     if (ei >= 0) return g_event[ei].signaled;
-    return 1;                          /* other handles: legacy always-signaled */
+    int mi = u32_mutex_idx(h);
+    if (mi >= 0) {
+        int o = g_mutex[mi].owner;
+        return o == 0 || o == fi + 1 || g_fiber[o - 1].state == FST_DONE;
+    }
+    int si = u32_sem_idx(h);
+    if (si >= 0) return g_sem[si].count > 0;
+    return 1;
 }
 static int u32_wait_ok(struct u32_fiber *f) {
+    int fi = (int)(f - g_fiber);
     if (f->wait_n == 0) return 1;
     if (f->wait_all) {
-        for (int i = 0; i < f->wait_n; i++) if (!u32_handle_signaled(f->wait_h[i])) return 0;
+        for (int i = 0; i < f->wait_n; i++) if (!u32_handle_signaled_for(f->wait_h[i], fi)) return 0;
         return 1;
     }
-    for (int i = 0; i < f->wait_n; i++) if (u32_handle_signaled(f->wait_h[i])) return 1;
+    for (int i = 0; i < f->wait_n; i++) if (u32_handle_signaled_for(f->wait_h[i], fi)) return 1;
     return 0;
+}
+/* Acquire (consume) a satisfying handle for fiber `me`: auto-reset event resets;
+ * mutex takes ownership (recursive); semaphore decrements. Manual event/thread =
+ * no side effect. */
+static void u32_handle_acquire(uint32_t h, int me) {
+    int ei = u32_event_idx(h);
+    if (ei >= 0) { if (!g_event[ei].manual) g_event[ei].signaled = 0; return; }
+    int mi = u32_mutex_idx(h);
+    if (mi >= 0) { g_mutex[mi].owner = me + 1; g_mutex[mi].rec++; return; }
+    int si = u32_sem_idx(h);
+    if (si >= 0) { if (g_sem[si].count > 0) g_sem[si].count--; return; }
 }
 /* A blocked fiber is runnable when its wait condition clears: a CRITICAL_SECTION
  * it wants is free (owner 0 or itself), or its handle wait set is satisfied. */
@@ -952,15 +995,13 @@ static uint32_t u32_wait(const uint32_t *handles, int n, int all, int poll) {
         do { f->state = FST_BLOCKED; u32_to_sched(); } while (!u32_wait_ok(f));
     }
     f->wait_n = 0;
-    /* Consume auto-reset events that satisfied the wait (waitAll: all of them;
-     * waitAny: only the first signaled — the index we report). */
-    int idx = 0;
-    if (!all) for (int i = 0; i < n; i++) if (u32_handle_signaled(handles[i])) { idx = i; break; }
-    if (all) {
-        for (int i = 0; i < n; i++) { int ei = u32_event_idx(handles[i]); if (ei >= 0 && !g_event[ei].manual) g_event[ei].signaled = 0; }
-    } else {
-        int ei = u32_event_idx(handles[idx]); if (ei >= 0 && !g_event[ei].manual) g_event[ei].signaled = 0;
-    }
+    /* Acquire the satisfying handle(s): waitAll consumes all, waitAny only the
+     * first signaled (the index we report). Auto-reset event resets, mutex takes
+     * ownership, semaphore decrements. */
+    int me = g_cur, idx = 0;
+    if (!all) for (int i = 0; i < n; i++) if (u32_handle_signaled_for(handles[i], me)) { idx = i; break; }
+    if (all) { for (int i = 0; i < n; i++) u32_handle_acquire(handles[i], me); }
+    else       u32_handle_acquire(handles[idx], me);
     return (uint32_t)idx;              /* WAIT_OBJECT_0 + idx */
 }
 /* Trampoline a fresh fiber: lay a __stdcall thread-proc frame on its machine
@@ -985,8 +1026,8 @@ int aret_fiber_yield(void) {
     return 1;
 }
 /* CreateThread(lpsa, dwStackSize, lpStartAddress, lpParameter, dwFlags, lpThreadId). */
-uint32_t aret_CreateThread(uint32_t esp) {
-    uint32_t start = WU(2), param = WU(3), flags = WU(4), pTid = WU(5);
+/* Spawn a fiber for a thread proc (shared by CreateThread and _beginthread(ex)). */
+static uint32_t u32_spawn(uint32_t start, uint32_t param, uint32_t flags, uint32_t pTid) {
     if (g_nfiber >= U32_MAX_FIBER) { g_last_error = 8u /*NOT_ENOUGH_MEMORY*/; return 0; }
     int i = g_nfiber;
     struct u32_fiber *f = &g_fiber[i];
@@ -1005,6 +1046,19 @@ uint32_t aret_CreateThread(uint32_t esp) {
     g_nfiber++;                        /* publish only once fully built */
     if (pTid) *(uint32_t *)(uintptr_t)pTid = 0x1000u + (uint32_t)i;
     return U32_THREAD_BASE | (uint32_t)i;
+}
+uint32_t aret_CreateThread(uint32_t esp) {
+    return u32_spawn(WU(2), WU(3), WU(4), WU(5));
+}
+/* _beginthreadex(security, stacksize, start, arglist, initflag, thrdaddr) — msvcrt
+ * CRT wrapper; identical arg layout and __stdcall proc to CreateThread. */
+uint32_t aret_beginthreadex(uint32_t esp) {
+    return u32_spawn(WU(2), WU(3), WU(4), WU(5));
+}
+/* _beginthread(start, stacksize, arglist) — the __cdecl variant; the trampoline's
+ * frame (param at [esp+4]) serves cdecl and stdcall procs alike. */
+uint32_t aret_beginthread(uint32_t esp) {
+    return u32_spawn(WU(0), WU(2), 0, 0);
 }
 uint32_t aret_ResumeThread(uint32_t esp) {
     int fi = u32_thread_idx(WU(0)); if (fi < 0) return (uint32_t)-1;
@@ -1034,7 +1088,9 @@ uint32_t aret_GetExitCodeThread(uint32_t esp) {
 }
 /* A handle this layer actually waits on (thread or event); others keep the legacy
  * immediate WAIT_OBJECT_0 (sound in the mono-thread model). */
-static int u32_waitable(uint32_t h) { return u32_thread_idx(h) >= 0 || u32_event_idx(h) >= 0; }
+static int u32_waitable(uint32_t h) {
+    return u32_thread_idx(h) >= 0 || u32_event_idx(h) >= 0 || u32_mutex_idx(h) >= 0 || u32_sem_idx(h) >= 0;
+}
 uint32_t aret_WaitForSingleObject(uint32_t esp) {
     uint32_t h = WU(0);
     if (!u32_waitable(h)) return 0;
@@ -1116,12 +1172,80 @@ uint32_t aret_ResetEvent(uint32_t esp) {
     if (ei >= 0) g_event[ei].signaled = 0;
     return 1;
 }
+/* -------- Mutex objects (doc 80 incr. 4) -------- */
+static uint32_t u32_create_mutex(int initial_owner, uint32_t nh) {
+    if (nh) for (int i = 0; i < g_nmutex; i++)
+        if (g_mutex[i].used && g_mutex[i].name_hash == nh) { g_last_error = 183u; return U32_MUTEX_BASE | (uint32_t)i; }
+    if (g_nmutex >= U32_MAX_MUTEX) { g_last_error = 8u; return 0; }
+    int i = g_nmutex++;
+    g_mutex[i].used = 1; g_mutex[i].owner = initial_owner ? (g_cur + 1) : 0;
+    g_mutex[i].rec = initial_owner ? 1 : 0; g_mutex[i].name_hash = nh;
+    return U32_MUTEX_BASE | (uint32_t)i;
+}
+static uint32_t u32_open_mutex(uint32_t nh) {
+    if (nh) for (int i = 0; i < g_nmutex; i++)
+        if (g_mutex[i].used && g_mutex[i].name_hash == nh) return U32_MUTEX_BASE | (uint32_t)i;
+    g_last_error = 2u; return 0;                       /* ERROR_FILE_NOT_FOUND */
+}
+uint32_t aret_CreateMutexA(uint32_t esp) { return u32_create_mutex(WI(1), u32_name_hash(WP(2), 0)); }
+uint32_t aret_CreateMutexW(uint32_t esp) { return u32_create_mutex(WI(1), u32_name_hash(WP(2), 1)); }
+uint32_t aret_OpenMutexA(uint32_t esp)   { return u32_open_mutex(u32_name_hash(WP(2), 0)); }
+uint32_t aret_OpenMutexW(uint32_t esp)   { return u32_open_mutex(u32_name_hash(WP(2), 1)); }
+uint32_t aret_ReleaseMutex(uint32_t esp) {
+    int mi = u32_mutex_idx(WU(0));
+    if (mi < 0 || g_mutex[mi].owner != g_cur + 1) return 0;   /* not the owner */
+    if (g_mutex[mi].rec > 0 && --g_mutex[mi].rec == 0) g_mutex[mi].owner = 0;
+    return 1;
+}
+/* -------- Semaphore objects (doc 80 incr. 4) -------- */
+static uint32_t u32_create_sem(int initial, int maximum, uint32_t nh) {
+    if (nh) for (int i = 0; i < g_nsem; i++)
+        if (g_sem[i].used && g_sem[i].name_hash == nh) { g_last_error = 183u; return U32_SEM_BASE | (uint32_t)i; }
+    if (g_nsem >= U32_MAX_SEM) { g_last_error = 8u; return 0; }
+    int i = g_nsem++;
+    g_sem[i].used = 1; g_sem[i].count = initial; g_sem[i].max = maximum; g_sem[i].name_hash = nh;
+    return U32_SEM_BASE | (uint32_t)i;
+}
+static uint32_t u32_open_sem(uint32_t nh) {
+    if (nh) for (int i = 0; i < g_nsem; i++)
+        if (g_sem[i].used && g_sem[i].name_hash == nh) return U32_SEM_BASE | (uint32_t)i;
+    g_last_error = 2u; return 0;
+}
+uint32_t aret_CreateSemaphoreA(uint32_t esp) { return u32_create_sem(WI(1), WI(2), u32_name_hash(WP(3), 0)); }
+uint32_t aret_CreateSemaphoreW(uint32_t esp) { return u32_create_sem(WI(1), WI(2), u32_name_hash(WP(3), 1)); }
+uint32_t aret_OpenSemaphoreA(uint32_t esp)   { return u32_open_sem(u32_name_hash(WP(2), 0)); }
+uint32_t aret_OpenSemaphoreW(uint32_t esp)   { return u32_open_sem(u32_name_hash(WP(2), 1)); }
+uint32_t aret_ReleaseSemaphore(uint32_t esp) {
+    int si = u32_sem_idx(WU(0));
+    if (si < 0) return 0;
+    int rel = WI(1);
+    if (rel <= 0 || g_sem[si].count + rel > g_sem[si].max) { g_last_error = 298u /*TOO_MANY_POSTS*/; return 0; }
+    uint32_t pPrev = WU(2);
+    if (pPrev) *(int32_t *)(uintptr_t)pPrev = g_sem[si].count;
+    g_sem[si].count += rel;
+    return 1;
+}
+/* Current fiber index (0 = main / no threads) — used by per-fiber TLS in aret_hle.c. */
+int aret_current_fiber(void) { return g_cur; }
 #else  /* __wasm__ : no ucontext. Threads are a sound abort, never a fake. */
 int aret_fiber_yield(void) { return 0; }
+int aret_current_fiber(void) { return 0; }
 uint32_t aret_CreateEventA(uint32_t esp) { (void)esp; return 0x101; }
 uint32_t aret_CreateEventW(uint32_t esp) { (void)esp; return 0x101; }
 uint32_t aret_SetEvent(uint32_t esp) { (void)esp; return 1; }
 uint32_t aret_ResetEvent(uint32_t esp) { (void)esp; return 1; }
+uint32_t aret_CreateMutexA(uint32_t esp) { (void)esp; return 0x100; }
+uint32_t aret_CreateMutexW(uint32_t esp) { (void)esp; return 0x100; }
+uint32_t aret_OpenMutexA(uint32_t esp) { (void)esp; return 0x100; }
+uint32_t aret_OpenMutexW(uint32_t esp) { (void)esp; return 0x100; }
+uint32_t aret_ReleaseMutex(uint32_t esp) { (void)esp; return 1; }
+uint32_t aret_CreateSemaphoreA(uint32_t esp) { (void)esp; return 0x102; }
+uint32_t aret_CreateSemaphoreW(uint32_t esp) { (void)esp; return 0x102; }
+uint32_t aret_OpenSemaphoreA(uint32_t esp) { (void)esp; return 0x102; }
+uint32_t aret_OpenSemaphoreW(uint32_t esp) { (void)esp; return 0x102; }
+uint32_t aret_ReleaseSemaphore(uint32_t esp) { (void)esp; return 1; }
+uint32_t aret_beginthreadex(uint32_t esp) { (void)esp; aret_unmodelled("_beginthreadex: WASM has no ucontext"); return 0; }
+uint32_t aret_beginthread(uint32_t esp) { (void)esp; aret_unmodelled("_beginthread: WASM has no ucontext"); return 0; }
 /* No threads under WASM → CriticalSection is a correct no-op (never contended). */
 uint32_t aret_InitializeCriticalSection(uint32_t esp) { (void)esp; return 0; }
 uint32_t aret_InitializeCriticalSectionAndSpinCount(uint32_t esp) { (void)esp; return 1; }
@@ -1143,9 +1267,8 @@ uint32_t aret_WaitForMultipleObjects(uint32_t esp) { (void)esp; return 0; }
 /* Synchronisation / handles (single-process model)                   */
 /* ------------------------------------------------------------------ */
 
-uint32_t aret_CreateMutexA(uint32_t esp)        { (void)esp; return 0x100; } /* fake handle */
-uint32_t aret_OpenMutexA(uint32_t esp)          { (void)esp; return 0x100; }
-uint32_t aret_ReleaseMutex(uint32_t esp)        { (void)esp; return 1; }
+/* CreateMutex{A,W}/OpenMutex{A,W}/ReleaseMutex + Semaphores = real waitable objects
+ * (doc 80 incr. 4), defined with the fiber scheduler above. */
 /* CreateEvent{A,W}/SetEvent/ResetEvent = real event objects (doc 80 incr. 3),
  * defined with the fiber scheduler above. */
 uint32_t aret_SetConsoleCtrlHandler(uint32_t esp) { (void)esp; return 1; }
