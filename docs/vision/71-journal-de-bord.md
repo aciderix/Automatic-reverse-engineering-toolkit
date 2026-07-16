@@ -2376,4 +2376,32 @@ Détail : **70 §6** (roadmap). Résumé :
   vérifiée) — `read_jump_table` s'arrête sur la 1ʳᵉ entrée non-exécutable ; pas de bug → pas de code spéculatif
   (règle « pas de changement sans bénéfice mesuré en zone correctness-critique »).
 
+### 2026-07-16 — [ORACLE] funcdiff élargi aux fonctions à-imports (stubs symétriques) — la zone aveugle du doc rendue visible
+- **Motivation mesurée (vrai binaire).** Forensics de profondeur sur `7za.exe` (7-Zip 9.20, MSVC 32-bit, archive.org) :
+  le dispatch vtable C++ **se lifte** (3248/3263 fonctions) — ce n'est **pas** le mur. Le vrai mur = un **crash au
+  runtime** (segfault au démarrage) dans `sub_471a83` (chaîne locale/sort-key), un **miscompile invisible à la carte
+  statique**. Or `funcdiff` (l'oracle qui l'attraperait) **skippait** exactement cette classe : *toute* fonction dont
+  la closure appelle un import Win32/CRT (doc 70 §7 : « les bugs profonds sont dans les fonctions skippées derrière
+  imports »). Levier : **étendre l'oracle**, réutilisable pour tout binaire/fonction.
+- **Mécanisme : stub d'import symétrique** (appliqué **identiquement** aux deux moteurs, donc l'import n'est jamais
+  source de divergence — tout écart d'esp/registre/mémoire autour = vrai bug de lift) :
+  - *Interpréteur* (`cpudiff.rs`) : un appel `Named` import pose `eax=0`, `edx=0` (colle au split de retour edx:eax
+    de l'IR, donc un **tail-call `jmp [import]`** — qui saute le split — matche aussi), ne touche rien d'autre ; le
+    `esp += @N` stdcall est déjà porté par l'IR. Il enregistre le slot `esp-4` où le `call` d'Unicorn pousse une
+    adresse de retour, pour que le diff de pile l'exclue (comme `call_direct` pour les appels récursés).
+  - *Unicorn* : le slot IAT de chaque import stdcall est repointé vers un blob `mov eax,0; mov edx,0; ret N` dans une
+    page scratch → l'émulateur exécute exactement le même effet.
+  - Restreint aux imports à **pop `@N` stdcall connu** (l'IR fait `esp += N`, le stub fait `ret N` → lockstep exact) ;
+    cdecl/inconnus restent skippés (sound, pas de régression).
+- **Debug itératif (4 sous-cas, chacun mesuré-puis-corrigé)** : (1) l'image Unicorn patchée vs l'image interpréteur
+  pristine → slots IAT divergents dans le diff mémoire → donner **la même** image patchée à l'interpréteur (il résout
+  par Named, jamais par le slot) ; (2) tail-call `jmp [import]` : eax non écrit → poser `regs[0]=0` ; (3) split
+  edx:eax : `mov edx,0` des deux côtés ; (4) l'adresse de retour poussée par le `call` Unicorn → exclue via `ret_slots`.
+- **Vérifié : 0 divergence maintenue, couverture explose.** Corpus busybox+sqlite : lift **12,5k → 16,6k** scorées
+  (busybox 3567→4904, sqlite 8900→11700), **0 divergence**. `cpudiff.rs` = oracle-only (hors pipeline produit) → hash
+  transpile et winediff intacts. Sur 7za : **8048 fonctions scorées, 0 divergence** (les non-SEH validées).
+- **Reste (increment 2)** : la chaîne `sub_471a83` reste skippée car **SEH** (`mov fs:[0]`) — non modélisé en mode
+  decompile (→ `Asm`). L'atteindre = mapper un TEB + base `fs` dans Unicorn **et** modéliser `fs:[0]` dans
+  l'interpréteur. C'est le prochain incrément pour pinpointer le miscompile 7za.
+
 <!-- NOUVELLES ENTRÉES ICI (garder l'ordre chronologique, plus récent en bas) -->
