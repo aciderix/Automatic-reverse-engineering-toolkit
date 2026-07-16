@@ -2287,4 +2287,21 @@ Détail : **70 §6** (roadmap). Résumé :
   `%lf/%f`, `%3s`, `%c`, `%[^=]=%s`, `%*d`, `%n`, échec→0, EOF→-1, espace en tête). Cdecl (pas de stdcall_pop).
   Portes : hash transpile inchangé (`19acad982194bf07`), winediff **110→111/111**, sqlite/busybox smoke OK.
 
+### 2026-07-16 — [HLE-CRT][HLE-STDIO][ORACLE] `swscanf` (wide, 16-bit) + `iswctype`/`isw*` — bit-identique Wine
+- **Suite naturelle du `sscanf`** : la variante wide manquait. Deux chemins réels : les binaires **MSVC**
+  atteignent `aret_swscanf` (analogue 16-bit de `aret_sscanf_core`, mêmes conversions) ; les binaires **mingw**
+  pilotent leur **propre** scanf wide statique (`__mingw_swscanf`) qui classe les caractères via
+  `iswctype(c, desc)` — non implémenté ⇒ mauvaise classification ⇒ parse échoué/garbage.
+- **Fix** (`aret_crt.c`) : (1) `aret_swscanf_core` + `aret_swscanf` — mêmes conversions que sscanf mais sur
+  unités 16-bit (`%ls`/`%hs`/`%lc` respectent la largeur des code units) ; (2) `w_ctype_mask` + `aret_iswctype`
+  reproduisant les masques `_pctype`/`wctype` **ASCII-exacts** (alpha/digit/space/punct/xdigit/cntrl/print/…),
+  plus les enveloppes `iswspace/iswdigit/iswalpha/iswalnum/iswupper/iswlower/iswpunct/iswxdigit/iswcntrl/
+  iswprint/iswgraph`. Tous **cdecl** (pas de `stdcall_pop`). Wchar Windows = 16-bit → jamais de renvoi vers
+  `wcs*`/`isw*` de l'hôte (32-bit).
+- **Vérifié bit-identique Wine** : `winecorpus/crt_swscanf.c` — `%d/%x/%lf`, `%lld`, `%f`, `%ls`/`%hs`/`%lc`,
+  `%3ls` (largeur), EOF→-1, échec→0. Portes : hash transpile inchangé (`19acad982194bf07`),
+  winediff **111→112/112**.
+- **Reste** : le scanset wide `%[^...]` de mingw a une quirk interne (Wine ⧣ attendu) — hors périmètre ;
+  la sémantique scanset reste couverte/prouvée côté `sscanf` narrow.
+
 <!-- NOUVELLES ENTRÉES ICI (garder l'ordre chronologique, plus récent en bas) -->

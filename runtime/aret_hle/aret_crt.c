@@ -373,6 +373,138 @@ uint32_t aret_sscanf(uint32_t esp) {
     if (!in || !fmt) return (uint32_t)-1;
     return (uint32_t)(int32_t)aret_sscanf_core(in, fmt, a);
 }
+/* swscanf — the wide (16-bit) analog of sscanf. The format is ASCII (read as 16-bit);
+ * the input is 16-bit. Numeric tokens are copied to a narrow buffer and parsed with
+ * the same strtoll/strtod path; %s/%c/%[…] write 16-bit output (%hs/%S = narrow). */
+static int aret_swscanf_core(const uint16_t *in, const uint16_t *fmt, const uint32_t *a) {
+    int ai = 0, assigned = 0, attempted = 0;
+    const uint16_t *ip = in;
+    for (const uint16_t *p = fmt; *p; ) {
+        if (*p < 128 && isspace((int)*p)) { while (*ip < 128 && isspace((int)*ip)) ip++; p++; continue; }
+        if (*p != '%') { if (*ip != *p) break; ip++; p++; continue; }
+        p++;
+        if (*p == '%') { if (*ip != '%') break; ip++; p++; continue; }
+        int suppress = 0; if (*p == '*') { suppress = 1; p++; }
+        int width = 0; while (*p >= '0' && *p <= '9') width = width * 10 + (*p++ - '0');
+        int lng = 0, sht = 0, narrow_str = 0;
+        for (;;) {
+            if (*p == 'l') { lng++; p++; }
+            else if (*p == 'h') { sht++; narrow_str = 1; p++; }
+            else if (*p == 'L' || *p == 'j' || *p == 'z' || *p == 't' || *p == 'I') { p++; }
+            else break;
+        }
+        char conv = *p ? (char)*p++ : 0;
+        if (!conv) break;
+        int w = width ? width : 0x3fffffff;
+        if (conv == 'S') narrow_str = 1;                  /* %S = narrow in a wide scanf */
+
+        if (conv == 'n') { if (!suppress) *(int *)(uintptr_t)a[ai++] = (int)(ip - in); continue; }
+        if (conv == 'c') {
+            int cnt = width ? width : 1; attempted = 1;
+            void *dst = suppress ? 0 : (void *)(uintptr_t)a[ai];
+            int got = 0;
+            for (; got < cnt && *ip; got++) { if (dst) { if (narrow_str) ((char *)dst)[got] = (char)*ip; else ((uint16_t *)dst)[got] = *ip; } ip++; }
+            if (got < cnt) break;
+            if (!suppress) { ai++; assigned++; }
+            continue;
+        }
+        if (conv == 's' || conv == 'S') {
+            while (*ip < 128 && isspace((int)*ip)) ip++;
+            attempted = 1;
+            void *dst = suppress ? 0 : (void *)(uintptr_t)a[ai];
+            int got = 0;
+            while (*ip && !(*ip < 128 && isspace((int)*ip)) && got < w) { if (dst) { if (narrow_str) ((char *)dst)[got] = (char)*ip; else ((uint16_t *)dst)[got] = *ip; } ip++; got++; }
+            if (got == 0) break;
+            if (dst) { if (narrow_str) ((char *)dst)[got] = 0; else ((uint16_t *)dst)[got] = 0; }
+            if (!suppress) { ai++; assigned++; }
+            continue;
+        }
+        if (conv == '[') {
+            int negate = 0; if (*p == '^') { negate = 1; p++; }
+            char set[256]; memset(set, 0, sizeof set);
+            if (*p == ']') { set[']'] = 1; p++; }
+            while (*p && *p != ']') {
+                if (p[1] == '-' && p[2] && p[2] != ']') { for (int cc = (int)p[0]; cc <= (int)p[2]; cc++) if (cc < 256) set[cc] = 1; p += 3; }
+                else { if (*p < 256) set[*p] = 1; p++; }
+            }
+            if (*p == ']') p++;
+            attempted = 1;
+            void *dst = suppress ? 0 : (void *)(uintptr_t)a[ai];
+            int got = 0;
+            while (*ip && got < w) { int m = (*ip < 256) ? set[*ip] : 0; if (negate) m = !m; if (!m) break; if (dst) { if (narrow_str) ((char *)dst)[got] = (char)*ip; else ((uint16_t *)dst)[got] = *ip; } ip++; got++; }
+            if (got == 0) break;
+            if (dst) { if (narrow_str) ((char *)dst)[got] = 0; else ((uint16_t *)dst)[got] = 0; }
+            if (!suppress) { ai++; assigned++; }
+            continue;
+        }
+        while (*ip < 128 && isspace((int)*ip)) ip++;
+        attempted = 1;
+        char buf[130]; int bn = 0;
+        while (ip[bn] && ip[bn] < 128 && bn < 129 && (!width || bn < width)) { buf[bn] = (char)ip[bn]; bn++; }
+        buf[bn] = 0;
+        char *end;
+        if (conv == 'e' || conv == 'E' || conv == 'f' || conv == 'F' || conv == 'g' || conv == 'G' || conv == 'a' || conv == 'A') {
+            double d = strtod(buf, &end);
+            if (end == buf) break;
+            ip += (end - buf);
+            if (!suppress) { if (lng) *(double *)(uintptr_t)a[ai] = d; else *(float *)(uintptr_t)a[ai] = (float)d; ai++; assigned++; }
+            continue;
+        }
+        int base = conv == 'i' ? 0 : (conv == 'x' || conv == 'X') ? 16 : conv == 'o' ? 8 : conv == 'p' ? 16 : 10;
+        int isu = (conv == 'u' || conv == 'x' || conv == 'X' || conv == 'o' || conv == 'p');
+        unsigned long long uv = 0; long long sv = 0;
+        if (isu) uv = strtoull(buf, &end, base); else sv = strtoll(buf, &end, base);
+        if (end == buf) break;
+        ip += (end - buf);
+        if (!suppress) {
+            void *dp = (void *)(uintptr_t)a[ai];
+            unsigned long long val = isu ? uv : (unsigned long long)sv;
+            if (lng >= 2) *(long long *)dp = (long long)val;
+            else if (sht >= 2) *(char *)dp = (char)val;
+            else if (sht) *(short *)dp = (short)val;
+            else *(int *)dp = (int)val;
+            ai++; assigned++;
+        }
+    }
+    if (assigned == 0 && attempted && *ip == 0) return -1;
+    return assigned;
+}
+uint32_t aret_swscanf(uint32_t esp) {
+    const uint16_t *in = (const uint16_t *)AP(0), *fmt = (const uint16_t *)AP(1);
+    const uint32_t *a = &((const uint32_t *)(uintptr_t)esp)[2];
+    if (!in || !fmt) return (uint32_t)-1;
+    return (uint32_t)(int32_t)aret_swscanf_core(in, fmt, a);
+}
+
+/* Wide character classification. mingw's own wide scanf/CRT drives all its tests
+ * through iswctype(c, desc) with the msvcrt ctype bit mask. For c < 128 we compute
+ * the exact C-locale type bits; non-ASCII is unclassified (0) — the C/default-locale
+ * behaviour. The isw* helpers delegate to the narrow ctype (ASCII-exact). */
+static uint32_t w_ctype_mask(uint32_t c) {
+    if (c >= 128) return 0;
+    uint32_t m = 0;
+    if (c >= 'A' && c <= 'Z') m |= 0x0001 | 0x0100;                 /* _UPPER | alpha */
+    if (c >= 'a' && c <= 'z') m |= 0x0002 | 0x0100;                 /* _LOWER | alpha */
+    if (c >= '0' && c <= '9') m |= 0x0004 | 0x0080;                 /* _DIGIT | _HEX  */
+    if ((c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F')) m |= 0x0080; /* _HEX        */
+    if (c == ' ' || (c >= '\t' && c <= '\r')) m |= 0x0008;          /* _SPACE         */
+    if (c == ' ' || c == '\t') m |= 0x0040;                        /* _BLANK         */
+    if (c < 0x20 || c == 0x7f) m |= 0x0020;                        /* _CONTROL       */
+    if (isprint((int)c) && !isalnum((int)c) && c != ' ') m |= 0x0010; /* _PUNCT      */
+    return m;
+}
+uint32_t aret_iswctype(uint32_t esp) { return w_ctype_mask(AU(0)) & AU(1); }
+uint32_t aret_iswspace(uint32_t esp)  { uint32_t c = AU(0); return c < 128 && isspace((int)c) ? 1 : 0; }
+uint32_t aret_iswdigit(uint32_t esp)  { uint32_t c = AU(0); return c < 128 && isdigit((int)c) ? 1 : 0; }
+uint32_t aret_iswalpha(uint32_t esp)  { uint32_t c = AU(0); return c < 128 && isalpha((int)c) ? 1 : 0; }
+uint32_t aret_iswalnum(uint32_t esp)  { uint32_t c = AU(0); return c < 128 && isalnum((int)c) ? 1 : 0; }
+uint32_t aret_iswupper(uint32_t esp)  { uint32_t c = AU(0); return c < 128 && isupper((int)c) ? 1 : 0; }
+uint32_t aret_iswlower(uint32_t esp)  { uint32_t c = AU(0); return c < 128 && islower((int)c) ? 1 : 0; }
+uint32_t aret_iswpunct(uint32_t esp)  { uint32_t c = AU(0); return c < 128 && ispunct((int)c) ? 1 : 0; }
+uint32_t aret_iswxdigit(uint32_t esp) { uint32_t c = AU(0); return c < 128 && isxdigit((int)c) ? 1 : 0; }
+uint32_t aret_iswcntrl(uint32_t esp)  { uint32_t c = AU(0); return c < 128 && iscntrl((int)c) ? 1 : 0; }
+uint32_t aret_iswprint(uint32_t esp)  { uint32_t c = AU(0); return c < 128 && isprint((int)c) ? 1 : 0; }
+uint32_t aret_iswgraph(uint32_t esp)  { uint32_t c = AU(0); return c < 128 && isgraph((int)c) ? 1 : 0; }
 
 /* Wide (16-bit) printf family. The wide formatter lives in aret_hle.c beside
  * aret_vformat. Windows wchar_t is 16-bit, so buffers/format strings are uint16_t. */
