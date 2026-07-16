@@ -2344,4 +2344,36 @@ Détail : **70 §6** (roadmap). Résumé :
   jamais atteint). Portes : **régression unifiée PASS** (difftest 272, funcdiff 0 div, SMT 11/11, recompil. 100 %),
   hash transpile inchangé (`19acad982194bf07`), winediff **113→114/114**.
 
+### 2026-07-16 — [RECOV][HLE-CRT][ORACLE] Profondeur : host-back de l'intrinsèque `memmove` MSVC (tables de saut entrelacées), PROUVÉ vs libc
+- **Levier de profondeur, attaqué proprement (mesure d'abord).** Cible = un **vrai binaire** rapatrié d'archive.org
+  (`tucows_putty.exe`, MSVC 32-bit strippé, MIT). `--mode walls` : ses **seuls** murs de lift = **8 sites**
+  `jmp [reg*4+0x43XXXX]` non résolus. Forensics : ce sont deux copies de l'**intrinsèque `memmove` MSVC hand-tuné**
+  (fonction `(dst,src,n)` + test de recouvrement + `rep movs` + dispatch d'alignement) dont les **tables de saut sont
+  physiquement entrelacées dans le code** (l'entrée[0] d'une table lit dans les octets d'une instruction voisine) →
+  **indissociable** par tout décodeur linéaire/récursif. `read_jump_table` renvoie 0/garbage → `jmp` calculé laissé
+  unmodelled (abort sound). *(Mesure de contrôle : sqlite3 3.40 et nasm 2.16, MSVC modernes qui passent, n'ont
+  **aucun** de ces murs — l'intrinsèque entrelacé est spécifique au vieux MSVC.)*
+- **La bonne réponse = réutilisation vérifiée** (précédent libm §4.2), pas lifter ce charabia : **reconnaître** que la
+  fonction *est* memmove et la brancher sur `aret_memmove`. Mais — **règle sacrée « rien de prouvé = rien de deviné »** :
+  on ne devine pas « c'est memmove » sur une lecture. **PREUVE comportementale (Unicorn)** : la fonction réelle
+  `0x43a620` exécutée sur **500/500** cas aléatoires (tailles 0..1000, recouvrements avant **et** arrière) produit
+  **bit-pour-bit** le résultat de `memmove` libc (et `eax=dst`). C'est memmove (gère le recouvrement → **pas** memcpy),
+  mesuré et non deviné.
+- **Fix (mécanisme existant, zéro nouveau code de reconnaissance)** : signature **FLIRT** du préfixe 32 o de
+  l'intrinsèque (jcc rel32 wildcardé) → `crt_symbol` = `memmove` → le host-backing existant lie les appels à
+  `aret_memmove` et **n'émet pas** le corps. Nouveau fichier `runtime/flirt/msvc_crt.sig` (concaténé au `mingw_crt.sig`
+  bundlé). **Byte-exact ⇒ zéro faux positif** : une autre version de memmove qui ne matche pas reste en abort (sound,
+  jamais faux). Gardé par test unitaire `flirt::bundled_recognises_msvc_memmove`.
+- **Résultat** : les deux entrées memmove de putty (`0x43a620`, `0x43b910`, octets identiques = 2 copies linker) sont
+  host-backées (host-backed 18→20, murs 16→8). **Résidu honnête** : les 8→derniers gaps sont dans des **fragments de
+  case-body morts** (`sub_43a690`…) que le scan address-taken a promus depuis les pointeurs des tables entrelacées ;
+  **0 site d'appel** (memmove, leur seul appelant, est désormais un shim) → code mort, jamais exécuté (sound). Les
+  supprimer = un fix de récupération (plus risqué) laissé en suivi.
+- **Portes** : régression unifiée **PASS** (difftest 272, funcdiff 0 div, SMT 11/11, recompil. 100 %), hash transpile
+  **inchangé** (`19acad982194bf07` — additif, aucun démonstrateur affecté), winediff **114/114**, flirt tests 6/6.
+- **Note méthode** : levier « profondeur » réel mais **niche** (vieux MSVC). Choix 3 (borne de saut par masque) mesuré
+  puis **écarté** : le `switch` à index masqué (`and idx,3`) est **déjà** résolu correctement (fixture inline-asm
+  vérifiée) — `read_jump_table` s'arrête sur la 1ʳᵉ entrée non-exécutable ; pas de bug → pas de code spéculatif
+  (règle « pas de changement sans bénéfice mesuré en zone correctness-critique »).
+
 <!-- NOUVELLES ENTRÉES ICI (garder l'ordre chronologique, plus récent en bas) -->

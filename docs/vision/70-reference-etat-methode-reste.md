@@ -318,6 +318,16 @@ recompilabilité **100 %** · WASM **7/7**.
   signaturés** (résolus structurellement) ; glue reconnue = `looks_like_func_start`.
   ⚠️ FLIRT est **cosmétique** pour nos cibles (reconnaît du code de biblio, pas le
   code propre ; sensible à la version) — **le levier réel est le lifter**.
+- **Host-back d'intrinsèques non-liftables (`runtime/flirt/msvc_crt.sig`)** : certaines routines CRT hand-assemblées
+  ne **peuvent pas** se lifter — l'intrinsèque **`memmove` MSVC** entrelace ses tables de saut d'alignement *dans* le
+  code (une entrée de table lit dans les octets d'une instruction voisine), donc les `jmp [idx*4+table]` restent
+  unmodelled (abort sound). Réponse doctrine-pure (comme libm §4.2) : **reconnaître** la fonction par signature FLIRT
+  → `crt_symbol=memmove` → brancher sur `aret_memmove`, corps non émis. **Reconnaissance PROUVÉE, pas devinée** : la
+  fonction réelle est exécutée sous **Unicorn vs `memmove` libc** (500/500 cas aléatoires, recouvrements avant/arrière
+  bit-identiques) avant d'ajouter la signature (byte-exacte ⇒ zéro faux positif ; une autre version reste en abort).
+  Débloque `putty.exe` (archive.org, vieux MSVC) ; niche (le MSVC moderne — sqlite/nasm — n'a pas cet intrinsèque).
+  Gardé `flirt::bundled_recognises_msvc_memmove`. *(Reste : les case-bodies morts promus par le scan address-taken
+  depuis les tables entrelacées — 0 appel, code mort sound.)*
 
 ### 4.5 Axe 2 — HLE (couverture OS/CRT/Win32, vérifié vs Wine)
 - **stdio** : **tous les FILE** = struct **msvcrt-layout (32 o) fd-backed non

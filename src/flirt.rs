@@ -188,8 +188,14 @@ impl FlirtDb {
     }
 }
 
-/// The bundled mingw CRT signature database, parsed once.
-const BUNDLED: &str = include_str!("../runtime/flirt/mingw_crt.sig");
+/// The bundled CRT signature database, parsed once: the mingw CRT/libm set plus
+/// the MSVC static-CRT intrinsics (e.g. the hand-assembled `memmove` whose
+/// interleaved jump tables don't lift — bound to the native shim instead).
+const BUNDLED: &str = concat!(
+    include_str!("../runtime/flirt/mingw_crt.sig"),
+    "\n",
+    include_str!("../runtime/flirt/msvc_crt.sig"),
+);
 
 pub fn bundled() -> &'static FlirtDb {
     static DB: OnceLock<FlirtDb> = OnceLock::new();
@@ -268,5 +274,29 @@ mod tests {
     fn bundled_db_loads() {
         // The committed database must parse and be non-trivial.
         assert!(bundled().len() >= 4, "bundled FLIRT db too small");
+    }
+
+    #[test]
+    fn bundled_recognises_msvc_memmove() {
+        // The MSVC static-CRT `memmove` intrinsic prologue (32 bytes: load
+        // (dst,src,n), the overlap check, then the alignment dispatch). Proven
+        // behaviourally equal to libc memmove (Unicorn, 500/500 random cases incl.
+        // overlap). The bundled db must bind it to `memmove` so its interleaved,
+        // unliftable jump tables are host-backed instead of aborting. The trailing
+        // jcc rel32 displacement is wildcarded, so any link address matches.
+        let mut code = [
+            0x55, 0x8b, 0xec, 0x57, 0x56, 0x8b, 0x75, 0x0c, 0x8b, 0x4d, 0x10, 0x8b, 0x7d, 0x08,
+            0x8b, 0xc1, 0x8b, 0xd1, 0x03, 0xc6, 0x3b, 0xfe, 0x76, 0x08, 0x3b, 0xf8, 0x0f, 0x82,
+            0x78, 0x01, 0x00, 0x00,
+        ];
+        assert_eq!(bundled().match_at(&code), Some("memmove"));
+        // A different jcc displacement (link address) still matches.
+        code[28] = 0xab;
+        code[29] = 0xcd;
+        assert_eq!(bundled().match_at(&code), Some("memmove"));
+        // A one-byte change in the significant prologue must NOT match (no misfire).
+        let mut bad = code;
+        bad[6] = 0x7d; // mov esi,[ebp+0xc] -> different modrm
+        assert_ne!(bundled().match_at(&bad), Some("memmove"));
     }
 }
