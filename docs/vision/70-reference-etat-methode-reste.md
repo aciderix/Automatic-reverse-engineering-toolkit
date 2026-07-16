@@ -170,7 +170,7 @@ bash bench/regression.sh    # PORTE unifiée : difftest 271/271, in-place 3/3,
                             # recompilabilité gzip/ls/cat 100%
 bash bench/difftest.sh              # décompile O0→O3
 bash bench/difftest_transpile.sh    # transpile (hash 19acad982194bf07)
-bash bench/winediff.sh              # axe 2 vs Wine (107/107)
+bash bench/winediff.sh              # axe 2 vs Wine (108/108)
 bash bench/funcdiff.sh              # lift-closure + opt-diff vs Unicorn (0 div)
 # Sweeps de vrais binaires (téléchargent + comparent à Wine) :
 bash bench/sqlite_sweep.sh   bash bench/busybox_sweep.sh   bash bench/corpus_sweep.sh
@@ -190,7 +190,7 @@ bash bench/wallsweep.sh <dir1> [dir2…]  # AGRÈGE --mode walls sur un corpus :
 
 ### État régression (référence — doit rester vert)
 difftest **272/272** · transpile-diff **4/4** (H=`19acad982194bf07`) · winediff
-**107/107** · cpudiff vert (per-instruction + séquences génératives) · funcdiff corpus **0 divergence** (lift ~12k scorées /
+**108/108** · cpudiff vert (per-instruction + séquences génératives) · funcdiff corpus **0 divergence** (lift ~12k scorées /
 ~6k appels, opt ~10k scorées) · SMT **11/11** · in-place **3/3** · magicdiv **2³²** ·
 recompilabilité **100 %** · WASM **7/7**.
 
@@ -344,7 +344,14 @@ recompilabilité **100 %** · WASM **7/7**.
   les compare **linguistiquement** (majuscule après minuscule, `CompareStringW`) ≠ ordinal (mesuré) → **abort sound**
   plutôt qu'une divergence silencieuse ; le besoin de compare ordinal est couvert exact par `wcscmp`/`_wcsicmp`.
   Gardé `winecorpus/crt_widestr.c` (bit-identique Wine, ASCII). *(Piège : `sanitize_import` retire l'underscore de
-  tête → shim `aret_wcsicmp`, pas `aret__wcsicmp`.)* Reste : `%ls` dans printf (lit du wchar 32-bit hôte — gap séparé).
+  tête → shim `aret_wcsicmp`, pas `aret__wcsicmp`.)*
+- **Formatage wide** : **`%ls`/`%S`/`%lc`/`%C`** dans le formateur narrow (`aret_vformat` : lit une chaîne/car
+  **16-bit**, largeur/précision correctes) ; **formateur wide `aret_wvformat`** (sortie 16-bit, réutilise la logique
+  numérique éprouvée puis élargit) branché sur **`wsprintfW`** (user32) / **`_snwprintf`** (sém. troncature MS :
+  `-1` si tronqué, pas de NUL sur remplissage exact) / **`_vsnwprintf`** (va_list = pointeur d'args). **`swprintf`
+  NON modélisé** (signature ambiguë selon le CRT : `(buf,fmt,…)` legacy vs `(buf,count,fmt,…)` C99 que Wine utilise
+  — deviner mis-parse les args, Wine lui-même faute) → **abort sound**. Gardé `winecorpus/crt_wideprintf.c`
+  (bit-identique Wine).
 - **Win32** : console/TTY (GetConsoleMode/SetConsoleMode/GetFileType), Tls, locale/
   codepage (GetACP/GetStringTypeW/LCMapStringW/MultiByte↔Wide), heap/module,
   process/thread (`CreatePipe`=pipe() fidèle ; **`CreateThread` = fibers coopératifs réels**, cf.

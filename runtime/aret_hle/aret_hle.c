@@ -191,11 +191,38 @@ size_t aret_vformat(char *out, size_t cap, const char *fmt, const uint32_t *a) {
                 if (longlong) { w64 = ((uint64_t)a[ai + 1] << 32) | a[ai]; ai += 2; n = snprintf(tmp, sizeof tmp, spec, (unsigned long long)w64); }
                 else { n = snprintf(tmp, sizeof tmp, spec, (unsigned)a[ai++]); }
                 break;
-            case 'c': n = snprintf(tmp, sizeof tmp, spec, (int)a[ai++]); break;
+            case 'C':   /* wide char in a narrow printf (16-bit unit) */
+            case 'c': {
+                if (conv == 'C' || seen_l) {                 /* %lc / %C : 16-bit char */
+                    uint16_t wc = (uint16_t)a[ai++];
+                    n = snprintf(tmp, sizeof tmp, "%c", (wc && wc < 0x100) ? (int)wc : '?');
+                } else {
+                    n = snprintf(tmp, sizeof tmp, spec, (int)a[ai++]);
+                }
+                break;
+            }
             case 'p': n = snprintf(tmp, sizeof tmp, spec, (void *)(uintptr_t)a[ai++]); break;
+            case 'S':   /* wide string in a narrow printf (Windows convention) */
             case 's': {
-                const char *v = (const char *)(uintptr_t)a[ai++];
-                n = snprintf(tmp, sizeof tmp, spec, v ? v : "(null)");
+                if (conv == 'S' || seen_l) {                 /* %ls / %S : 16-bit string */
+                    const uint16_t *w = (const uint16_t *)(uintptr_t)a[ai++];
+                    char nb[2048]; size_t nn = 0;
+                    if (w) for (; w[nn] && nn < sizeof nb - 1; nn++) nb[nn] = w[nn] < 0x100 ? (char)w[nn] : '?';
+                    else { const char *z = "(null)"; while (*z) nb[nn++] = *z++; }
+                    nb[nn] = 0;
+                    /* narrow spec: same flags/width/precision, length modifiers dropped, conv 's'. */
+                    char sp[80]; size_t j = 0;
+                    for (size_t k = 0; k < si && j < sizeof sp - 2; k++) {
+                        char ch = spec[k];
+                        if (ch == 'l' || ch == 'h' || ch == 'L' || ch == 'j' || ch == 'z' || ch == 't') continue;
+                        sp[j++] = (ch == 'S') ? 's' : ch;
+                    }
+                    sp[j] = 0;
+                    n = snprintf(tmp, sizeof tmp, sp, nb);
+                } else {
+                    const char *v = (const char *)(uintptr_t)a[ai++];
+                    n = snprintf(tmp, sizeof tmp, spec, v ? v : "(null)");
+                }
                 break;
             }
             case 'e': case 'E': case 'f': case 'F': case 'g': case 'G': case 'a': case 'A': {
@@ -207,6 +234,98 @@ size_t aret_vformat(char *out, size_t cap, const char *fmt, const uint32_t *a) {
         }
         if (n < 0) n = 0;
         for (int k = 0; k < n && o < cap - 1; k++) out[o++] = tmp[k];
+    }
+    out[o] = 0;
+    return o;
+}
+
+/* Wide (16-bit) formatter — the analog of aret_vformat that produces a Windows
+ * wchar_t (16-bit) string. Numeric/char conversions reuse the exact narrow logic
+ * (format into a narrow buffer, then widen), so only the string source differs: in
+ * a wide printf `%s`/`%ls` = wide string, `%hs`/`%S` = narrow. `cap` counts 16-bit
+ * units (including the terminator). */
+size_t aret_wvformat(uint16_t *out, size_t cap, const uint16_t *fmt, const uint32_t *a) {
+    if (!fmt || cap == 0) { if (cap) out[0] = 0; return 0; }
+    int ai = 0;
+    size_t o = 0;
+    char spec[80];
+    for (const uint16_t *p = fmt; *p && o < cap - 1;) {
+        if (*p != '%') { out[o++] = *p++; continue; }
+        size_t si = 0;
+        spec[si++] = '%'; p++;
+        if (*p == '%') { out[o++] = '%'; p++; continue; }
+        while (*p && *p < 128 && si < sizeof(spec) - 16 && strchr("-+ #0123456789.*", (char)*p)) {
+            if (*p == '*') { si += (size_t)snprintf(spec + si, sizeof(spec) - si, "%d", (int)a[ai++]); p++; }
+            else spec[si++] = (char)*p++;
+        }
+        int longlong = 0, seen_l = 0, seen_h = 0;
+        if (p[0] == 'I' && p[1] == '6' && p[2] == '4') { longlong = 1; if (si < sizeof(spec) - 3) { spec[si++] = 'l'; spec[si++] = 'l'; } p += 3; }
+        else if (p[0] == 'I' && p[1] == '3' && p[2] == '2') { p += 3; }
+        else if (p[0] == 'I') { p += 1; }
+        while (*p == 'l' || *p == 'h' || *p == 'L' || *p == 'z' || *p == 'j' || *p == 't') {
+            if (*p == 'l') { if (seen_l) longlong = 1; seen_l = 1; }
+            if (*p == 'h') seen_h = 1;
+            if (*p == 'L' || *p == 'j') longlong = 1;
+            if (si < sizeof(spec) - 2) spec[si++] = (char)*p;
+            p++;
+        }
+        char conv = *p ? (char)*p++ : 0;
+        if (!conv) break;
+        if (si < sizeof(spec) - 2) spec[si++] = conv;
+        spec[si] = 0;
+        char tmp[2048];
+        int n = 0;
+        uint64_t w64;
+        switch (conv) {
+            case 'd': case 'i':
+                if (longlong) { w64 = ((uint64_t)a[ai + 1] << 32) | a[ai]; ai += 2; n = snprintf(tmp, sizeof tmp, spec, (long long)w64); }
+                else { n = snprintf(tmp, sizeof tmp, spec, (int)a[ai++]); }
+                break;
+            case 'u': case 'x': case 'X': case 'o':
+                if (longlong) { w64 = ((uint64_t)a[ai + 1] << 32) | a[ai]; ai += 2; n = snprintf(tmp, sizeof tmp, spec, (unsigned long long)w64); }
+                else { n = snprintf(tmp, sizeof tmp, spec, (unsigned)a[ai++]); }
+                break;
+            case 'p': n = snprintf(tmp, sizeof tmp, spec, (void *)(uintptr_t)a[ai++]); break;
+            case 'e': case 'E': case 'f': case 'F': case 'g': case 'G': case 'a': case 'A': {
+                union { uint64_t u; double d; } u; u.u = ((uint64_t)a[ai + 1] << 32) | a[ai]; ai += 2;
+                n = snprintf(tmp, sizeof tmp, spec, u.d);
+                break;
+            }
+            case 'C': case 'c': {                  /* wide char default; %hc = narrow */
+                uint16_t wc = (uint16_t)a[ai++];
+                if (conv != 'C' && seen_h) wc = (uint16_t)(uint8_t)wc;
+                if (o < cap - 1) out[o++] = wc;
+                continue;
+            }
+            case 'S': case 's': {
+                int narrow = (conv == 'S') || seen_h;  /* %hs/%S narrow, %s/%ls wide */
+                /* Widen the source into a narrow byte buffer, then apply flags/width/
+                 * precision via a narrow `%s` spec, then widen the formatted result. */
+                char nb[2048]; size_t nn = 0;
+                if (narrow) {
+                    const char *v = (const char *)(uintptr_t)a[ai++];
+                    if (!v) v = "(null)";
+                    for (; *v && nn < sizeof nb - 1; nn++) nb[nn] = *v++;
+                } else {
+                    const uint16_t *v = (const uint16_t *)(uintptr_t)a[ai++];
+                    if (v) for (; v[nn] && nn < sizeof nb - 1; nn++) nb[nn] = v[nn] < 0x100 ? (char)v[nn] : '?';
+                    else { const char *z = "(null)"; while (*z) nb[nn++] = *z++; }
+                }
+                nb[nn] = 0;
+                char sp[80]; size_t j = 0;
+                for (size_t k = 0; k < si && j < sizeof sp - 2; k++) {
+                    char ch = spec[k];
+                    if (ch == 'l' || ch == 'h' || ch == 'L' || ch == 'j' || ch == 'z' || ch == 't') continue;
+                    sp[j++] = (ch == 'S') ? 's' : ch;
+                }
+                sp[j] = 0;
+                n = snprintf(tmp, sizeof tmp, sp, nb);
+                break;
+            }
+            default: n = snprintf(tmp, sizeof tmp, "%s", spec); break;
+        }
+        if (n < 0) n = 0;
+        for (int k = 0; k < n && o < cap - 1; k++) out[o++] = (uint16_t)(uint8_t)tmp[k];
     }
     out[o] = 0;
     return o;

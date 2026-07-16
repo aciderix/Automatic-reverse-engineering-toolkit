@@ -2201,4 +2201,23 @@ Détail : **70 §6** (roadmap). Résumé :
   chr/rchr/str, towlower/upper, ncpy, lstrlenW/cpyW/catW), ASCII. Portes : hash transpile inchangé
   (`19acad982194bf07`), `table_is_sorted` vert, winediff **106→107/107**, sqlite/busybox smoke OK.
 
+### 2026-07-16 — [HLE-STDIO][ORACLE] Formatage wide (`%ls`, `wsprintfW`, `_snwprintf`, `_vsnwprintf`) — bit-identique Wine
+- **Suite du wide-string** : le gap `%ls` repéré la fois d'avant est comblé, + les formateurs wide.
+- **Formateur narrow** (`aret_vformat`) : `%ls`/`%S` (chaîne **16-bit** → narrow, avec largeur/précision via un spec
+  narrow reconstruit sans les length-modifiers), `%lc`/`%C` (car 16-bit). Avant, `%ls` passait à glibc qui lisait
+  du `wchar_t` **32-bit** hôte sur une chaîne 16-bit → sortie fausse.
+- **Formateur wide** `aret_wvformat` (analogue 16-bit) : réutilise la logique numérique éprouvée (formate en narrow
+  puis élargit), seule la **source chaîne** diffère (en wide printf `%s`=wide, `%hs`/`%S`=narrow). Branché sur :
+  **`wsprintfW`** (user32, max 1024), **`_snwprintf(dst,count,fmt,…)`** (sém. MS : retourne `-1` si tronqué, pas de
+  NUL sur remplissage exact — **mesuré = Wine** : `_snwprintf(6,"HELLOWORLD")→-1, buf="HELLOW"`), **`_vsnwprintf`**
+  (va_list = pointeur d'args).
+- **Décision de soundness — `swprintf` NON modélisé** : signature **ambiguë selon le CRT** (`(buf,fmt,…)` legacy vs
+  `(buf,count,fmt,…)` C99/secure que Wine utilise). Deviner mis-parse les arguments — **Wine lui-même faute**
+  (`page fault, movzxw (%edi), edi=7`) quand on passe la forme legacy. → **abort sound** plutôt qu'un mis-parse
+  silencieux ; `_snwprintf`/`wsprintfW`/`_vsnwprintf` (signatures non ambiguës) couvrent le besoin.
+- **Piège** : `sanitize_import` → shims `aret_snwprintf`/`aret_vsnwprintf` (underscore de tête retiré).
+- **Vérifié bit-identique Wine** : `winecorpus/crt_wideprintf.c` (`%ls`/`%S`/`%10ls`/`%.4ls`/`%lc`/`%C`, wsprintfW
+  avec `%d`/`%08x`/`%s`/`%c`/`%%`, `_snwprintf` tronqué **et** ok, `_vsnwprintf` via va_list). Portes : hash
+  transpile inchangé (`19acad982194bf07`), winediff **107→108/108**.
+
 <!-- NOUVELLES ENTRÉES ICI (garder l'ordre chronologique, plus récent en bas) -->

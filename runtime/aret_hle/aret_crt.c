@@ -269,6 +269,49 @@ uint32_t aret_vsprintf(uint32_t esp) {
     return (uint32_t)n;
 }
 
+/* Wide (16-bit) printf family. The wide formatter lives in aret_hle.c beside
+ * aret_vformat. Windows wchar_t is 16-bit, so buffers/format strings are uint16_t. */
+size_t aret_wvformat(uint16_t *out, size_t cap, const uint16_t *fmt, const uint32_t *a);
+/* NOTE: `swprintf` is deliberately NOT modelled — its signature is CRT-version
+ * ambiguous (legacy `(buf, fmt, ...)` vs the C99/secure `(buf, count, fmt, ...)`
+ * that Wine's msvcrt uses), so guessing one silently mis-parses arguments (Wine
+ * itself faults on the wrong form). It stays a sound abort; the unambiguous
+ * `_snwprintf`/`wsprintfW`/`_vsnwprintf` cover wide formatting. */
+/* wsprintfW(dst, fmt, ...) — USER32's wide sprintf (max 1024 wchars). */
+uint32_t aret_wsprintfW(uint32_t esp) {
+    uint16_t *dst = (uint16_t *)AP(0);
+    const uint16_t *fmt = (const uint16_t *)AP(1);
+    const uint32_t *va = &((const uint32_t *)(uintptr_t)esp)[2];
+    return (uint32_t)aret_wvformat(dst, 1024, fmt, va);
+}
+/* _snwprintf(dst, count, fmt, ...) — msvcrt: returns the count written, or -1 if
+ * the output was truncated (does NOT NUL-terminate on an exact fill). */
+static uint32_t aret_wsn_finish(uint16_t *dst, size_t cap, const uint16_t *tmp, size_t n) {
+    if (cap == 0) return (uint32_t)-1;
+    if (n < cap) { memcpy(dst, tmp, n * 2); dst[n] = 0; return (uint32_t)n; }
+    memcpy(dst, tmp, cap * 2);            /* fill, no terminator */
+    return (uint32_t)-1;
+}
+uint32_t aret_snwprintf(uint32_t esp) {
+    uint16_t *dst = (uint16_t *)AP(0);
+    size_t cap = AU(1);
+    const uint16_t *fmt = (const uint16_t *)AP(2);
+    const uint32_t *va = &((const uint32_t *)(uintptr_t)esp)[3];
+    static uint16_t tmp[8192];
+    size_t n = aret_wvformat(tmp, 8192, fmt, va);
+    return aret_wsn_finish(dst, cap, tmp, n);
+}
+/* _vsnwprintf(dst, count, fmt, va_list) — the va_list is a pointer to the args. */
+uint32_t aret_vsnwprintf(uint32_t esp) {
+    uint16_t *dst = (uint16_t *)AP(0);
+    size_t cap = AU(1);
+    const uint16_t *fmt = (const uint16_t *)AP(2);
+    const uint32_t *va = (const uint32_t *)(uintptr_t)AU(3);
+    static uint16_t tmp[8192];
+    size_t n = aret_wvformat(tmp, 8192, fmt, va);
+    return aret_wsn_finish(dst, cap, tmp, n);
+}
+
 /* aret_fflush lives in aret_hle.c (next to the synthetic _iob machinery): a
  * flush of a stdin/out/err stream must NOT be passed to the host fflush as a
  * raw pointer — those are our unbuffered _iob entries, not host FILE*. */
