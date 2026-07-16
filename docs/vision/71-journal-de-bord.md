@@ -2244,4 +2244,17 @@ Détail : **70 §6** (roadmap). Résumé :
 - **Extensible** : mesurer le niveau spécial de `-`/`'` (et Latin-1) élargirait le sous-ensemble prouvé ; pour
   l'instant abort sound suffit (le chemin rapide couvre déjà l'égalité de tout contenu).
 
+### 2026-07-16 — [HLE-WIN32][ORACLE] Collation : niveau spécial des ignorables (`-`/`'`) — sous-ensemble prouvé élargi
+- **Suite directe** de la collation linguistique : élargi le sous-ensemble prouvé aux **ponctuations ignorables au
+  niveau primaire** (`-`, `'`) — fréquentes (noms de fichiers "read-me.txt", "O'Brien").
+- **Forensics** : dumpé `LCMAP_SORTKEY` pour des chaînes avec `-`/`'` → **décodé le niveau spécial** : chaque
+  ignorable ne contribue **rien** aux niveaux primaire/casse, mais ajoute `ff (0xff - nNonIgnorablesAvant) <poids>
+  0x12` au niveau spécial (poids mesurés : `-`=0x82, `'`=0x80). Structure complète : `PRI 01 01 CASE 01 01 SPECIAL
+  00`. Pattern de position **linéaire** confirmé jusqu'à n=10 (`abcdefghij-k` → `0xf5`).
+- **Implémenté** : `u32_ign(c)` + branche spéciale dans `u32_sortkey` ; cap `nAvant < 0x80` (au-delà → abort sound,
+  hors de toute chaîne réaliste). Message d'abort mis à jour (ne reste que non-ASCII/contrôles).
+- **Vérifié bit-identique Wine** : `win_collate.c` élargi à **2500 paires** (50 chaînes dont `read-me`/`O'Brien`/
+  `co-op`/`e-mail`…), hash **`63c659d1`** = Wine ; `readme/read-me=-1`, `coop/co-op=-1`, `OBrien/O'Brien=-1`. Portes :
+  hash transpile inchangé, winediff (voir chiffre). ⇒ l'abort ne reste que pour le **non-ASCII** (Latin-1/Unicode).
+
 <!-- NOUVELLES ENTRÉES ICI (garder l'ordre chronologique, plus récent en bas) -->

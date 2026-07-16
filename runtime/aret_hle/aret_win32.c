@@ -383,18 +383,30 @@ static const uint16_t u32_pri[128] = {
     0x0e7e, 0x0e89, 0x0e8a, 0x0e91, 0x0e99, 0x0e9f, 0x0ea2, 0x0ea4,
     0x0ea6, 0x0ea7, 0x0ea9, 0x074a, 0x074c, 0x074e, 0x0750, 0x0000,
 };
+/* Primary-ignorable punctuation: contributes nothing to the primary/case levels,
+ * only a 4-byte entry to the special level `ff (0xff-nBefore) <weight> 12` (weights
+ * measured from Wine). 0 = not ignorable. */
+static uint8_t u32_ign(uint16_t c) { return c == '\'' ? 0x80 : c == '-' ? 0x82 : 0; }
 /* Build the sort key for `len` code units of `s` (len<0 = until NUL). Returns the
- * key length, or -1 if any unit is outside the proven subset. */
+ * key length, or -1 if any unit is outside the proven subset. Structure:
+ * PRI 01 01 CASE 01 01 SPECIAL 00 (CASE dropped when case-insensitive). */
 static int u32_sortkey(uint8_t *dst, const uint16_t *s, int len, int ignore_case) {
-    uint8_t pri[1024], cas[512]; int np = 0, nc = 0;
+    uint8_t pri[1024], cas[512], spc[1024]; int np = 0, nc = 0, ns = 0, nbefore = 0;
     for (int i = 0; (len < 0) ? (s[i] != 0) : (i < len); i++) {
         uint16_t c = s[i];
         if (len >= 0 && c == 0) break;
+        uint8_t iw = u32_ign(c);
+        if (iw) {                                        /* primary-ignorable -> special level */
+            if (ns > 1018 || nbefore >= 0x80) return -1; /* position byte stays in proven range */
+            spc[ns++] = 0xff; spc[ns++] = (uint8_t)(0xff - nbefore); spc[ns++] = iw; spc[ns++] = 0x12;
+            continue;
+        }
         if (c >= 128 || u32_pri[c] == 0) return -1;      /* unmodelled -> abort */
         if (np > 1020 || nc > 508) return -1;            /* too long -> abort */
         uint16_t w = u32_pri[c];
         pri[np++] = (uint8_t)(w >> 8); pri[np++] = (uint8_t)w;
         cas[nc++] = (c >= 'A' && c <= 'Z') ? 0x12 : 0x02;
+        nbefore++;
     }
     if (ignore_case) nc = 0;
     else while (nc > 0 && cas[nc - 1] == 0x02) nc--;     /* trim trailing default case */
@@ -402,7 +414,9 @@ static int u32_sortkey(uint8_t *dst, const uint16_t *s, int len, int ignore_case
     for (int i = 0; i < np; i++) dst[o++] = pri[i];
     dst[o++] = 0x01; dst[o++] = 0x01;
     for (int i = 0; i < nc; i++) dst[o++] = cas[i];
-    dst[o++] = 0x01; dst[o++] = 0x01; dst[o++] = 0x00;
+    dst[o++] = 0x01; dst[o++] = 0x01;
+    for (int i = 0; i < ns; i++) dst[o++] = spc[i];
+    dst[o++] = 0x00;
     return o;
 }
 /* Linguistic compare -> -1/0/1, or -2 = unmodelled (caller aborts sound). */
@@ -427,7 +441,7 @@ uint32_t aret_lstrcmpW(uint32_t esp) {
     if (!a || !b) return (uint32_t)(int32_t)(a == b ? 0 : a ? 1 : -1);
     if (u32_wstr_eq(a, b)) return 0;
     int r = u32_collate(a, -1, b, -1, 0);
-    if (r == -2) { aret_unmodelled("lstrcmpW: unmodelled linguistic collation (non-ASCII or ignorable '-'/apostrophe)"); return 0; }
+    if (r == -2) { aret_unmodelled("lstrcmpW: unmodelled linguistic collation (non-ASCII / control char)"); return 0; }
     return (uint32_t)(int32_t)r;
 }
 uint32_t aret_lstrcmpiW(uint32_t esp) {

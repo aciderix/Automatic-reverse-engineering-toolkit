@@ -348,11 +348,12 @@ recompilabilité **100 %** · WASM **7/7**.
   lettres, `~` < lettres…), pas ordinalement. Le résultat = `sign(memcmp(sortkey(a), sortkey(b)))`. On **reproduit
   la sort-key BIT-À-BIT** (poids par caractère **MESURÉS** de `LCMAP_SORTKEY` de Wine, pas devinés) pour un
   **sous-ensemble ASCII prouvé** : `PRI(2 o/car) 01 01 CASE(0x12 maj/0x02 sinon, 0x02 de queue élagués ; retiré si
-  insensible à la casse) 01 01 00`. **Hors du sous-ensemble** (contrôles, `-`/`'` ignorables au niveau primaire,
-  non-ASCII) → **abort sound** (jamais deviné). **Chemin rapide égalité** : deux chaînes binairement identiques
-  sont linguistiquement égales pour **tout** contenu (une comparaison d'égalité n'aborte jamais). Gardé
-  `winecorpus/win_collate.c` (**1444 paires**, hash `aa8fcadd` = Wine ; `Hello/hello=1`, `~/a=-1` — que l'ordinal
-  ratait).
+  insensible à la casse) 01 01 SPECIAL 00`, où **SPECIAL** gère les **ignorables au niveau primaire** `-`/`'`
+  (contribuent `ff (0xff-nAvant) <poids> 12` — mesuré : "read-me" trié après "readme", "O'Brien"…). **Hors du
+  sous-ensemble** (contrôles, non-ASCII) → **abort sound** (jamais deviné). **Chemin rapide égalité** : deux chaînes
+  binairement identiques sont linguistiquement égales pour **tout** contenu (une comparaison d'égalité n'aborte
+  jamais). Gardé `winecorpus/win_collate.c` (**2500 paires**, hash `63c659d1` = Wine ; `Hello/hello=1`, `~/a=-1`,
+  `readme/read-me=-1` — que l'ordinal ratait).
 - **Formatage wide** : **`%ls`/`%S`/`%lc`/`%C`** dans le formateur narrow (`aret_vformat` : lit une chaîne/car
   **16-bit**, largeur/précision correctes) ; **formateur wide `aret_wvformat`** (sortie 16-bit, réutilise la logique
   numérique éprouvée puis élargit) branché sur **`wsprintfW`** (user32) / **`_snwprintf`** (sém. troncature MS :
