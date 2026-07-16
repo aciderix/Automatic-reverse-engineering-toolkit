@@ -337,6 +337,27 @@ uint32_t aret_lstrcpyA(uint32_t esp) { return WRP(strcpy(WS(0), WCS(1))); }
 uint32_t aret_lstrcatA(uint32_t esp) { return WRP(strcat(WS(0), WCS(1))); }
 uint32_t aret_lstrcmpA(uint32_t esp) { return (uint32_t)(int32_t)strcmp(WCS(0), WCS(1)); }
 uint32_t aret_lstrcmpiA(uint32_t esp){ return (uint32_t)(int32_t)strcasecmp(WCS(0), WCS(1)); }
+/* Wide (16-bit) kernel32 string length/copy/cat — ordinal, exact. NOTE: lstrcmpW/
+ * lstrcmpiW are deliberately NOT implemented here: Wine (like Windows) compares them
+ * *linguistically* via CompareStringW (uppercase sorts AFTER lowercase, locale
+ * collation), which an ordinal compare does not match (measured) — so they stay a
+ * sound abort rather than a silent divergence. The ordinal msvcrt `wcscmp`/`_wcsicmp`
+ * cover the ordinal-compare need exactly. */
+uint32_t aret_lstrlenW(uint32_t esp) {
+    const uint16_t *s = (const uint16_t *)WP(0);
+    if (!s) return 0;
+    uint32_t n = 0; while (s[n]) n++; return n;
+}
+uint32_t aret_lstrcpyW(uint32_t esp) {
+    uint16_t *d = (uint16_t *)WP(0); const uint16_t *s = (const uint16_t *)WP(1);
+    if (d && s) while ((*d++ = *s++)) {}
+    return WU(0);
+}
+uint32_t aret_lstrcatW(uint32_t esp) {
+    uint16_t *d = (uint16_t *)WP(0); const uint16_t *s = (const uint16_t *)WP(1);
+    if (d && s) { while (*d) d++; while ((*d++ = *s++)) {} }
+    return WU(0);
+}
 
 /* ------------------------------------------------------------------ */
 /* Heap — kernel32 heap maps onto the C allocator                      */

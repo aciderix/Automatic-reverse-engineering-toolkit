@@ -170,7 +170,7 @@ bash bench/regression.sh    # PORTE unifiée : difftest 271/271, in-place 3/3,
                             # recompilabilité gzip/ls/cat 100%
 bash bench/difftest.sh              # décompile O0→O3
 bash bench/difftest_transpile.sh    # transpile (hash 19acad982194bf07)
-bash bench/winediff.sh              # axe 2 vs Wine (106/106)
+bash bench/winediff.sh              # axe 2 vs Wine (107/107)
 bash bench/funcdiff.sh              # lift-closure + opt-diff vs Unicorn (0 div)
 # Sweeps de vrais binaires (téléchargent + comparent à Wine) :
 bash bench/sqlite_sweep.sh   bash bench/busybox_sweep.sh   bash bench/corpus_sweep.sh
@@ -190,7 +190,7 @@ bash bench/wallsweep.sh <dir1> [dir2…]  # AGRÈGE --mode walls sur un corpus :
 
 ### État régression (référence — doit rester vert)
 difftest **272/272** · transpile-diff **4/4** (H=`19acad982194bf07`) · winediff
-**106/106** · cpudiff vert (per-instruction + séquences génératives) · funcdiff corpus **0 divergence** (lift ~12k scorées /
+**107/107** · cpudiff vert (per-instruction + séquences génératives) · funcdiff corpus **0 divergence** (lift ~12k scorées /
 ~6k appels, opt ~10k scorées) · SMT **11/11** · in-place **3/3** · magicdiv **2³²** ·
 recompilabilité **100 %** · WASM **7/7**.
 
@@ -337,6 +337,14 @@ recompilabilité **100 %** · WASM **7/7**.
   strtoll/strtoull/div/ldiv (retour **edx:eax** via `import_returns_u64`), `atexit`
   (via `_onexit`), setjmp/longjmp, `_getcwd`/`_chdir`/`_fullpath`, rand LCG msvcrt,
   gmtime/localtime/mktime/strftime (struct tm Windows).
+- **CRT wide-string** (`<wchar.h>`, code-units **16-bit** Windows, **piloté par la donnée** — famille dominante
+  d'imports manquants sur le corpus WineHQ) : `wcslen/cpy/cat/cmp/ncmp/ncpy/chr/rchr/str/dup`, `_wcsicmp/_wcsnicmp`
+  (**fold ASCII = exact en locale C**, ordinal comme msvcrt — mesuré ≠ collation linguistique), `towlower/towupper`,
+  + kernel32 `lstrlenW/lstrcpyW/lstrcatW` (ordinaux). **`lstrcmpW`/`lstrcmpiW` volontairement NON modélisés** : Wine
+  les compare **linguistiquement** (majuscule après minuscule, `CompareStringW`) ≠ ordinal (mesuré) → **abort sound**
+  plutôt qu'une divergence silencieuse ; le besoin de compare ordinal est couvert exact par `wcscmp`/`_wcsicmp`.
+  Gardé `winecorpus/crt_widestr.c` (bit-identique Wine, ASCII). *(Piège : `sanitize_import` retire l'underscore de
+  tête → shim `aret_wcsicmp`, pas `aret__wcsicmp`.)* Reste : `%ls` dans printf (lit du wchar 32-bit hôte — gap séparé).
 - **Win32** : console/TTY (GetConsoleMode/SetConsoleMode/GetFileType), Tls, locale/
   codepage (GetACP/GetStringTypeW/LCMapStringW/MultiByte↔Wide), heap/module,
   process/thread (`CreatePipe`=pipe() fidèle ; **`CreateThread` = fibers coopératifs réels**, cf.

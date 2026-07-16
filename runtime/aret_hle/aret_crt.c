@@ -419,6 +419,74 @@ uint32_t aret_wcsdup(uint32_t esp) {
     for (uint32_t i = 0; i <= n; i++) d[i] = s[i];
     return (uint32_t)(uintptr_t)d;
 }
+/* Case fold for a 16-bit code unit. In the C/default locale (which this runtime
+ * fixes) msvcrt's towlower/_wcsicmp fold ONLY ASCII A-Z — so ASCII folding is the
+ * exact behaviour, not an approximation. Non-ASCII units pass through unchanged. */
+static uint16_t w_lower(uint16_t c) { return (c >= 'A' && c <= 'Z') ? (uint16_t)(c + 32) : c; }
+uint32_t aret_towlower(uint32_t esp) { uint16_t c = (uint16_t)a32(esp, 0); return w_lower(c); }
+uint32_t aret_towupper(uint32_t esp) {
+    uint16_t c = (uint16_t)a32(esp, 0);
+    return (c >= 'a' && c <= 'z') ? (uint16_t)(c - 32) : c;
+}
+uint32_t aret_wcsncmp(uint32_t esp) {
+    const uint16_t *a = (const uint16_t *)(uintptr_t)a32(esp, 0);
+    const uint16_t *b = (const uint16_t *)(uintptr_t)a32(esp, 1);
+    uint32_t n = a32(esp, 2);
+    for (uint32_t i = 0; i < n; i++) {
+        if (a[i] != b[i]) return (uint32_t)(int32_t)((int)a[i] - (int)b[i]);
+        if (!a[i]) break;
+    }
+    return 0;
+}
+/* _wcsicmp / _wcsnicmp — case-insensitive (ASCII fold, exact for the C locale). */
+uint32_t aret_wcsicmp(uint32_t esp) {
+    const uint16_t *a = (const uint16_t *)(uintptr_t)a32(esp, 0);
+    const uint16_t *b = (const uint16_t *)(uintptr_t)a32(esp, 1);
+    while (*a && w_lower(*a) == w_lower(*b)) { a++; b++; }
+    return (uint32_t)(int32_t)((int)w_lower(*a) - (int)w_lower(*b));
+}
+uint32_t aret_wcsnicmp(uint32_t esp) {
+    const uint16_t *a = (const uint16_t *)(uintptr_t)a32(esp, 0);
+    const uint16_t *b = (const uint16_t *)(uintptr_t)a32(esp, 1);
+    uint32_t n = a32(esp, 2);
+    for (uint32_t i = 0; i < n; i++) {
+        uint16_t x = w_lower(a[i]), y = w_lower(b[i]);
+        if (x != y) return (uint32_t)(int32_t)((int)x - (int)y);
+        if (!a[i]) break;
+    }
+    return 0;
+}
+uint32_t aret_wcschr(uint32_t esp) {
+    const uint16_t *s = (const uint16_t *)(uintptr_t)a32(esp, 0);
+    uint16_t c = (uint16_t)a32(esp, 1);
+    for (;; s++) { if (*s == c) return (uint32_t)(uintptr_t)s; if (!*s) return 0; }
+}
+uint32_t aret_wcsrchr(uint32_t esp) {
+    const uint16_t *s = (const uint16_t *)(uintptr_t)a32(esp, 0);
+    uint16_t c = (uint16_t)a32(esp, 1);
+    const uint16_t *last = 0;
+    for (;; s++) { if (*s == c) last = s; if (!*s) break; }
+    return (uint32_t)(uintptr_t)last;
+}
+uint32_t aret_wcsncpy(uint32_t esp) {
+    uint16_t *d = (uint16_t *)(uintptr_t)a32(esp, 0);
+    const uint16_t *s = (const uint16_t *)(uintptr_t)a32(esp, 1);
+    uint32_t n = a32(esp, 2), i = 0;
+    for (; i < n && s[i]; i++) d[i] = s[i];
+    for (; i < n; i++) d[i] = 0;                 /* pad with NULs, no forced terminator */
+    return a32(esp, 0);
+}
+uint32_t aret_wcsstr(uint32_t esp) {
+    const uint16_t *h = (const uint16_t *)(uintptr_t)a32(esp, 0);
+    const uint16_t *n = (const uint16_t *)(uintptr_t)a32(esp, 1);
+    if (!n[0]) return (uint32_t)(uintptr_t)h;
+    for (; *h; h++) {
+        uint32_t i = 0;
+        while (n[i] && h[i] == n[i]) i++;
+        if (!n[i]) return (uint32_t)(uintptr_t)h;
+    }
+    return 0;
+}
 
 /* ------------------------------------------------------------------ */
 /* <time.h> calendar — struct tm marshalling (host/guest ABI)         */

@@ -2181,4 +2181,24 @@ Détail : **70 §6** (roadmap). Résumé :
   funcdiff corpus **0 divergence**, winediff **106/106**. *(Piège attrapé : un Xvfb `:99` résiduel de mes tests
   manuels faisait DIFF les 12 fixtures GUI — environnemental, pas le lift ; résolu en tuant le stray Xvfb.)*
 
+### 2026-07-16 — [HLE-STDIO][ORACLE] CRT wide-string (16-bit) — piloté par la donnée (imports manquants des vrais binaires), bit-identique Wine
+- **Méthode data-driven (axe 2)** : `--mode imports` agrégé sur 7 modules WineHQ → la famille dominante d'imports
+  manquants = **wide-string** (`lstrcmpW`×7, `_wcsnicmp`×4, `lstrcmpiW`×5, `wcsrchr/wcsncmp/_wcsicmp/wcschr/wcstok/
+  towlower/towupper/wsprintfW…`). Utilisée largement par les vraies applis Unicode Windows.
+- **Implémenté** (code-units **16-bit**, Windows `wchar_t` ≠ hôte 32-bit → compté à la main, pas de forward host) :
+  `wcsncmp/wcschr/wcsrchr/wcsncpy/wcsstr` + `_wcsicmp/_wcsnicmp` (**fold ASCII = exact en locale C**, ordinal comme
+  msvcrt) + `towlower/towupper`, et kernel32 `lstrlenW/lstrcpyW/lstrcatW` (ordinaux). stdcall_pops : lstr\*W + les
+  lstr\*A jusque-là **absents** (bug latent d'esp-drift, jamais testé).
+- **Décision de soundness — `lstrcmpW`/`lstrcmpiW` NON implémentés** : mesuré que Wine les compare
+  **linguistiquement** (`lstrcmpW("Hello","hello")=+1` : majuscule *après* minuscule via `CompareStringW`), ≠ ordinal
+  (`-1`). Un ordinal serait **silencieusement faux** → laissés en **abort sound**. `_wcsicmp` (msvcrt), lui, EST
+  ordinal (`_wcsicmp("ZED","abc")=+1` = Wine) → gardé. Le besoin de compare ordinal est couvert exact par
+  `wcscmp`/`_wcsicmp`.
+- **Pièges attrapés** : (1) `sanitize_import` retire l'underscore de tête → shims `aret_wcsicmp`/`aret_wcsnicmp`
+  (pas `aret__…`) — le weak stub rendait `0` = « égal » par coïncidence, masquant le bug ; (2) `%ls` dans printf
+  lit du `wchar_t` **32-bit hôte** sur une chaîne 16-bit → gap séparé (évité dans la fixture via un dump octet).
+- **Vérifié bit-identique Wine** : `winecorpus/crt_widestr.c` (len/cmp/ncmp/icmp/nicmp avec **ordonnancements**,
+  chr/rchr/str, towlower/upper, ncpy, lstrlenW/cpyW/catW), ASCII. Portes : hash transpile inchangé
+  (`19acad982194bf07`), `table_is_sorted` vert, winediff **106→107/107**, sqlite/busybox smoke OK.
+
 <!-- NOUVELLES ENTRÉES ICI (garder l'ordre chronologique, plus récent en bas) -->
