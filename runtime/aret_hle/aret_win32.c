@@ -801,6 +801,9 @@ struct u32_fiber {
     uint32_t   wait_h[64];       /* Wait set (MAXIMUM_WAIT_OBJECTS)                  */
     int        wait_n, wait_all;
     uint32_t   wait_cs;          /* CRITICAL_SECTION being acquired (0 = none)      */
+    int        has_timeout;      /* this wait/sleep has a finite deadline           */
+    int        timed_out;        /* it was woken by the deadline, not a signal      */
+    uint64_t   wake_time;        /* virtual-clock deadline (ms) if has_timeout      */
 };
 static struct u32_fiber g_fiber[U32_MAX_FIBER];
 static int g_nfiber = 1;         /* fiber 0 = main, always present */
@@ -809,6 +812,13 @@ static int g_rr = 0;             /* round-robin cursor */
 static ucontext_t g_sched_ctx;   /* scheduler's own context */
 static void *g_sched_stack;
 static int g_sched_ready;
+/* Deterministic virtual clock (ms). It only advances when NO fiber can make
+ * progress and a timed wait/Sleep is pending — the scheduler jumps to the earliest
+ * deadline and fires it. Independent of wall-clock, so the schedule stays
+ * reproducible while finite timeouts (WaitForSingleObject(h, 50), Sleep(100)) get
+ * honoured instead of dead-locking. */
+static uint64_t g_vclock;
+#define U32_INFINITE 0xFFFFFFFFu
 
 /* CRITICAL_SECTION table, keyed by the program's &cs pointer (the struct itself is
  * left opaque, as Wine treats it). owner = fiber index + 1 (0 = free); rec = the
@@ -926,19 +936,22 @@ static void u32_handle_acquire(uint32_t h, int me) {
     int si = u32_sem_idx(h);
     if (si >= 0) { if (g_sem[si].count > 0) g_sem[si].count--; return; }
 }
-/* A blocked fiber is runnable when its wait condition clears: a CRITICAL_SECTION
- * it wants is free (owner 0 or itself), or its handle wait set is satisfied. */
+/* A blocked fiber is signal-runnable when its wait condition clears: a CRITICAL_
+ * SECTION it wants is free, or its handle wait set is satisfied. A *pure* timed
+ * sleep (no handles) is never signal-runnable — only the virtual clock wakes it. */
 static int u32_fiber_runnable(int i) {
     struct u32_fiber *f = &g_fiber[i];
     if (f->wait_cs) { int o = u32_cs_owner(f->wait_cs); return o == 0 || o == i + 1; }
+    if (f->wait_n == 0) return 0;                 /* pure Sleep → woken by the clock only */
     return u32_wait_ok(f);
 }
 static void u32_sched_loop(void) {
     for (;;) {
-        /* Wake any blocked fiber whose wait condition is now satisfied. */
+        /* Wake any blocked fiber whose wait condition is now satisfied (by signal). */
         for (int i = 0; i < g_nfiber; i++)
-            if (g_fiber[i].state == FST_BLOCKED && u32_fiber_runnable(i))
-                g_fiber[i].state = FST_READY;
+            if (g_fiber[i].state == FST_BLOCKED && u32_fiber_runnable(i)) {
+                g_fiber[i].state = FST_READY; g_fiber[i].timed_out = 0;
+            }
         /* Pick the next READY fiber round-robin (starting AFTER the last one). */
         int pick = -1;
         for (int k = 1; k <= g_nfiber; k++) {
@@ -946,9 +959,25 @@ static void u32_sched_loop(void) {
             if (g_fiber[i].state == FST_READY) { pick = i; break; }
         }
         if (pick < 0) {
+            /* Nothing signal-runnable. If any fiber has a finite deadline, advance
+             * the virtual clock to the earliest and fire the timed-out ones — this
+             * is how finite timeouts (and Sleep) resolve deterministically instead
+             * of dead-locking. Only an all-infinite block is a true deadlock. */
+            uint64_t earliest = (uint64_t)-1;
+            for (int i = 0; i < g_nfiber; i++)
+                if (g_fiber[i].state == FST_BLOCKED && g_fiber[i].has_timeout && g_fiber[i].wake_time < earliest)
+                    earliest = g_fiber[i].wake_time;
+            if (earliest != (uint64_t)-1) {
+                g_vclock = earliest;
+                for (int i = 0; i < g_nfiber; i++)
+                    if (g_fiber[i].state == FST_BLOCKED && g_fiber[i].has_timeout && g_fiber[i].wake_time <= g_vclock) {
+                        g_fiber[i].state = FST_READY; g_fiber[i].timed_out = 1;
+                    }
+                continue;                          /* re-loop: some are READY now */
+            }
             int blocked = 0;
             for (int i = 0; i < g_nfiber; i++) if (g_fiber[i].state == FST_BLOCKED) blocked = 1;
-            if (blocked) aret_unmodelled("fiber scheduler: deadlock (all live threads blocked)");
+            if (blocked) aret_unmodelled("fiber scheduler: deadlock (all live threads blocked, no timeout pending)");
             return;   /* nothing runnable and nothing blocked → every fiber is DONE */
         }
         g_rr = pick; g_cur = pick; g_fiber[pick].state = FST_RUNNING;
@@ -974,25 +1003,32 @@ static void u32_to_sched(void) {
     swapcontext(&g_fiber[me].ctx, &g_sched_ctx);
 }
 #define U32_WAIT_TIMEOUT 0x102u
-/* Block the running fiber on a wait set until it is satisfied. Drives the
- * scheduler (which runs the other fibers meanwhile). `poll` (timeout 0) returns
- * WAIT_TIMEOUT immediately instead of blocking. A finite non-zero timeout is
- * treated as INFINITE here: in the cooperative model a runnable thread has no
- * wall-clock, so it either completes (→ WAIT_OBJECT_0, like Wine) or the whole
- * set deadlocks (→ sound abort); a timeout that Wine would let expire is a rare
- * refinement for later, never a silent wrong answer. */
-static uint32_t u32_wait(const uint32_t *handles, int n, int all, int poll) {
+/* Block the running fiber on a wait set until satisfied or the timeout expires.
+ * ms == 0 polls (→ WAIT_TIMEOUT if not already satisfied); ms == INFINITE never
+ * times out; a finite ms registers a virtual-clock deadline the scheduler honours
+ * (so timeout-driven code resolves deterministically instead of dead-locking).
+ * Returns WAIT_OBJECT_0 + idx, or WAIT_TIMEOUT. */
+static uint32_t u32_wait(const uint32_t *handles, int n, int all, uint32_t ms) {
     struct u32_fiber *f = &g_fiber[g_cur];
     if (n > 64) n = 64;
     f->wait_n = n; f->wait_all = all;
     for (int i = 0; i < n; i++) f->wait_h[i] = handles[i];
     if (!u32_wait_ok(f)) {
-        if (poll) { f->wait_n = 0; return U32_WAIT_TIMEOUT; }
+        if (ms == 0) { f->wait_n = 0; return U32_WAIT_TIMEOUT; }   /* poll */
         u32_sched_ensure();
+        f->has_timeout = (ms != U32_INFINITE);
+        f->wake_time = g_vclock + ms;
+        f->timed_out = 0;
         /* Re-check after every wake: with auto-reset events several waiters may be
          * woken for one signal, but only the one that still finds it satisfied may
-         * proceed (and consume it below); the others re-block. */
-        do { f->state = FST_BLOCKED; u32_to_sched(); } while (!u32_wait_ok(f));
+         * proceed (and consume it below); the others re-block. A timeout wake ends
+         * the loop with WAIT_TIMEOUT. */
+        for (;;) {
+            f->state = FST_BLOCKED; u32_to_sched();
+            if (u32_wait_ok(f)) break;
+            if (f->timed_out) { f->has_timeout = 0; f->wait_n = 0; return U32_WAIT_TIMEOUT; }
+        }
+        f->has_timeout = 0;
     }
     f->wait_n = 0;
     /* Acquire the satisfying handle(s): waitAll consumes all, waitAny only the
@@ -1003,6 +1039,16 @@ static uint32_t u32_wait(const uint32_t *handles, int n, int all, int poll) {
     if (all) { for (int i = 0; i < n; i++) u32_handle_acquire(handles[i], me); }
     else       u32_handle_acquire(handles[idx], me);
     return (uint32_t)idx;              /* WAIT_OBJECT_0 + idx */
+}
+/* Sleep(ms) with threads live: block on the virtual clock for `ms`, letting other
+ * fibers run. A pure timed block (no handles) — only the clock wakes it. */
+static void u32_sleep(uint32_t ms) {
+    u32_sched_ensure();
+    struct u32_fiber *f = &g_fiber[g_cur];
+    f->wait_n = 0; f->wait_cs = 0;
+    f->has_timeout = 1; f->wake_time = g_vclock + ms; f->timed_out = 0;
+    do { f->state = FST_BLOCKED; u32_to_sched(); } while (!f->timed_out);
+    f->has_timeout = 0;
 }
 /* Trampoline a fresh fiber: lay a __stdcall thread-proc frame on its machine
  * stack and dispatch the lifted proc; on return, record the exit code, mark the
@@ -1017,12 +1063,13 @@ static void u32_fiber_trampoline(void) {
     f->state = FST_DONE;
     /* returns into uc_link = g_sched_ctx */
 }
-/* Cooperative yield (Sleep and friends). Returns 0 when there is no thread to
- * yield to (so the caller keeps its non-threaded behaviour). */
-int aret_fiber_yield(void) {
+/* Sleep(ms) as a fiber operation. Returns 0 when there is no thread (so the caller
+ * keeps its non-threaded usleep). ms == 0 is a plain yield; ms > 0 blocks on the
+ * virtual clock, letting other fibers run first. */
+int aret_fiber_sleep(uint32_t ms) {
     if (!g_sched_ready) return 0;
-    g_fiber[g_cur].state = FST_READY;
-    u32_to_sched();
+    if (ms == 0) { g_fiber[g_cur].state = FST_READY; u32_to_sched(); }
+    else u32_sleep(ms);
     return 1;
 }
 /* CreateThread(lpsa, dwStackSize, lpStartAddress, lpParameter, dwFlags, lpThreadId). */
@@ -1094,7 +1141,7 @@ static int u32_waitable(uint32_t h) {
 uint32_t aret_WaitForSingleObject(uint32_t esp) {
     uint32_t h = WU(0);
     if (!u32_waitable(h)) return 0;
-    uint32_t r = u32_wait(&h, 1, 1, WU(1) == 0);
+    uint32_t r = u32_wait(&h, 1, 1, WU(1));                /* WU(1) = timeout ms */
     return (r == U32_WAIT_TIMEOUT) ? r : 0;                /* WAIT_OBJECT_0 */
 }
 uint32_t aret_WaitForMultipleObjects(uint32_t esp) {
@@ -1104,7 +1151,7 @@ uint32_t aret_WaitForMultipleObjects(uint32_t esp) {
     int any = 0;
     for (uint32_t i = 0; i < n; i++) if (u32_waitable(h[i])) any = 1;
     if (!any) return 0;                                    /* legacy immediate WAIT_OBJECT_0 */
-    return u32_wait(h, (int)n, all, WU(3) == 0);           /* WAIT_OBJECT_0(+idx), or WAIT_TIMEOUT */
+    return u32_wait(h, (int)n, all, WU(3));                /* WU(3) = timeout ms */
 }
 /* -------- CRITICAL_SECTION (doc 80 incr. 2) -------- */
 /* Cooperative fibers: only one fiber runs at a time, but a fiber that yields
@@ -1228,7 +1275,7 @@ uint32_t aret_ReleaseSemaphore(uint32_t esp) {
 /* Current fiber index (0 = main / no threads) — used by per-fiber TLS in aret_hle.c. */
 int aret_current_fiber(void) { return g_cur; }
 #else  /* __wasm__ : no ucontext. Threads are a sound abort, never a fake. */
-int aret_fiber_yield(void) { return 0; }
+int aret_fiber_sleep(uint32_t ms) { (void)ms; return 0; }
 int aret_current_fiber(void) { return 0; }
 uint32_t aret_CreateEventA(uint32_t esp) { (void)esp; return 0x101; }
 uint32_t aret_CreateEventW(uint32_t esp) { (void)esp; return 0x101; }

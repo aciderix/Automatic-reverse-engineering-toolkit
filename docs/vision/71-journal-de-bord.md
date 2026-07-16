@@ -2101,4 +2101,36 @@ Détail : **70 §6** (roadmap). Résumé :
 - **⇒ Chantier fibers (doc 80 §2) COMPLET** (incréments 1-4). Prochaine orientation doc 80 : lifting comctl32
   binaire (endgame GUI) ou PGL opt-in.
 
+### 2026-07-16 — [THREAD][HLE-WIN32] Fibers incrément 5 : timeouts finis (horloge virtuelle) — débloqué par un VRAI test binaire
+- **Déclencheur = « ça marche sur de vrais binaires ? »**. Deux mesures honnêtes :
+  1. **`kernel32_test.exe`** (conformance WineHQ, extraite de `winetest -x`, 3 Mo) : ARET la **transpile** (ELF
+     54 Mo) mais **aborte sound AVANT le 1er test `thread.c`** (0 ligne de test imprimée) sur `indirect call to
+     unrecovered function 0x446680`. Diagnostic : `0x446680` est une vraie fonction atteinte **uniquement** via la
+     table `{nom, func}` de winetest en `.rdata` (`… 80664400 …` = ptr `0x00446680`, **entrelacée** string-ptr/
+     code-ptr) → non récupérée par le statique. **Mur points-to orthogonal** (P3/Phase-4), **pas** un bug threads —
+     mais ça prouve qu'**aucun vrai binaire MT tiers n'a encore tourné bout-en-bout** ici.
+  2. **Workload composé réaliste** (pool de threads : file + mutex + sémaphore + event manual-reset + TLS) : a
+     **révélé un vrai gap** — le pattern `WaitForSingleObject(sem, 50)` (**timeout fini comme sonde de vivacité**,
+     ultra-courant) dead-lockait, car le modèle traitait « fini == infini ». Wine, lui, **time-out** à 50 ms et
+     les workers sortent. → abort sound, mais code réaliste inexécutable.
+- **Fix (cause générale, pas rustine) — horloge virtuelle déterministe** : chaque `WaitFor*(h, ms)` / `Sleep(ms)`
+  **fini** pose `wake_time = g_vclock + ms` (`has_timeout`). Quand le scheduler ne trouve **aucun** fiber
+  signal-runnable, au lieu d'aborter il **avance `g_vclock` à la plus proche échéance** et réveille les fibers
+  échus avec `timed_out=1` (→ `WAIT_TIMEOUT`). Deadlock réel (tout bloqué, **aucune** échéance) = abort sound.
+  `Sleep(ms>0)` = blocage pur sur l'horloge (`u32_sleep`, réveillé seulement par le temps) ; `Sleep(0)` = yield.
+  **Déterministe** : l'horloge n'avance que par la logique du scheduler (jamais le wall-clock) ⇒ oracle
+  reproductible. `WaitForSingleObject`/`WaitForMultipleObjects` passent désormais le **vrai `ms`** (plus le flag poll).
+- **Additivité** : sans timeout fini, `has_timeout=0`, l'horloge n'avance jamais → INFINITE et Sleep(0) inchangés,
+  programmes mono-thread inchangés (usleep réel conservé sans threads). Les 4 fixtures threads précédentes restent
+  bit-identiques.
+- **Oracle** : `winecorpus/thread_pool.c` — pool de 4 workers drainant une file (M=200), somme parallèle des carrés
+  `total=2686700`, **avec le timeout fini de vivacité** → **bit-identique Wine** (avant le fix : deadlock→abort).
+- **Vérifié** : hash transpile inchangé (`19acad982194bf07`), `table_is_sorted` vert, winediff **105→106/106**,
+  sqlite/busybox smoke OK.
+- **Bilan honnête** : primitives de threads (join/CS/events/mutex/sem/TLS/`_beginthreadex`/timeouts) **prouvées
+  bit-identiques Wine sur 6 workloads** dont un pool réaliste. Mais **faire tourner un vrai binaire MT tiers
+  bout-en-bout** reste bloqué en amont par (a) la récup de **dispatch indirect** (table de pointeurs entrelacée) et
+  (b) les **API haut-niveau** (thread-pools/APC/affinity) que le conformance exerce. Prochaine valeur réelle =
+  ces deux chantiers, pas plus de primitives.
+
 <!-- NOUVELLES ENTRÉES ICI (garder l'ordre chronologique, plus récent en bas) -->

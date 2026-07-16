@@ -170,7 +170,7 @@ bash bench/regression.sh    # PORTE unifiée : difftest 271/271, in-place 3/3,
                             # recompilabilité gzip/ls/cat 100%
 bash bench/difftest.sh              # décompile O0→O3
 bash bench/difftest_transpile.sh    # transpile (hash 19acad982194bf07)
-bash bench/winediff.sh              # axe 2 vs Wine (105/105)
+bash bench/winediff.sh              # axe 2 vs Wine (106/106)
 bash bench/funcdiff.sh              # lift-closure + opt-diff vs Unicorn (0 div)
 # Sweeps de vrais binaires (téléchargent + comparent à Wine) :
 bash bench/sqlite_sweep.sh   bash bench/busybox_sweep.sh   bash bench/corpus_sweep.sh
@@ -190,7 +190,7 @@ bash bench/wallsweep.sh <dir1> [dir2…]  # AGRÈGE --mode walls sur un corpus :
 
 ### État régression (référence — doit rester vert)
 difftest **271/271** · transpile-diff **4/4** (H=`19acad982194bf07`) · winediff
-**105/105** · cpudiff vert (per-instruction + séquences génératives) · funcdiff corpus **0 divergence** (lift ~12k scorées /
+**106/106** · cpudiff vert (per-instruction + séquences génératives) · funcdiff corpus **0 divergence** (lift ~12k scorées /
 ~6k appels, opt ~10k scorées) · SMT **11/11** · in-place **3/3** · magicdiv **2³²** ·
 recompilabilité **100 %** · WASM **7/7**.
 
@@ -498,9 +498,24 @@ recompilabilité **100 %** · WASM **7/7**.
   **sémaphore** `ssum=21`, spawné par **`_beginthreadex`**). `stdcall_pops` : +CreateMutexA/W=12, OpenMutexA/W=12,
   ReleaseMutex=4, CreateSemaphoreA/W=16, OpenSemaphoreA/W=12, ReleaseSemaphore=12 (`_beginthread*` = cdecl, pas de
   pop). Portes : hash transpile inchangé, winediff **105/105**.
-- **Chantier fibers = complet** (doc 80 §2, incréments 1-4). Reste hors-scope (abort sound) : préemption d'un thread
+- **Incrément 5 — timeouts finis via horloge virtuelle déterministe** (débloqué par un vrai workload) : `WaitFor*
+  (h, ms)` et `Sleep(ms)` **finis** enregistrent une échéance sur une **horloge virtuelle** ; quand aucun fiber
+  n'est *signal-runnable*, le scheduler **avance l'horloge à la plus proche échéance** et réveille les timed-out
+  (`WAIT_TIMEOUT`) — au lieu de dead-locker. Déterministe (l'horloge n'avance que par la logique du scheduler, pas
+  le wall-clock ⇒ oracle reproductible). Deadlock réel (tout bloqué, **aucun** timeout en attente) = abort sound.
+  Motivé par le mur mesuré : le pattern **`WaitForSingleObject(h, 50)` comme sonde de vivacité** (ultra-courant en
+  vrai) dead-lockait avant. `thread_pool.c` (pool de threads réel : file + mutex + sémaphore + event + TLS + timeout
+  fini, somme parallèle `2686700`) = **bit-identique Wine**.
+- **Chantier fibers = complet** (doc 80 §2, incréments 1-5). Reste hors-scope (abort sound) : préemption d'un thread
   CPU-bound qui ne yield jamais (hang→abort), WAIT_ABANDONED distinct, `SuspendThread` d'un thread courant, WASM
   (Asyncify).
+- **⚠️ Test « vrai binaire » honnête (2026-07-16)** : `kernel32_test.exe` (conformance WineHQ, extrait de
+  `winetest`, 3 Mo) transpile mais **aborte sound AVANT le sous-test `thread`** — sur un **`call [table]` indirect
+  non résolu** (`0x446680`, une fonction atteinte *uniquement* via la table `{nom, func}` de winetest en `.rdata`,
+  entrelacée string-ptr/code-ptr → non récupérée). C'est un **mur points-to orthogonal** (doc §5 P3/Phase-4), **pas**
+  un bug threads. ⇒ les primitives threads sont prouvées sur workloads composés (dont un pool réaliste), mais **aucun
+  vrai binaire tiers multithread n'a encore tourné bout-en-bout** (il faut d'abord la récup de dispatch indirect +
+  les API haut-niveau : thread-pools/APC/affinity que le conformance teste).
 
 ---
 

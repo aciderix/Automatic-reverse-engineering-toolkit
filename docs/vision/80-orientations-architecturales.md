@@ -161,8 +161,22 @@ récursion + file d'attente), `SetEvent/ResetEvent`, Mutex, Semaphore.
    `thread_mutex_sem.c` (mutex `2000`, TLS `ok`, sémaphore `21`), bit-identique Wine,
    winediff 105/105.
 
-**⇒ Chantier fibers (incréments 1-4) COMPLET.** Reste hors-scope (abort sound) : préemption
+5. ✅ **FAIT (2026-07-16)** — **Timeouts finis** via **horloge virtuelle déterministe**
+   (débloqué par un vrai workload : `WaitForSingleObject(h, 50)` comme sonde de vivacité
+   dead-lockait avec le modèle « fini==infini »). `WaitFor*`/`Sleep` finis posent une
+   échéance ; quand rien n'est signal-runnable, le scheduler avance l'horloge à la plus
+   proche et réveille les timed-out (`WAIT_TIMEOUT`). Déterministe (horloge ≠ wall-clock).
+   Oracle `thread_pool.c` (pool réaliste : file+mutex+sémaphore+event+TLS+timeout, `2686700`).
+
+**⇒ Chantier fibers (incréments 1-5) COMPLET.** Reste hors-scope (abort sound) : préemption
 d'un thread CPU-bound (hang→abort), WAIT_ABANDONED distinct, `SuspendThread` courant, WASM (Asyncify).
+
+**Test « vrai binaire » (honnête, 2026-07-16)** : `kernel32_test.exe` (conformance WineHQ, 3 Mo)
+transpile mais **aborte sound avant le sous-test `thread`** — sur un `call [table]` indirect non
+résolu (table `{nom, func}` de winetest, entrelacée en `.rdata`, non récupérée par le statique).
+**Mur points-to orthogonal** (§1.4 / doc 70 P3), pas un bug threads. Les primitives sont prouvées
+sur workloads composés (pool réaliste inclus) ; faire tourner un vrai binaire MT tiers bout-en-bout
+demande d'abord la récup du dispatch indirect **et** les API haut-niveau (thread-pools/APC/affinity).
 
 Chaque incrément : fixture minimale → oracle Wine → régression complète → commit + doc.
 

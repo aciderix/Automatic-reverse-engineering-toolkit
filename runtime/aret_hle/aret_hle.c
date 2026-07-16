@@ -118,10 +118,11 @@ uint32_t aret_GetLastError(uint32_t esp) { (void)esp; return g_last_error; }
 uint32_t aret_SetLastError(uint32_t esp) { g_last_error = arg(esp, 0); return 0; }
 
 uint32_t aret_Sleep(uint32_t esp) {
-    /* With cooperative threads live, Sleep is a yield point (let other fibers run);
-     * aret_fiber_yield returns 0 when no threads exist, so a single-threaded program
-     * keeps the exact real usleep it had before. */
-    if (!aret_fiber_yield()) usleep((useconds_t)arg(esp, 0) * 1000u);
+    /* With cooperative threads live, Sleep blocks on the deterministic virtual clock
+     * (letting other fibers run); aret_fiber_sleep returns 0 when no threads exist,
+     * so a single-threaded program keeps the exact real usleep it had before. */
+    uint32_t ms = arg(esp, 0);
+    if (!aret_fiber_sleep(ms)) usleep((useconds_t)ms * 1000u);
     return 0;
 }
 
