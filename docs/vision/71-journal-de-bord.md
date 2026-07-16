@@ -2274,4 +2274,17 @@ Détail : **70 §6** (roadmap). Résumé :
 - **Vérifié bit-identique Wine** : `winecorpus/win_smallshims.c` (MulDiv, lang, wcstoul/wcstol). Portes : hash
   transpile inchangé (`19acad982194bf07`), `table_is_sorted` vert, winediff **109→110/110**.
 
+### 2026-07-16 — [HLE-STDIO][DEMO][ORACLE] `sscanf` complet — bit-identique Wine (importé par sqlite/busybox)
+- **La plus grosse pièce tractable restante**, et **importée par de vrais démonstrateurs** (sqlite3 **et**
+  busybox l'ont en import non-couvert) — pas juste un test de conformance. Aucun scanf n'existait.
+- **Implémentation** (`aret_sscanf_core`, `aret_crt.c`) : parse le format, lit l'entrée, écrit dans les pointeurs
+  args de la pile machine. Couvre : entiers `%d/%i/%u/%x/%X/%o` (base auto pour `%i`) avec longueurs `h/hh/l/ll`
+  (taille du store suit le modificateur), flottants `%f/%e/%g` (`%lf`→double), `%s` (délimité espace, largeur),
+  `%c` (largeur), scansets `%[...]`/`%[^...]` (avec plages `a-z`), suppression `%*`, `%n`, littéraux, espace. Les
+  conversions numériques défèrent à `strtoll/strtoull/strtod` (base/signe/overflow corrects) ; endptr → avance.
+  Retour = nb d'items assignés, **`EOF(-1)`** si l'entrée s'épuise avant la 1ʳᵉ assignation (mesuré = Wine).
+- **Vérifié bit-identique Wine** : `winecorpus/crt_sscanf.c` — 14 cas (hex/octal `0x1F`/`077`, `%lld`, `%hd/%u`,
+  `%lf/%f`, `%3s`, `%c`, `%[^=]=%s`, `%*d`, `%n`, échec→0, EOF→-1, espace en tête). Cdecl (pas de stdcall_pop).
+  Portes : hash transpile inchangé (`19acad982194bf07`), winediff **110→111/111**, sqlite/busybox smoke OK.
+
 <!-- NOUVELLES ENTRÉES ICI (garder l'ordre chronologique, plus récent en bas) -->

@@ -269,6 +269,111 @@ uint32_t aret_vsprintf(uint32_t esp) {
     return (uint32_t)n;
 }
 
+/* sscanf core — parse `in` per `fmt`, writing to the pointer args `a[]`. Returns the
+ * number of items assigned, or EOF(-1) if input ran out before the first assignment.
+ * Numeric conversions defer to strtoll/strtoull/strtod (correct base/sign/overflow);
+ * %s/%c/%[…] are scanned directly. Handles width, suppression (%*), length (h/l/ll)
+ * and %n. Output pointer size follows the length modifier. */
+static int aret_sscanf_core(const char *in, const char *fmt, const uint32_t *a) {
+    int ai = 0, assigned = 0, attempted = 0;
+    const char *ip = in;
+    for (const char *p = fmt; *p; ) {
+        if (isspace((unsigned char)*p)) { while (isspace((unsigned char)*ip)) ip++; p++; continue; }
+        if (*p != '%') { if (*ip != *p) break; ip++; p++; continue; }
+        p++;
+        if (*p == '%') { if (*ip != '%') { break; } ip++; p++; continue; }
+        int suppress = 0; if (*p == '*') { suppress = 1; p++; }
+        int width = 0; while (isdigit((unsigned char)*p)) width = width * 10 + (*p++ - '0');
+        int lng = 0, sht = 0;
+        for (;;) {
+            if (*p == 'l') { lng++; p++; }
+            else if (*p == 'h') { sht++; p++; }
+            else if (*p == 'L' || *p == 'j' || *p == 'z' || *p == 't' || *p == 'I') { p++; }
+            else break;
+        }
+        char conv = *p ? *p++ : 0;
+        if (!conv) break;
+        int w = width ? width : 0x3fffffff;
+
+        if (conv == 'n') { if (!suppress) *(int *)(uintptr_t)a[ai++] = (int)(ip - in); continue; }
+        if (conv == 'c') {
+            int cnt = width ? width : 1;
+            attempted = 1;
+            char *dst = suppress ? 0 : (char *)(uintptr_t)a[ai];
+            int got = 0;
+            for (; got < cnt && *ip; got++) { if (dst) dst[got] = *ip; ip++; }
+            if (got < cnt) break;                         /* not enough chars */
+            if (!suppress) { ai++; assigned++; }
+            continue;
+        }
+        if (conv == 's') {
+            while (isspace((unsigned char)*ip)) ip++;
+            attempted = 1;
+            char *dst = suppress ? 0 : (char *)(uintptr_t)a[ai];
+            int got = 0;
+            while (*ip && !isspace((unsigned char)*ip) && got < w) { if (dst) dst[got] = *ip; ip++; got++; }
+            if (got == 0) break;
+            if (dst) dst[got] = 0;
+            if (!suppress) { ai++; assigned++; }
+            continue;
+        }
+        if (conv == '[') {
+            int negate = 0; if (*p == '^') { negate = 1; p++; }
+            char set[256]; memset(set, 0, sizeof set);
+            if (*p == ']') { set[(unsigned char)']'] = 1; p++; }
+            while (*p && *p != ']') {
+                if (p[1] == '-' && p[2] && p[2] != ']') { for (int c = (unsigned char)p[0]; c <= (unsigned char)p[2]; c++) set[c] = 1; p += 3; }
+                else { set[(unsigned char)*p] = 1; p++; }
+            }
+            if (*p == ']') p++;
+            attempted = 1;
+            char *dst = suppress ? 0 : (char *)(uintptr_t)a[ai];
+            int got = 0;
+            while (*ip && got < w) { int m = set[(unsigned char)*ip]; if (negate) m = !m; if (!m) break; if (dst) dst[got] = *ip; ip++; got++; }
+            if (got == 0) break;
+            if (dst) dst[got] = 0;
+            if (!suppress) { ai++; assigned++; }
+            continue;
+        }
+        /* numeric: skip leading whitespace, then convert */
+        while (isspace((unsigned char)*ip)) ip++;
+        attempted = 1;
+        char buf[130]; const char *src = ip;
+        if (width && width < 129) { int k = 0; while (ip[k] && k < width) { buf[k] = ip[k]; k++; } buf[k] = 0; src = buf; }
+        char *end;
+        if (conv == 'e' || conv == 'E' || conv == 'f' || conv == 'F' || conv == 'g' || conv == 'G' || conv == 'a' || conv == 'A') {
+            double d = strtod(src, &end);
+            if (end == src) break;
+            ip += (end - src);
+            if (!suppress) { if (lng) *(double *)(uintptr_t)a[ai] = d; else *(float *)(uintptr_t)a[ai] = (float)d; ai++; assigned++; }
+            continue;
+        }
+        int base = conv == 'i' ? 0 : (conv == 'x' || conv == 'X') ? 16 : conv == 'o' ? 8 : conv == 'p' ? 16 : 10;
+        int isu = (conv == 'u' || conv == 'x' || conv == 'X' || conv == 'o' || conv == 'p');
+        unsigned long long uv = 0; long long sv = 0;
+        if (isu) uv = strtoull(src, &end, base); else sv = strtoll(src, &end, base);
+        if (end == src) break;
+        ip += (end - src);
+        if (!suppress) {
+            void *dp = (void *)(uintptr_t)a[ai];
+            unsigned long long val = isu ? uv : (unsigned long long)sv;
+            if (lng >= 2) *(long long *)dp = (long long)val;
+            else if (sht >= 2) *(char *)dp = (char)val;
+            else if (sht) *(short *)dp = (short)val;
+            else *(int *)dp = (int)val;
+            ai++; assigned++;
+        }
+    }
+    if (assigned == 0 && attempted && *ip == 0) return -1;    /* EOF before first assignment */
+    return assigned;
+}
+uint32_t aret_sscanf(uint32_t esp) {
+    const char *in = ACS(0), *fmt = ACS(1);
+    const uint32_t *a = &((const uint32_t *)(uintptr_t)esp)[2];
+    if (!in || !fmt) return (uint32_t)-1;
+    return (uint32_t)(int32_t)aret_sscanf_core(in, fmt, a);
+}
+
 /* Wide (16-bit) printf family. The wide formatter lives in aret_hle.c beside
  * aret_vformat. Windows wchar_t is 16-bit, so buffers/format strings are uint16_t. */
 size_t aret_wvformat(uint16_t *out, size_t cap, const uint16_t *fmt, const uint32_t *a);
