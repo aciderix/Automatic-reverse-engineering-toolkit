@@ -304,6 +304,10 @@ recompilabilité **100 %** · WASM **7/7**.
   `compute_noreturn` = point-fixe **sound** (jamais deviné noreturn).
 - **x87 leaf-thunk** (`is_x87_leaf_thunk`) : décode tout le corps (fld arg → ops FPU
   → ret) → amorce atan2/fmod/trunc atteints par pointeur isolé.
+- **Prologue de réalignement de pile GCC sans frame-pointer** (`lea ecx,[esp+4]; and esp,imm` = `8d 4c 24 04 83
+  e4`) reconnu par `looks_like_func_start` (`known_prologue_bytes`, testé) : toute une classe de fonctions mingw
+  (alignement 16 o, ebp omis) atteintes via une **table `{nom, func}`** (winetest/busybox/interpréteurs) était non
+  récupérée → `call [table]` indirect abortait. Débloque le dispatch de test de `kernel32_test.exe`.
 - **FLIRT** : opérandes **relocalisés wildcardés** (`.reloc`) ; **thunks jamais
   signaturés** (résolus structurellement) ; glue reconnue = `looks_like_func_start`.
   ⚠️ FLIRT est **cosmétique** pour nos cibles (reconnaît du code de biblio, pas le
@@ -509,13 +513,14 @@ recompilabilité **100 %** · WASM **7/7**.
 - **Chantier fibers = complet** (doc 80 §2, incréments 1-5). Reste hors-scope (abort sound) : préemption d'un thread
   CPU-bound qui ne yield jamais (hang→abort), WAIT_ABANDONED distinct, `SuspendThread` d'un thread courant, WASM
   (Asyncify).
-- **⚠️ Test « vrai binaire » honnête (2026-07-16)** : `kernel32_test.exe` (conformance WineHQ, extrait de
-  `winetest`, 3 Mo) transpile mais **aborte sound AVANT le sous-test `thread`** — sur un **`call [table]` indirect
-  non résolu** (`0x446680`, une fonction atteinte *uniquement* via la table `{nom, func}` de winetest en `.rdata`,
-  entrelacée string-ptr/code-ptr → non récupérée). C'est un **mur points-to orthogonal** (doc §5 P3/Phase-4), **pas**
-  un bug threads. ⇒ les primitives threads sont prouvées sur workloads composés (dont un pool réaliste), mais **aucun
-  vrai binaire tiers multithread n'a encore tourné bout-en-bout** (il faut d'abord la récup de dispatch indirect +
-  les API haut-niveau : thread-pools/APC/affinity que le conformance teste).
+- **Test « vrai binaire » honnête (2026-07-16)** : `kernel32_test.exe` (conformance WineHQ, extrait de `winetest`,
+  3 Mo). **Mur franchi** : la table de dispatch `{nom, func}` (fonction de test atteinte via `0x446680`, prologue
+  de réalignement) est désormais récupérée (cf. §4.4) → le sous-test `thread` **exécute du vrai code de test réel**
+  (**0 → 5+ lignes `thread.c:`**, correctes). Il aborte *sound* sur `CreateProcessA` (pas de process enfant), puis
+  **segfault** plus loin dans la surface process/remote-thread/thread-pool/APC (très au-delà des primitives) — **pas**
+  une régression. ⇒ les primitives threads sont prouvées (dont un pool réaliste), **du vrai code de conformance
+  threads tourne maintenant**, mais faire passer ce binaire **entièrement** reste un gros chantier (process-création
+  + API haut-niveau). C'est le mur **points-to/Phase-4** (§5 P3) qui reste le levier principal, pas les threads.
 
 ---
 

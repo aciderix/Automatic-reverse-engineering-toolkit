@@ -2133,4 +2133,29 @@ Détail : **70 §6** (roadmap). Résumé :
   (b) les **API haut-niveau** (thread-pools/APC/affinity) que le conformance exerce. Prochaine valeur réelle =
   ces deux chantiers, pas plus de primitives.
 
+### 2026-07-16 — [RECOV][DEMO] Prologue de réalignement de pile GCC (`lea ecx,[esp+4]; and esp`) → débloque le dispatch `{nom,func}` de `kernel32_test`
+- **Suite directe du test « vrai binaire »** : `kernel32_test.exe` abortait sur `call [table]` indirect vers
+  `0x446680` (fonction de test « thread » atteinte **uniquement** via la table `{nom, func}` de winetest en
+  `.rdata`, entrelacée string-ptr/code-ptr). Diagnostic précis : le scan de données voit chaque `func` comme un
+  run isolé (interrompu par le `name`-ptr voisin, non-exec) → il retombe sur `looks_like_func_start`, **qui
+  rejetait le prologue** `8d 4c 24 04 83 e4 f8` = `lea ecx,[esp+4]; and esp,-8`.
+- **Cause générale** : c'est le **prologue de réalignement de pile GCC/mingw sans frame-pointer** (une fonction
+  qui a besoin d'un alignement 16 octets en omettant ebp garde l'esp d'origine dans ecx pour l'accès aux args).
+  Toute une **classe** de fonctions mingw l'utilise. Fix : reconnaître la signature **6 octets** (spécifique →
+  pas de faux positif sur du padding/données) dans `looks_like_func_start`. Byte-matching extrait en
+  `known_prologue_bytes(code, allow_leaf)` (testable).
+- **Effet mesuré sur le vrai binaire** : `kernel32_test.exe thread` passe de **0 → 5+ lignes `thread.c:` exécutées**
+  (tests TLS-slot/OpenThread/process réels tournent). Il aborte *sound* ensuite sur `CreateProcessA` (pas de
+  process enfant — hors-scope) puis **segfault** plus loin dans la surface process/remote-thread/pool (très
+  au-delà des primitives) — **pas** une régression (ce chemin était injoignable avant), mais ça borne : faire
+  tourner ce conformance **entièrement** demande process-création + thread-pools/APC, un autre grand chantier.
+  Les lignes de test qui tournent sont **correctes** (skips/échecs attendus vu l'absence de `CreateProcessA`) ⇒
+  la fonction réalignée récupérée **s'exécute juste** (le prologue de réalignement se lifte correctement).
+- **Régression complète** (changement recovery = risqué) : hash transpile inchangé (`19acad982194bf07`),
+  difftest **271/271**, funcdiff corpus **0 divergence**, gauntlet **19/21** (les 2 = `units.dat` environnemental),
+  winediff **106/106**. Unit-tests `analysis::prologue_tests` (3, dont rejets : mauvais disp, `lea` sans `and`,
+  données aléatoires). Harnais : hook `winecorpus/NAME.cflags` ajouté à `winediff.sh` (général).
+- **Note honnête** : la variante `lea ecx` n'est pas reproductible avec le mingw local (il émet `push ebp; and esp`,
+  déjà reconnu) → guard = unit-test byte-exact + preuve sur le vrai binaire, pas une fixture winediff.
+
 <!-- NOUVELLES ENTRÉES ICI (garder l'ordre chronologique, plus récent en bas) -->

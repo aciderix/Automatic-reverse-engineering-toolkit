@@ -281,6 +281,18 @@ fn looks_like_func_start(prog: &Program, addr: u64, allow_leaf: bool) -> bool {
         return true;
     }
     let Some(code) = prog.read_from(addr) else { return false };
+    known_prologue_bytes(&code, allow_leaf) || is_x87_leaf_thunk(prog, addr)
+}
+
+/// Pure byte test for a recognised function-entry prologue (frame setup, stack
+/// realignment, import thunks, CRT init guards). Split out from
+/// `looks_like_func_start` so the signatures can be unit-tested directly. `code`
+/// is the bytes at the candidate address; `allow_leaf` also accepts the bare
+/// `mov reg,[esp+d]` leaf shape (used for stronger address-taken evidence).
+fn known_prologue_bytes(code: &[u8], allow_leaf: bool) -> bool {
+    if code.is_empty() {
+        return false;
+    }
     let b0 = code[0];
     let b1 = code.get(1).copied().unwrap_or(0);
     let b2 = code.get(2).copied().unwrap_or(0);
@@ -290,6 +302,16 @@ fn looks_like_func_start(prog: &Program, addr: u64, allow_leaf: bool) -> bool {
         || (b0 == 0x81 && b1 == 0xec)         // sub esp, imm32
         || (b0 == 0x8b && b1 == 0xff)         // mov edi, edi (hot-patch pad)
         || (b0 == 0x89 && b1 == 0xff)
+        // GCC/mingw frame-pointer-omitted stack-realignment prologue:
+        // `lea ecx,[esp+4]; and esp,imm8` (8d 4c 24 04 83 e4 xx). A function needing
+        // 16-byte stack alignment while omitting ebp opens with this (it keeps the
+        // original stack in ecx for arg access) instead of `push ebp`. The 6-byte
+        // signature is specific enough not to seed interior bytes; without it such a
+        // function reached only through a data pointer (a `{name,func}` dispatch
+        // table, as in winetest/busybox/interpreters) is unrecovered and the
+        // indirect call to it aborts.
+        || (b0 == 0x8d && b1 == 0x4c && b2 == 0x24 && code.get(3) == Some(&0x04)
+            && code.get(4) == Some(&0x83) && code.get(5) == Some(&0xe4))
         || (b0 == 0xff && b1 == 0x25)         // jmp [mem] (import thunk)
         || (b0 == 0xff && b1 == 0x15)         // call [mem]; ret (import-call thunk /
                                               // address-taken callback wrapper)
@@ -306,16 +328,6 @@ fn looks_like_func_start(prog: &Program, addr: u64, allow_leaf: bool) -> bool {
             && code.get(7) == Some(&0x85) && code.get(8) == Some(&0xc0))
         // mov reg, [esp+disp] (modrm rm=100=SIB, mod≠11; SIB=24 → base=esp).
         || (allow_leaf && b0 == 0x8b && (b1 & 0x07) == 0x04 && (b1 & 0xc0) != 0xc0 && b2 == 0x24)
-        // A tiny x87 math thunk (`fld [esp+d]; …; ret`) — the C `ceil`/`floor`/
-        // `trunc`/`atan2`/`fmod` a real MSVC CRT ships as leaf helpers, reached
-        // only through a data pointer (stored as a SQL function's user-data, an
-        // isolated slot — not a >=3 run that the table heuristic trusts). Their
-        // `fld m64,[esp+d]` prologue matches none of the shapes above, so without
-        // this the indirect call through the pointer lands on unrecovered code and
-        // aborts (a sound but needless `atan2`/`fmod`/`trunc` failure). The whole
-        // body is verified x87+glue ending in `ret`, so this is safe even for a
-        // bare data pointer (random data does not decode as a clean x87 leaf).
-        || is_x87_leaf_thunk(prog, addr)
 }
 
 /// Decode forward from `addr` and decide whether it is a small, self-contained
@@ -1573,4 +1585,39 @@ fn build_function(
         blocks,
         callees,
     })
+}
+
+#[cfg(test)]
+mod prologue_tests {
+    use super::known_prologue_bytes;
+
+    #[test]
+    fn recognises_gcc_stack_realign_prologue() {
+        // `lea ecx,[esp+4]; and esp,-8` — GCC/mingw frame-pointer-omitted
+        // realignment (kernel32_test.exe's test functions, reached only via a
+        // {name,func} dispatch table). Must be recognised or the indirect call aborts.
+        assert!(known_prologue_bytes(&[0x8d, 0x4c, 0x24, 0x04, 0x83, 0xe4, 0xf8], false));
+        assert!(known_prologue_bytes(&[0x8d, 0x4c, 0x24, 0x04, 0x83, 0xe4, 0xf0], false));
+    }
+
+    #[test]
+    fn still_recognises_classic_prologues() {
+        assert!(known_prologue_bytes(&[0x55], false)); // push ebp
+        assert!(known_prologue_bytes(&[0x83, 0xec, 0x20], false)); // sub esp,imm8
+        assert!(known_prologue_bytes(&[0xff, 0x25, 0, 0, 0, 0], false)); // jmp [mem]
+    }
+
+    #[test]
+    fn rejects_non_prologues() {
+        assert!(known_prologue_bytes(&[], false).eq(&false));
+        // `lea ecx,[esp+8]` (wrong disp) is not the realignment form.
+        assert!(!known_prologue_bytes(&[0x8d, 0x4c, 0x24, 0x08, 0x83, 0xe4, 0xf8], false));
+        // `lea ecx,[esp+4]` NOT followed by `and esp` is not the realignment form.
+        assert!(!known_prologue_bytes(&[0x8d, 0x4c, 0x24, 0x04, 0x8b, 0x01], false));
+        // random data
+        assert!(!known_prologue_bytes(&[0x00, 0x11, 0x22, 0x33], false));
+        // the leaf `mov reg,[esp+d]` shape is gated by allow_leaf
+        assert!(!known_prologue_bytes(&[0x8b, 0x44, 0x24], false));
+        assert!(known_prologue_bytes(&[0x8b, 0x44, 0x24], true));
+    }
 }
