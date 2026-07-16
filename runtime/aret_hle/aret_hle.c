@@ -42,7 +42,10 @@ static void stdio_write(uint32_t file, const char *buf, size_t len);
 /* kernel32.dll                                                        */
 /* ------------------------------------------------------------------ */
 
-static uint32_t g_last_error = 0;
+/* Per-fiber while a fiber runs (the cooperative scheduler swaps this global in
+ * and out at every context switch — see aret_win32.c). Non-static so the fiber
+ * layer can save/restore it. */
+uint32_t g_last_error = 0;
 
 /* Map a Windows standard-handle constant to a POSIX file descriptor. */
 static int std_fd(uint32_t nStdHandle) {
@@ -115,7 +118,10 @@ uint32_t aret_GetLastError(uint32_t esp) { (void)esp; return g_last_error; }
 uint32_t aret_SetLastError(uint32_t esp) { g_last_error = arg(esp, 0); return 0; }
 
 uint32_t aret_Sleep(uint32_t esp) {
-    usleep((useconds_t)arg(esp, 0) * 1000u);
+    /* With cooperative threads live, Sleep is a yield point (let other fibers run);
+     * aret_fiber_yield returns 0 when no threads exist, so a single-threaded program
+     * keeps the exact real usleep it had before. */
+    if (!aret_fiber_yield()) usleep((useconds_t)arg(esp, 0) * 1000u);
     return 0;
 }
 
@@ -1330,13 +1336,18 @@ uint32_t aret_FlushViewOfFile(uint32_t esp) {
 
 uint32_t aret_CloseHandle(uint32_t esp) {
     uint32_t h = arg(esp, 0);
+    if ((h & 0xFF000000u) == 0x70000000u) return 1;      /* thread handle: reference only */
     for (int i = 0; i < ARET_MAP_MAX; i++) if (aret_maps[i] && (uint32_t)(uintptr_t)aret_maps[i] == h) {
         free(aret_maps[i]); aret_maps[i] = NULL; return 1;
     }
     return close((int)h) == 0 ? 1 : 0;
 }
 #else /* __wasm__: no file mapping; a HANDLE is always an fd. */
-uint32_t aret_CloseHandle(uint32_t esp) { return close((int)arg(esp, 0)) == 0 ? 1 : 0; }
+uint32_t aret_CloseHandle(uint32_t esp) {
+    uint32_t h = arg(esp, 0);
+    if ((h & 0xFF000000u) == 0x70000000u) return 1;      /* thread handle: reference only */
+    return close((int)h) == 0 ? 1 : 0;
+}
 #endif
 
 /* CreatePipe(hRead, hWrite, sa, size) -> BOOL. An anonymous pipe maps exactly to

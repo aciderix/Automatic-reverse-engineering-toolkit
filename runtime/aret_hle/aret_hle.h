@@ -27,6 +27,8 @@ uint32_t aret_WriteConsoleA(uint32_t esp);  /* (h, buf, nchars, *written, reserv
 uint32_t aret_ExitProcess(uint32_t esp);    /* (UINT code) -> noreturn */
 uint32_t aret_GetLastError(uint32_t esp);   /* () -> DWORD */
 uint32_t aret_SetLastError(uint32_t esp);   /* (DWORD) -> void */
+extern uint32_t g_last_error;               /* per-fiber GetLastError() slot */
+int aret_fiber_yield(void);                 /* cooperative yield; 0 if no threads */
 uint32_t aret_Sleep(uint32_t esp);          /* (DWORD ms) -> void */
 uint32_t aret_GetCurrentProcessId(uint32_t esp); /* () -> DWORD */
 

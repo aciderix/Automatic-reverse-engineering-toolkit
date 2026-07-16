@@ -139,8 +139,11 @@ Single/MultipleObjects` (join inclus), `GetMessage` ; `EnterCriticalSection` (ow
 récursion + file d'attente), `SetEvent/ResetEvent`, Mutex, Semaphore.
 
 **Plan incrémental (règle §2, piloté par fixture)** :
-1. Infra fibers + `CreateThread` + `WaitForMultipleObjects` (join) + `last_error`
-   par-fiber. Fixture : N threads, somme déterministe vs Wine.
+1. ✅ **FAIT (2026-07-16)** — Infra fibers + `CreateThread` (+`CREATE_SUSPENDED`/
+   `ResumeThread`/`ExitThread`/`GetExitCodeThread`) + `WaitForSingle/MultipleObjects`
+   (join) + `Sleep`=yield + `last_error` par-fiber. Fixture `thread_join.c` : 4 threads,
+   somme déterministe `25800` + isolation `last_error` à travers un yield, bit-identique
+   Wine. winediff 102/102, hash transpile inchangé. Détail : doc 70 §4.7, doc 71.
 2. `CriticalSection` réelle (oracle `counter=4000`).
 3. Events (Set/Reset/Wait) — signalisation déterministe.
 4. Mutex / Semaphore / `WaitForMultipleObjects(FALSE)`, TLS par-fiber, `_beginthreadex`.

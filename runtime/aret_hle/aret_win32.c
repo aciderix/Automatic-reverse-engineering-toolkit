@@ -30,6 +30,7 @@
 #include <sys/stat.h>
 #ifndef __wasm__
 #include <sys/statvfs.h>   /* no filesystem statvfs under wasm32-wasi */
+#include <ucontext.h>      /* cooperative threads (fibers) — no ucontext in WASM */
 #endif
 #include <sys/ioctl.h>
 
@@ -770,6 +771,227 @@ uint32_t aret_GetStartupInfoA(uint32_t esp) {
     return 0;
 }
 
+/* ================================================================== */
+/* Cooperative threads (fibers) — doc 80. A Win32 thread becomes a       */
+/* coroutine multiplexed on the single host thread; control switches      */
+/* ONLY at blocking points (Wait/Sleep/…), so there is never a data race  */
+/* and the schedule is round-robin deterministic → the differential       */
+/* oracle stays reproducible bit-for-bit. Fiber 0 is the program's main   */
+/* thread; absent any CreateThread the scheduler never starts, so a        */
+/* single-threaded program is byte-identical to before. `ucontext` is      */
+/* libc-native (statically linkable). WASM has no ucontext → CreateThread  */
+/* there is a sound abort (Asyncify later), never a silent divergence.     */
+/* Per-fiber state that is a plain global while running (last_error) is     */
+/* swapped in/out by the scheduler at every context switch.                */
+/* ================================================================== */
+#ifndef __wasm__
+#define U32_MAX_FIBER    64
+#define U32_THREAD_BASE  0x70000000u
+#define U32_FIBER_MSTACK (1u << 20)     /* 1 MB emulated machine stack per thread */
+#define U32_FIBER_HSTACK (4u << 20)     /* 4 MB host C stack for the transpiled code */
+enum { FST_FREE = 0, FST_SUSPENDED, FST_READY, FST_RUNNING, FST_BLOCKED, FST_DONE };
+struct u32_fiber {
+    ucontext_t ctx;
+    void      *host_stack;       /* malloc'd host C stack (NULL for fiber 0)        */
+    uint8_t   *mstack;           /* malloc'd emulated machine stack (NULL fiber 0)  */
+    uint32_t   start, param;     /* thread-proc VA + argument                       */
+    uint32_t   exit_code;
+    uint32_t   last_error;       /* saved GetLastError() while this fiber is parked  */
+    int        state;
+    uint32_t   wait_h[64];       /* Wait set (MAXIMUM_WAIT_OBJECTS)                  */
+    int        wait_n, wait_all;
+};
+static struct u32_fiber g_fiber[U32_MAX_FIBER];
+static int g_nfiber = 1;         /* fiber 0 = main, always present */
+static int g_cur = 0;            /* running fiber index */
+static int g_rr = 0;             /* round-robin cursor */
+static ucontext_t g_sched_ctx;   /* scheduler's own context */
+static void *g_sched_stack;
+static int g_sched_ready;
+
+/* handle -> fiber index, or -1 if it is not one of our thread handles. */
+static int u32_thread_idx(uint32_t h) {
+    if ((h & 0xFF000000u) != U32_THREAD_BASE) return -1;
+    uint32_t i = h & 0x00FFFFFFu;
+    return (i < (uint32_t)g_nfiber) ? (int)i : -1;
+}
+/* Is a wait handle signaled? A thread handle signals when its fiber is DONE. Any
+ * other handle (event/mutex/file/process) keeps the legacy always-signaled value
+ * — sound in the mono-thread model; real events arrive in a later increment. */
+static int u32_handle_signaled(uint32_t h) {
+    int fi = u32_thread_idx(h);
+    if (fi >= 0) return g_fiber[fi].state == FST_DONE;
+    return 1;
+}
+static int u32_wait_ok(struct u32_fiber *f) {
+    if (f->wait_n == 0) return 1;
+    if (f->wait_all) {
+        for (int i = 0; i < f->wait_n; i++) if (!u32_handle_signaled(f->wait_h[i])) return 0;
+        return 1;
+    }
+    for (int i = 0; i < f->wait_n; i++) if (u32_handle_signaled(f->wait_h[i])) return 1;
+    return 0;
+}
+static void u32_sched_loop(void) {
+    for (;;) {
+        /* Wake any blocked fiber whose wait set is now satisfied. */
+        for (int i = 0; i < g_nfiber; i++)
+            if (g_fiber[i].state == FST_BLOCKED && u32_wait_ok(&g_fiber[i]))
+                g_fiber[i].state = FST_READY;
+        /* Pick the next READY fiber round-robin (starting AFTER the last one). */
+        int pick = -1;
+        for (int k = 1; k <= g_nfiber; k++) {
+            int i = (g_rr + k) % g_nfiber;
+            if (g_fiber[i].state == FST_READY) { pick = i; break; }
+        }
+        if (pick < 0) {
+            int blocked = 0;
+            for (int i = 0; i < g_nfiber; i++) if (g_fiber[i].state == FST_BLOCKED) blocked = 1;
+            if (blocked) aret_unmodelled("fiber scheduler: deadlock (all live threads blocked)");
+            return;   /* nothing runnable and nothing blocked → every fiber is DONE */
+        }
+        g_rr = pick; g_cur = pick; g_fiber[pick].state = FST_RUNNING;
+        g_last_error = g_fiber[pick].last_error;      /* make its last-error current */
+        swapcontext(&g_sched_ctx, &g_fiber[pick].ctx);
+    }
+}
+static void u32_sched_ensure(void) {
+    if (g_sched_ready) return;
+    g_sched_ready = 1;
+    g_sched_stack = malloc(U32_FIBER_HSTACK);
+    getcontext(&g_sched_ctx);
+    g_sched_ctx.uc_stack.ss_sp = g_sched_stack;
+    g_sched_ctx.uc_stack.ss_size = U32_FIBER_HSTACK;
+    g_sched_ctx.uc_link = NULL;
+    makecontext(&g_sched_ctx, u32_sched_loop, 0);
+}
+/* Park the running fiber and return control to the scheduler (saving its
+ * last-error). Resumes here when the scheduler next selects this fiber. */
+static void u32_to_sched(void) {
+    int me = g_cur;
+    g_fiber[me].last_error = g_last_error;
+    swapcontext(&g_fiber[me].ctx, &g_sched_ctx);
+}
+#define U32_WAIT_TIMEOUT 0x102u
+/* Block the running fiber on a wait set until it is satisfied. Drives the
+ * scheduler (which runs the other fibers meanwhile). `poll` (timeout 0) returns
+ * WAIT_TIMEOUT immediately instead of blocking. A finite non-zero timeout is
+ * treated as INFINITE here: in the cooperative model a runnable thread has no
+ * wall-clock, so it either completes (→ WAIT_OBJECT_0, like Wine) or the whole
+ * set deadlocks (→ sound abort); a timeout that Wine would let expire is a rare
+ * refinement for later, never a silent wrong answer. */
+static uint32_t u32_wait(const uint32_t *handles, int n, int all, int poll) {
+    struct u32_fiber *f = &g_fiber[g_cur];
+    if (n > 64) n = 64;
+    f->wait_n = n; f->wait_all = all;
+    for (int i = 0; i < n; i++) f->wait_h[i] = handles[i];
+    if (!u32_wait_ok(f)) {
+        if (poll) { f->wait_n = 0; return U32_WAIT_TIMEOUT; }
+        u32_sched_ensure();
+        f->state = FST_BLOCKED;
+        u32_to_sched();
+    }
+    f->wait_n = 0;
+    return 0;                          /* WAIT_OBJECT_0 */
+}
+/* Trampoline a fresh fiber: lay a __stdcall thread-proc frame on its machine
+ * stack and dispatch the lifted proc; on return, record the exit code, mark the
+ * fiber DONE, and fall through to uc_link (the scheduler). */
+static void u32_fiber_trampoline(void) {
+    struct u32_fiber *f = &g_fiber[g_cur];
+    uint32_t *sp = (uint32_t *)(uintptr_t)(f->mstack + U32_FIBER_MSTACK - 64);
+    sp[0] = 0;                          /* return address (proc never returns here) */
+    sp[1] = f->param;                   /* LPVOID lpParameter @ [esp+4]             */
+    uint64_t r = aret_call(f->start, (uint64_t)(uintptr_t)sp, 0, 0, 0, 0);
+    f->exit_code = (uint32_t)r;
+    f->state = FST_DONE;
+    /* returns into uc_link = g_sched_ctx */
+}
+/* Cooperative yield (Sleep and friends). Returns 0 when there is no thread to
+ * yield to (so the caller keeps its non-threaded behaviour). */
+int aret_fiber_yield(void) {
+    if (!g_sched_ready) return 0;
+    g_fiber[g_cur].state = FST_READY;
+    u32_to_sched();
+    return 1;
+}
+/* CreateThread(lpsa, dwStackSize, lpStartAddress, lpParameter, dwFlags, lpThreadId). */
+uint32_t aret_CreateThread(uint32_t esp) {
+    uint32_t start = WU(2), param = WU(3), flags = WU(4), pTid = WU(5);
+    if (g_nfiber >= U32_MAX_FIBER) { g_last_error = 8u /*NOT_ENOUGH_MEMORY*/; return 0; }
+    int i = g_nfiber;
+    struct u32_fiber *f = &g_fiber[i];
+    memset(f, 0, sizeof *f);
+    f->start = start; f->param = param;
+    f->host_stack = malloc(U32_FIBER_HSTACK);
+    f->mstack = (uint8_t *)malloc(U32_FIBER_MSTACK);
+    if (!f->host_stack || !f->mstack) { free(f->host_stack); free(f->mstack); g_last_error = 8u; return 0; }
+    u32_sched_ensure();
+    getcontext(&f->ctx);
+    f->ctx.uc_stack.ss_sp = f->host_stack;
+    f->ctx.uc_stack.ss_size = U32_FIBER_HSTACK;
+    f->ctx.uc_link = &g_sched_ctx;
+    makecontext(&f->ctx, u32_fiber_trampoline, 0);
+    f->state = (flags & 0x4u /*CREATE_SUSPENDED*/) ? FST_SUSPENDED : FST_READY;
+    g_nfiber++;                        /* publish only once fully built */
+    if (pTid) *(uint32_t *)(uintptr_t)pTid = 0x1000u + (uint32_t)i;
+    return U32_THREAD_BASE | (uint32_t)i;
+}
+uint32_t aret_ResumeThread(uint32_t esp) {
+    int fi = u32_thread_idx(WU(0)); if (fi < 0) return (uint32_t)-1;
+    if (g_fiber[fi].state == FST_SUSPENDED) { g_fiber[fi].state = FST_READY; return 1; }
+    return 0;                          /* was not suspended */
+}
+uint32_t aret_SuspendThread(uint32_t esp) {
+    (void)esp;
+    aret_unmodelled("SuspendThread: cooperative fibers cannot pre-empt a running thread");
+    return (uint32_t)-1;
+}
+uint32_t aret_ExitThread(uint32_t esp) {
+    uint32_t code = WU(0);
+    if (g_cur == 0) { aret_ExitProcess(esp); return 0; }   /* main thread → exit process */
+    g_fiber[g_cur].exit_code = code;
+    g_fiber[g_cur].last_error = g_last_error;
+    g_fiber[g_cur].state = FST_DONE;
+    swapcontext(&g_fiber[g_cur].ctx, &g_sched_ctx);        /* never resumed */
+    return 0;
+}
+uint32_t aret_GetExitCodeThread(uint32_t esp) {
+    int fi = u32_thread_idx(WU(0));
+    uint32_t *out = (uint32_t *)WP(1);
+    if (fi < 0) { if (out) *out = 0; return 0; }
+    if (out) *out = (g_fiber[fi].state == FST_DONE) ? g_fiber[fi].exit_code : 259u /*STILL_ACTIVE*/;
+    return 1;
+}
+uint32_t aret_WaitForSingleObject(uint32_t esp) {
+    uint32_t h = WU(0);
+    if (u32_thread_idx(h) < 0) return 0;                   /* legacy immediate WAIT_OBJECT_0 */
+    return u32_wait(&h, 1, 1, WU(1) == 0);
+}
+uint32_t aret_WaitForMultipleObjects(uint32_t esp) {
+    uint32_t n = WU(0), ph = WU(1); int all = WI(2);
+    const uint32_t *h = (const uint32_t *)(uintptr_t)ph;
+    if (!h || n == 0) return 0;
+    int anyT = 0;
+    for (uint32_t i = 0; i < n; i++) if (u32_thread_idx(h[i]) >= 0) anyT = 1;
+    if (!anyT) return 0;                                   /* legacy immediate WAIT_OBJECT_0 */
+    uint32_t r = u32_wait(h, (int)n, all, WU(3) == 0);
+    if (r == U32_WAIT_TIMEOUT) return r;
+    if (all) return 0;                                     /* WAIT_OBJECT_0 */
+    for (uint32_t i = 0; i < n; i++) if (u32_handle_signaled(h[i])) return i;  /* WAIT_OBJECT_0 + i */
+    return 0;
+}
+#else  /* __wasm__ : no ucontext. Threads are a sound abort, never a fake. */
+int aret_fiber_yield(void) { return 0; }
+uint32_t aret_CreateThread(uint32_t esp) { (void)esp; aret_unmodelled("CreateThread: WASM has no ucontext (Asyncify pending)"); return 0; }
+uint32_t aret_ResumeThread(uint32_t esp) { (void)esp; return (uint32_t)-1; }
+uint32_t aret_SuspendThread(uint32_t esp) { (void)esp; return (uint32_t)-1; }
+uint32_t aret_ExitThread(uint32_t esp) { return aret_ExitProcess(esp); }
+uint32_t aret_GetExitCodeThread(uint32_t esp) { uint32_t *o = (uint32_t *)WP(1); if (o) *o = 0; return 0; }
+uint32_t aret_WaitForSingleObject(uint32_t esp) { (void)esp; return 0; }
+uint32_t aret_WaitForMultipleObjects(uint32_t esp) { (void)esp; return 0; }
+#endif /* __wasm__ */
+
 /* ------------------------------------------------------------------ */
 /* Synchronisation / handles (single-process model)                   */
 /* ------------------------------------------------------------------ */
@@ -780,7 +1002,6 @@ uint32_t aret_ReleaseMutex(uint32_t esp)        { (void)esp; return 1; }
 uint32_t aret_CreateEventA(uint32_t esp)        { (void)esp; return 0x101; }
 uint32_t aret_SetEvent(uint32_t esp)            { (void)esp; return 1; }
 uint32_t aret_ResetEvent(uint32_t esp)          { (void)esp; return 1; }
-uint32_t aret_WaitForSingleObject(uint32_t esp) { (void)esp; return 0; } /* WAIT_OBJECT_0 */
 uint32_t aret_SetConsoleCtrlHandler(uint32_t esp) { (void)esp; return 1; }
 uint32_t aret_FlushFileBuffers(uint32_t esp)    { (void)esp; return 1; }
 /* File byte-range locks (LockFile/LockFileEx and their Unlock counterparts):

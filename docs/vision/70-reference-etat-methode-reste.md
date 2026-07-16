@@ -143,7 +143,11 @@ esp/appels/frame) → **`ssa`** → **`opt`** → **`emit`** (`structured.rs` = 
 **Modèle shared-stack (clé)** : `esp` passé **par valeur** aux fonctions liftées ;
 la pile machine est une **région unique partagée** ; `ebp` **threadé** comme 5ᵉ
 registre-param (callee-saved) ; l'effet net d'un appel est modélisé statiquement.
-`ebp`/`last-error`/TEB sont **globaux** ⇒ modèle **mono-thread** aujourd'hui.
+`ebp` est un registre-param (per-appel, donc thread-safe). Le multithread se fait
+par **fibers coopératifs** (§4.7, doc 80) : une seule coroutine court à la fois, la
+pile machine est **par-fiber** (malloc), et l'état global par-thread (`last_error`,
+TEB à venir) est **swappé par le scheduler** à chaque bascule. Sans `CreateThread`,
+tout reste strictement mono-thread (byte-identique).
 
 ### Fichiers importants
 - `src/ir/lift.rs` — sémantique par-instruction (le « lifter »).
@@ -166,7 +170,7 @@ bash bench/regression.sh    # PORTE unifiée : difftest 271/271, in-place 3/3,
                             # recompilabilité gzip/ls/cat 100%
 bash bench/difftest.sh              # décompile O0→O3
 bash bench/difftest_transpile.sh    # transpile (hash 19acad982194bf07)
-bash bench/winediff.sh              # axe 2 vs Wine (101/101)
+bash bench/winediff.sh              # axe 2 vs Wine (102/102)
 bash bench/funcdiff.sh              # lift-closure + opt-diff vs Unicorn (0 div)
 # Sweeps de vrais binaires (téléchargent + comparent à Wine) :
 bash bench/sqlite_sweep.sh   bash bench/busybox_sweep.sh   bash bench/corpus_sweep.sh
@@ -186,7 +190,7 @@ bash bench/wallsweep.sh <dir1> [dir2…]  # AGRÈGE --mode walls sur un corpus :
 
 ### État régression (référence — doit rester vert)
 difftest **271/271** · transpile-diff **4/4** (H=`19acad982194bf07`) · winediff
-**101/101** · cpudiff vert (per-instruction + séquences génératives) · funcdiff corpus **0 divergence** (lift ~12k scorées /
+**102/102** · cpudiff vert (per-instruction + séquences génératives) · funcdiff corpus **0 divergence** (lift ~12k scorées /
 ~6k appels, opt ~10k scorées) · SMT **11/11** · in-place **3/3** · magicdiv **2³²** ·
 recompilabilité **100 %** · WASM **7/7**.
 
@@ -325,8 +329,8 @@ recompilabilité **100 %** · WASM **7/7**.
   gmtime/localtime/mktime/strftime (struct tm Windows).
 - **Win32** : console/TTY (GetConsoleMode/SetConsoleMode/GetFileType), Tls, locale/
   codepage (GetACP/GetStringTypeW/LCMapStringW/MultiByte↔Wide), heap/module,
-  process/thread **partiel** (`CreatePipe`=pipe() fidèle ; CreateThread/CreateProcess
-  = **échec sound**, pas simulé), Find\*File (opendir+fnmatch), env, temps figé,
+  process/thread (`CreatePipe`=pipe() fidèle ; **`CreateThread` = fibers coopératifs réels**, cf.
+  §4.7 ; `CreateProcess` = **échec sound**, pas simulé), Find\*File (opendir+fnmatch), env, temps figé,
   Interlocked, **version-info** (VS_VERSIONINFO parsé), **BSTR/COM minimal**
   (SysAllocString, CoInitialize/CoTaskMemAlloc), temp-fichiers, SetEndOfFile/
   SetFileTime, PeekNamedPipe (FIONREAD), GetThreadLocale (en-US 0x0409), TEB/PEB
@@ -453,6 +457,25 @@ recompilabilité **100 %** · WASM **7/7**.
   sed + **sqlite3 ×4** + **m4 ×2** + strippés. Seul reste : **units ×2** (cherche
   `units.dat` — **environnemental**, pas un bug ; message d'erreur diffère de Wine).
 
+### 4.7 Threads coopératifs (fibers) — incrément 1 (doc 80), vérifié vs Wine
+- **`CreateThread` = coroutine réelle** (fiber `ucontext`/`swapcontext`) multiplexée sur l'unique thread hôte ;
+  bascule **uniquement** aux points bloquants ⇒ zéro data-race, **ordonnancement round-robin déterministe** ⇒
+  oracle reproductible bit-à-bit. Fiber 0 = thread principal ; **sans aucun `CreateThread`, le scheduler ne
+  démarre jamais** ⇒ un programme mono-thread est **byte-identique** à avant.
+- **Livré (incrément 1)** : table de fibers `g_fiber[64]` (pile hôte 4 Mo + pile machine émulée 1 Mo par thread,
+  malloc), `CreateThread`(+`CREATE_SUSPENDED`/`ResumeThread`), `ExitThread`, `GetExitCodeThread` (STILL_ACTIVE
+  tant que vivant), **`WaitForSingleObject`/`WaitForMultipleObjects` = vrai join** (bloque→scheduler ; timeout 0
+  = poll→`WAIT_TIMEOUT` ; sinon traité comme INFINITE), `Sleep` = **point de yield** coopératif. **`last_error`
+  par-fiber** : le scheduler le swappe (global `g_last_error`) à chaque bascule (prouvé isolé à travers un yield).
+  Deadlock (tous les fibers bloqués) → **abort sound** ; `SuspendThread` d'un thread courant → **abort sound**.
+- **Autonomie/universalité** : `ucontext` = libc natif, lié statiquement. **WASM n'a pas `ucontext`** ⇒
+  `CreateThread` y est un **abort sound** (Asyncify plus tard), jamais une divergence silencieuse (règle doc 80 §3).
+- **Vérifié bit-identique Wine** : `winecorpus/thread_join.c` (4 threads, join, somme déterministe `25800`,
+  exit-codes `1..4`, `last_error` par-thread OK). `stdcall_pops` : CreateThread=24, ExitThread=4, ResumeThread=4,
+  SuspendThread=4, GetExitCodeThread=8. Portes : hash transpile inchangé, winediff **102/102**.
+- **Reste (incréments 2-4, doc 80 §2)** : `CriticalSection` réelle (oracle `counter=4000`), Events
+  (Set/Reset/Wait), Mutex/Semaphore/`WaitForMultipleObjects(FALSE)`, TLS par-fiber, `_beginthreadex`.
+
 ---
 
 ## 5. Ce qui RESTE — précis, ordonné par valeur × sûreté
@@ -572,7 +595,7 @@ bornée** : `WSAStartup`/Winsock, `CreateEventW`, `wcschr`, `LoadLibraryW`, et l
 | CRT+/W32 | Vrai CRT (forward libc) + Win32 native (kernel32→POSIX) | prog. C large + Win32 hors-GUI | ✅ |
 | UNPACK | Déballage dynamique Unicorn (émule stub → OEP → dump) | packers non-VM | ✅ |
 | M6 | Cible **WebAssembly** (`--target wasm`, wasmtime) | cible universelle | ✅ (7/7) |
-| **M7** | **GUI / graphisme** (USER32/GDI via **SDL2** portable, puis DXVK/vkd3d) | applis fenêtrées, puis **jeux** | 🚧 **plan doc 72** — **couche USER32/GDI display-free quasi complète** : fenêtres/classes/messages (A+W), modèle fenêtre étendu, ressources/LoadString, MessageBox, **dialogs (DLGTEMPLATE+modal)**, **GDI DIB bit-exact**, menus, helpers, SID/token, rect/char/…, **+ fenêtre SDL VISIBLE (G2b : `SDL_Window`+présentation framebuffer+pompe `SDL_PollEvent`)** **+ GDI texte FreeType bit-identique Wine (G3, autonome)** (winediff **87/87**). **Reste** : widgets natifs (BUTTON/EDIT), texte étendu (antialiasing/gras/fond opaque/substitution), + hors-GUI : **EH/RtlUnwind**, **threads** |
+| **M7** | **GUI / graphisme** (USER32/GDI via **SDL2** portable, puis DXVK/vkd3d) | applis fenêtrées, puis **jeux** | 🚧 **plan doc 72** — **couche USER32/GDI display-free quasi complète** : fenêtres/classes/messages (A+W), modèle fenêtre étendu, ressources/LoadString, MessageBox, **dialogs (DLGTEMPLATE+modal)**, **GDI DIB bit-exact**, menus, helpers, SID/token, rect/char/…, **+ fenêtre SDL VISIBLE (G2b : `SDL_Window`+présentation framebuffer+pompe `SDL_PollEvent`)** **+ GDI texte FreeType bit-identique Wine (G3, autonome)** **+ GDI vectoriel/raster complet (G6 : lignes/Rectangle/Polyline(To)/FrameRect/InvertRect/BitBlt-ROPs)** (winediff **102/102**). **Reste** : widgets natifs (BUTTON/EDIT), Ellipse/courbes (niveau-recherche), + hors-GUI : **threads coopératifs** (fibers, incrément 1 fait — §4.7), **EH/RtlUnwind** |
 
 > **Règle** : on ne s'engage pas sur M_n+1 tant que M_n ne tourne pas proprement ;
 > chaque palier = un artefact démontrable + un test de non-régression.
@@ -583,21 +606,19 @@ Largeur/signe/pointeur à partir de l'usage des registres, puis agrégats
 (casts explicites conservés). Non bloquant pour l'exécution ; améliore la lisibilité
 du C généré et peut aider les autres passes.
 
-### 8.3 Multithreading (chantier dédié — modèle actuel mono-thread)
-**Blocage de fond** : `ebp`/`last-error`/TEB/PEB sont **globaux**, la pile machine
-est **une région unique partagée** ⇒ modèle **fondamentalement mono-thread**
-aujourd'hui. Les registres sont des variables C locales (thread-safe), mais l'état
-partagé ne l'est pas. Chemin **clair et mesuré** (à faire dans l'ordre) :
-1. **TEB + last-error thread-locaux** (`__thread`) — la fondation.
-2. **Pile machine par thread** dans `CreateThread` (malloc 32-bit, `__esp` initial au
-   sommet) + dispatch `aret_call(startAddr, esp, param)` (ABI stdcall du thread-proc).
-3. **Sync réelle** : `CRITICAL_SECTION` → `pthread_mutex` **récursif** ;
-   `CreateEvent`/`SetEvent`/`WaitForSingleObject`/`WaitForMultipleObjects` →
-   `pthread` cond/join. (Aujourd'hui : CriticalSection = no-op *correct sans
-   concurrence*, WaitForSingleObject = WAIT_OBJECT_0 immédiat — **sound en
-   mono-thread**, à remplacer par du réel en MT.)
-4. **Validation MT vs Wine** : N threads + compteur sous section critique → somme
-   déterministe ; signalisation d'événement → déterministe.
+### 8.3 Multithreading — **fibers coopératifs** (doc 80). Incrément 1 fait
+**Choix d'architecture** (doc 80 §2, > pthread) : `CreateThread` = **coroutine**
+(`ucontext`) multiplexée sur l'unique thread hôte, bascule **seulement** aux points
+bloquants ⇒ **zéro data-race, ordonnancement déterministe** ⇒ oracle différentiel
+valide. Autonome (`ucontext` = libc statique) ; WASM ⇒ abort sound (Asyncify plus tard).
+La pile machine est **par-fiber** ; `last_error`/TEB (globaux) sont **swappés par le
+scheduler** à chaque bascule. Plan incrémental piloté par fixture :
+1. ✅ **FAIT** — infra fibers + `CreateThread`/`ExitThread`/`ResumeThread`/`GetExitCodeThread`
+   + `WaitForSingle/MultipleObjects` (join) + `Sleep`=yield + `last_error` par-fiber.
+   Oracle `thread_join.c` (somme déterministe vs Wine). Détail §4.7.
+2. **CriticalSection réelle** (owner + récursion + file d'attente) — oracle `counter=4000`.
+3. **Events** (Set/Reset/Wait) — signalisation déterministe.
+4. **Mutex/Semaphore/`WaitForMultipleObjects(FALSE)`, TLS par-fiber, `_beginthreadex`.
 *Frontière dure* : `CreateProcessA/W` (lancer un `.exe` enfant) — pas de Windows pour
 l'exécuter ; reste **échec sound**, pas simulé. `CreatePipe` (anonyme) est déjà fidèle
 (`pipe()`).

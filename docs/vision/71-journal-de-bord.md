@@ -1984,4 +1984,40 @@ Détail : **70 §6** (roadmap). Résumé :
   sound** (match niveau-recherche, pas un minage rapide) : Ellipse/Polygon/RoundRect/Arc (midpoint-ellipse à
   centre demi-entier), stylos larges/pointillés, ROP à motif. Prochain grand chantier = **fibers** (doc 80).
 
+### 2026-07-16 — [THREAD][HLE-WIN32] Threads coopératifs (fibers) — incrément 1 : `CreateThread` + join, bit-identique Wine
+- **Nouveau chantier (doc 80, priorité 1)**. `CreateThread` devient une **coroutine réelle** (`ucontext`/
+  `swapcontext`) multiplexée sur l'unique thread hôte ; on ne bascule qu'aux **points bloquants** (Wait/Sleep) ⇒
+  **zéro data-race**, ordonnancement **round-robin déterministe** ⇒ oracle différentiel reproductible.
+- **Feasibilité re-mesurée** (règle « mesurer, pas affirmer ») avant d'écrire le vrai code : `ucontext`
+  coopératif compile et tourne en **`-m32`** (le binaire produit d'un PE 32-bit est un ELF 32-bit natif),
+  probe `counter=4000` déterministe. Feu vert.
+- **Architecture** (`aret_win32.c`, `#ifndef __wasm__`) : table `g_fiber[64]` (fiber 0 = main), chacun a un
+  **contexte hôte** (`ucontext_t` + pile C hôte 4 Mo malloc) et une **pile machine émulée dédiée** (1 Mo malloc,
+  `esp` au sommet — le modèle shared-stack devient par-fiber sans toucher le lifter). Un **scheduler** (`ucontext`
+  propre) boucle : réveille les fibers dont la condition d'attente est satisfaite, choisit le prochain READY
+  round-robin, `swapcontext`. Aucun READY alors qu'un fiber est BLOCKED = **deadlock → abort sound**.
+- **`CreateThread`** alloue les piles, `makecontext`→ trampoline qui pose la frame `__stdcall` du thread-proc
+  (`param` @ `[esp+4]`) sur la pile machine et dispatche via **`aret_call(start, esp, …)`** (le proc lifté court
+  sur la pile hôte du fiber) ; au retour, code de sortie + état DONE + `uc_link`=scheduler. `CREATE_SUSPENDED`
+  +`ResumeThread`, `ExitThread`, `GetExitCodeThread` (STILL_ACTIVE=259 tant que vivant).
+- **`WaitForSingle/MultipleObjects` = vrai join** : bloque le fiber courant sur l'ensemble de handles jusqu'à
+  satisfaction (un handle de thread signale quand son fiber est DONE), en pilotant le scheduler. **timeout 0** =
+  poll → `WAIT_TIMEOUT` (jamais bloquer) ; timeout fini non nul traité comme INFINITE (dans le modèle coopératif
+  un thread runnable n'a pas d'horloge : il complète → `WAIT_OBJECT_0`, ou l'ensemble deadlock → abort sound —
+  jamais un faux). `waitAll`→0, `waitAny`→index du signalé. Handles non-thread gardent l'immédiat legacy
+  (`WAIT_OBJECT_0`, sound en mono-thread). `CloseHandle`(thread)=succès (référence seule).
+- **`last_error` par-fiber** : `g_last_error` (aret_hle.c) rendu non-`static` ; le scheduler le **sauve/restaure**
+  à chaque bascule (un seul fiber court ⇒ correct). `Sleep` devient un **yield** coopératif (`aret_fiber_yield`,
+  retourne 0 sans thread ⇒ `usleep` inchangé en mono-thread). `SuspendThread` d'un thread en cours → abort sound.
+- **WASM** : `ucontext` inexistant ⇒ `CreateThread` = **abort sound** (Asyncify plus tard), jamais divergence
+  silencieuse (règle doc 80 §3). Branche `#else` fournie.
+- **Additivité prouvée** : sans `CreateThread`, le scheduler ne démarre jamais, `last_error` n'est jamais swappé,
+  `Sleep` garde son `usleep` ⇒ un programme mono-thread est **byte-identique**. winediff **101→102/102**, hash
+  transpile inchangé (`19acad982194bf07`).
+- **Vérifié bit-identique Wine** : `winecorpus/thread_join.c` (4 threads, `SetLastError` propre puis yield puis
+  `GetLastError` = **isolation par-thread prouvée à travers un yield**, somme déterministe `25800` via slots
+  privés, exit-codes `1..4`, `wait=0`). `stdcall_pops` : CreateThread=24, ExitThread=4, ResumeThread=4,
+  SuspendThread=4, GetExitCodeThread=8 (triés). Découverte auto du shim par le builder (`aret_x(uint32_t`).
+- **Suite (doc 80 §2)** : CriticalSection réelle (`counter=4000`), Events, Mutex/Semaphore/TLS/`_beginthreadex`.
+
 <!-- NOUVELLES ENTRÉES ICI (garder l'ordre chronologique, plus récent en bas) -->
