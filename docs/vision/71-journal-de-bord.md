@@ -2020,4 +2020,29 @@ Détail : **70 §6** (roadmap). Résumé :
   SuspendThread=4, GetExitCodeThread=8 (triés). Découverte auto du shim par le builder (`aret_x(uint32_t`).
 - **Suite (doc 80 §2)** : CriticalSection réelle (`counter=4000`), Events, Mutex/Semaphore/TLS/`_beginthreadex`.
 
+### 2026-07-16 — [THREAD][HLE-WIN32] Fibers incrément 2 : `CRITICAL_SECTION` réelle (owner + récursion), oracle `counter=4000`
+- **Suite du chantier fibers** (doc 80 §2, incr. 2). Les stubs CS (no-op *sound en mono-thread*) deviennent une
+  **vraie exclusion mutuelle** au-dessus du scheduler coopératif.
+- **Déplacement** : les 6 fns CS quittent `aret_hle.c` (où elles étaient no-op) pour `aret_win32.c`, à côté du
+  scheduler qu'elles doivent piloter (le builder les redécouvre par `aret_x(uint32_t` ; zéro changement d'en-tête).
+- **Modèle** : table `g_cs[256]` **keyée par le pointeur `&cs`** (la struct RTL_CRITICAL_SECTION reste opaque,
+  comme chez Wine — on ne falsifie pas ses champs), portant `owner` (index fiber+1, 0=libre) et `rec` (profondeur
+  de récursion de l'owner). Table pleine → **abort sound**.
+- **`EnterCriticalSection`** : libre ou déjà à moi → prends (`owner=moi`, `rec++`) ; sinon **bloque** — le fiber
+  pose `wait_cs=&cs`, passe BLOCKED, rend la main au scheduler ; le scheduler (prédicat `u32_fiber_runnable`
+  étendu : runnable quand `owner==0`) le réveille quand la CS se libère, il **retente** l'acquisition. ⇒ un owner
+  qui **yield en tenant le lock** (Sleep/Wait) garde bien les autres dehors. `TryEnter` = même prise sans blocage
+  (0 si tenu par un autre). `Leave` = `rec--`, libère (`owner=0`) à 0, **réservé à l'owner** (un Leave d'un
+  non-owner ne corrompt rien). `Initialize`(+AndSpinCount/Ex) enregistrent, `Delete` compacte (pointeurs stables).
+- **WASM** (`#else`) : pas de threads ⇒ CS = **no-op correct** (jamais de contention), `InitializeCritical
+  SectionAndSpinCount`→1 (sinon le CRT `__fastfail`).
+- **Oracle discriminant** : `winecorpus/thread_critsec.c` — 4 threads × 1000, chacun `Enter; v=counter; Sleep(0);
+  counter=v+1; …; Leave`. Le **`Sleep(0)` coupe le read-modify-write sous le lock** : sans exclusion vraie, un
+  autre fiber lirait le même `v` pendant le yield → incréments perdus → `<4000`. Avec la CS correcte : **`4000`
+  exact**, déterministe sur Wine (threads préemptifs réels) **et** ARET (fibers). + récursion (`Enter` imbriqué,
+  `TryEnter` par l'owner = TRUE) → `rec_ok=1`. `stdcall_pops` : TryEnterCriticalSection=4 (les autres déjà là).
+- **Vérifié** : hash transpile inchangé (`19acad982194bf07`), `table_is_sorted` vert, winediff **102→103/103**
+  (les fixtures existantes utilisant CS restent bit-identiques ⇒ additivité préservée).
+- **Suite** : Events (Set/Reset/Wait), puis Mutex/Semaphore/TLS/`_beginthreadex` (doc 80 §2, incr. 3-4).
+
 <!-- NOUVELLES ENTRÉES ICI (garder l'ordre chronologique, plus récent en bas) -->

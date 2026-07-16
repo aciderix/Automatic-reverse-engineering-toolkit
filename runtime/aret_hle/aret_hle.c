@@ -2200,11 +2200,8 @@ uint32_t aret_TlsFree(uint32_t esp) {
  * value is opaque to the program, so identity is correct and round-trips. */
 uint32_t aret_EncodePointer(uint32_t esp) { return arg(esp, 0); }
 uint32_t aret_DecodePointer(uint32_t esp) { return arg(esp, 0); }
-uint32_t aret_InitializeCriticalSection(uint32_t esp) { (void)esp; return 0; }
-/* Single-threaded model: the spin count is irrelevant and there is never
- * contention, so initialisation always succeeds. Returns BOOL=TRUE; a FALSE
- * here makes the CRT treat init as failed and __fastfail (int 0x29). */
-uint32_t aret_InitializeCriticalSectionAndSpinCount(uint32_t esp) { (void)esp; return 1; }
+/* CriticalSection (Initialize/Enter/Leave/Try/Delete) lives in aret_win32.c with
+ * the cooperative-fiber scheduler it must drive under contention (doc 80 incr. 2). */
 /* InitializeSListHead(PSLIST_HEADER): zero the lock-free list header so later
  * SList queries see an empty list. The header is 8 bytes on x86 (a union with a
  * 64-bit Alignment); zero 16 to be safe. A no-op stub left it uninitialised, so
@@ -2344,10 +2341,6 @@ uint32_t aret_VerQueryValueA(uint32_t esp) {
     *plen = vi_w(node, 2);
     return 1;
 }
-uint32_t aret_InitializeCriticalSectionEx(uint32_t esp) { (void)esp; return 1; }
-uint32_t aret_DeleteCriticalSection(uint32_t esp) { (void)esp; return 0; }
-uint32_t aret_EnterCriticalSection(uint32_t esp) { (void)esp; return 0; }
-uint32_t aret_LeaveCriticalSection(uint32_t esp) { (void)esp; return 0; }
 uint32_t aret_IsDBCSLeadByteEx(uint32_t esp) { (void)esp; return 0; }
 /* CP_ACP narrow<->wide: model the code page as Latin-1 (each byte is one WCHAR).
  * Enough for ASCII text — the common case — and a faithful identity round-trip.

@@ -170,7 +170,7 @@ bash bench/regression.sh    # PORTE unifiée : difftest 271/271, in-place 3/3,
                             # recompilabilité gzip/ls/cat 100%
 bash bench/difftest.sh              # décompile O0→O3
 bash bench/difftest_transpile.sh    # transpile (hash 19acad982194bf07)
-bash bench/winediff.sh              # axe 2 vs Wine (102/102)
+bash bench/winediff.sh              # axe 2 vs Wine (103/103)
 bash bench/funcdiff.sh              # lift-closure + opt-diff vs Unicorn (0 div)
 # Sweeps de vrais binaires (téléchargent + comparent à Wine) :
 bash bench/sqlite_sweep.sh   bash bench/busybox_sweep.sh   bash bench/corpus_sweep.sh
@@ -190,7 +190,7 @@ bash bench/wallsweep.sh <dir1> [dir2…]  # AGRÈGE --mode walls sur un corpus :
 
 ### État régression (référence — doit rester vert)
 difftest **271/271** · transpile-diff **4/4** (H=`19acad982194bf07`) · winediff
-**102/102** · cpudiff vert (per-instruction + séquences génératives) · funcdiff corpus **0 divergence** (lift ~12k scorées /
+**103/103** · cpudiff vert (per-instruction + séquences génératives) · funcdiff corpus **0 divergence** (lift ~12k scorées /
 ~6k appels, opt ~10k scorées) · SMT **11/11** · in-place **3/3** · magicdiv **2³²** ·
 recompilabilité **100 %** · WASM **7/7**.
 
@@ -470,11 +470,18 @@ recompilabilité **100 %** · WASM **7/7**.
   Deadlock (tous les fibers bloqués) → **abort sound** ; `SuspendThread` d'un thread courant → **abort sound**.
 - **Autonomie/universalité** : `ucontext` = libc natif, lié statiquement. **WASM n'a pas `ucontext`** ⇒
   `CreateThread` y est un **abort sound** (Asyncify plus tard), jamais une divergence silencieuse (règle doc 80 §3).
-- **Vérifié bit-identique Wine** : `winecorpus/thread_join.c` (4 threads, join, somme déterministe `25800`,
-  exit-codes `1..4`, `last_error` par-thread OK). `stdcall_pops` : CreateThread=24, ExitThread=4, ResumeThread=4,
-  SuspendThread=4, GetExitCodeThread=8. Portes : hash transpile inchangé, winediff **102/102**.
-- **Reste (incréments 2-4, doc 80 §2)** : `CriticalSection` réelle (oracle `counter=4000`), Events
-  (Set/Reset/Wait), Mutex/Semaphore/`WaitForMultipleObjects(FALSE)`, TLS par-fiber, `_beginthreadex`.
+- **Incrément 2 — `CRITICAL_SECTION` réelle** : table keyée par le pointeur `&cs` (struct laissé opaque, comme
+  Wine) portant **owner (fiber) + compteur de récursion**. `Enter` : libre ou déjà à moi → prends (rec++) ; sinon
+  **bloque** (le fiber pose `wait_cs`, le scheduler le réveille quand la CS se libère) → **exclusion mutuelle vraie
+  même si l'owner yield en la tenant**. `TryEnter` (non bloquant), `Leave` (rec--→ libère à 0, réservé à l'owner),
+  `Initialize`(+SpinCount/Ex)/`Delete`. Récursif. Table pleine → abort sound. WASM : no-op correct (jamais de
+  contention). `Sleep`/Wait dans la CS restent des points de yield sûrs.
+- **Vérifié bit-identique Wine** : `thread_join.c` (join, somme `25800`, `last_error` par-thread) **et**
+  `thread_critsec.c` (**`counter=4000`** — RMW *coupé par un yield sous le lock*, discriminant réel : un lock no-op
+  perdrait des incréments ; + récursion `rec_ok=1`). `stdcall_pops` : CreateThread=24, ExitThread/Resume/Suspend=4,
+  GetExitCodeThread=8, TryEnterCriticalSection=4. Portes : hash transpile inchangé, winediff **103/103**.
+- **Reste (incréments 3-4, doc 80 §2)** : Events (Set/Reset/Wait), Mutex/Semaphore/`WaitForMultipleObjects(FALSE)`,
+  TLS par-fiber, `_beginthreadex`.
 
 ---
 
@@ -616,7 +623,8 @@ scheduler** à chaque bascule. Plan incrémental piloté par fixture :
 1. ✅ **FAIT** — infra fibers + `CreateThread`/`ExitThread`/`ResumeThread`/`GetExitCodeThread`
    + `WaitForSingle/MultipleObjects` (join) + `Sleep`=yield + `last_error` par-fiber.
    Oracle `thread_join.c` (somme déterministe vs Wine). Détail §4.7.
-2. **CriticalSection réelle** (owner + récursion + file d'attente) — oracle `counter=4000`.
+2. ✅ **FAIT** — **CriticalSection réelle** (owner + récursion, blocage sur CS tenue) — oracle
+   `thread_critsec.c` `counter=4000` (RMW coupé par un yield sous le lock = discriminant réel).
 3. **Events** (Set/Reset/Wait) — signalisation déterministe.
 4. **Mutex/Semaphore/`WaitForMultipleObjects(FALSE)`, TLS par-fiber, `_beginthreadex`.
 *Frontière dure* : `CreateProcessA/W` (lancer un `.exe` enfant) — pas de Windows pour

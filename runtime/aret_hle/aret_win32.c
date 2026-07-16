@@ -800,6 +800,7 @@ struct u32_fiber {
     int        state;
     uint32_t   wait_h[64];       /* Wait set (MAXIMUM_WAIT_OBJECTS)                  */
     int        wait_n, wait_all;
+    uint32_t   wait_cs;          /* CRITICAL_SECTION being acquired (0 = none)      */
 };
 static struct u32_fiber g_fiber[U32_MAX_FIBER];
 static int g_nfiber = 1;         /* fiber 0 = main, always present */
@@ -808,6 +809,23 @@ static int g_rr = 0;             /* round-robin cursor */
 static ucontext_t g_sched_ctx;   /* scheduler's own context */
 static void *g_sched_stack;
 static int g_sched_ready;
+
+/* CRITICAL_SECTION table, keyed by the program's &cs pointer (the struct itself is
+ * left opaque, as Wine treats it). owner = fiber index + 1 (0 = free); rec = the
+ * recursion depth held by that owner. Under contention a would-be acquirer blocks
+ * and the scheduler runs the owner until it fully Leaves. */
+#define U32_MAX_CS 256
+static struct { uint32_t cs; int owner, rec; } g_cs[U32_MAX_CS];
+static int g_ncs;
+static int u32_cs_slot(uint32_t cs) {
+    for (int i = 0; i < g_ncs; i++) if (g_cs[i].cs == cs) return i;
+    return -1;
+}
+/* Owner fiber index+1 of a CS (0 = free / not yet registered). */
+static int u32_cs_owner(uint32_t cs) {
+    int s = u32_cs_slot(cs);
+    return s < 0 ? 0 : g_cs[s].owner;
+}
 
 /* handle -> fiber index, or -1 if it is not one of our thread handles. */
 static int u32_thread_idx(uint32_t h) {
@@ -832,11 +850,18 @@ static int u32_wait_ok(struct u32_fiber *f) {
     for (int i = 0; i < f->wait_n; i++) if (u32_handle_signaled(f->wait_h[i])) return 1;
     return 0;
 }
+/* A blocked fiber is runnable when its wait condition clears: a CRITICAL_SECTION
+ * it wants is free (owner 0 or itself), or its handle wait set is satisfied. */
+static int u32_fiber_runnable(int i) {
+    struct u32_fiber *f = &g_fiber[i];
+    if (f->wait_cs) { int o = u32_cs_owner(f->wait_cs); return o == 0 || o == i + 1; }
+    return u32_wait_ok(f);
+}
 static void u32_sched_loop(void) {
     for (;;) {
-        /* Wake any blocked fiber whose wait set is now satisfied. */
+        /* Wake any blocked fiber whose wait condition is now satisfied. */
         for (int i = 0; i < g_nfiber; i++)
-            if (g_fiber[i].state == FST_BLOCKED && u32_wait_ok(&g_fiber[i]))
+            if (g_fiber[i].state == FST_BLOCKED && u32_fiber_runnable(i))
                 g_fiber[i].state = FST_READY;
         /* Pick the next READY fiber round-robin (starting AFTER the last one). */
         int pick = -1;
@@ -981,8 +1006,69 @@ uint32_t aret_WaitForMultipleObjects(uint32_t esp) {
     for (uint32_t i = 0; i < n; i++) if (u32_handle_signaled(h[i])) return i;  /* WAIT_OBJECT_0 + i */
     return 0;
 }
+/* -------- CRITICAL_SECTION (doc 80 incr. 2) -------- */
+/* Cooperative fibers: only one fiber runs at a time, but a fiber that yields
+ * (Sleep/Wait) while holding a CS must keep others out — so Enter blocks a
+ * different-owner acquirer until the owner fully Leaves. Recursive by owner. */
+static int u32_cs_ensure(uint32_t cs) {
+    int s = u32_cs_slot(cs);
+    if (s >= 0) return s;
+    if (g_ncs >= U32_MAX_CS) { aret_unmodelled("CriticalSection: table full"); return -1; }
+    s = g_ncs++;
+    g_cs[s].cs = cs; g_cs[s].owner = 0; g_cs[s].rec = 0;
+    return s;
+}
+uint32_t aret_InitializeCriticalSection(uint32_t esp) { u32_cs_ensure(WU(0)); return 0; }
+uint32_t aret_InitializeCriticalSectionAndSpinCount(uint32_t esp) { u32_cs_ensure(WU(0)); return 1; }
+uint32_t aret_InitializeCriticalSectionEx(uint32_t esp) { u32_cs_ensure(WU(0)); return 1; }
+uint32_t aret_DeleteCriticalSection(uint32_t esp) {
+    int s = u32_cs_slot(WU(0));
+    if (s >= 0) g_cs[s] = g_cs[--g_ncs];              /* compact (pointers stay stable) */
+    return 0;
+}
+uint32_t aret_EnterCriticalSection(uint32_t esp) {
+    uint32_t cs = WU(0);
+    int me = g_cur, s = u32_cs_ensure(cs);
+    if (s < 0) return 0;
+    for (;;) {
+        if (g_cs[s].owner == 0 || g_cs[s].owner == me + 1) {
+            g_cs[s].owner = me + 1; g_cs[s].rec++;
+            return 0;
+        }
+        u32_sched_ensure();                            /* owned by another → block & retry */
+        g_fiber[me].wait_cs = cs;
+        g_fiber[me].state = FST_BLOCKED;
+        u32_to_sched();
+        g_fiber[me].wait_cs = 0;
+        s = u32_cs_slot(cs);                           /* table may have compacted */
+        if (s < 0) return 0;
+    }
+}
+uint32_t aret_TryEnterCriticalSection(uint32_t esp) {
+    int me = g_cur, s = u32_cs_ensure(WU(0));
+    if (s < 0) return 0;
+    if (g_cs[s].owner == 0 || g_cs[s].owner == me + 1) {
+        g_cs[s].owner = me + 1; g_cs[s].rec++;
+        return 1;                                      /* acquired */
+    }
+    return 0;                                          /* held by another fiber */
+}
+uint32_t aret_LeaveCriticalSection(uint32_t esp) {
+    int s = u32_cs_slot(WU(0));
+    if (s >= 0 && g_cs[s].owner == g_cur + 1 && g_cs[s].rec > 0)
+        if (--g_cs[s].rec == 0) g_cs[s].owner = 0;     /* fully released → waiters may take it */
+    return 0;
+}
 #else  /* __wasm__ : no ucontext. Threads are a sound abort, never a fake. */
 int aret_fiber_yield(void) { return 0; }
+/* No threads under WASM → CriticalSection is a correct no-op (never contended). */
+uint32_t aret_InitializeCriticalSection(uint32_t esp) { (void)esp; return 0; }
+uint32_t aret_InitializeCriticalSectionAndSpinCount(uint32_t esp) { (void)esp; return 1; }
+uint32_t aret_InitializeCriticalSectionEx(uint32_t esp) { (void)esp; return 1; }
+uint32_t aret_DeleteCriticalSection(uint32_t esp) { (void)esp; return 0; }
+uint32_t aret_EnterCriticalSection(uint32_t esp) { (void)esp; return 0; }
+uint32_t aret_TryEnterCriticalSection(uint32_t esp) { (void)esp; return 1; }
+uint32_t aret_LeaveCriticalSection(uint32_t esp) { (void)esp; return 0; }
 uint32_t aret_CreateThread(uint32_t esp) { (void)esp; aret_unmodelled("CreateThread: WASM has no ucontext (Asyncify pending)"); return 0; }
 uint32_t aret_ResumeThread(uint32_t esp) { (void)esp; return (uint32_t)-1; }
 uint32_t aret_SuspendThread(uint32_t esp) { (void)esp; return (uint32_t)-1; }

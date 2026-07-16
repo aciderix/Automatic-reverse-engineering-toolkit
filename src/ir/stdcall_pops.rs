@@ -471,6 +471,7 @@ static TABLE: &[(&str, u32)] = &[
     ("TrackPopupMenu", 28),
     ("TrackPopupMenuEx", 24),
     ("TranslateMessage", 4),
+    ("TryEnterCriticalSection", 4),
     ("UnhookWindowsHookEx", 4),
     ("UnionRect", 12),
     ("UnlockFile", 20),

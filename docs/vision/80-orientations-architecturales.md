@@ -144,7 +144,11 @@ récursion + file d'attente), `SetEvent/ResetEvent`, Mutex, Semaphore.
    (join) + `Sleep`=yield + `last_error` par-fiber. Fixture `thread_join.c` : 4 threads,
    somme déterministe `25800` + isolation `last_error` à travers un yield, bit-identique
    Wine. winediff 102/102, hash transpile inchangé. Détail : doc 70 §4.7, doc 71.
-2. `CriticalSection` réelle (oracle `counter=4000`).
+2. ✅ **FAIT (2026-07-16)** — `CriticalSection` réelle (table keyée par `&cs` : owner
+   fiber + récursion ; Enter bloque un acquéreur d'un autre fiber tant que l'owner ne
+   Leave pas ; Try/Delete/Init*). Oracle `thread_critsec.c` : **`counter=4000`** avec le
+   read-modify-write **coupé par un yield sous le lock** (discriminant réel — un lock
+   no-op perdrait des incréments), + récursion. Bit-identique Wine, winediff 103/103.
 3. Events (Set/Reset/Wait) — signalisation déterministe.
 4. Mutex / Semaphore / `WaitForMultipleObjects(FALSE)`, TLS par-fiber, `_beginthreadex`.
 
