@@ -374,11 +374,19 @@ impl Interp {
             // 32-bit integer-division helpers. Any other call (`__ps_*`,
             // `__pi_*`, `__x87_*`, …) is unmodelled -> skip.
             Expr::Call { target: CallTarget::Named(name), args, .. } => {
-                let mut vals = Vec::with_capacity(args.len());
-                for a in args {
-                    vals.push(self.eval(a)?);
+                // Symmetric import stub: deterministic return (eax=0), no esp effect
+                // (the lifted IR carries the stdcall `esp += @N` itself). Unicorn runs
+                // the matching `mov eax,0; ret N` at the IAT slot, so the two engines
+                // stay in lockstep across the call.
+                if is_stub_import(name) {
+                    0
+                } else {
+                    let mut vals = Vec::with_capacity(args.len());
+                    for a in args {
+                        vals.push(self.eval(a)?);
+                    }
+                    helper_call(name, &vals)?
                 }
-                helper_call(name, &vals)?
             }
             // Memory, addresses, other calls, SSA forms: not modelled -> skip.
             _ => return None,
@@ -517,6 +525,26 @@ impl Interp {
                 // returned pointer, ignored at the `rep` site) is 0.
                 CallTarget::Named(n) if is_modeled_memcall(n, args.len()) => {
                     self.do_memcall(n, args)?;
+                    return Some(0);
+                }
+                // Symmetric import stub: the import returns 0 in eax (matching the
+                // Unicorn `mov eax,0; ret N` blob at its IAT slot). Write eax so a
+                // *tail-call* `jmp [import]` (result = eax) compares correctly; the
+                // stdcall esp pop is already in the lifted IR (`esp += @N`). ecx/edx
+                // are left as-is (the stub preserves them too — both engines match).
+                CallTarget::Named(n) if is_stub_import(n) => {
+                    self.regs[0] = 0; // eax = import return (0)
+                    self.regs[2] = 0; // edx = high half (0) — matches the Unicorn stub's
+                                      // `mov edx,0` and the IR's edx:eax return split, so
+                                      // a *tail-call* `jmp [import]` (which skips the split)
+                                      // agrees with the emulator too.
+                    // Unicorn's `call [IAT]` pushes a return address at esp-4 (its stub's
+                    // `ret N` pops it, but the bytes linger in stack memory); the
+                    // interpreter's import model pushes none. Record that slot so the
+                    // stack diff skips it — exactly as call_direct does for recursed
+                    // calls (a tail-call `jmp [import]` writes nothing there, so excluding
+                    // its seeded, matching slot is harmless).
+                    self.ret_slots.push(self.regs[4].wrapping_sub(4));
                     return Some(0);
                 }
                 _ => {}
@@ -2122,6 +2150,26 @@ fn is_modeled_helper(name: &str) -> bool {
         || name.starts_with("__fp_")
 }
 
+thread_local! {
+    /// Sanitized names of the current binary's IAT imports that funcdiff stubs
+    /// *symmetrically*: the interpreter returns a deterministic 0 (eax) and does
+    /// not touch esp (the lifted IR carries its own `esp += @N` stdcall
+    /// compensation), while Unicorn runs a `mov eax,0; ret N` stub placed at the
+    /// import's IAT slot. Because BOTH engines apply the identical stub, the
+    /// import is never itself a divergence source — any esp/register/memory
+    /// mismatch around the call is a real lift bug (the class that was previously
+    /// *skipped*: functions behind imports, e.g. SEH-heavy CRT wrappers). Set per
+    /// binary by `run_functions`.
+    static STUB_IMPORTS: std::cell::RefCell<std::collections::HashSet<String>> =
+        std::cell::RefCell::new(std::collections::HashSet::new());
+}
+fn set_stub_imports(names: std::collections::HashSet<String>) {
+    STUB_IMPORTS.with(|s| *s.borrow_mut() = names);
+}
+fn is_stub_import(name: &str) -> bool {
+    STUB_IMPORTS.with(|s| s.borrow().contains(name))
+}
+
 /// A memory-effecting library call modelled by executing the memory op itself
 /// (`do_memcall`): the synthetic `memcpy`/`memmove` (from `rep movs`) and
 /// `__rep_stos*` (from `rep stos`), each with explicit `(dst, src/val, len)`.
@@ -2155,7 +2203,7 @@ fn check_expr_calls(
                     targets.push(*t);
                 }
                 CallTarget::Named(n) => {
-                    if !is_modeled_helper(n) && !is_modeled_memcall(n, args.len()) {
+                    if !is_modeled_helper(n) && !is_modeled_memcall(n, args.len()) && !is_stub_import(n) {
                         return None;
                     }
                 }
@@ -2503,6 +2551,35 @@ pub fn diff_function(
         img0[off..off + s.data.len()].copy_from_slice(&s.data);
     }
 
+    // Symmetric import stubs for Unicorn: point each stdcall import's IAT slot at a
+    // `mov eax,0; ret N` blob (8 bytes) in a scratch page, so Unicorn runs the exact
+    // same effect the interpreter models (return 0, `esp += N`). `uc_img` is the
+    // image the emulator sees (patched slots); the interpreter keeps the pristine
+    // `img0` (it resolves imports by Named, never reads the slot). Only slots with a
+    // known `@N` are patched — matching the STUB_IMPORTS set the interpreter uses.
+    const STUB_BASE: u64 = 0x2000_0000;
+    let mut uc_img = img0.clone();
+    let mut stub_blob: Vec<u8> = Vec::new();
+    for (&slot, name) in &prog.imports {
+        let Some(n) = crate::ir::stdcall_pops::stdcall_pop_bytes(name) else { continue };
+        if slot < lo || slot + 4 > hi {
+            continue;
+        }
+        let stub_addr = STUB_BASE + stub_blob.len() as u64;
+        // Match the lifted caller-side call model exactly: eax = low(result)=0 and
+        // edx = high(result)=0 (the edx:eax return split in ir/lift). ecx is left
+        // untouched — the IR clobbers it to Undef, which the interpreter skips
+        // (keeps the pre-call value), and the stub preserves it likewise.
+        stub_blob.extend_from_slice(&[0xB8, 0, 0, 0, 0]); // mov eax, 0
+        stub_blob.extend_from_slice(&[0xBA, 0, 0, 0, 0]); // mov edx, 0
+        stub_blob.extend_from_slice(&[0xC2, (n & 0xff) as u8, (n >> 8) as u8]); // ret N
+        let off = (slot - lo) as usize;
+        uc_img[off..off + 4].copy_from_slice(&(stub_addr as u32).to_le_bytes());
+    }
+    if stub_blob.len() > 0x1000 {
+        return out; // more imports than the one-page stub region holds — skip (rare)
+    }
+
     let mut uc: *mut uc_engine = std::ptr::null_mut();
     unsafe {
         if uc_open(UC_ARCH_X86, UC_MODE_32, &mut uc) != 0 {
@@ -2510,9 +2587,13 @@ pub fn diff_function(
         }
         if uc_mem_map(uc, lo, img0.len(), UC_PROT_ALL) != 0
             || uc_mem_map(uc, FN_STACK_BASE, FN_STACK_SIZE, UC_PROT_ALL) != 0
+            || uc_mem_map(uc, STUB_BASE, 0x1000, UC_PROT_ALL) != 0
         {
             uc_close(uc);
             return out;
+        }
+        if !stub_blob.is_empty() {
+            uc_mem_write(uc, STUB_BASE, stub_blob.as_ptr() as *const c_void, stub_blob.len());
         }
     }
 
@@ -2544,9 +2625,13 @@ pub fn diff_function(
         let state = CpuState { regs, flags: flags.clone(), xmm: [[0; 2]; 8] };
 
         // ---- interpret the lifted IR ----
+        // Use the SAME (IAT-patched) image the emulator sees, so the whole-image
+        // memory diff matches at the stubbed slots. The interpreter resolves imports
+        // by Named (it never reads a slot as a call target), so the patch is inert to
+        // it — but keeping both images byte-identical avoids a spurious slot mismatch.
         let mut interp = Interp::new(&state, Vec::new());
         interp.regions = vec![
-            Region { base: lo, data: img0.clone(), writable: true },
+            Region { base: lo, data: uc_img.clone(), writable: true },
             Region { base: FN_STACK_BASE, data: stack.clone(), writable: true },
         ];
         let mut budget = 500_000u32;
@@ -2563,7 +2648,7 @@ pub fn diff_function(
 
         // ---- run Unicorn from the same state ----
         unsafe {
-            uc_mem_write(uc, lo, img0.as_ptr() as *const c_void, img0.len());
+            uc_mem_write(uc, lo, uc_img.as_ptr() as *const c_void, uc_img.len());
             uc_mem_write(uc, FN_STACK_BASE, stack.as_ptr() as *const c_void, FN_STACK_SIZE);
             for r in 0..8 {
                 let v = regs[r] as u32;
@@ -2669,6 +2754,21 @@ pub fn run_functions(path: &str, iters: u32) -> Result<Vec<FnMismatch>, String> 
     let funcs: HashMap<u64, &IrFunction> = irfs.iter().map(|f| (f.entry, f)).collect();
     let ret_pops = compute_ret_pops(&result.functions);
     let ctx = ClosureCtx { funcs: &funcs, ret_pops: &ret_pops };
+
+    // Symmetric import stubs (see STUB_IMPORTS), by the sanitized Named form
+    // `build_ir` lowers a `call [IAT]` to. Restricted to imports with a KNOWN
+    // __stdcall pop `@N`: there the lifted IR carries an explicit `esp += N` and the
+    // Unicorn stub does `ret N`, so the two stay in exact lockstep. Imports without
+    // a known pop (cdecl / unlisted) keep being skipped — sound, no regression.
+    // Modeled memcalls are excluded (they keep their real memory effect).
+    let stub_imports: std::collections::HashSet<String> = prog
+        .imports
+        .values()
+        .filter(|n| crate::ir::stdcall_pops::stdcall_pop_bytes(n).is_some())
+        .map(|n| crate::ir::build::sanitize_import(n))
+        .filter(|n| !is_modeled_memcall(n, 3))
+        .collect();
+    set_stub_imports(stub_imports);
 
     let mut seed: u64 = 0x1234_5678_9abc_def1;
     let mut out = Vec::new();
