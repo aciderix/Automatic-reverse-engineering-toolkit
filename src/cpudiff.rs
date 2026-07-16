@@ -878,6 +878,91 @@ fn helper_call(name: &str, a: &[u64]) -> Option<u64> {
             }
             return Some(r);
         }
+        "__pi_add8" | "__pi_sub8" => {
+            let mut r = 0u64;
+            for i in (0..64).step_by(8) {
+                let (x, y) = ((a[0] >> i) as u8, (a[1] >> i) as u8);
+                let s = if name == "__pi_add8" { x.wrapping_add(y) } else { x.wrapping_sub(y) };
+                r |= (s as u64) << i;
+            }
+            return Some(r);
+        }
+        "__pi_sub16" => {
+            let mut r = 0u64;
+            for i in (0..64).step_by(16) {
+                r |= (((a[0] >> i) as u16).wrapping_sub((a[1] >> i) as u16) as u64) << i;
+            }
+            return Some(r);
+        }
+        "__pi_mullw" => {
+            let mut r = 0u64;
+            for i in (0..64).step_by(16) {
+                r |= (((a[0] >> i) as u16).wrapping_mul((a[1] >> i) as u16) as u64) << i;
+            }
+            return Some(r);
+        }
+        "__pi_sll32" | "__pi_srl32" | "__pi_sra32" => {
+            let c = a[1];
+            let (lo, hi) = (a[0] as u32, (a[0] >> 32) as u32);
+            let (l, h) = if name == "__pi_sra32" {
+                let c = c.min(31) as u32;
+                (((lo as i32) >> c) as u32, ((hi as i32) >> c) as u32)
+            } else if c > 31 {
+                (0, 0)
+            } else if name == "__pi_sll32" {
+                (lo << c, hi << c)
+            } else {
+                (lo >> c, hi >> c)
+            };
+            return Some(l as u64 | (h as u64) << 32);
+        }
+        "__pi_sll16" | "__pi_srl16" | "__pi_sra16" => {
+            let c = a[1];
+            let mut r = 0u64;
+            for i in (0..64).step_by(16) {
+                let w = (a[0] >> i) as u16;
+                let o = if name == "__pi_sra16" {
+                    (((w as i16) >> c.min(15)) as u16) as u64
+                } else if c > 15 {
+                    0
+                } else if name == "__pi_sll16" {
+                    (w << c) as u64
+                } else {
+                    (w >> c) as u64
+                };
+                r |= (o & 0xffff) << i;
+            }
+            return Some(r);
+        }
+        "__pi_packuswb" => {
+            let sat = |w: i16| -> u64 { (if w < 0 { 0 } else if w > 255 { 255 } else { w }) as u8 as u64 };
+            let mut r = 0u64;
+            for i in 0..4 {
+                r |= sat((a[0] >> (i * 16)) as i16) << (i * 8);
+                r |= sat((a[1] >> (i * 16)) as i16) << ((i + 4) * 8);
+            }
+            return Some(r);
+        }
+        "__pi_packssdw" => {
+            let sat = |d: i32| -> u64 {
+                (if d < -32768 { -32768 } else if d > 32767 { 32767 } else { d } as i16) as u16 as u64
+            };
+            let mut r = 0u64;
+            for i in 0..2 {
+                r |= sat((a[0] >> (i * 32)) as i32) << (i * 16);
+                r |= sat((a[1] >> (i * 32)) as i32) << ((i + 2) * 16);
+            }
+            return Some(r);
+        }
+        "__pi_unpcklbw_lo" | "__pi_unpcklbw_hi" => {
+            let sh = if name == "__pi_unpcklbw_hi" { 32 } else { 0 };
+            let mut r = 0u64;
+            for i in 0..4 {
+                r |= (((a[0] >> (i * 8 + sh)) as u8) as u64) << (i * 16);
+                r |= (((a[1] >> (i * 8 + sh)) as u8) as u64) << (i * 16 + 8);
+            }
+            return Some(r);
+        }
 
         // ---- packed single-precision float (two f32 lanes per 64-bit half) ----
         "__ps_add" => return Some(ps_map2(a[0], a[1], |x, y| x + y)),
@@ -1539,6 +1624,41 @@ fn corpus() -> Vec<Vec<u8>> {
         vec![0x66, 0x0f, 0xd7, 0xc1],       // pmovmskb eax, xmm1
         vec![0xf2, 0x0f, 0x70, 0xc1, 0x1b], // pshuflw  xmm0, xmm1, 0x1b
         vec![0xf3, 0x0f, 0x70, 0xc1, 0x1b], // pshufhw  xmm0, xmm1, 0x1b
+        // SSE2 byte/word add-sub-mul, quad sub, pack (saturating), byte unpack, extract
+        vec![0x66, 0x0f, 0xfc, 0xc1],       // paddb     xmm0, xmm1
+        vec![0x66, 0x0f, 0xf8, 0xc1],       // psubb     xmm0, xmm1
+        vec![0x66, 0x0f, 0xf9, 0xc1],       // psubw     xmm0, xmm1
+        vec![0x66, 0x0f, 0xfb, 0xc1],       // psubq     xmm0, xmm1
+        vec![0x66, 0x0f, 0xd5, 0xc1],       // pmullw    xmm0, xmm1
+        vec![0x66, 0x0f, 0x67, 0xc1],       // packuswb  xmm0, xmm1
+        vec![0x66, 0x0f, 0x6b, 0xc1],       // packssdw  xmm0, xmm1
+        vec![0x66, 0x0f, 0x60, 0xc1],       // punpcklbw xmm0, xmm1
+        vec![0x66, 0x0f, 0x68, 0xc1],       // punpckhbw xmm0, xmm1
+        vec![0x66, 0x0f, 0xc5, 0xc1, 0x03], // pextrw    eax, xmm1, 3
+        vec![0x66, 0x0f, 0xc5, 0xc1, 0x06], // pextrw    eax, xmm1, 6
+        // packed lane shifts — immediate count (72/71 /digit) and register count
+        vec![0x66, 0x0f, 0x72, 0xf0, 0x05], // pslld     xmm0, 5
+        vec![0x66, 0x0f, 0x72, 0xd0, 0x05], // psrld     xmm0, 5
+        vec![0x66, 0x0f, 0x72, 0xe0, 0x05], // psrad     xmm0, 5
+        vec![0x66, 0x0f, 0x72, 0xf0, 0x28], // pslld     xmm0, 0x28 (>=32 -> 0)
+        vec![0x66, 0x0f, 0x71, 0xf0, 0x03], // psllw     xmm0, 3
+        vec![0x66, 0x0f, 0x71, 0xd0, 0x03], // psrlw     xmm0, 3
+        vec![0x66, 0x0f, 0x71, 0xe0, 0x03], // psraw     xmm0, 3
+        vec![0x66, 0x0f, 0xf2, 0xc1],       // pslld     xmm0, xmm1 (count in xmm1 low64)
+        vec![0x66, 0x0f, 0xd2, 0xc1],       // psrld     xmm0, xmm1
+        vec![0x66, 0x0f, 0xe2, 0xc1],       // psrad     xmm0, xmm1
+        vec![0x66, 0x0f, 0xf1, 0xc1],       // psllw     xmm0, xmm1
+        vec![0x66, 0x0f, 0xd1, 0xc1],       // psrlw     xmm0, xmm1
+        vec![0x66, 0x0f, 0xe1, 0xc1],       // psraw     xmm0, xmm1
+        // whole-register byte shifts (psrldq/pslldq) at assorted counts
+        vec![0x66, 0x0f, 0x73, 0xd8, 0x01], // psrldq    xmm0, 1
+        vec![0x66, 0x0f, 0x73, 0xd8, 0x02], // psrldq    xmm0, 2
+        vec![0x66, 0x0f, 0x73, 0xd8, 0x07], // psrldq    xmm0, 7
+        vec![0x66, 0x0f, 0x73, 0xd8, 0x0b], // psrldq    xmm0, 11
+        vec![0x66, 0x0f, 0x73, 0xf8, 0x01], // pslldq    xmm0, 1
+        vec![0x66, 0x0f, 0x73, 0xf8, 0x03], // pslldq    xmm0, 3
+        vec![0x66, 0x0f, 0x73, 0xf8, 0x09], // pslldq    xmm0, 9
+        vec![0x66, 0x0f, 0x73, 0xf8, 0x0e], // pslldq    xmm0, 14
         // packed single-precision float (0F): arith, min/max, sqrt, cvt, bitwise,
         // compare, unpack, movmask (GP result)
         vec![0x0f, 0x58, 0xc1],       // addps     xmm0, xmm1

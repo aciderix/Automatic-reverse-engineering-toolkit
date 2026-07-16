@@ -167,6 +167,27 @@ pub(crate) const FLOAT_HELPERS: &str = concat!(
     "static inline uint32_t __pi_mskb(uint64_t lo,uint64_t hi){uint32_t m=0;for(int i=0;i<8;i++){m|=((uint32_t)((lo>>(i*8+7))&1))<<i;m|=((uint32_t)((hi>>(i*8+7))&1))<<(i+8);}return m;}\n",
     "static inline uint64_t __pi_muludq(uint64_t a,uint64_t b){return (uint64_t)(uint32_t)a*(uint32_t)b;}\n",
     "static inline uint64_t __pi_subus16(uint64_t a,uint64_t b){uint64_t r=0;for(int i=0;i<64;i+=16){uint16_t x=(uint16_t)(a>>i),y=(uint16_t)(b>>i);r|=(uint64_t)(uint16_t)(x>y?x-y:0)<<i;}return r;}\n",
+    // Byte/word lane add & sub (wrap per lane), word multiply-low (SSE2 pixel/vectorized code).
+    "static inline uint64_t __pi_add8(uint64_t a,uint64_t b){uint64_t r=0;for(int i=0;i<64;i+=8)r|=(uint64_t)(uint8_t)((a>>i)+(b>>i))<<i;return r;}\n",
+    "static inline uint64_t __pi_sub8(uint64_t a,uint64_t b){uint64_t r=0;for(int i=0;i<64;i+=8)r|=(uint64_t)(uint8_t)((a>>i)-(b>>i))<<i;return r;}\n",
+    "static inline uint64_t __pi_sub16(uint64_t a,uint64_t b){uint64_t r=0;for(int i=0;i<64;i+=16)r|=(uint64_t)(uint16_t)((a>>i)-(b>>i))<<i;return r;}\n",
+    "static inline uint64_t __pi_mullw(uint64_t a,uint64_t b){uint64_t r=0;for(int i=0;i<64;i+=16)r|=(uint64_t)(uint16_t)((uint16_t)(a>>i)*(uint16_t)(b>>i))<<i;return r;}\n",
+    // Packed lane shifts by a scalar count (same count for every lane; count>=width -> 0,
+    // arithmetic saturates the count to width-1). 32-bit and 16-bit lanes.
+    "static inline uint64_t __pi_sll32(uint64_t a,uint64_t c){if(c>31)return 0;uint32_t l=(uint32_t)a<<c,h=(uint32_t)(a>>32)<<c;return (uint64_t)l|((uint64_t)h<<32);}\n",
+    "static inline uint64_t __pi_srl32(uint64_t a,uint64_t c){if(c>31)return 0;uint32_t l=(uint32_t)a>>c,h=(uint32_t)(a>>32)>>c;return (uint64_t)l|((uint64_t)h<<32);}\n",
+    "static inline uint64_t __pi_sra32(uint64_t a,uint64_t c){if(c>31)c=31;int32_t l=(int32_t)(uint32_t)a>>c,h=(int32_t)(uint32_t)(a>>32)>>c;return (uint64_t)(uint32_t)l|((uint64_t)(uint32_t)h<<32);}\n",
+    "static inline uint64_t __pi_sll16(uint64_t a,uint64_t c){if(c>15)return 0;uint64_t r=0;for(int i=0;i<64;i+=16)r|=(uint64_t)(uint16_t)((uint16_t)(a>>i)<<c)<<i;return r;}\n",
+    "static inline uint64_t __pi_srl16(uint64_t a,uint64_t c){if(c>15)return 0;uint64_t r=0;for(int i=0;i<64;i+=16)r|=(uint64_t)(uint16_t)((uint16_t)(a>>i)>>c)<<i;return r;}\n",
+    "static inline uint64_t __pi_sra16(uint64_t a,uint64_t c){if(c>15)c=15;uint64_t r=0;for(int i=0;i<64;i+=16)r|=(uint64_t)(uint16_t)((int16_t)(a>>i)>>c)<<i;return r;}\n",
+    // Pack with saturation: packuswb (word->unsigned byte), packssdw (dword->signed word).
+    // Each takes 4 words (8 dwords) split across the two source 64-bit halves — the low
+    // half of the result comes from the first operand, the high half from the second.
+    "static inline uint64_t __pi_packuswb(uint64_t a,uint64_t b){uint64_t r=0;for(int i=0;i<4;i++){int16_t w=(int16_t)(a>>(i*16));r|=(uint64_t)(uint8_t)(w<0?0:w>255?255:w)<<(i*8);}for(int i=0;i<4;i++){int16_t w=(int16_t)(b>>(i*16));r|=(uint64_t)(uint8_t)(w<0?0:w>255?255:w)<<((i+4)*8);}return r;}\n",
+    "static inline uint64_t __pi_packssdw(uint64_t a,uint64_t b){uint64_t r=0;for(int i=0;i<2;i++){int32_t d=(int32_t)(uint32_t)(a>>(i*32));int16_t w=d<-32768?-32768:d>32767?32767:d;r|=(uint64_t)(uint16_t)w<<(i*16);}for(int i=0;i<2;i++){int32_t d=(int32_t)(uint32_t)(b>>(i*32));int16_t w=d<-32768?-32768:d>32767?32767:d;r|=(uint64_t)(uint16_t)w<<((i+2)*16);}return r;}\n",
+    // Unpack-low bytes (apply to the high 32 bits of each half for the *hi variant).
+    "static inline uint64_t __pi_unpcklbw_lo(uint64_t d,uint64_t s){uint64_t r=0;for(int i=0;i<4;i++){r|=(uint64_t)(uint8_t)(d>>(i*8))<<(i*16);r|=(uint64_t)(uint8_t)(s>>(i*8))<<(i*16+8);}return r;}\n",
+    "static inline uint64_t __pi_unpcklbw_hi(uint64_t d,uint64_t s){uint64_t r=0;for(int i=0;i<4;i++){r|=(uint64_t)(uint8_t)(d>>(i*8+32))<<(i*16);r|=(uint64_t)(uint8_t)(s>>(i*8+32))<<(i*16+8);}return r;}\n",
     // Packed single-precision (4 floats per 128-bit reg, 2 per 64-bit half),
     // bit-exact via native IEEE-754 float per lane.
     "static inline uint64_t __ps_add(uint64_t a,uint64_t b){uint32_t l=(uint32_t)__fp_f32(__fp_g32(a)+__fp_g32(b)),h=(uint32_t)__fp_f32(__fp_g32(a>>32)+__fp_g32(b>>32));return (uint64_t)l|((uint64_t)h<<32);}\n",

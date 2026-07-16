@@ -189,7 +189,7 @@ bash bench/wallsweep.sh <dir1> [dir2…]  # AGRÈGE --mode walls sur un corpus :
 ```
 
 ### État régression (référence — doit rester vert)
-difftest **271/271** · transpile-diff **4/4** (H=`19acad982194bf07`) · winediff
+difftest **272/272** · transpile-diff **4/4** (H=`19acad982194bf07`) · winediff
 **106/106** · cpudiff vert (per-instruction + séquences génératives) · funcdiff corpus **0 divergence** (lift ~12k scorées /
 ~6k appels, opt ~10k scorées) · SMT **11/11** · in-place **3/3** · magicdiv **2³²** ·
 recompilabilité **100 %** · WASM **7/7**.
@@ -210,7 +210,13 @@ recompilabilité **100 %** · WASM **7/7**.
   quotient) via `__ix_*div*/*mod*` → crash exact, jamais une troncature silencieuse.
 - **SSE scalaire + SIMD packed** validés bit-à-bit contre Unicorn (`__fp_*`/`__ps_*`/
   `__pi_*`). Bug `ss` (préservation `[63:32]`) corrigé. SSE2-string
-  (pcmpeqb/pmovmskb/pshuflw…).
+  (pcmpeqb/pmovmskb/pshuflw…). **SSE2 packed-integer élargi** (2026-07-16, **piloté par la donnée** — famille
+  dominante des lift-gaps sur les vrais binaires WineHQ) : `paddb/psubb/psubw/psubq/pmullw`, décalages de lane
+  `pslld/psrld/psrad/psllw/psrlw/psraw` (compte imm **et** registre), `packuswb/packssdw` (saturation),
+  `punpcklbw/punpckhbw`, `pextrw`, et `psrldq/pslldq` **généralisés** (tout compte 0-15). Chacun **bit-identique
+  Unicorn** (corpus cpudiff). Effet mesuré : gaps de lift `gdi32_test` **147 → 19 sites** (le reste = données
+  décodées-en-code : `sti/hlt/in/out/ud2` → abort correct, + MMX). Débloque le code vectorisé (graphisme, boucles
+  auto-vectorisées, string/hash).
 - **Instructions de chaîne + drapeau de direction (DF)** : `movs/stos/lods/scas/cmps`
   (non-rep) + `rep movs/stos/scas/cmps` (helpers `__rep_*`). `rep(ne) cmps` = **idiome
   memcmp/strcmp** (`repe cmpsb;je…`). **DF modélisé** (`FlagKind::Df`, EFLAGS bit 10) :

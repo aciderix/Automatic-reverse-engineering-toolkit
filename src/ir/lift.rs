@@ -90,10 +90,13 @@ fn is_scalar_float(ins: &Instruction) -> bool {
             | Comiss | Comisd | Ucomiss | Ucomisd
             | Pxor | Xorps | Xorpd
             | Movaps | Movapd | Movups | Movupd
-            | Movdqa | Movdqu | Paddd | Psubd | Psrldq
+            | Movdqa | Movdqu | Paddd | Psubd | Psrldq | Pslldq
             | Pand | Pandn | Por | Pcmpeqd | Pcmpgtd | Pshufd
             | Pcmpeqb | Pcmpgtb | Pcmpeqw | Pmovmskb | Pshuflw | Pshufhw
             | Paddw | Paddq | Pcmpgtw | Pmuludq | Psrlq | Psubusw
+            | Paddb | Psubb | Psubw | Psubq | Pmullw
+            | Pslld | Psrld | Psrad | Psllw | Psrlw | Psraw
+            | Packuswb | Packssdw | Punpcklbw | Punpckhbw | Pextrw
             | Punpcklwd | Punpckhwd | Punpckldq | Punpckhdq | Punpcklqdq | Punpckhqdq
             | Movhlps | Movlhps | Movhps | Movhpd | Movlps | Movlpd | Shufpd
             | Unpcklpd | Unpckhpd | Addpd | Subpd | Mulpd | Divpd
@@ -1201,38 +1204,42 @@ pub fn lift(insn: &Insn, bits: u32) -> Vec<Stmt> {
             let hi = fcall(h, vec![ahi, bhi]);
             some_or_asm!(write_xmm128(ins, lo, hi))
         }
-        // Byte shift of the whole 128-bit value (right). Handles the reduction
-        // shifts (4/8/12); other counts aren't modelled.
-        Mnemonic::Psrldq => {
-            let n = xmm_num(ins.op_register(0));
-            let imm = ins.immediate(1);
-            match (n, imm) {
-                (Some(n), 8) => vec![
-                    Stmt::Set { dst: xmm_lo(n), expr: Expr::Read(xmm_hi(n)) },
-                    Stmt::Set { dst: xmm_hi(n), expr: konst(0) },
-                ],
-                (Some(n), 12) => vec![
-                    Stmt::Set {
-                        dst: xmm_lo(n),
-                        expr: bin(BinOp::Shr, Expr::Read(xmm_hi(n)), konst(32)),
-                    },
-                    Stmt::Set { dst: xmm_hi(n), expr: konst(0) },
-                ],
-                (Some(n), 4) => {
-                    // lo' = (lo>>32)|(hi<<32) ; hi' = hi>>32  (each masked to 64).
-                    let lo = bin(
-                        BinOp::Or,
-                        bin(BinOp::Shr, Expr::Read(xmm_lo(n)), konst(32)),
-                        bin(BinOp::And, bin(BinOp::Shl, Expr::Read(xmm_hi(n)), konst(32)), konst(mask(64))),
-                    );
-                    let hi = bin(BinOp::Shr, Expr::Read(xmm_hi(n)), konst(32));
-                    vec![
-                        Stmt::Set { dst: xmm_lo(n), expr: lo },
-                        Stmt::Set { dst: xmm_hi(n), expr: hi },
-                    ]
-                }
-                _ => return asm(),
-            }
+        // Byte shift of the whole 128-bit value (right = psrldq, left = pslldq) by
+        // an immediate byte count. Modelled for any count 0..15 on a register operand.
+        Mnemonic::Psrldq | Mnemonic::Pslldq => {
+            let n = some_or_asm!(xmm_num(ins.op_register(0)));
+            let s = (ins.immediate(1) & 0xff).min(16) as i128 * 8; // bit shift (>=128 → 0)
+            let (lo0, hi0) = (Expr::Read(xmm_lo(n)), Expr::Read(xmm_hi(n)));
+            let m64 = konst(mask(64));
+            let right = ins.mnemonic() == Mnemonic::Psrldq;
+            let (lo, hi) = if s == 0 {
+                (lo0, hi0)
+            } else if s >= 128 {
+                (konst(0), konst(0))
+            } else if right && s < 64 {
+                // lo' = (lo>>s)|(hi<<(64-s)); hi' = hi>>s
+                (
+                    bin(BinOp::Or,
+                        bin(BinOp::Shr, lo0, konst(s)),
+                        bin(BinOp::And, bin(BinOp::Shl, hi0.clone(), konst(64 - s)), m64)),
+                    bin(BinOp::Shr, hi0, konst(s)),
+                )
+            } else if right {
+                // 64<=s<128: lo' = hi>>(s-64); hi' = 0
+                (bin(BinOp::Shr, hi0, konst(s - 64)), konst(0))
+            } else if s < 64 {
+                // pslldq, s<64: hi' = (hi<<s)|(lo>>(64-s)); lo' = lo<<s  (masked to 64)
+                (
+                    bin(BinOp::And, bin(BinOp::Shl, lo0.clone(), konst(s)), m64.clone()),
+                    bin(BinOp::Or,
+                        bin(BinOp::And, bin(BinOp::Shl, hi0, konst(s)), m64.clone()),
+                        bin(BinOp::Shr, lo0, konst(64 - s))),
+                )
+            } else {
+                // pslldq, 64<=s<128: hi' = lo<<(s-64); lo' = 0
+                (konst(0), bin(BinOp::And, bin(BinOp::Shl, lo0, konst(s - 64)), m64))
+            };
+            some_or_asm!(write_xmm128(ins, lo, hi))
         }
         // 128-bit bitwise (exact on both halves). `pandn dst,src` = ~dst & src.
         Mnemonic::Pand | Mnemonic::Por | Mnemonic::Pandn => {
@@ -1314,6 +1321,82 @@ pub fn lift(insn: &Insn, bits: u32) -> Vec<Stmt> {
                 fcall("__pi_muludq", vec![dlo, slo]),
                 fcall("__pi_muludq", vec![dhi, shi])
             ))
+        }
+        // Byte/word lane add-sub-mul (per-lane wrap), and quadword sub (64-bit wrap).
+        Mnemonic::Paddb | Mnemonic::Psubb | Mnemonic::Psubw | Mnemonic::Pmullw => {
+            let (alo, ahi) = some_or_asm!(read_xmm128(ins, 0));
+            let (blo, bhi) = some_or_asm!(read_xmm128(ins, 1));
+            let h = match ins.mnemonic() {
+                Mnemonic::Paddb => "__pi_add8",
+                Mnemonic::Psubb => "__pi_sub8",
+                Mnemonic::Psubw => "__pi_sub16",
+                _ => "__pi_mullw",
+            };
+            some_or_asm!(write_xmm128(ins, fcall(h, vec![alo, blo]), fcall(h, vec![ahi, bhi])))
+        }
+        Mnemonic::Psubq => {
+            let (alo, ahi) = some_or_asm!(read_xmm128(ins, 0));
+            let (blo, bhi) = some_or_asm!(read_xmm128(ins, 1));
+            some_or_asm!(write_xmm128(ins, bin(BinOp::Sub, alo, blo), bin(BinOp::Sub, ahi, bhi)))
+        }
+        // Packed lane shifts by a scalar count (immediate or the low 64 bits of an
+        // XMM/mem operand). Same count for every lane; the helper handles count>=width.
+        Mnemonic::Pslld | Mnemonic::Psrld | Mnemonic::Psrad
+        | Mnemonic::Psllw | Mnemonic::Psrlw | Mnemonic::Psraw => {
+            let (lo, hi) = some_or_asm!(read_xmm128(ins, 0));
+            let count = match ins.op_kind(1) {
+                OpKind::Immediate8 => konst(ins.immediate(1) as i128),
+                OpKind::Register => Expr::Read(xmm_lo(some_or_asm!(xmm_num(ins.op_register(1))))),
+                _ => return asm(),
+            };
+            let h = match ins.mnemonic() {
+                Mnemonic::Pslld => "__pi_sll32",
+                Mnemonic::Psrld => "__pi_srl32",
+                Mnemonic::Psrad => "__pi_sra32",
+                Mnemonic::Psllw => "__pi_sll16",
+                Mnemonic::Psrlw => "__pi_srl16",
+                _ => "__pi_sra16",
+            };
+            some_or_asm!(write_xmm128(
+                ins,
+                fcall(h, vec![lo, count.clone()]),
+                fcall(h, vec![hi, count])
+            ))
+        }
+        // Pack with saturation: the low result half comes from operand 0's words/
+        // dwords, the high half from operand 1's.
+        Mnemonic::Packuswb | Mnemonic::Packssdw => {
+            let (dlo, dhi) = some_or_asm!(read_xmm128(ins, 0));
+            let (slo, shi) = some_or_asm!(read_xmm128(ins, 1));
+            let h = if ins.mnemonic() == Mnemonic::Packuswb { "__pi_packuswb" } else { "__pi_packssdw" };
+            some_or_asm!(write_xmm128(
+                ins,
+                fcall(h, vec![dlo, dhi]),
+                fcall(h, vec![slo, shi])
+            ))
+        }
+        // Interleave the low (punpcklbw) / high (punpckhbw) 8 bytes of dst and src.
+        Mnemonic::Punpcklbw | Mnemonic::Punpckhbw => {
+            let (dlo, dhi) = some_or_asm!(read_xmm128(ins, 0));
+            let (slo, shi) = some_or_asm!(read_xmm128(ins, 1));
+            let (d, s) = if ins.mnemonic() == Mnemonic::Punpcklbw { (dlo, slo) } else { (dhi, shi) };
+            some_or_asm!(write_xmm128(
+                ins,
+                fcall("__pi_unpcklbw_lo", vec![d.clone(), s.clone()]),
+                fcall("__pi_unpcklbw_hi", vec![d, s])
+            ))
+        }
+        // Extract one of the 8 16-bit lanes (imm & 7) into a GP register, zero-extended.
+        Mnemonic::Pextrw => {
+            let n = (ins.immediate(2) & 7) as u32;
+            let (lo, hi) = some_or_asm!(read_xmm128(ins, 1));
+            let half = if n < 4 { lo } else { hi };
+            let word = bin(
+                BinOp::And,
+                bin(BinOp::Shr, half, konst(((n & 3) * 16) as i128)),
+                konst(0xffff),
+            );
+            some_or_asm!(write_op0(ins, word, 32))
         }
         Mnemonic::Psrlq if ins.op_kind(1) == OpKind::Immediate8 => {
             let n = konst(ins.immediate(1) as i128);

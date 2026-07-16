@@ -2158,4 +2158,27 @@ Détail : **70 §6** (roadmap). Résumé :
 - **Note honnête** : la variante `lea ecx` n'est pas reproductible avec le mingw local (il émet `push ebp; and esp`,
   déjà reconnu) → guard = unit-test byte-exact + preuve sur le vrai binaire, pas une fixture winediff.
 
+### 2026-07-16 — [LIFT][ORACLE] SSE2 packed-integer élargi — **piloté par la donnée** (murs des vrais binaires), bit-identique Unicorn
+- **Méthode : mesurer avant de coder.** `--mode walls` (carte statique) agrégé sur **6 modules de conformance
+  WineHQ réels** (ucrtbase/shlwapi/msvcrt/advapi32/ole32/gdi32, extraits de `winetest -x`) → **0 appel direct non
+  résolu partout** (récup solide) ; le mur dominant = **instructions non liftées**, concentrées en gdi32 (**59
+  distinct / 147 sites**). Agrégat des mnémoniques : **SSE2 packed-integer** écrasant (`pextrw`×14, `packuswb`×7,
+  `psrld/pslld`×11, `pmullw`, `paddb`, `punpcklbw`, `psubw`…) ; le reste = `ud2`/`in`/`out`/`sti`/`hlt` (données
+  décodées-en-code, abort **correct**).
+- **Implémenté** (modèle lo/hi 64-bit existant, helpers `__pi_*`) : `paddb/psubb/psubw` (add/sub octet-mot),
+  `psubq` (64-bit), `pmullw` (mul-low mot), décalages de lane `pslld/psrld/psrad/psllw/psrlw/psraw` (compte
+  **immédiat ET registre**, `compte>=largeur → 0`, arithmétique saturé à largeur-1), `packuswb/packssdw` (pack
+  saturant, moitié basse = op0, haute = op1), `punpcklbw/punpckhbw` (interleave octets), `pextrw` (extraction de
+  lane 16-bit vers GP), et **`psrldq/pslldq` généralisés** (tout compte 0-15, plus seulement 4/8/12).
+- **Validation bit-exacte** : chaque op ajoutée au **corpus cpudiff** (encodages explicites, formes imm+reg) →
+  `per_instruction_corpus_matches_unicorn` **passe** (4000 états aléatoires/insn, regs+flags+xmm+mémoire = Unicorn).
+  Miroir Rust des helpers dans `cpudiff::helper_call`. C'est la preuve de justesse (pas juste « ça compile »).
+- **Effet mesuré** : gaps de lift `gdi32_test` **147 → 19 sites** (−87 %), `msvcrt_test` **10 → 2**. Le résidu =
+  données-en-code (abort correct) + MMX (`psubq mm`) + `fiadd` (filet x87). Débloque le code **vectorisé** en
+  général (graphisme, boucles auto-vectorisées, string/hash SSE2), pas juste gdi32.
+- **Régression complète** (changement lift = risqué) : cpudiff **vert** (bit-exact), hash transpile inchangé
+  (`19acad982194bf07`), difftest **271→272/272** (un test jadis « incomplet/non modélisé » devient liftable),
+  funcdiff corpus **0 divergence**, winediff **106/106**. *(Piège attrapé : un Xvfb `:99` résiduel de mes tests
+  manuels faisait DIFF les 12 fixtures GUI — environnemental, pas le lift ; résolu en tuant le stray Xvfb.)*
+
 <!-- NOUVELLES ENTRÉES ICI (garder l'ordre chronologique, plus récent en bas) -->
