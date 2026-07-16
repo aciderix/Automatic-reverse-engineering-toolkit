@@ -2923,6 +2923,59 @@ uint32_t aret_Rectangle(uint32_t esp) {
     }
     return 1;
 }
+/* FrameRect(hdc, const RECT*, hbrush) -> int. Draws a 1px border on the outline
+ * [l,r-1]x[t,b-1] (same bounds as Rectangle's outline) with the *argument* brush's
+ * colour (measured on Wine — it uses the brush passed in, not the selected one).
+ * Null brush -> nothing. */
+uint32_t aret_FrameRect(uint32_t esp) {
+    struct gdi_obj *bm = gdi_dc_surface(WU(0));
+    const int32_t *r = (const int32_t *)WP(1);
+    if (!bm || !r) return 0;
+    uint32_t c;
+    if (!gdi_brush_color(WU(2), &c)) return 1;            /* null brush: nothing */
+    int l = r[0], t = r[1], rr = r[2], b = r[3];
+    if (bm->bpp == 32 && rr > l && b > t) {
+        int r1 = rr - 1, b1 = b - 1;
+        for (int x = l; x <= r1; x++) { if (gdi_px(bm, x, t))  gdi_put(bm, x, t,  c);
+                                        if (gdi_px(bm, x, b1)) gdi_put(bm, x, b1, c); }
+        for (int y = t; y <= b1; y++) { if (gdi_px(bm, l, y))  gdi_put(bm, l,  y, c);
+                                        if (gdi_px(bm, r1, y)) gdi_put(bm, r1, y, c); }
+    }
+    return 1;
+}
+/* InvertRect(hdc, const RECT*) -> BOOL. XORs every pixel (all 32 bits, incl. the
+ * unused alpha byte — measured identical to DSTINVERT on Wine) over [l,r)x[t,b). */
+uint32_t aret_InvertRect(uint32_t esp) {
+    struct gdi_obj *bm = gdi_dc_surface(WU(0));
+    const int32_t *r = (const int32_t *)WP(1);
+    if (!bm || !r) return 0;
+    for (int y = r[1]; y < r[3]; y++)
+        for (int x = r[0]; x < r[2]; x++) {
+            uint8_t *p = gdi_px(bm, x, y); if (!p) continue;
+            p[0] = ~p[0]; p[1] = ~p[1]; p[2] = ~p[2]; p[3] = ~p[3];
+        }
+    return 1;
+}
+/* PolylineTo(hdc, const POINT* pts, int count) -> BOOL. Like a run of LineTo: from
+ * the current position, a Bresenham segment to each point (endpoint excluded),
+ * updating the current position to the last point (measured on Wine). */
+uint32_t aret_PolylineTo(uint32_t esp) {
+    int d = gdi_idx(WU(0)); if (d < 0 || g_gdi[d].type != GDIT_DC) return 0;
+    struct gdi_obj *bm = gdi_dc_surface(WU(0));
+    const int32_t *pts = (const int32_t *)(uintptr_t)WU(1); int n = WI(2);
+    uint32_t c; int pr = gdi_pen(d, &c);
+    if (pr < 0) return 0;
+    if (pts && n >= 1) {
+        int cx = g_gdi[d].cur_x, cy = g_gdi[d].cur_y;
+        for (int i = 0; i < n; i++) {
+            int nx = pts[2 * i], ny = pts[2 * i + 1];
+            if (pr && bm && bm->bpp == 32) gdi_bres(bm, cx, cy, nx, ny, c);
+            cx = nx; cy = ny;
+        }
+        g_gdi[d].cur_x = cx; g_gdi[d].cur_y = cy;
+    }
+    return 1;
+}
 /* FillRect(hdc, const RECT*, hbrush) -> int. [left,right) x [top,bottom). */
 uint32_t aret_FillRect(uint32_t esp) {
     struct gdi_obj *bm = gdi_dc_surface(WU(0));

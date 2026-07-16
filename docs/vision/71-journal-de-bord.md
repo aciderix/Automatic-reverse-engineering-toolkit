@@ -1960,4 +1960,28 @@ Détail : **70 §6** (roadmap). Résumé :
   `gdi_bitblt_rop.c`.
 - **Vérifié** : hash transpile inchangé, difftest-transpile 4/4, `table_is_sorted` vert, winediff (voir chiffre).
 
+### 2026-07-12 — [GUI][HLE-WIN32] GDI : **FrameRect / InvertRect / PolylineTo** bit-identiques Wine (fin du filon vectoriel/raster propre)
+- **Mesuré sur Wine avant d'implémenter** (rien de deviné) via une sonde ASCII-map : chaque primitive a sa
+  sémantique exacte capturée au pixel, puis prouvée par l'oracle DIB-hash.
+- **`FrameRect(hdc, RECT*, hbrush)`** : bord **1px** sur l'outline `[l,r-1]×[t,b-1]` (mêmes bornes que le contour
+  de `Rectangle`) mais de la couleur du **pinceau passé en argument** (pas le sélectionné — mesuré). Pinceau NULL
+  → rien. Réutilise `gdi_brush_color`/`gdi_px`/`gdi_put`.
+- **`InvertRect(hdc, RECT*)`** : XOR de **chaque pixel sur les 32 bits** (octet alpha inutilisé compris — vérifié
+  `0x44112233 → 0xBBEEDDCC`, cohérent avec `DSTINVERT`) sur `[l,r)×[t,b)`. Opère sur les 4 octets bruts (pas
+  `gdi_put` qui force alpha=0).
+- **`PolylineTo(hdc, POINT*, count)`** : **suite de `LineTo`** depuis la position courante — un segment Bresenham
+  vers chaque point (**point final exclu** par segment, donc les sommets partagés sont peints par le départ du
+  segment suivant), **met à jour la position courante** au dernier point (mesuré `cur=(2,8)`). Diffère de
+  `Polyline` (qui part de `pts[0]` et n'utilise/ne met pas à jour la position courante).
+- **Vérifié bit-identique Wine** : fixture combinée `winecorpus/gdi_framerect.c` (FrameRect vert + InvertRect sur
+  fond `112233` + PolylineTo boîte ouverte, `hash=af0530e1`, `cur=3,21`). `stdcall_pops` : FrameRect=12,
+  InvertRect=8, PolylineTo=12 (triés, `table_is_sorted` vert).
+- **Enregistrement automatique** : le builder découvre les `aret_x(uint32_t` du runtime → aucun table de dispatch
+  à toucher, juste la définition C + le pop stdcall.
+- **Vérifié** : hash transpile inchangé (`19acad982194bf07`), difftest-transpile 4/4, winediff **101/101**.
+- **Bilan filon GDI vectoriel/raster** : LineTo/MoveToEx, Rectangle, Polyline, BitBlt-ROPs, FrameRect, InvertRect,
+  PolylineTo = tout le sous-ensemble **proprement minable** (oracle DIB-hash exact) est **fait**. Reste **abort
+  sound** (match niveau-recherche, pas un minage rapide) : Ellipse/Polygon/RoundRect/Arc (midpoint-ellipse à
+  centre demi-entier), stylos larges/pointillés, ROP à motif. Prochain grand chantier = **fibers** (doc 80).
+
 <!-- NOUVELLES ENTRÉES ICI (garder l'ordre chronologique, plus récent en bas) -->

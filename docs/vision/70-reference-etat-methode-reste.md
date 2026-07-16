@@ -166,7 +166,7 @@ bash bench/regression.sh    # PORTE unifiée : difftest 271/271, in-place 3/3,
                             # recompilabilité gzip/ls/cat 100%
 bash bench/difftest.sh              # décompile O0→O3
 bash bench/difftest_transpile.sh    # transpile (hash 19acad982194bf07)
-bash bench/winediff.sh              # axe 2 vs Wine (100/100)
+bash bench/winediff.sh              # axe 2 vs Wine (101/101)
 bash bench/funcdiff.sh              # lift-closure + opt-diff vs Unicorn (0 div)
 # Sweeps de vrais binaires (téléchargent + comparent à Wine) :
 bash bench/sqlite_sweep.sh   bash bench/busybox_sweep.sh   bash bench/corpus_sweep.sh
@@ -186,7 +186,7 @@ bash bench/wallsweep.sh <dir1> [dir2…]  # AGRÈGE --mode walls sur un corpus :
 
 ### État régression (référence — doit rester vert)
 difftest **271/271** · transpile-diff **4/4** (H=`19acad982194bf07`) · winediff
-**100/100** · cpudiff vert (per-instruction + séquences génératives) · funcdiff corpus **0 divergence** (lift ~12k scorées /
+**101/101** · cpudiff vert (per-instruction + séquences génératives) · funcdiff corpus **0 divergence** (lift ~12k scorées /
 ~6k appels, opt ~10k scorées) · SMT **11/11** · in-place **3/3** · magicdiv **2³²** ·
 recompilabilité **100 %** · WASM **7/7**.
 
@@ -355,7 +355,17 @@ recompilabilité **100 %** · WASM **7/7**.
   `SetPixel`/`GetPixel`/`FillRect`/`PatBlt`/`BitBlt`(SRCCOPY), `CreateSolidBrush`/`Pen`, `GetStockObject`/
   `GetSysColor`/`GetDeviceCaps` (métriques par invariant), `GetDC`/`ReleaseDC`/`BeginPaint`/`EndPaint`. Cible
   vérifiée = un **DIB qu'on possède** (COLORREF↔`[B,G,R,0]`) → oracle = **hash du framebuffer** vs Wine. Hors
-  périmètre (abort sound) : Rectangle/LineTo (bords stylo), <32bpp. Gardé `winecorpus/gdi_dib.c`.
+  périmètre (abort sound) : <32bpp. Gardé `winecorpus/gdi_dib.c`.
+- **GDI vectoriel + raster** (M7 G6, doc 72, **bit-identique à Wine**, oracle DIB-hash) : `MoveToEx`/`LineTo`/
+  `GetCurrentPositionEx` (**Bresenham** entier, point final exclu, position courante sur le DC), `Rectangle`
+  (bord stylo `[l,r-1]×[t,b-1]` + remplissage pinceau `[l+1,r-1)×[t+1,b-1)`), `Polyline` (segments connectés,
+  n'utilise pas la position courante), `PolylineTo` (suite de `LineTo` depuis la position courante, la met à
+  jour), `FrameRect` (bord 1px du **pinceau argument** sur `[l,r-1]×[t,b-1]`), `InvertRect` (XOR 32 bits sur
+  `[l,r)×[t,b)`), `BitBlt` ROP3 **binaires** (S,D : SRCCOPY/AND/PAINT/INVERT/NOTSRC/ERASE/MERGE/DSTINVERT/
+  BLACK/WHITE). Stylo : **solide largeur ≤1** seulement (`PS_NULL`=rien ; styles/largeurs >1 = **abort sound**).
+  Hors périmètre = **abort sound** : Ellipse/Polygon/RoundRect/Arc (midpoint-ellipse à centre demi-entier =
+  match niveau-recherche), ROP à motif (pinceau). Gardés `winecorpus/gdi_{lineto,rectangle,polyline,framerect,
+  bitblt_rop}.c`.
 - **GDI texte via FreeType** (M7 G3, doc 72, **bit-identique à Wine, autonome**) : `TextOutA/W` rastérise avec
   **FreeType** — le rasterizer **que Wine utilise** — donc glyphes, ligne de base, positionnement, avances
   **identiques à Wine au pixel**, sans dépendance runtime Wine (FreeType lié dans l'ELF, statiquement liable →
