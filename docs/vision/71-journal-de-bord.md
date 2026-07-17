@@ -2570,4 +2570,32 @@ Détail : **70 §6** (roadmap). Résumé :
   généraux livrés cette session (pops `@N`, appels indirects, `@0` scalaires) ; la résolution finale 7za attend le
   levier memmove-callers.
 
+### 2026-07-17 — [ORACLE] funcdiff modélise les intrinsèques mémoire host-backés (memmove/memcpy) + exclut le scratch sous-esp
+- **Le blind-spot du memmove résolu.** funcdiff tourne `shared_stack=false` → il ne voyait pas le host-back FLIRT et
+  récursait dans le corps brut (tables entrelacées → skip) → **skippait tous les appelants de memmove/memcpy** (classe
+  large : tout binaire static-CRT MSVC). Fix : précalcul `{addr → MemIntrin}` via `prog.crt_symbol` ; à la frontière
+  d'appel, `call_mem_intrinsic` modélise l'effet mémoire (comme le shim `aret_memmove` du produit) au lieu de récurser.
+- **Modèle sound** : cdecl, args pile `[esp]=dst/[esp+4]=src/[esp+8]=n`, retourne `dst` en `eax`. **Lecture de tous les
+  octets source AVANT écriture** = résultat memmove correct pour tout recouvrement (et = memcpy sur non-recouvrement ;
+  memcpy recouvrant = UB → skip). Gardes statiques (`check_expr_calls`/`fn_local_targets`/`is_closure_modelable`)
+  threadées pour traiter une cible intrinsèque comme **feuille modélisée** (pas de récursion, pas de `ret N` requis).
+- **DÉCOUVERTE — le scratch sous-esp (12 faux positifs, corrigés proprement).** Modéliser l'intrinsèque à la frontière
+  ne réplique pas le **scratch que le corps réel écrit sous esp** (push edi/esi/ebp + dispatch) → Unicorn a des valeurs
+  là où le modèle a le seed → 12 divergences 7za, **toutes le même motif** (`stack +0x7fXX : lifted=0 unicorn=0xNN`,
+  juste sous esp). **Faux positifs.** Fix **principiel** (pas une rustine) : **la mémoire strictement sous l'esp final
+  est morte** (un programme correct ne la lit jamais) → le diff de pile **skippe les slots sous `min(esp_interp,
+  esp_unicorn)`**. Un vrai bug touche la pile **vivante** (≥ esp) et reste comparé ; le `min` garde la région vivante
+  du moteur au plus haut esp si esp divergeait. Soundness-neutre (le corpus reste 0-div).
+- **Mesuré** : corpus **20501 scorées, 0 divergence** (inchangé — busybox/sqlite n'ont pas l'intrinsèque host-backé) ;
+  **7za 38512 → 54214 scorées** (+15 700 memmove-callers), **0 divergence**. Portes : régression unifiée **PASS**, hash
+  transpile `19acad982194bf07` inchangé (oracle-only), winediff intact.
+- **7za : le crash n'est TOUJOURS pas un lift scorable.** Même les memmove-callers (`sub_470889`/`sub_471c08`/
+  `sub_471830`/`sub_46cf4c`) sont désormais **prouvés corrects** (0 div). ⇒ le crash est hors du lift scorable :
+  fonction encore skippée (import à pop **inconnu**/cdecl, `@0` **pointeur** non-stubbable, x87, ou un autre intrinsèque
+  unliftable non signaturé), ou une **dépendance environnement/heap** que l'oracle par-fonction ne peut structurellement
+  pas voir (valeurs seedées ≠ layout réel). **La chasse 7za sort du périmètre funcdiff** — prochain angle : diff
+  end-to-end (gdb watchpoint sur l'origine du garbage passé à sub_472126), ou audit des imports non-implémentés du
+  chemin de démarrage. L'oracle a fait tout son travail : **il a prouvé que le lift n'est pas en cause**, sur ~54k
+  fonctions/appels scorés de 7za.
+
 <!-- NOUVELLES ENTRÉES ICI (garder l'ordre chronologique, plus récent en bas) -->

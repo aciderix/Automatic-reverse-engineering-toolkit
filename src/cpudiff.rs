@@ -595,6 +595,12 @@ impl Interp {
         depth: u32,
         budget: &mut u32,
     ) -> Option<u64> {
+        // A call to a host-backed memory intrinsic (memmove/memcpy): don't recurse
+        // into its unliftable body — model its memory effect at the boundary, exactly
+        // as the product's native shim does.
+        if let Some(&kind) = ctx.mem_intrinsics.get(&t) {
+            return self.call_mem_intrinsic(kind);
+        }
         if depth >= CLOSURE_DEPTH {
             return None;
         }
@@ -609,6 +615,49 @@ impl Interp {
         let rv = self.run_closure(callee, ctx, depth + 1, budget)?;
         self.regs[4] = s.wrapping_add(pop as u64); // net: -4 (push) +4+N (ret N)
         Some(rv)
+    }
+
+    /// Model a host-backed memory intrinsic (`memmove`/`memcpy`) at the call
+    /// boundary — the effect the transpiler's `aret_memmove`/`aret_memcpy` shim
+    /// has — instead of recursing into the unliftable body. Cdecl: args on the
+    /// stack (`[esp]=dst`, `[esp+4]=src`, `[esp+8]=n`), returns `dst` in `eax`,
+    /// pops nothing (caller cleans). The final memory state is what both engines
+    /// must agree on; reading all `n` source bytes *before* writing gives the
+    /// correct **memmove** result for any overlap (and equals `memcpy` on the
+    /// non-overlapping inputs `memcpy` is defined for — overlapping `memcpy` is
+    /// UB, so skip it rather than risk disagreeing with the real intrinsic's order).
+    fn call_mem_intrinsic(&mut self, kind: MemIntrin) -> Option<u64> {
+        FUNCDIFF_CALLS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        const CAP: u64 = 0x10_0000; // 1 MiB — larger copies skip (as `do_memcall`)
+        let s = self.regs[4];
+        let dst = self.mem_read(s, 4)?;
+        let src = self.mem_read(s.wrapping_add(4), 4)?;
+        let n = self.mem_read(s.wrapping_add(8), 4)? & 0xffff_ffff;
+        if n > CAP {
+            return None;
+        }
+        if kind == MemIntrin::Memcpy
+            && dst < src.wrapping_add(n)
+            && src < dst.wrapping_add(n)
+            && n != 0
+        {
+            return None; // overlapping memcpy is UB — don't model it
+        }
+        let mut buf = Vec::with_capacity(n as usize);
+        for i in 0..n {
+            buf.push(self.mem_read(src.wrapping_add(i), 1)? as u8);
+        }
+        for (i, &b) in buf.iter().enumerate() {
+            self.mem_write(dst.wrapping_add(i as u64), 1, b as u64)?;
+        }
+        self.regs[0] = dst; // eax = dst (both intrinsics return the destination)
+        // The hardware `call` pushed a return address at `[s-4]`; the cdecl intrinsic
+        // `ret`s it (pops 0) → esp back to `s`. Record the sentinel slot so the stack
+        // diff skips it (exactly as `call_direct`).
+        let slot = s.wrapping_sub(4);
+        self.mem_write(slot, 4, FN_RET_SENTINEL)?;
+        self.ret_slots.push(slot);
+        Some(dst)
     }
 
     // ---- post-opt SSA interpreter (optimizer differential) ---------------
@@ -706,9 +755,24 @@ impl Interp {
 
 /// Context for closure-mode interpretation: the recovered functions keyed by
 /// entry (to follow direct calls into) and their `ret N` pop counts.
+/// A statically-linked CRT memory intrinsic that the transpiler host-backs (via
+/// `crt_symbol`/FLIRT) instead of lifting — its hand-assembled body interleaves
+/// alignment jump tables with code and cannot be lifted (a raw `Direct` call into
+/// it makes the closure skip). funcdiff runs `shared_stack` off, so it does *not*
+/// see that host-backing; we recognise these targets here and model their memory
+/// effect directly (like the product's `aret_memmove`/`aret_memcpy` shim) so the
+/// callers become scorable instead of skipped.
+#[derive(Clone, Copy, PartialEq)]
+enum MemIntrin {
+    Memmove,
+    Memcpy,
+}
+
 pub struct ClosureCtx<'a> {
     funcs: &'a HashMap<u64, &'a IrFunction>,
     ret_pops: &'a HashMap<u64, i64>,
+    /// Recovered function entries the transpiler host-backs to a memory intrinsic.
+    mem_intrinsics: &'a HashMap<u64, MemIntrin>,
 }
 
 fn bin(op: BinOp, a: u64, b: u64) -> Option<u64> {
@@ -2217,11 +2281,16 @@ fn check_expr_calls(
     e: &Expr,
     funcs: &HashMap<u64, &IrFunction>,
     ret_pops: &HashMap<u64, i64>,
+    intr: &HashMap<u64, MemIntrin>,
     targets: &mut Vec<u64>,
 ) -> Option<()> {
     match e {
         Expr::Call { target, args, .. } => {
             match target {
+                // A host-backed memory intrinsic (memmove/memcpy) is modeled at the
+                // call boundary (`call_mem_intrinsic`), not recursed into — no
+                // recovered `ret N` is needed and it adds no walk target.
+                CallTarget::Direct(t) if intr.contains_key(t) => {}
                 CallTarget::Direct(t) => {
                     if !funcs.contains_key(t) || !ret_pops.contains_key(t) {
                         return None;
@@ -2237,22 +2306,22 @@ fn check_expr_calls(
                 // target per-iteration (`eval_or_call` → `call_direct`) and skips when
                 // it is not a recovered function, so no static target is added here.
                 // Still validate the address expression's own nested calls.
-                CallTarget::Indirect(addr) => check_expr_calls(addr, funcs, ret_pops, targets)?,
+                CallTarget::Indirect(addr) => check_expr_calls(addr, funcs, ret_pops, intr, targets)?,
             }
             for a in args {
-                check_expr_calls(a, funcs, ret_pops, targets)?;
+                check_expr_calls(a, funcs, ret_pops, intr, targets)?;
             }
         }
-        Expr::Unary(_, a) | Expr::Cast { expr: a, .. } => check_expr_calls(a, funcs, ret_pops, targets)?,
+        Expr::Unary(_, a) | Expr::Cast { expr: a, .. } => check_expr_calls(a, funcs, ret_pops, intr, targets)?,
         Expr::Binary(_, a, b) => {
-            check_expr_calls(a, funcs, ret_pops, targets)?;
-            check_expr_calls(b, funcs, ret_pops, targets)?;
+            check_expr_calls(a, funcs, ret_pops, intr, targets)?;
+            check_expr_calls(b, funcs, ret_pops, intr, targets)?;
         }
-        Expr::Load { addr, .. } => check_expr_calls(addr, funcs, ret_pops, targets)?,
+        Expr::Load { addr, .. } => check_expr_calls(addr, funcs, ret_pops, intr, targets)?,
         Expr::Select { cond, then_, else_ } => {
-            check_expr_calls(cond, funcs, ret_pops, targets)?;
-            check_expr_calls(then_, funcs, ret_pops, targets)?;
-            check_expr_calls(else_, funcs, ret_pops, targets)?;
+            check_expr_calls(cond, funcs, ret_pops, intr, targets)?;
+            check_expr_calls(then_, funcs, ret_pops, intr, targets)?;
+            check_expr_calls(else_, funcs, ret_pops, intr, targets)?;
         }
         _ => {}
     }
@@ -2265,6 +2334,7 @@ fn fn_local_targets(
     irf: &IrFunction,
     funcs: &HashMap<u64, &IrFunction>,
     ret_pops: &HashMap<u64, i64>,
+    intr: &HashMap<u64, MemIntrin>,
 ) -> Option<Vec<u64>> {
     if irf.blocks.is_empty() {
         return None;
@@ -2274,6 +2344,13 @@ fn fn_local_targets(
         for s in &b.stmts {
             match s {
                 Stmt::Switch { .. } | Stmt::Asm(_) => return None,
+                // A tail call to a host-backed intrinsic is not modeled (its return
+                // discipline differs) — skip the whole function (sound, rare).
+                Stmt::Return(Some(Expr::Call { target: CallTarget::Direct(t), .. }))
+                    if intr.contains_key(t) =>
+                {
+                    return None;
+                }
                 // A tail call needs only that its target is recovered (no pop is
                 // applied — the callee returns for us); followed at depth 0 only.
                 Stmt::Return(Some(Expr::Call { target: CallTarget::Direct(t), .. })) => {
@@ -2283,13 +2360,13 @@ fn fn_local_targets(
                     targets.push(*t);
                 }
                 Stmt::Return(Some(e)) | Stmt::CallStmt(e) | Stmt::Set { expr: e, .. } => {
-                    check_expr_calls(e, funcs, ret_pops, &mut targets)?;
+                    check_expr_calls(e, funcs, ret_pops, intr, &mut targets)?;
                 }
                 Stmt::Store { addr, value, .. } => {
-                    check_expr_calls(addr, funcs, ret_pops, &mut targets)?;
-                    check_expr_calls(value, funcs, ret_pops, &mut targets)?;
+                    check_expr_calls(addr, funcs, ret_pops, intr, &mut targets)?;
+                    check_expr_calls(value, funcs, ret_pops, intr, &mut targets)?;
                 }
-                Stmt::Branch { cond, .. } => check_expr_calls(cond, funcs, ret_pops, &mut targets)?,
+                Stmt::Branch { cond, .. } => check_expr_calls(cond, funcs, ret_pops, intr, &mut targets)?,
                 _ => {}
             }
         }
@@ -2305,6 +2382,7 @@ fn is_closure_modelable(
     entry: u64,
     funcs: &HashMap<u64, &IrFunction>,
     ret_pops: &HashMap<u64, i64>,
+    intr: &HashMap<u64, MemIntrin>,
 ) -> bool {
     let mut seen = std::collections::HashSet::new();
     let mut stack = vec![entry];
@@ -2312,11 +2390,17 @@ fn is_closure_modelable(
         if !seen.insert(a) {
             continue;
         }
+        // A host-backed intrinsic target is a modeled leaf — never walked into (its
+        // body is unliftable). `fn_local_targets` already excludes it from the walk,
+        // but guard here too in case one reaches the stack another way.
+        if intr.contains_key(&a) {
+            continue;
+        }
         let irf = match funcs.get(&a) {
             Some(f) => f,
             None => return false,
         };
-        match fn_local_targets(irf, funcs, ret_pops) {
+        match fn_local_targets(irf, funcs, ret_pops, intr) {
             Some(ts) => {
                 for t in ts {
                     if !seen.contains(&t) {
@@ -2467,7 +2551,8 @@ pub fn diff_function_opt(
 
     let empty_funcs: HashMap<u64, &IrFunction> = HashMap::new();
     let empty_pops: HashMap<u64, i64> = HashMap::new();
-    let ctx = ClosureCtx { funcs: &empty_funcs, ret_pops: &empty_pops };
+    let empty_intr: HashMap<u64, MemIntrin> = HashMap::new();
+    let ctx = ClosureCtx { funcs: &empty_funcs, ret_pops: &empty_pops, mem_intrinsics: &empty_intr };
 
     for _ in 0..iters {
         let mut next = || {
@@ -2560,7 +2645,7 @@ pub fn diff_function(
     seed: &mut u64,
 ) -> Vec<FnMismatch> {
     let mut out = Vec::new();
-    if !is_closure_modelable(irf.entry, ctx.funcs, ctx.ret_pops) {
+    if !is_closure_modelable(irf.entry, ctx.funcs, ctx.ret_pops, ctx.mem_intrinsics) {
         return out;
     }
     // One mirrored region over the whole PE image.
@@ -2753,8 +2838,24 @@ pub fn diff_function(
             // address, the interpreter a sentinel) — ABI plumbing, not a lift
             // signal. Comparing them would be a guaranteed false positive.
             let is_ret_slot = |addr: u64| interp.ret_slots.iter().any(|&s| addr >= s && addr < s + 4);
+            // Memory strictly below BOTH engines' final esp is dead scratch — a
+            // correct program never reads it. Skip it. This is what makes a
+            // *modeled* memory intrinsic (`call_mem_intrinsic`) sound: the real
+            // intrinsic saves registers below its call esp (leaving values there
+            // after it returns) while the boundary model does not — a difference in
+            // popped, dead scratch, never a lift signal. A genuine bug touches live
+            // stack (at/above esp) and is still compared. The floor is the *lower*
+            // of the two final esps, so if esp itself diverged the higher engine's
+            // live region stays compared.
+            let mut uesp: u32 = 0;
+            uc_reg_read(uc, UC_X86_REG_ESP, &mut uesp as *mut u32 as *mut c_void);
+            let floor = (interp.regs[4] as u32).min(uesp) as u64;
             for i in 0..FN_STACK_SIZE {
-                if ustk[i] != interp.regions[1].data[i] && !is_ret_slot(FN_STACK_BASE + i as u64) {
+                let addr = FN_STACK_BASE + i as u64;
+                if addr < floor {
+                    continue;
+                }
+                if ustk[i] != interp.regions[1].data[i] && !is_ret_slot(addr) {
                     out.push(FnMismatch { func: irf.entry, what: format!("stack +{i:#x}"), lifted: interp.regions[1].data[i] as u64, unicorn: ustk[i] as u64 });
                     break;
                 }
@@ -2803,7 +2904,20 @@ pub fn run_functions(path: &str, iters: u32) -> Result<Vec<FnMismatch>, String> 
         .collect();
     let funcs: HashMap<u64, &IrFunction> = irfs.iter().map(|f| (f.entry, f)).collect();
     let ret_pops = compute_ret_pops(&result.functions);
-    let ctx = ClosureCtx { funcs: &funcs, ret_pops: &ret_pops };
+    // Recovered functions the transpiler host-backs to a memory intrinsic (FLIRT
+    // `crt_symbol`). funcdiff runs `shared_stack` off, so `build_ir` lowers a call
+    // to one as a raw `Direct` into its (unliftable, jump-table-interleaved) body —
+    // which makes the closure skip the callee AND every caller. Recognise them here
+    // and model the memory effect at the call boundary instead (see `MemIntrin`).
+    let mem_intrinsics: HashMap<u64, MemIntrin> = irfs
+        .iter()
+        .filter_map(|f| match prog.crt_symbol(f.entry) {
+            Some("memmove") => Some((f.entry, MemIntrin::Memmove)),
+            Some("memcpy") => Some((f.entry, MemIntrin::Memcpy)),
+            _ => None,
+        })
+        .collect();
+    let ctx = ClosureCtx { funcs: &funcs, ret_pops: &ret_pops, mem_intrinsics: &mem_intrinsics };
 
     // Symmetric import stubs (see STUB_IMPORTS), by the sanitized Named form
     // `build_ir` lowers a `call [IAT]` to. Restricted to imports whose pop is
