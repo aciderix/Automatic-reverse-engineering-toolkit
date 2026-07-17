@@ -284,6 +284,41 @@ fn looks_like_func_start(prog: &Program, addr: u64, allow_leaf: bool) -> bool {
     known_prologue_bytes(&code, allow_leaf) || is_x87_leaf_thunk(prog, addr)
 }
 
+/// A lone address-taken code pointer whose target is a **frame-pointer-omitted**
+/// (FPO) function opens with a non-standard prologue (`push imm`, `cmp [mem],imm`,
+/// …) that `looks_like_func_start` rejects — yet the stored pointer already proves
+/// the address is *taken*. The only remaining question is whether it is a genuine
+/// function *start* (not an interior byte), and a clean terminator immediately
+/// before it settles that: the previous function ended exactly there. Two sound
+/// witnesses, both hard boundary proof:
+///  - (A) an already-decoded instruction ends exactly at `addr` and is a control
+///    terminator (`ret`/`ret N`/`jmp`) — the preceding function's last instruction;
+///  - (B) the byte before `addr` is `int3` (0xCC) — MSVC inter-function padding,
+///    which never appears as interior fall-through code.
+///
+/// Both prove `addr` is a real entry, so no recognised prologue is required. Sound
+/// by construction: recovery from a proven boundary cannot truncate a function
+/// (nothing spans a terminator), and a data word coincidentally equal to such an
+/// address still lands on a true function start (worst case: a dead function, lifted
+/// correctly or a sound abort — never a miscompile). Only trusted for a candidate
+/// already known to be address-taken (a data-section code pointer / a stored or
+/// pushed code immediate), never for a linear-scan seed.
+fn preceded_by_terminator(prog: &Program, global: &BTreeMap<u64, Insn>, addr: u64) -> bool {
+    if addr == 0 {
+        return false;
+    }
+    // (A) a decoded terminator instruction ends exactly at `addr`.
+    for k in 1..=15u64 {
+        if let Some(prev) = global.get(&(addr - k)) {
+            if prev.next_addr() == addr {
+                return matches!(prev.flow, Flow::Return | Flow::Jump);
+            }
+        }
+    }
+    // (B) int3 padding immediately before `addr`.
+    prog.read_from(addr - 1).is_some_and(|b| b.first() == Some(&0xCC))
+}
+
 /// Pure byte test for a recognised function-entry prologue (frame setup, stack
 /// realignment, import thunks, CRT init guards). Split out from
 /// `looks_like_func_start` so the signatures can be unit-tested directly. `code`
@@ -771,7 +806,11 @@ fn global_decode(
                             if !global.contains_key(&v)
                                 && (trusted
                                     || bare_stub_in_table
-                                    || looks_like_func_start(prog, v, false))
+                                    || looks_like_func_start(prog, v, false)
+                                    // A lone FPO function pointer (no recognised
+                                    // prologue) is still a genuine entry when a proven
+                                    // terminator / int3 padding sits right before it.
+                                    || preceded_by_terminator(prog, &global, v))
                             {
                                 cands.insert(v);
                             } else if global.contains_key(&v)

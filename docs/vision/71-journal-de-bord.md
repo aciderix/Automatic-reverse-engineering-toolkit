@@ -2797,4 +2797,31 @@ Détail : **70 §6** (roadmap). Résumé :
   `Ppview32`/`dxfix` tournent proprement. ⇒ le mur dominant sur ce corpus frais est le **points-to**, pas l'EH ; la
   brique 3 reste néanmoins un vrai incrément EH testable (fixture), livré ici.
 
+### 2026-07-17 — [RECOV] Récup des pointeurs de fonction FPO isolés (cible précédée d'un terminateur) — le mur points-to mesuré
+- **Le mur mesuré (option 1).** 6 MSVC du CD 1997 lancés end-to-end sous ARET headless : le mur dominant n'est PAS l'EH
+  mais le **points-to** — `slidelib`/`DEMO32`/`itiem95` abortent (sound) sur un **appel indirect vers une fonction non
+  récupérée** (`0x405f22`/`0x432664`/`0x100a200`). Diagnostic : chacune est une **vraie fonction FPO** (frame-pointer
+  omis → pas de prologue `push ebp`), stockée comme **pointeur isolé initialisé statiquement en `.data`** (référencée
+  **1×**, entourée de zéros), et **immédiatement précédée d'un terminateur propre** (`ret`/`ret N` ou padding `int3`).
+- **La lacune.** Le scan de données (`analysis/mod.rs`, pass 2b) accepte un pointeur-code **isolé** (hors table ≥3)
+  uniquement s'il passe `looks_like_func_start` (prologue reconnu). Une fonction FPO ouvrant sur `push imm`/`cmp [m],imm`
+  échoue ce gate → jamais récupérée → l'appel indirect aborte. Motif **général** (init statique de callbacks/dispatch),
+  vérifié **identique sur les 3 binaires**.
+- **Fix (sound par frontière).** Helper `preceded_by_terminator(prog, global, addr)` : un pointeur-code isolé
+  **address-taken** est un vrai début de fonction dès qu'une **frontière prouvée** le précède — (A) une instruction déjà
+  décodée finit **exactement** à `addr` et est un terminateur (`ret`/`ret N`/`jmp`) = dernière insn de la fonction
+  précédente, ou (B) l'octet avant `addr` est `int3(0xCC)` (padding inter-fonction MSVC, jamais du code fall-through
+  interne). **Sound par construction** : récupérer depuis une frontière prouvée ne peut pas tronquer une fonction (rien
+  ne franchit un terminateur), et un mot de données coïncidant avec une telle adresse tombe quand même sur un vrai début
+  (au pire une fonction morte, liftée juste ou abort sound — jamais un miscompile). Gaté aux candidats déjà
+  address-taken (pointeur de données / immédiat code), jamais un seed de balayage linéaire.
+- **Mesuré (bénéfice réel).** Murs avancés : `slidelib` `0x405f22`→ récupéré (mur suivant `0x404926`), `DEMO32` l'appel
+  indirect résolu (bute ensuite sur l'import `GetClassInfoA`), `itiem95` `0x100a200`→ récupéré (tombe sur `0x80000011`
+  = valeur non-code, autre problème). **+89 fonctions FPO récupérées dans les démonstrateurs mêmes** (busybox
+  5202→5291, funcdiff corpus **20501→20590 scorées, 0 divergence**) — la classe existe partout, désormais couverte.
+- **Portes (récup = zone la plus risquée → régression complète).** Hash transpile `19acad982194bf07` **inchangé**,
+  régression unifiée **PASS** (difftest 272/272, funcdiff **20590 / 0 div**, SMT 11/11, recompilabilité 100%), winediff
+  **117/117**, sweeps sqlite (bit-identiques) + busybox **60/60**, **gauntlet 19/21** (inchangé). Zéro régression : le
+  gate ne se déclenche que sur une frontière **prouvée**, jamais un faux positif.
+
 <!-- NOUVELLES ENTRÉES ICI (garder l'ordre chronologique, plus récent en bas) -->

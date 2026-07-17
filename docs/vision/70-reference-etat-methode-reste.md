@@ -190,7 +190,7 @@ bash bench/wallsweep.sh <dir1> [dir2…]  # AGRÈGE --mode walls sur un corpus :
 
 ### État régression (référence — doit rester vert)
 difftest **272/272** · transpile-diff **4/4** (H=`19acad982194bf07`) · winediff
-**117/117** · cpudiff vert (per-instruction + séquences génératives) · funcdiff corpus **0 divergence** (lift **~20,5k** scorées /
+**117/117** · cpudiff vert (per-instruction + séquences génératives) · funcdiff corpus **0 divergence** (lift **~20,6k** scorées /
 **~20k appels** — **imports (stubs `@N` + `@0` scalaires) + appels indirects résolus + intrinsèques mémoire host-backés (memmove/memcpy)** ; scratch sous-esp exclu ; opt ~10k scorées) · SMT **11/11** · in-place **3/3** · magicdiv **2³²** ·
 recompilabilité **100 %** · WASM **7/7**.
 
@@ -325,6 +325,13 @@ recompilabilité **100 %** · WASM **7/7**.
   e4`) reconnu par `looks_like_func_start` (`known_prologue_bytes`, testé) : toute une classe de fonctions mingw
   (alignement 16 o, ebp omis) atteintes via une **table `{nom, func}`** (winetest/busybox/interpréteurs) était non
   récupérée → `call [table]` indirect abortait. Débloque le dispatch de test de `kernel32_test.exe`.
+- **Pointeur de fonction FPO isolé précédé d'un terminateur** (`preceded_by_terminator`, 2026-07-17) : un pointeur-code
+  **isolé** (hors table ≥3) initialisé statiquement en `.data`, dont la cible est une fonction **FPO** (ouvre sur `push
+  imm`/`cmp [m],imm`, pas de prologue reconnu), échouait `looks_like_func_start` → l'appel indirect abortait. Fix
+  **sound par frontière** : la cible est un vrai début de fonction dès qu'une frontière **prouvée** la précède — (A) une
+  insn décodée finit exactement là et est un terminateur (`ret`/`ret N`/`jmp`), ou (B) l'octet avant = `int3` (padding
+  MSVC). Ne peut pas tronquer (rien ne franchit un terminateur). Mur mesuré dominant sur le corpus MSVC 1997 (avance
+  slidelib/DEMO32/itiem95) ; **+89 fonctions récupérées dans busybox/sqlite** (funcdiff 20501→20590, 0 div).
 - **FLIRT** : opérandes **relocalisés wildcardés** (`.reloc`) ; **thunks jamais
   signaturés** (résolus structurellement) ; glue reconnue = `looks_like_func_start`.
   ⚠️ FLIRT est **cosmétique** pour nos cibles (reconnaît du code de biblio, pas le
