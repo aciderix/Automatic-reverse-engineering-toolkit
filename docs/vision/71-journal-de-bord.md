@@ -2404,4 +2404,23 @@ Détail : **70 §6** (roadmap). Résumé :
   decompile (→ `Asm`). L'atteindre = mapper un TEB + base `fs` dans Unicorn **et** modéliser `fs:[0]` dans
   l'interpréteur. C'est le prochain incrément pour pinpointer le miscompile 7za.
 
+### 2026-07-16 — [ORACLE] funcdiff increment 2 : fonctions SEH scorées (page-segment zéroée pour `fs:[disp]`) — et sub_471a83 PROUVÉ correct
+- **Suite de l'extension imports.** Les wrappers CRT à SEH restaient skippés : Unicorn **fautait** sur `mov eax,fs:[0]`
+  (base fs non configurée) alors que l'interpréteur modélise une lecture segment en `konst(0)`.
+- **Fix minimal (après une impasse GDT).** Tentative 1 = descripteur GDT + base fs → **casse tout** (configurer GDTR
+  invalide les sélecteurs par défaut DS/SS → `push` faute). Tentative 2 (retenue) : la base fs par défaut d'Unicorn
+  est **0** (plate), donc `fs:[disp]` lit l'adresse absolue `disp` → **mapper une page zéroée à l'adresse 0** rend ces
+  lectures = 0 (= l'interpréteur), sans faute ; re-zéroée par itération, **jamais comparée** (hors des plages
+  image/pile du diff) ; les écritures segment (SEH `mov fs:[0],esp`) y vont — l'interpréteur les drop (Nop), donc
+  ce n'est pas un signal de lift. (Un vrai null-deref ne faute plus, mais l'interpréteur n'a pas de région à 0 → skip,
+  jamais de faux verdict.)
+- **Vérifié : corpus **0 divergence** (16604 scorées). Sur 7za, scored **8048 → 11374** (fonctions SEH couvertes).**
+- **Découverte majeure (réfute une hypothèse).** `sub_471a83` — la fonction que le segfault 7za traverse, que j'avais
+  supposée porteuse d'un **miscompile de frame SEH** — est **modelable=true et scorée à 0 divergence** : son lift est
+  **CORRECT**. Le crash n'est **pas** là. La chasse se redirige vers un **ancêtre** (`0x470889`/`0x471830`/`0x471c08`,
+  encore unmodelables car ils appellent des **imports cdecl / appels indirects**) ou vers le **shim MBToWC** lui-même.
+  C'est exactement le rôle de l'oracle : **écarter** une piste fausse par la preuve, pas la deviner.
+- **Reste (increment 3)** : étendre le stub aux imports **cdecl** (pop 0, nettoyage appelant) et gérer les appels
+  indirects pour rendre les ancêtres modelables — puis pinpointer le vrai fautif.
+
 <!-- NOUVELLES ENTRÉES ICI (garder l'ordre chronologique, plus récent en bas) -->
