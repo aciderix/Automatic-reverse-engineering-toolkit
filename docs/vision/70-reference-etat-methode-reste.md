@@ -263,6 +263,11 @@ recompilabilité **100 %** · WASM **7/7**.
 - **Transcendantes = libm host-backed** (pow/sin/cos/exp/log/fmod/atan2… via
   `crt_symbol`/nom/FLIRT) → on branche la vraie libm au lieu de lifter du x87 dense.
   Cause racine du double-`sin` corrigée (helpers effacent **C2**).
+- **`fstcw`/`fnstcw` = store constant `0x037F`** (le mot de contrôle x87 par défaut Linux/ELF), pas un `Nop`
+  (2026-07-17, trouvé par funcdiff sur `dxfix.exe`) : le Nop laissait la destination non-écrite → `_control87`/
+  `_controlfp` lisait de la **pile non-init = garbage** (faux silencieux). Le constant est portable (WASM, aucun
+  global). funcdiff seed le FPCW d'Unicorn à `0x037F` pour matcher. `fldcw` reste Nop (l'arrondi est tracké
+  statiquement pour `frndint`/`fist`).
 
 ### 4.3 ABI / frame / appels
 - **Callee-pop `ret N`** modélisé : **imports** (`stdcall_pops.rs`) **et** fonctions

@@ -3201,8 +3201,23 @@ fn x87_try(insn: &Insn, sp: i32, mode: RoundMode) -> Option<Vec<Stmt>> {
             _ => return None,
         },
 
-        // --- control word / wait / FPU reset: no value the model tracks ----
-        Fldcw | Fnstcw | Fstcw | Fnclex | Fclex | Fnop | Wait | Finit | Fninit => vec![Stmt::Nop],
+        // `fstcw`/`fnstcw` store the 16-bit x87 control word. A `Nop` left the
+        // destination unwritten, so a caller reading it back got uninitialised stack
+        // — silently wrong (`_control87`/`_controlfp` returned garbage; found by
+        // funcdiff on dxfix). Store the reset default `0x037F` (all exceptions masked,
+        // extended precision, round-to-nearest) — the value a Linux/ELF process's x87
+        // control word actually holds, so `_control87` reads the correct default. A
+        // pure constant (no runtime FPU state), hence portable (WASM) and safe for the
+        // decompile link (no global reference). The rounding mode a program installs
+        // via `fldcw` is still tracked at compile time by the depth analysis for
+        // `frndint`/`fist`; only reading the *live* CW back through a custom `fldcw`
+        // is unmodelled (rare) — no longer silent garbage.
+        Fnstcw | Fstcw => {
+            let (addr, _) = mem_addr(ins)?;
+            vec![Stmt::Store { addr, value: konst(0x037f), ty: Ty::int(16) }]
+        }
+        // --- control word load / wait / FPU reset: no value the model tracks ----
+        Fldcw | Fnclex | Fclex | Fnop | Wait | Finit | Fninit => vec![Stmt::Nop],
 
         _ => return None,
     })

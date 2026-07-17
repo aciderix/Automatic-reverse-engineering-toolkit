@@ -37,6 +37,7 @@ const UC_X86_REG_EIP: c_int = 26;
 const UC_X86_REG_ESI: c_int = 29;
 const UC_X86_REG_ESP: c_int = 30;
 const UC_X86_REG_XMM0: c_int = 122; // XMMn = 122 + n
+const UC_X86_REG_FPCW: c_int = 246;
 const UC_X86_REG_MXCSR: c_int = 249;
 
 #[link(name = "unicorn")]
@@ -2799,6 +2800,13 @@ pub fn diff_function(
                 }
             }
             uc_reg_write(uc, UC_X86_REG_EFLAGS, &eflags as *const u32 as *const c_void);
+            // Seed the x87 control word to the reset default `0x037F` — the value a
+            // Linux/ELF process actually holds — so a modelled `fstcw` (which the lift
+            // lowers to storing `0x037F`) matches Unicorn's real `fstcw`. Without this
+            // Unicorn's power-on FPCW differs and a `_control87` function would falsely
+            // diverge.
+            let fpcw: u16 = 0x037f;
+            uc_reg_write(uc, UC_X86_REG_FPCW, &fpcw as *const u16 as *const c_void);
             // Bounded run; stop when the function returns into the sentinel.
             let err = uc_emu_start(uc, irf.entry, FN_SENTINEL, 200_000, 100_000);
             if err != 0 {

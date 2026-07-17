@@ -2617,4 +2617,27 @@ Détail : **70 §6** (roadmap). Résumé :
   slot `call [0x48e040]` (hors IAT standard) de `sub_46cf4c`. **Pas de forensics mono-binaire infinie** ici : la valeur
   de la session est l'oracle élargi (5 incréments, validés sur 11 binaires), pas un fix 7za spéculatif.
 
+### 2026-07-17 — [LIFT][ORACLE] Sweep de binaires INÉDITS → 1er vrai bug trouvé : `fstcw`/`_control87` lisait du garbage
+- **Méthode : chasse sur du code inédit.** L'oracle élargi (5 incréments du jour) ne trouvait plus rien sur les
+  démonstrateurs verts → il faut du **code jamais lifté**. Récupéré des PE 32-bit de vieux CD-ROM (archive.org, Chip
+  ISO). Sweep funcdiff par binaire → **`dxfix.exe` : 6 divergences** (2 fonctions `_control87`), les autres 0-div.
+- **Cause racine (vrai bug produit, silencieusement faux).** `fstcw [m]`/`fnstcw` (store du mot de contrôle x87) était
+  lifté en **`Nop`** dans le chemin statique → la destination n'était **pas écrite** → un appelant qui la relit
+  (`_control87`/`_controlfp`) lisait de la **pile non-initialisée = garbage**. Viole le principe sacré (faux silencieux).
+- **Fix (portable, sound).** `fstcw`/`fnstcw` → **store constant `0x037F`** = le mot de contrôle x87 par défaut d'un
+  process Linux/ELF (toutes exceptions masquées, précision étendue, arrondi au plus proche), donc `_control87` lit la
+  **vraie** valeur par défaut. Pur constant (aucun état FPU runtime, aucun global) ⇒ portable WASM **et** sans souci de
+  link (contrairement à passer par `__x87rt_stcw` qui référence des globals — tenté, cassait le link difftest
+  `x87arith`/`x87div`). L'arrondi installé par `fldcw` reste tracké **statiquement** (RoundMode compile-time) pour
+  `frndint`/`fist` ; seule la relecture d'un CW **custom** posé par `fldcw` reste non modélisée (rare) — plus jamais du
+  garbage. **funcdiff** : seed le FPCW d'Unicorn à `0x037F` (`UC_X86_REG_FPCW`) pour qu'il matche le modèle → les
+  fonctions `_control87` sont désormais **scorées et validées** (dxfix 2302→2380 scorées, **0 divergence**).
+- **Portes** : régression unifiée **PASS**, difftest **272/272** (le constant n'introduit aucun global, contrairement à
+  la 1ʳᵉ tentative), hash transpile `19acad982194bf07` **inchangé**, winediff **114/114**, sweeps sqlite/busybox
+  bit-identiques (les démonstrateurs MSVC appellent `_control87` au startup — lisaient du garbage, lisent maintenant
+  0x037F, sans changement fonctionnel), corpus funcdiff **20501, 0 div**.
+- **Leçon méthodo confirmée** : l'oracle élargi **trouve de vrais bugs sur du code inédit** (ce que les démonstrateurs
+  déjà verts ne montrent plus). C'est la voie pour « terminer les 32 bits » : sweeper des binaires neufs, fixer, itérer.
+  *(Le CD 1997 est surtout 16-bit/DOS ; peu de 32-bit complexe. Pour la suite : des binaires plus modernes/C++ lourd.)*
+
 <!-- NOUVELLES ENTRÉES ICI (garder l'ordre chronologique, plus récent en bas) -->
