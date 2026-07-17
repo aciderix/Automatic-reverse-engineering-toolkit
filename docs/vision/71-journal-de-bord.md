@@ -2759,4 +2759,42 @@ Détail : **70 §6** (roadmap). Résumé :
   multi-modules pour animer les DLL MFC. Import scan **inopérant** ici (static-CRT ⇒ `__except_handler3` **interne**,
   ni importé ni en clair). Pas de forensics spéculative : la valeur du jour = brique 2 (`RtlUnwind`) + validation large.
 
+### 2026-07-17 — [HLE-WIN32][EH] Chantier EH lourd, brique 3 : fautes matérielles (SIGSEGV→dispatch SEH)
+- **Le manque.** Sur Windows un **trap CPU** (access violation, div0, …) est transformé par le noyau en **dispatch
+  SEH** : parcours de `fs:[0]`, appel de chaque handler, exactement comme un `RaiseException` logiciel. ARET exécute
+  les accès mémoire du programme comme de **vrais load/store hôte** → un tel trap arrive en **signal hôte** (SIGSEGV/
+  SIGFPE) et **tuait le process** (aucun dispatch). Un programme qui protège un accès fautif par `__try/__except` (ou
+  un frame SEH manuel) devait donc **catch et continuer** ; il crashait.
+- **Fix : `aret_hw_fault` + constructor `aret_hw_fault_install` (`aret_hle.c`, natif seulement).** `sigaction(SIGSEGV/
+  SIGFPE, SA_SIGINFO|SA_NODEFER)` posé à l'init (ELF constructor). À la faute : construit un `EXCEPTION_RECORD`
+  (SIGSEGV→`STATUS_ACCESS_VIOLATION 0xC0000005` + `ExceptionInformation[0]`=read/write depuis `REG_ERR` du ucontext +
+  `[1]`=`si_addr` ; SIGFPE→`STATUS_INTEGER_DIVIDE_BY_ZERO 0xC0000094`) puis **dispatch dans `fs:[0]`** comme
+  `RaiseException`. **Découverte clé (pile scratch dédiée).** L'esp machine du **point de faute** est enfoui dans un
+  registre hôte et **irrécupérable** du contexte signal — mais **inutile** : on exécute le handler sur une **pile
+  scratch dédiée** (`aret_eh_stack`), et un handler qui **catch restaure l'esp depuis son propre registration record**
+  (scope-jump `__except_handler3` / longjmp du fixture), piloté par la **donnée du frame**, pas par l'esp du
+  dispatcher. `SA_NODEFER` garde le signal catchable **à travers le longjmp** de sortie (le longjmp d'un handler de
+  signal vers un `setjmp` antérieur marche car la pile hôte mirror 1:1 la pile logique — cf. shim setjmp/longjmp).
+- **Soundness (vérifiée).** Chaîne épuisée sans catch ⇒ **faute réelle non gérée** : `SIG_DFL` + re-faute → le process
+  meurt du **vrai signal** (message stderr `unhandled hardware exception`, jamais avalé en silence). Prouvé : fixture
+  NULL-deref **sans** handler → « before » imprimé, **« after » jamais** (Wine idem : crash). Garde de ré-entrance
+  (faute dans le dispatch → abort). WASM : pas de signaux POSIX ⇒ mécanisme **exclu** (faute = trap sound).
+- **Testable vs Wine.** Fixture `winecorpus/seh_hwfault.c` : frame SEH manuel (mingw n'a pas `__try`), NULL-deref dans
+  le corps protégé, handler qui vérifie `ExceptionCode==0xC0000005` et sort par `longjmp`. Wine **et** ARET → `r=42
+  code=0xc0000005`.
+- **Portes** : winediff **116→117/117** (seh_hwfault), hash transpile `19acad982194bf07` **inchangé** (runtime-only,
+  additif), régression unifiée **PASS** (difftest 272/272, funcdiff 20501 / 0 div, SMT 11/11, recompilabilité 100%),
+  **sweeps sqlite (bit-identiques) + busybox 60/60** — le handler global de signal **ne perturbe pas** les
+  démonstrateurs (ils ne fautent pas ; handler jamais déclenché). Les 3 fixtures SEH passent (`seh_raise`/`seh_unwind`/
+  `seh_hwfault`).
+- **Reste EH** : `__except_handler3` réel (scope-table — testabilité = **vrai binaire MSVC `__try/__except`**, mingw ne
+  l'émet pas) ; C++ (`_CxxThrowException`/`__CxxFrameHandler`). Les 3 primitives de dispatch (software `RaiseException`,
+  local unwind `RtlUnwind`, faute matérielle) sont **faites et prouvées** ; il ne reste que le handler MSVC de haut
+  niveau qui les orchestre (scope-table) et les exceptions C++.
+- **Note corpus (option 1, mesurée).** 6 binaires MSVC du CD 1997 lancés end-to-end sous ARET headless : **aucun** ne
+  franchit un chemin EH — ils s'arrêtent (abort sound) plus tôt sur des **appels indirects non résolus** (`itiem95`/
+  `DEMO32`/`slidelib` = points-to/Phase 4, le levier P3) ou un **import manquant** (`ARTLANT` : `SystemParametersInfoA`) ;
+  `Ppview32`/`dxfix` tournent proprement. ⇒ le mur dominant sur ce corpus frais est le **points-to**, pas l'EH ; la
+  brique 3 reste néanmoins un vrai incrément EH testable (fixture), livré ici.
+
 <!-- NOUVELLES ENTRÉES ICI (garder l'ordre chronologique, plus récent en bas) -->

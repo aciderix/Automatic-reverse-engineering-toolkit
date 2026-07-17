@@ -3015,3 +3015,95 @@ uint32_t aret_RtlUnwind(uint32_t esp) {
     /* fs:[0] now == target (the last pop left it there). Return the requested eax. */
     return retval;
 }
+
+/* Structured Exception Handling — hardware faults (native only).
+ *
+ * On Windows a CPU trap (access violation, integer divide-by-zero, …) is turned by
+ * the kernel into an SEH dispatch: it walks fs:[0] calling each handler, exactly like
+ * a software RaiseException. ARET runs the lifted program's memory accesses as real
+ * host loads/stores, so such a trap arrives as a host signal (SIGSEGV/SIGFPE). This
+ * routes that signal into the same fs:[0] dispatch: a program that wraps a faulting
+ * access in __try/__except (or a hand-installed SEH frame) catches it and continues,
+ * instead of the process dying — matching Wine.
+ *
+ * The dispatch runs the handler on a DEDICATED scratch stack (aret_eh_stack), not the
+ * machine stack: at fault time the lifted program's machine `esp` is a value buried in
+ * a host register and cannot be recovered from the signal context, but it is not
+ * needed — a handler that catches restores esp from its own registration record (the
+ * __except_handler3 scope jump, or the fixture's longjmp), driven by the frame data,
+ * not by the dispatcher's stack. A handler that catches never returns here (it
+ * longjmps / scope-jumps out; SA_NODEFER keeps the signal unblocked across that jump,
+ * so later faults are caught too). Chain exhausted with no catch ⇒ the fault was real
+ * and unhandled: restore the default disposition and let the instruction re-fault, so
+ * the process dies with the authentic signal (loud, never silently swallowed).
+ *
+ * WASM has no POSIX signals and no hardware-fault SEH ⇒ this whole mechanism is
+ * native-only (guarded), and a genuine fault there stays a sound trap. */
+#ifndef __wasm__
+#include <signal.h>
+#include <ucontext.h>
+static uint8_t aret_eh_stack[1 << 16];   /* scratch stack for the fault handler run */
+
+static void aret_hw_fault(int sig, siginfo_t *si, void *uctx) {
+    static volatile int depth = 0;       /* re-entrancy guard: a fault inside dispatch */
+    if (++depth > 8) { signal(sig, SIG_DFL); return; }
+
+    uint32_t *teb = (uint32_t *)(uintptr_t)__aret_fs();
+    uint32_t frame = teb[0];             /* ExceptionList head */
+
+    /* Map the host signal to the NT exception code Windows would raise. */
+    uint32_t code = (sig == SIGFPE) ? 0xC0000094u   /* STATUS_INTEGER_DIVIDE_BY_ZERO */
+                                    : 0xC0000005u;  /* STATUS_ACCESS_VIOLATION       */
+    uint32_t rec[20];
+    memset(rec, 0, sizeof(rec));
+    rec[0] = code;                       /* ExceptionCode  */
+    rec[3] = si ? (uint32_t)(uintptr_t)si->si_addr : 0; /* ExceptionAddress (approx) */
+    if (sig == SIGSEGV) {
+        rec[4] = 2;                      /* NumberParameters                        */
+        uint32_t write = 0;              /* ExceptionInformation[0]: 0 read / 1 write */
+#ifdef REG_ERR
+        write = (((ucontext_t *)uctx)->uc_mcontext.gregs[REG_ERR] & 2u) ? 1u : 0u;
+#else
+        (void)uctx;
+#endif
+        rec[5] = write;
+        rec[6] = si ? (uint32_t)(uintptr_t)si->si_addr : 0; /* faulting address */
+    }
+    uint32_t ctx[200];
+    memset(ctx, 0, sizeof(ctx));
+
+    /* Run each handler cdecl on the dedicated scratch stack (see the note above). */
+    uint32_t hesp = (uint32_t)(uintptr_t)(aret_eh_stack + sizeof(aret_eh_stack) - 0x100);
+    while (frame != 0 && frame != 0xFFFFFFFFu) {
+        uint32_t *f = (uint32_t *)(uintptr_t)frame;
+        uint32_t handler = f[1];
+        uint32_t *cf = (uint32_t *)(uintptr_t)hesp;
+        cf[1] = (uint32_t)(uintptr_t)rec;
+        cf[2] = frame;
+        cf[3] = (uint32_t)(uintptr_t)ctx;
+        cf[4] = frame;
+        uint32_t disp = (uint32_t)aret_call(handler, hesp, 0, 0, 0, 0);
+        /* ExceptionContinueExecution(0): retry the faulting instruction (the handler
+         * fixed the cause). ExceptionContinueSearch(1): next frame. A handler that
+         * catches never returns (longjmp / scope jump). */
+        if (disp == 0) { depth--; return; }
+        frame = f[0];
+    }
+    /* No handler caught it: a genuine, unhandled hardware fault. Let it re-fault with
+     * the default disposition so the process dies with the real signal. */
+    fprintf(stderr, "aret: unhandled hardware exception %#x at %p\n",
+            (unsigned)code, si ? si->si_addr : (void *)0);
+    signal(sig, SIG_DFL);
+    depth--;
+}
+
+__attribute__((constructor)) static void aret_hw_fault_install(void) {
+    struct sigaction sa;
+    memset(&sa, 0, sizeof(sa));
+    sa.sa_sigaction = aret_hw_fault;
+    sa.sa_flags = SA_SIGINFO | SA_NODEFER;   /* NODEFER: stay catchable across longjmp */
+    sigemptyset(&sa.sa_mask);
+    sigaction(SIGSEGV, &sa, NULL);
+    sigaction(SIGFPE, &sa, NULL);
+}
+#endif /* !__wasm__ */

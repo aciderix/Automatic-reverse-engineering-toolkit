@@ -80,7 +80,14 @@ Implémenter le SEH **entièrement dans le runtime** (ne PAS lier l'EH C++ de l'
 - **Utilité** : haute (C++/Delphi, logiciels Win32 2000s).
 - **Conformité** : ✅ in-HLE + abort sound sur ce qu'on ne modélise pas. WASM : SEH
   matériel indisponible ⇒ **abort sound** (jamais divergence silencieuse).
-- **Statut** : compatible, mais lourd et testabilité dure ici. Après les fibers.
+- **Statut** : **engagé — 3 primitives de dispatch faites et prouvées vs Wine** (2026-07-17, doc 70 §5 P3.5-P3.8) :
+  `push imm;…;ret` (ret-as-jump `__finally`), **software `RaiseException`** (parcours `fs:[0]`), **local unwind
+  `RtlUnwind`** (i386 : retour normal, TargetIp ignoré — la « muraille de testabilité » était une erreur de
+  mental-model x64), **fautes matérielles** (SIGSEGV/SIGFPE→dispatch, pile scratch dédiée car l'esp du point de faute
+  est irrécupérable mais inutile — le handler restaure l'esp depuis son registration record). Chaque brique = fixture
+  SEH inline-asm (mingw n'a pas `__try`) bit-identique Wine. **Reste** : `__except_handler3` réel (scope-table, testable
+  seulement avec un **vrai binaire MSVC `__try`**) + exceptions C++ (`__CxxFrameHandler`). La testabilité globale n'était
+  donc PAS un blocage : elle l'était par **brique**, chacune fixturable isolément.
 
 ### 1.4 Profile-Guided Lifting (Unicorn comme guide) — ✅ **si opt-in**
 Tracer les cibles d'appels indirects (`call eax`, `jmp [edx]`) via Unicorn, générer un

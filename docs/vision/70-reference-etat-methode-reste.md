@@ -170,7 +170,7 @@ bash bench/regression.sh    # PORTE unifiée : difftest 271/271, in-place 3/3,
                             # recompilabilité gzip/ls/cat 100%
 bash bench/difftest.sh              # décompile O0→O3
 bash bench/difftest_transpile.sh    # transpile (hash 19acad982194bf07)
-bash bench/winediff.sh              # axe 2 vs Wine (116/116)
+bash bench/winediff.sh              # axe 2 vs Wine (117/117)
 bash bench/funcdiff.sh              # lift-closure + opt-diff vs Unicorn (0 div)
 # Sweeps de vrais binaires (téléchargent + comparent à Wine) :
 bash bench/sqlite_sweep.sh   bash bench/busybox_sweep.sh   bash bench/corpus_sweep.sh
@@ -190,7 +190,7 @@ bash bench/wallsweep.sh <dir1> [dir2…]  # AGRÈGE --mode walls sur un corpus :
 
 ### État régression (référence — doit rester vert)
 difftest **272/272** · transpile-diff **4/4** (H=`19acad982194bf07`) · winediff
-**116/116** · cpudiff vert (per-instruction + séquences génératives) · funcdiff corpus **0 divergence** (lift **~20,5k** scorées /
+**117/117** · cpudiff vert (per-instruction + séquences génératives) · funcdiff corpus **0 divergence** (lift **~20,5k** scorées /
 **~20k appels** — **imports (stubs `@N` + `@0` scalaires) + appels indirects résolus + intrinsèques mémoire host-backés (memmove/memcpy)** ; scratch sous-esp exclu ; opt ~10k scorées) · SMT **11/11** · in-place **3/3** · magicdiv **2³²** ·
 recompilabilité **100 %** · WASM **7/7**.
 
@@ -631,6 +631,21 @@ précédent continuait en silence = faux). Testé par `winecorpus/seh_raise.c` (
 pas `__try` ; 2 frames imbriqués, chain-walk) bit-identique Wine. winediff **115/115**. **Reste EH** : `__except_handler3`
 réel (scope-table + CONTEXT peuplé + local-unwind), fautes matérielles (SIGSEGV→dispatch, natif), C++
 (`_CxxThrowException`/`__CxxFrameHandler`).
+
+### P3.8 — EH MSVC lourd : brique 3 — fautes matérielles (SIGSEGV→dispatch SEH) ✅ FAIT (2026-07-17)
+`aret_hw_fault` (`aret_hle.c`, **natif seulement**) route un **trap CPU** (SIGSEGV/SIGFPE, car ARET exécute les
+accès mémoire du programme comme de vrais load/store hôte) dans le **même dispatch `fs:[0]`** que `RaiseException` :
+un programme qui protège un accès fautif par `__try/__except` (ou un frame SEH manuel) **catch et continue** au lieu
+de mourir — comme Wine. Signal→code NT : SIGSEGV→`STATUS_ACCESS_VIOLATION(0xC0000005)` (+ExceptionInformation
+read/write depuis `REG_ERR` + adresse `si_addr`), SIGFPE→`STATUS_INTEGER_DIVIDE_BY_ZERO(0xC0000094)`. **Pile scratch
+dédiée** (`aret_eh_stack`) pour exécuter le handler : l'esp machine du point de faute est enfoui dans un registre hôte
+et **irrécupérable** du contexte signal, mais **inutile** — un handler qui catch restaure l'esp depuis son *propre*
+registration record (scope-jump `__except_handler3` / longjmp), piloté par la donnée du frame, pas par l'esp du
+dispatcher. `SA_NODEFER` garde le signal catchable à travers le longjmp de sortie. **Chaîne épuisée sans catch ⇒
+faute réelle non gérée : `SIG_DFL` + re-faute → le process meurt du vrai signal** (bruyant, jamais avalé en silence).
+WASM : pas de signaux POSIX ⇒ mécanisme **exclu** (faute = trap sound). Gardé `winecorpus/seh_hwfault.c` (NULL-deref
+catchée → `r=42 code=0xc0000005`, bit-identique Wine). winediff **117/117**. **Reste EH** : `__except_handler3` réel
+(scope-table — testabilité = vrai binaire MSVC `__try`), C++ (`__CxxFrameHandler`/`_CxxThrowException`).
 
 ### P3.7 — EH MSVC lourd : brique 2 — local unwind `RtlUnwind` ✅ FAIT (2026-07-17)
 `aret_RtlUnwind` (`aret_hle.c`) implémente le primitif d'**unwind local** que `__except_handler3` (via
