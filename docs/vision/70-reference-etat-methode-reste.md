@@ -621,6 +621,15 @@ qui **échoue réellement** (le filet couvre tout le testé). Pistes si un jour 
 du filet : suivre les valeurs conservées `fstp st(i)`/`fxch` ; fp-returning auto-récursif
 (prouvé) ; host-back par signature d'idiome. Délicat (une fn à la fois, toutes portes).
 
+### P3.5 — EH MSVC : 1re brique `push imm; …; ret` ✅ FAIT (2026-07-17)
+`find_ret_jumps` (`analysis/mod.rs`) reconnaît l'idiome de continuation `__finally` (`push <cont>; …; ret` = `ret`
+utilisé comme **saut** vers l'adresse poussée) par **interprétation abstraite forward** (pile symbolique, point-fixe) :
+un `ret` est réécrit en `jmp <imm>` seulement quand `[esp]` est **prouvé** = la même constante-code poussée sur tous
+les chemins (build.rs ajoute le `esp += 4` du pop). Sound par construction (ne peut que rater un saut, jamais en
+inventer). Trouvé/fixé via sweep de `Ppview32.exe` (6 div → 0), 0 régression. **Reste EH** : frame SEH complet (7za, 96
+frames), `__except_handler3`, exceptions C++ — cf. doc 80 §1.3. La carte de prévalence (SEH-frames) : nasm/sqlite=0
+(complets), Ppview32=13, **7za=96** (le plus lourd).
+
 ### P3 — Récupération points-to (Phase 4 vtables / dispatch calculé)
 - **NASM `-f obj` (OMF) ✅ RÉSOLU (2026-07-09)** : le stub `ret` nu (méthode no-op d'un
   `struct ofmt`) est **stocké via `mov [reg], imm`** (pointeur de méthode dans un objet pointé par

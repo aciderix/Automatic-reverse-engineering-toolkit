@@ -2656,4 +2656,30 @@ Détail : **70 §6** (roadmap). Résumé :
 - **Bilan méthode** : 2 sweeps de binaires inédits → 2 vrais bugs (fstcw **fixé**, push-ret/EH **documenté**). La boucle
   « sweep → fix » marche ; les bugs restants convergent vers **l'EH MSVC** (push-ret, SEH table-driven, C++ exceptions).
 
+### 2026-07-17 — [RECOV][LIFT] `push imm; …; ret` (ret-as-jump, continuation MSVC `__finally`) reconnu — 1re brique EH, Ppview32 fixé
+- **Le bug (Ppview32, trouvé au sweep).** L'idiome de continuation `__finally` : `push <cont>; …; ret` où le `ret`
+  **saute** vers l'adresse poussée (pas un retour). ARET traitait ce `ret` comme un retour → sortait tôt, `ebp` non
+  restauré, épilogue SEH sauté, mauvais `ret N` → pile corrompue. funcdiff : `sub_530bf0`/`sub_530d20`/`sub_530d26`,
+  `reg ebp lifted=frame vs unicorn=restauré`.
+- **Fix (analyse, sound par construction).** `find_ret_jumps` (`analysis/mod.rs`) : **interprétation abstraite
+  forward** par fonction — pile symbolique (chaque slot = une constante-code poussée précise, ou opaque), point-fixe ;
+  un `ret` est réécrit en `jmp <imm>` **uniquement** quand `[esp]` est prouvé être la **même** constante-code poussée
+  sur **tous** les chemins (exactement l'adresse que le `ret` hardware pop et vers laquelle il saute). Un vrai retour
+  (`[esp]`=adresse appelant, opaque) n'est jamais converti. `stack_pointer_increment` d'iced donne l'effet esp par
+  instruction ; un `call` utilise le **callee-pop** (`callee_ret_pop`, mémoïsé, scan des `ret N` du callee) ; tout
+  effet non modélisé (call indirect, `mov esp,…`, écriture pile désalignée) rend les slots opaques → jamais une fausse
+  constante ⇒ la passe ne peut que **rater** un saut, jamais en inventer un.
+- **Trois pièges résolus** : (1) le `ret` réécrit **pop toujours** `[esp]` → build.rs émet `esp += 4` avant le `jmp`
+  (sinon l'épilogue cible lit de mauvais slots) ; (2) la continuation est souvent **mal-promue en entrée de fonction**
+  (address-taken du `push`) → `is_cont` accepte toute adresse-code du binaire dans un span généreux (la soundness vient
+  de la preuve abstraite, pas de `is_cont`), et `insns` est **étendu** en collectant depuis la cible ; (3) `callee_pop`
+  d'un helper EH qui a lui-même un push-ret : un plain `ret` (N=0) coexistant avec un `ret N` (N>0) EST un push-ret jump
+  → on ignore les N=0 quand un N>0 existe (une fonction = une convention d'appel).
+- **Mesuré** : **Ppview32 6 divergences → 0** (les 3 fonctions EH liftées correctement, +53 continuations incluses).
+  **Aucune régression** : difftest **272/272**, hash transpile `19acad982194bf07` **inchangé**, régression unifiée
+  **PASS**, winediff **114/114**, sweeps sqlite/busybox bit-identiques, gauntlet **19/21**, funcdiff corpus **0 div**,
+  7za 0 div. La passe ne se déclenche sur AUCUNE fonction sans push-ret (les démonstrateurs sans EH sont intacts).
+- **1re brique du chantier EH franchie.** Reste (doc 80 §1.3) : teardown de frame SEH complet (7za, 96 frames),
+  dispatch `__except_handler3`, exceptions C++ (`__CxxFrameHandler`/RtlUnwind). La boucle sweep→fix continue.
+
 <!-- NOUVELLES ENTRÉES ICI (garder l'ordre chronologique, plus récent en bas) -->

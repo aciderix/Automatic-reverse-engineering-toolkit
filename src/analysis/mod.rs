@@ -1439,6 +1439,250 @@ fn collect_function(
     insns
 }
 
+/// The callee-pop (`ret N`'s `N`) of the function at `target`, or `None` if it
+/// cannot be pinned down (indirect/interrupt terminator, inconsistent `ret N`, or
+/// it runs off the recovered map). Memoised. Used by `find_ret_jumps` to keep the
+/// abstract esp exact across a call inside a `push imm; …; ret` body.
+fn callee_ret_pop(
+    global: &BTreeMap<u64, Insn>,
+    target: u64,
+    memo: &mut HashMap<u64, Option<u32>>,
+) -> Option<u32> {
+    if let Some(v) = memo.get(&target) {
+        return *v;
+    }
+    memo.insert(target, None); // break recursion: unknown while computing
+    let mut pops: BTreeSet<u32> = BTreeSet::new();
+    let mut seen: BTreeSet<u64> = BTreeSet::new();
+    let mut work = vec![target];
+    let mut budget = 600u32;
+    let mut ok = true;
+    while let Some(a) = work.pop() {
+        if budget == 0 {
+            ok = false;
+            break;
+        }
+        budget -= 1;
+        if !seen.insert(a) {
+            continue;
+        }
+        let Some(insn) = global.get(&a) else {
+            ok = false;
+            break;
+        };
+        match insn.flow {
+            Flow::Return => {
+                let inc = insn.raw.stack_pointer_increment();
+                if inc < 4 {
+                    ok = false;
+                    break;
+                }
+                pops.insert((inc - 4) as u32);
+            }
+            Flow::Jump => match insn.target {
+                Some(t) => work.push(t),
+                None => {
+                    ok = false;
+                    break;
+                }
+            },
+            Flow::CondJump => {
+                if let Some(t) = insn.target {
+                    work.push(t);
+                }
+                work.push(insn.next_addr());
+            }
+            Flow::Indirect | Flow::Interrupt => {
+                ok = false;
+                break;
+            }
+            Flow::Fallthrough | Flow::Call => work.push(insn.next_addr()),
+        }
+    }
+    // A plain `ret` (N=0) inside a function that also has `ret N` (N>0) is a
+    // push-ret JUMP, not a return — one function has a single calling convention, so
+    // its real returns all pop the same N. Ignore the N=0 rets when any N>0 exists.
+    let nonzero: Vec<u32> = pops.iter().copied().filter(|&n| n > 0).collect();
+    let r = if !ok {
+        None
+    } else if nonzero.is_empty() {
+        Some(0) // all plain `ret` → cdecl (caller cleans) or a pure push-ret helper
+    } else if nonzero.len() == 1 {
+        Some(nonzero[0])
+    } else {
+        None // conflicting `ret N` → can't pin the pop
+    };
+    memo.insert(target, r);
+    r
+}
+
+/// Recognise the `push <code>; … ; ret` idiom — a `ret` used as a computed JUMP to
+/// an in-function code address pushed earlier (the MSVC `__finally` continuation /
+/// local-unwind tail). Returns `{ret_addr -> jump_target}`.
+///
+/// **Sound by construction.** A forward abstract interpretation tracks the stack
+/// symbolically (each slot is either a specific pushed in-function code constant or
+/// opaque). A `ret` is converted only when, on EVERY path reaching it, `[esp]` is
+/// proven to be the *same* pushed code constant — which is exactly the address the
+/// hardware `ret` pops and jumps to. A genuine return (whose `[esp]` is a caller
+/// address, opaque here) is never converted. Any unmodelled esp effect (an indirect
+/// call, `mov esp,…`, a misaligned stack write) merely makes slots opaque — never a
+/// wrong constant — so the pass can only *miss* a jump, never invent one.
+fn find_ret_jumps(
+    insns: &BTreeMap<u64, Insn>,
+    global: &BTreeMap<u64, Insn>,
+    entry: u64,
+    func_end: u64,
+) -> HashMap<u64, u64> {
+    use iced_x86::{Mnemonic, OpKind, Register};
+    const MAXD: usize = 48;
+    type Stk = Vec<Option<u64>>;
+
+    let mut memo: HashMap<u64, Option<u32>> = HashMap::new();
+    // A valid continuation is a real instruction start at or ahead of `entry`,
+    // within a generous single-function span. It need NOT be in `insns`: the pushed
+    // address is frequently mis-promoted to its own "function" entry (address-taken),
+    // so the true continuation sits exactly at `func_end`. Looseness here is safe —
+    // the abstract interpretation is the real gate (it converts a `ret` only when
+    // `[esp]` is PROVABLY this pushed constant on every path; a genuine return, whose
+    // `[esp]` is an opaque caller address, is never marked). `func_end` bounds the
+    // search but is not trusted as the span limit.
+    let _ = func_end;
+    let is_cont = |imm: u64| global.contains_key(&imm) && imm >= entry && imm - entry < 0x8000;
+
+    // Transfer: the abstract stack after `insn` executes (index 0 = top = [esp]).
+    let transfer = |stk: &Stk, insn: &Insn, memo: &mut HashMap<u64, Option<u32>>| -> Stk {
+        // `push <in-function code imm>` establishes a known top even if esp was opaque.
+        if insn.raw.mnemonic() == Mnemonic::Push && insn.raw.op0_kind() == OpKind::Immediate32 {
+            let imm = insn.raw.immediate32() as u64;
+            let mut n = stk.clone();
+            n.insert(0, if is_cont(imm) { Some(imm) } else { None });
+            n.truncate(MAXD);
+            return n;
+        }
+        // esp effect in stack slots: >0 pops from the top, <0 pushes opaque slots,
+        // `None` = unknown => clear the tracked prefix (top becomes opaque).
+        let delta: Option<i64> = if insn.flow == Flow::Call {
+            insn.target.and_then(|t| callee_ret_pop(global, t, memo)).map(|m| m as i64 / 4)
+        } else {
+            let inc = insn.raw.stack_pointer_increment() as i64;
+            let writes_esp_nonstack = insn.raw.op0_kind() == OpKind::Register
+                && matches!(insn.raw.op0_register(), Register::ESP | Register::SP)
+                && inc == 0;
+            if writes_esp_nonstack || inc % 4 != 0 {
+                None
+            } else {
+                Some(inc / 4)
+            }
+        };
+        let mut n = match delta {
+            None => Vec::new(),
+            Some(d) if d >= 0 => {
+                let mut n = stk.clone();
+                for _ in 0..(d as usize).min(n.len()) {
+                    n.remove(0);
+                }
+                n
+            }
+            Some(d) => {
+                let mut n = stk.clone();
+                for _ in 0..(-d) as usize {
+                    n.insert(0, None);
+                }
+                n.truncate(MAXD);
+                n
+            }
+        };
+        // A store through `[esp+disp]` overwrites a tracked slot: opaque it (or, if
+        // misaligned, clear — the write may span slots).
+        if insn.raw.op0_kind() == OpKind::Memory
+            && matches!(insn.raw.memory_base(), Register::ESP)
+            && insn.raw.is_ip_rel_memory_operand() == false
+        {
+            let disp = insn.raw.memory_displacement64() as i64;
+            if disp < 0 || disp % 4 != 0 {
+                n.clear();
+            } else {
+                let k = (disp / 4) as usize;
+                if k < n.len() {
+                    n[k] = None;
+                }
+            }
+        }
+        n
+    };
+
+    // Join two abstract stacks (align at the top): equal constants survive, all
+    // else becomes opaque; the result keeps the shorter length. Returns whether
+    // `into` changed. `None` slot beyond a stack's length is the opaque floor.
+    fn join(into: &mut Option<Stk>, incoming: &Stk) -> bool {
+        match into {
+            None => {
+                *into = Some(incoming.clone());
+                true
+            }
+            Some(cur) => {
+                let newlen = cur.len().min(incoming.len());
+                let mut changed = cur.len() != newlen;
+                cur.truncate(newlen);
+                for i in 0..newlen {
+                    let m = if cur[i] == incoming[i] { cur[i] } else { None };
+                    if m != cur[i] {
+                        cur[i] = m;
+                        changed = true;
+                    }
+                }
+                changed
+            }
+        }
+    }
+
+    let mut state: HashMap<u64, Option<Stk>> = HashMap::new();
+    state.insert(entry, Some(Vec::new()));
+    let mut work = vec![entry];
+    let mut budget = 20_000u32;
+    while let Some(a) = work.pop() {
+        if budget == 0 {
+            return HashMap::new(); // pathological: bail, convert nothing (sound)
+        }
+        budget -= 1;
+        let Some(insn) = insns.get(&a) else { continue };
+        let Some(Some(s_in)) = state.get(&a).cloned() else { continue };
+        let s_out = transfer(&s_in, insn, &mut memo);
+        let succs: Vec<u64> = match insn.flow {
+            Flow::CondJump => insn.target.into_iter().chain(std::iter::once(insn.next_addr())).collect(),
+            Flow::Jump => insn.target.into_iter().collect(),
+            Flow::Return | Flow::Indirect | Flow::Interrupt => Vec::new(),
+            Flow::Fallthrough | Flow::Call => vec![insn.next_addr()],
+        };
+        for succ in succs {
+            if !insns.contains_key(&succ) {
+                continue;
+            }
+            if join(state.entry(succ).or_insert(None), &s_out) {
+                work.push(succ);
+            }
+        }
+    }
+
+    let mut out = HashMap::new();
+    for (&addr, insn) in insns {
+        if insn.flow == Flow::Return
+            && insn.raw.mnemonic() == Mnemonic::Ret
+            && insn.raw.op_count() == 0
+        {
+            if let Some(Some(st)) = state.get(&addr) {
+                if let Some(Some(imm)) = st.first() {
+                    if is_cont(*imm) {
+                        out.insert(addr, *imm);
+                    }
+                }
+            }
+        }
+    }
+    out
+}
+
 /// Phase B — build the CFG of a single function from the global map.
 fn build_function(
     prog: &Program,
@@ -1451,9 +1695,29 @@ fn build_function(
     let mut boundary = all_entries.clone();
     boundary.remove(&entry);
 
-    let insns = collect_function(global, entry, &boundary, jump_tables, prologue_only);
+    let mut insns = collect_function(global, entry, &boundary, jump_tables, prologue_only);
     if insns.is_empty() {
         return None;
+    }
+
+    // `push <code>; … ; ret` (ret-as-jump, MSVC `__finally` continuation): rewrite
+    // each proven such `ret` into a `jmp` to the pushed address, so block leaders,
+    // successors and the lift all treat it as the jump it really is (build.rs adds
+    // the `esp += 4` the `ret` still pops). Sound: see `find_ret_jumps`.
+    let func_end = boundary.range((entry + 1)..).next().copied().unwrap_or(u64::MAX);
+    let ret_jumps = find_ret_jumps(&insns, global, entry, func_end);
+    for (&ra, &tgt) in &ret_jumps {
+        if let Some(insn) = insns.get_mut(&ra) {
+            insn.flow = Flow::Jump;
+            insn.target = Some(tgt);
+        }
+        // The continuation is reachable only through this newly-recognised edge, so
+        // collect its instructions (the epilogue tail) into the function now.
+        if !insns.contains_key(&tgt) {
+            for (a, i) in collect_function(global, tgt, &boundary, jump_tables, prologue_only) {
+                insns.entry(a).or_insert(i);
+            }
+        }
     }
 
     let mut callees = BTreeSet::new();

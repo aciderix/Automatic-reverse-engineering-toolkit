@@ -410,6 +410,22 @@ pub fn build_ir(prog: &Program, func: &Function) -> IrFunction {
                 // unbounded WHERE-term list on any `x AND y` (which hung CREATE
                 // TABLE's schema reparse). Emit it as a tail call instead.
                 let is_self_tail = target_addr == Some(func.entry);
+                // A `ret` the analyser rewrote into a `jmp` (the `push imm; …; ret`
+                // continuation idiom) still POPS the address it jumps to: model the
+                // `esp += 4` the hardware `ret` performs, so the jump target's
+                // epilogue (`pop edi/esi/ebx` before `mov esp,ebp`) reads the right
+                // slots. A normal `jmp` has no such pop.
+                if last.raw.mnemonic() == iced_x86::Mnemonic::Ret {
+                    let sp = Location::Reg(RegId(4));
+                    stmts.push(Stmt::Set {
+                        dst: sp.clone(),
+                        expr: Expr::Binary(
+                            BinOp::Add,
+                            Box::new(Expr::Read(sp)),
+                            Box::new(Expr::Const(4, Ty::int(32))),
+                        ),
+                    });
+                }
                 match t {
                     Some(t) if !is_self_tail => stmts.push(Stmt::Jump(BlockId(t))),
                     // No internal target (or a jump to our own entry): a direct jump
