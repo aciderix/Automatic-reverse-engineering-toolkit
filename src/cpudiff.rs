@@ -3112,6 +3112,36 @@ mod tests {
         assert!(scored > 0, "optimizer differential scored 0 functions -- vacuous");
     }
 
+    /// Ad-hoc bug sweep: run the lift-closure differential on ONE binary named by
+    /// `ARET_SWEEP_BIN` (iterations via `ARET_SWEEP_ITERS`, default 40). Prints the
+    /// scored count and any divergences. Used to hunt lift bugs on fresh binaries
+    /// (`ARET_SWEEP_BIN=/path/x.exe cargo test --features unpack funcdiff_one --
+    /// --ignored --nocapture`). Inert (returns) when the env var is unset.
+    #[test]
+    #[ignore]
+    fn funcdiff_one() {
+        let Ok(path) = std::env::var("ARET_SWEEP_BIN") else { return };
+        if !std::path::Path::new(&path).exists() {
+            eprintln!("SWEEP absent {path}");
+            return;
+        }
+        let iters: u32 = std::env::var("ARET_SWEEP_ITERS").ok().and_then(|s| s.parse().ok()).unwrap_or(40);
+        FUNCDIFF_SCORED.store(0, std::sync::atomic::Ordering::Relaxed);
+        let lift = match run_functions(&path, iters) {
+            Ok(v) => v,
+            Err(e) => {
+                eprintln!("SWEEP {path}: ERR {e}");
+                return;
+            }
+        };
+        let s = FUNCDIFF_SCORED.load(std::sync::atomic::Ordering::Relaxed);
+        let name = path.rsplit('/').next().unwrap();
+        eprintln!("SWEEP {name}: {s} scored, {} divergence(s)", lift.len());
+        for m in lift.iter().take(12) {
+            eprintln!("SWEEP     fn {:#x} {}: lifted={:#x} unicorn={:#x}", m.func, m.what, m.lifted, m.unicorn);
+        }
+    }
+
     /// Corpus gate (run via `bench/funcdiff.sh`): both differentials — the lifter
     /// closure (vs Unicorn) and the optimizer diff (pre-opt vs post-opt SSA) — must
     /// find **no** divergence on the committed real binaries (mingw busybox + MSVC
