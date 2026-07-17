@@ -2776,6 +2776,9 @@ pub fn run_functions(path: &str, iters: u32) -> Result<Vec<FnMismatch>, String> 
     // __stdcall pop `@N`: there the lifted IR carries an explicit `esp += N` and the
     // Unicorn stub does `ret N`, so the two stay in exact lockstep. Imports without
     // a known pop (cdecl / unlisted) keep being skipped — sound, no regression.
+    // (Stubbing them too was tried and proven UNSOUND: for an unknown-pop import the
+    // push-model build.rs DROPS the compensating `sub esp, N` while Unicorn still runs
+    // it, so esp diverges and yields a false positive — e.g. 7za fn 0x447f00.)
     // Modeled memcalls are excluded (they keep their real memory effect).
     let stub_imports: std::collections::HashSet<String> = prog
         .imports
