@@ -2598,4 +2598,23 @@ Détail : **70 §6** (roadmap). Résumé :
   chemin de démarrage. L'oracle a fait tout son travail : **il a prouvé que le lift n'est pas en cause**, sur ~54k
   fonctions/appels scorés de 7za.
 
+### 2026-07-17 — [ORACLE][DEMO] Validation large de l'oracle élargi (0 div sur tout le gauntlet) + 7za borné (crash = startup CRT, hors funcdiff)
+- **Sweep de validation** : funcdiff (avec les 5 incréments du jour — pops `@N`, appels indirects, `@0` scalaires,
+  intrinsèques memmove, exclusion scratch sous-esp) lancé sur les **11 binaires distincts du gauntlet** (mingw C **et**
+  MSVC) : `hello` 1320, `bzip2` 1302, `gzip` 1654, `grep` 1977, `sed` 1575, `m4` 2491, `units` 1320, `lua` 1527,
+  `nasm` 3660, `sqlite3` 7303, `sqlite3_full` 7887 scorées — **0 divergence partout**. Les incréments sont donc **sound
+  sur volume** (aucun faux positif, couverture bien plus profonde qu'avant : appels indirects + memmove-callers +
+  import-callers désormais validés sur tous ces binaires réels). Pas de nouveau bug : ce sont des démonstrateurs déjà
+  éprouvés (le lift est prouvé correct, plus profondément).
+- **7za : chasse bornée (règle §2).** Le crash de démarrage (`aret_LCMapStringW ← sub_472126 ← … ← sub_46cf4c ← main`)
+  est dans l'**init locale du CRT statique**, AVANT `main`. `sub_46cf4c` = le sas de démarrage CRT (appelle `GetVersion`,
+  **`GetCommandLineA`**, `ExitProcess`, puis l'init). funcdiff a **prouvé le lift innocent** sur ~54k fonctions/appels de
+  7za, y compris les memmove-callers. Le fautif est donc structurellement **hors funcdiff** : la chaîne passe par
+  `GetCommandLineA` (@0 **pointeur**, non-stubbable soundement) et du code startup que l'oracle par-fonction (états
+  seedés ≠ layout réel) ne peut pas valider. **Écarté** : heap non-init (`aret_HeapAlloc`→always-zero **n'a pas** changé
+  le crash ; le malloc de 7za est lifté, pas host-backé), les shims vérifiés (GetACP=1252, memmove OK). **Reste** (pour
+  une session dédiée) : diff instruction-par-instruction ARET vs Wine à travers le sas CRT, ou identifier ce qu'est le
+  slot `call [0x48e040]` (hors IAT standard) de `sub_46cf4c`. **Pas de forensics mono-binaire infinie** ici : la valeur
+  de la session est l'oracle élargi (5 incréments, validés sur 11 binaires), pas un fix 7za spéculatif.
+
 <!-- NOUVELLES ENTRÉES ICI (garder l'ordre chronologique, plus récent en bas) -->
