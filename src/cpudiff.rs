@@ -2580,6 +2580,17 @@ pub fn diff_function(
         return out; // more imports than the one-page stub region holds — skip (rare)
     }
 
+    // Synthetic zeroed segment for `fs:[disp]` (SEH prolog, stack canary). Unicorn's
+    // default fs base is 0 (flat), so `fs:[disp]` reads absolute address `disp`; mapping
+    // a zeroed page at 0 makes those reads return 0 — exactly the interpreter's `konst(0)`
+    // segment model — instead of faulting on an unmapped low address. It is re-zeroed each
+    // iteration and never compared (it lies outside the image/stack ranges the diff reads):
+    // the interpreter drops segment writes (Nop), so an SEH `mov fs:[0],esp` writing here is
+    // a modelled-away write, not a lift signal. Unblocks SEH-heavy functions (CRT wrappers)
+    // for scoring; a real esp/frame bug still surfaces in the image/stack diff. (A genuine
+    // null-deref elsewhere no longer faults, but the interpreter has no region at 0 so it
+    // skips — never a false verdict.)
+    const SEG_ZERO: u64 = 0;
     let mut uc: *mut uc_engine = std::ptr::null_mut();
     unsafe {
         if uc_open(UC_ARCH_X86, UC_MODE_32, &mut uc) != 0 {
@@ -2588,6 +2599,7 @@ pub fn diff_function(
         if uc_mem_map(uc, lo, img0.len(), UC_PROT_ALL) != 0
             || uc_mem_map(uc, FN_STACK_BASE, FN_STACK_SIZE, UC_PROT_ALL) != 0
             || uc_mem_map(uc, STUB_BASE, 0x1000, UC_PROT_ALL) != 0
+            || uc_mem_map(uc, SEG_ZERO, 0x1000, UC_PROT_ALL) != 0
         {
             uc_close(uc);
             return out;
@@ -2650,6 +2662,10 @@ pub fn diff_function(
         unsafe {
             uc_mem_write(uc, lo, uc_img.as_ptr() as *const c_void, uc_img.len());
             uc_mem_write(uc, FN_STACK_BASE, stack.as_ptr() as *const c_void, FN_STACK_SIZE);
+            // Re-zero the segment page so `fs:[disp]` reads 0 (the interpreter's model)
+            // at every iteration, even after a prior SEH write left a value there.
+            let seg_zero = [0u8; 0x1000];
+            uc_mem_write(uc, SEG_ZERO, seg_zero.as_ptr() as *const c_void, seg_zero.len());
             for r in 0..8 {
                 let v = regs[r] as u32;
                 uc_reg_write(uc, UC_GP[r], &v as *const u32 as *const c_void);
