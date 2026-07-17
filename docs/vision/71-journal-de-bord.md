@@ -2865,4 +2865,20 @@ Détail : **70 §6** (roadmap). Résumé :
   (loader-only, inerte pour les binaires à imports **nommés** = tous les démonstrateurs), régression unifiée **PASS**,
   tests ordinal_imports **3/3**.
 
+### 2026-07-17 — [HLE-WIN32] `CharToOem`/`OemToChar` (ANSI CP1252 ↔ OEM CP437) — mur DEMO32, tables extraites de Wine
+- **Le mur (mesuré).** Après `GetClassInfoA`, `DEMO32.EXE` (CD 1997) butait sur `CharToOemA` non implémenté.
+- **La subtilité : best-fit, pas strict.** `CharToOemA` convertit ACP(1252)→OEMCP(437) en **best-fit** : un caractère
+  CP1252 sans forme CP437 exacte prend la plus proche (U+201A `‚` → `,`, U+2019 `’` → `'`), sans équivalent → `?`, et
+  un caractère présent dans les deux mappe direct (`é` 0xE9 → 0x82). Une table stricte (codec Python) **ne matche pas**.
+- **Fix : tables extraites verbatim de Wine (l'oracle).** Un programme jetable a lancé `CharToOemA`/`OemToCharA` de Wine
+  sur **les 256 valeurs d'octet** → 2 tables de 256 (`u32_ansi_to_oem`/`u32_oem_to_ansi`) hardcodées → **bit-identique
+  Wine par construction** (ACP=1252/OEMCP=437 confirmés). Shims `CharToOem{,Buff}A`/`OemToChar{,Buff}A` (formes A
+  NUL-terminées copient le NUL ; formes Buff = longueur explicite). `stdcall_pops` : +CharToOemA@8/CharToOemBuffA@12/
+  OemToCharA@8/OemToCharBuffA@12.
+- **Mesuré (fort levier).** `DEMO32` traverse désormais **tout son démarrage** (récup points-to + GetClassInfo + ordinal
+  InitCommonControls + CharToOem) et atteint sa **boucle de messages** (`GetMessageW: empty queue` — repli headless
+  attendu, pas un bug). Le binaire s'initialise entièrement. **Portes** : winediff **119→120/120** (`win32_charoem`,
+  signature round-trip 256 octets `sig=67a9e5e5` = Wine), hash transpile `19acad982194bf07` **inchangé**,
+  `table_is_sorted_by_name` ok, régression unifiée **PASS**.
+
 <!-- NOUVELLES ENTRÉES ICI (garder l'ordre chronologique, plus récent en bas) -->

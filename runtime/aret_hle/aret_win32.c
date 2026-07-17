@@ -658,6 +658,70 @@ uint32_t aret_AreFileApisANSI(uint32_t esp) { (void)esp; return 1; }
 
 uint32_t aret_GetACP(uint32_t esp)   { (void)esp; return 1252; } /* Windows-1252 */
 uint32_t aret_GetOEMCP(uint32_t esp) { (void)esp; return 437; }
+
+/* ANSI(CP1252) <-> OEM(CP437) byte translation for CharToOem/OemToChar. The
+ * tables are the ground-truth best-fit mapping extracted verbatim from the very
+ * Wine (msvcrt/user32) that is our oracle: running CharToOemA/OemToCharA over all
+ * 256 byte values and recording the result. Best-fit (not strict) is what Windows
+ * uses here — e.g. U+201A single low quote -> ','; a char with no CP437 form -> '?'.
+ * Bit-identical to Wine by construction (ACP=1252, OEMCP=437). */
+static const uint8_t u32_ansi_to_oem[256] = {
+    0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15,
+    16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31,
+    32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47,
+    48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63,
+    64, 65, 66, 67, 68, 69, 70, 71, 72, 73, 74, 75, 76, 77, 78, 79,
+    80, 81, 82, 83, 84, 85, 86, 87, 88, 89, 90, 91, 92, 93, 94, 95,
+    96, 97, 98, 99, 100, 101, 102, 103, 104, 105, 106, 107, 108, 109, 110, 111,
+    112, 113, 114, 115, 116, 117, 118, 119, 120, 121, 122, 123, 124, 125, 126, 127,
+    63, 63, 44, 159, 44, 46, 43, 216, 94, 37, 83, 60, 79, 63, 90, 63,
+    63, 96, 39, 34, 34, 7, 45, 45, 126, 84, 115, 62, 111, 63, 122, 89,
+    255, 173, 155, 156, 15, 157, 221, 21, 34, 99, 166, 174, 170, 45, 114, 95,
+    248, 241, 253, 51, 39, 230, 20, 250, 44, 49, 167, 175, 172, 171, 95, 168,
+    65, 65, 65, 65, 142, 143, 146, 128, 69, 144, 69, 69, 73, 73, 73, 73,
+    68, 165, 79, 79, 79, 79, 153, 120, 79, 85, 85, 85, 154, 89, 95, 225,
+    133, 160, 131, 97, 132, 134, 145, 135, 138, 130, 136, 137, 141, 161, 140, 139,
+    100, 164, 149, 162, 147, 111, 148, 246, 111, 151, 163, 150, 129, 121, 95, 152,
+};
+static const uint8_t u32_oem_to_ansi[256] = {
+    0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15,
+    16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31,
+    32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47,
+    48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63,
+    64, 65, 66, 67, 68, 69, 70, 71, 72, 73, 74, 75, 76, 77, 78, 79,
+    80, 81, 82, 83, 84, 85, 86, 87, 88, 89, 90, 91, 92, 93, 94, 95,
+    96, 97, 98, 99, 100, 101, 102, 103, 104, 105, 106, 107, 108, 109, 110, 111,
+    112, 113, 114, 115, 116, 117, 118, 119, 120, 121, 122, 123, 124, 125, 126, 127,
+    199, 252, 233, 226, 228, 224, 229, 231, 234, 235, 232, 239, 238, 236, 196, 197,
+    201, 230, 198, 244, 246, 242, 251, 249, 255, 214, 220, 162, 163, 165, 80, 131,
+    225, 237, 243, 250, 241, 209, 170, 186, 191, 172, 172, 189, 188, 161, 171, 187,
+    166, 166, 166, 166, 166, 166, 166, 43, 43, 166, 166, 43, 43, 43, 43, 43,
+    43, 45, 45, 43, 45, 43, 166, 166, 43, 43, 45, 45, 166, 45, 43, 45,
+    45, 45, 45, 43, 43, 43, 43, 43, 43, 43, 43, 166, 95, 166, 166, 175,
+    97, 223, 71, 112, 83, 115, 181, 116, 70, 84, 79, 100, 56, 102, 101, 110,
+    61, 177, 61, 61, 40, 41, 247, 152, 176, 183, 183, 118, 110, 178, 166, 160,
+};
+/* CharToOem(Buff)A / OemToChar(Buff)A — translate a string between the ANSI and OEM
+ * code pages in place per byte. The A forms are NUL-terminated (and copy the NUL);
+ * the Buff forms take an explicit length and do not stop at NUL. Return TRUE. */
+static uint32_t u32_xlate_z(uint32_t src, uint32_t dst, const uint8_t *tab) {
+    const uint8_t *s = (const uint8_t *)(uintptr_t)src;
+    uint8_t *d = (uint8_t *)(uintptr_t)dst;
+    if (!s || !d) return 0;
+    do { *d = tab[*s]; } while (*s++ && (d++, 1));
+    return 1;
+}
+static uint32_t u32_xlate_n(uint32_t src, uint32_t dst, uint32_t n, const uint8_t *tab) {
+    const uint8_t *s = (const uint8_t *)(uintptr_t)src;
+    uint8_t *d = (uint8_t *)(uintptr_t)dst;
+    if ((!s || !d) && n) return 0;
+    for (uint32_t i = 0; i < n; i++) d[i] = tab[s[i]];
+    return 1;
+}
+uint32_t aret_CharToOemA(uint32_t esp)  { return u32_xlate_z(WP(0), WP(1), u32_ansi_to_oem); }
+uint32_t aret_OemToCharA(uint32_t esp)  { return u32_xlate_z(WP(0), WP(1), u32_oem_to_ansi); }
+uint32_t aret_CharToOemBuffA(uint32_t esp) { return u32_xlate_n(WP(0), WP(1), WP(2), u32_ansi_to_oem); }
+uint32_t aret_OemToCharBuffA(uint32_t esp) { return u32_xlate_n(WP(0), WP(1), WP(2), u32_oem_to_ansi); }
 /* Locale IDs: report en-US (LCID 0x0409) — the CRT reads GetThreadLocale for
  * locale-dependent classification (GNU m4/grep query it at startup; a 0 stub made
  * their locale setup misbehave and swallow output). */
