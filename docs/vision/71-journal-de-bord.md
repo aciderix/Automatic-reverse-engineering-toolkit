@@ -2421,6 +2421,26 @@ Détail : **70 §6** (roadmap). Résumé :
   encore unmodelables car ils appellent des **imports cdecl / appels indirects**) ou vers le **shim MBToWC** lui-même.
   C'est exactement le rôle de l'oracle : **écarter** une piste fausse par la preuve, pas la deviner.
 - **Reste (increment 3)** : étendre le stub aux imports **cdecl** (pop 0, nettoyage appelant) et gérer les appels
-  indirects pour rendre les ancêtres modelables — puis pinpointer le vrai fautif.
+  indirects pour rendre les ancêtres modelables — puis pinpointer le vrai fautif. **⚠️ TENTÉ ET REJETÉ — voir
+  l'entrée suivante : élargir le stub aux imports à pop inconnu est UNSOUND.**
+
+### 2026-07-17 — [ORACLE] funcdiff : élargir les stubs aux imports à pop inconnu est UNSOUND (rejeté par preuve)
+- **Ce qu'on a tenté (increment 3 pressenti).** Pour rendre modelables les ancêtres de `sub_471a83` (qui appellent
+  des imports **cdecl** / à pop non listé), élargir le stub symétrique à **tous** les imports IAT : blob Unicorn
+  `mov eax,0; mov edx,0; ret @N` où `@N` = pop stdcall connu **ou 0** (cdecl/inconnu), en pariant sur la symétrie.
+- **Pourquoi c'est unsound (mesuré, pas supposé).** La symétrie stub↔IR ne tient QUE si le pop est connu : là l'IR
+  liftée porte un `esp += N` explicite qui verrouille le `ret N` du stub (lockstep). Pour un import **à pop inconnu**,
+  le modèle *push* de `build.rs` **supprime** la compensation `sub esp, N` de l'appelant (elle est censée être annulée
+  par le pop de l'appelé) — mais Unicorn, lui, **exécute** ce `sub esp, N` puis le `ret 0` du stub → **esp diverge** →
+  **faux positif**. Reproduit sur **7za fn `0x447f00`** : avec l'élargissement, divergence esp fantôme ; en revenant
+  au sous-ensemble pop-connu, la divergence **disparaît** (7za : 11374 scorées, **0 divergence**). L'instinct
+  « stubber = désactiver = deviner ? » était juste : hors du domaine prouvé, le stub **fabrique** un écart.
+- **Décision (discipline > couverture).** Reverté à l'ensemble **prouvablement sound** (pops connus uniquement). Le
+  commentaire de `run_functions` (`cpudiff.rs`) grave la raison + le contre-exemple pour que la frontière ne soit pas
+  re-franchie. Corpus busybox+sqlite **16604 scorées, 0 divergence** ; hash transpile `19acad982194bf07` inchangé.
+- **Conséquence pour la chasse 7za.** On **ne peut pas** rendre soundement modelables les ancêtres cdecl de
+  `sub_471a83` via ce mécanisme. Le miscompile 7za (segfault au démarrage) reste hors de portée de funcdiff tant
+  qu'on n'a pas une autre voie sound (p. ex. connaître le pop réel de chaque import cdecl par prototype, ou un
+  oracle end-to-end différent). `sub_471a83` lui-même reste **prouvé correct** (0 divergence) — le fautif est ailleurs.
 
 <!-- NOUVELLES ENTRÉES ICI (garder l'ordre chronologique, plus récent en bas) -->
