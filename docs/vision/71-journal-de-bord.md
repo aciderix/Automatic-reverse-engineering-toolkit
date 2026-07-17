@@ -2640,4 +2640,20 @@ Détail : **70 §6** (roadmap). Résumé :
   déjà verts ne montrent plus). C'est la voie pour « terminer les 32 bits » : sweeper des binaires neufs, fixer, itérer.
   *(Le CD 1997 est surtout 16-bit/DOS ; peu de 32-bit complexe. Pour la suite : des binaires plus modernes/C++ lourd.)*
 
+### 2026-07-17 — [LIFT][RECOV] Sweep suite : `Ppview32.exe` → 2ᵉ vrai bug = idiome `push imm; …; ret` (ret-as-jump) du EH MSVC, non géré
+- **Sweep des gros PE32 restants** (Ppview32 = PowerPoint Viewer MSVC, itmnm2095, uninst, wzbeta32) : seul **Ppview32
+  diverge** (33273 scorées, **6 divergences** dans `sub_530bf0`/`sub_530d20`/`sub_530d26`), les autres 0-div.
+- **Cause (vrai bug produit, EH).** Ces fonctions sont des helpers d'**exception MSVC** (frame SEH + itération de
+  callback). Elles utilisent l'idiome **`push <addr>; … ; ret`** où le `ret` **saute** vers l'adresse poussée (une
+  continuation `__finally`), PAS un retour. Ex. `sub_530bf0` : `530c49 push 0x530c6a` … `530c69 ret` → devrait sauter à
+  l'épilogue `0x530c6a` (qui restaure esi/ebx/edi/ebp, démonte le frame SEH, `ret 0x10`). **ARET (et le produit) traite
+  ce `ret` comme un retour de fonction** → sort en `530c69` avec `ebp=frame` non restauré, épilogue **sauté**, mauvais
+  `ret N` → pile corrompue. funcdiff le voit : `reg r5(ebp) lifted=0x10007ffc (frame) unicorn=<restauré>`.
+- **Statut : lead borné, pas fixé ici.** L'analyse ne reconnaît pas `push imm; ret` comme un saut (grep : aucun
+  handling). Le cas Ppview32 est la forme **différée** (push continuation → bloc finally → ret), pas le `push imm; ret`
+  adjacent — sa reconnaissance demande de suivre la pile à travers l'EH = c'est le **chantier SEH/EH** (doc 80 §1.3),
+  pas un fix rapide. **Confirme que l'EH est la prochaine frontière pour les 32 bits.**
+- **Bilan méthode** : 2 sweeps de binaires inédits → 2 vrais bugs (fstcw **fixé**, push-ret/EH **documenté**). La boucle
+  « sweep → fix » marche ; les bugs restants convergent vers **l'EH MSVC** (push-ret, SEH table-driven, C++ exceptions).
+
 <!-- NOUVELLES ENTRÉES ICI (garder l'ordre chronologique, plus récent en bas) -->
