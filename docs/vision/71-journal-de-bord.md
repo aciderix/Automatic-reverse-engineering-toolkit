@@ -2462,4 +2462,29 @@ Détail : **70 §6** (roadmap). Résumé :
   la surface process/EH. **Borné puis pivoté** (règle §2) : on ne s'enferme pas dans du forensics mono-7za ; le fix des
   pops vaut **pour lui-même** (soundness générale + oracle élargi), indépendamment de 7za.
 
+### 2026-07-17 — [DEMO][LIFT] 7za : crash de démarrage LOCALISÉ au bit près (init locale/collation) — borné, pas la faute du shim/pops/SEH
+- **Méthode (tip doc 70 §7 « localiser un crash natif ») :** gdb sur l'`app` recompilée (noms `sub_XXXX` présents).
+  Backtrace du SIGSEGV : `aret_LCMapStringW+198` ← `sub_472126` ← `sub_471a83` ← `sub_471830` ← `sub_471c08` ←
+  `sub_470889` ← `sub_46cf4c` ← `main`. C'est l'**init locale/collation du CRT/C++** (avant même la bannière usage).
+- **Ce n'est PAS** : (1) le **shim** — `aret_LCMapStringW` lit correctement ses 6 args (saute le `Locale` de tête via
+  `WU(1)=2e arg`, convention `esp[0]=arg1` vérifiée contre `MultiByteToWideChar`) ; (2) les **pops** — LCMapStringW=24,
+  LCMapStringA=24, MultiByteToWideChar : tous corrects et tabulés ; (3) une **exception SEH/C++** — breakpoints sur
+  `aret_RaiseException`/`aret_RtlUnwind`/`aret_UnhandledExceptionFilter` : **aucun** ne se déclenche avant le crash.
+- **Ce que c'est** : la pile machine passée au 3ᵉ appel LCMapStringW est **corrompue en amont**. Args lus (machine-esp
+  correct, via `[ebp+8]`) : call1 `flags=0x100,src=0x47cd24,cchSrc=1,dst=0` (mesure, OK) ; call2/call3
+  `flags=0x230022, src=0xb000a, cchSrc=0xF000E` — **valeurs garbage** (motif de petites paires séquentielles
+  0x0a/0x0b, 0x0e/0x0f, 0x22/0x23 → lecture d'une mauvaise structure/table). Au crash, `dst≠0` + `src=0xb000a` invalide
+  → `src[i]` déréférence 0xb000a → SIGSEGV. `sub_472126` (frame-pointer) passe ses **propres params** `[ebp+0x8..0x24]`
+  à LCMapStringW ; ils sont déjà corrompus → la faute naît **au-dessus** (sub_471a83 et ses ancêtres, tous SEH +
+  imports/appels indirects que funcdiff ne modélise pas encore → 0-divergence n'y prouve rien, doc 70 §7).
+- **Note soundness** : c'est un **crash** (SIGSEGV), pas une sortie fausse silencieuse → conforme au principe sacré
+  (« juste, ou échec bruyant »), mais **incomplet**. Pas un abort `aret_unmodelled` propre (le lift ne *sait* pas
+  qu'il produit une adresse fausse — c'est un miscompile, pas un mur de couverture).
+- **Borné puis pivoté (règle §2).** Pistes pour la reprise, par ordre : (a) rendre les ancêtres modelables par funcdiff
+  en gérant les **appels indirects** (le vrai chaînon manquant de l'oracle — cf. doc 80 §1.4 PGL opt-in) pour pinpointer
+  la fonction qui corrompt ; (b) tracer sous gdb quelle frame écrit le garbage `0xb000a`/`0x230022` dans les params de
+  sub_472126 (watchpoint) ; (c) suspecter un **`ret N` interne mal calculé** (`compute_callee_pops`) ou un appel
+  indirect à callee-pop erroné sur ce chemin. **Le fix des 51 pops (entrée précédente) vaut indépendamment** — il n'a
+  pas corrigé *ce* crash, mais il a élargi l'oracle de +1808 fonctions prouvées correctes, valeur générale réelle.
+
 <!-- NOUVELLES ENTRÉES ICI (garder l'ordre chronologique, plus récent en bas) -->
