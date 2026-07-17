@@ -2682,4 +2682,27 @@ Détail : **70 §6** (roadmap). Résumé :
 - **1re brique du chantier EH franchie.** Reste (doc 80 §1.3) : teardown de frame SEH complet (7za, 96 frames),
   dispatch `__except_handler3`, exceptions C++ (`__CxxFrameHandler`/RtlUnwind). La boucle sweep→fix continue.
 
+### 2026-07-17 — [HLE-WIN32][EH] Chantier EH lourd, brique 1 : dispatch SEH software-raised (`RaiseException`)
+- **Le manque.** La chaîne de handlers SEH (`fs:[0]`) et ses `EXCEPTION_REGISTRATION` sont **déjà** maintenues (le
+  prologue lifté `push handler; push scopetable; push -1; mov fs:[0],esp` écrit dans le TEB synthétique ; les reads
+  `fs:[ea]` sont de vrais loads — `ir/lift.rs` transpile-mode). Manquait le **DISPATCH** : `RaiseException` était un
+  stub no-op → le programme **continuait après l'exception** (faux silencieux ; fixture : `r=1` au lieu de `r=42`).
+- **Fix : `aret_RaiseException` (`aret_hle.c`).** Parcourt la chaîne `fs:[0]` (TEB[0], frames sur la pile machine =
+  mémoire host réelle en shared-stack) ; pour chaque frame, appelle le handler **cdecl** `handler(EXCEPTION_RECORD*,
+  EstablisherFrame, CONTEXT*, DispatcherContext)` via `aret_call` (frame cdecl posé sous l'esp machine, comme le
+  trampoline qsort). Un handler qui **décline** rend `ExceptionContinueSearch(1)` → frame suivante ; un qui **catch**
+  transfère non-localement (longjmp, ou le scope-jump de `__except_handler3`) et ne revient jamais. Chaîne épuisée sans
+  catch ⇒ **abort bruyant** (jamais continuer en silence). WASM : reste un abort sound (pas de SEH).
+- **Testabilité résolue** (le doc 80 §1.3 la notait dure). mingw i686 ne compile pas `__try/__except`, mais on installe
+  le frame SEH **à la main en inline-asm** (exactement ce que MSVC émet) + un handler C qui catch via `longjmp`.
+  Fixture `winecorpus/seh_raise.c` : **deux frames imbriqués** (interne décline `ContinueSearch`, externe catch) →
+  teste le **parcours de chaîne**. Wine **et** ARET → `r=42`.
+- **Portes** : winediff **114→115/115** (seh_raise), hash transpile `19acad982194bf07` **inchangé**, régression
+  unifiée **PASS**, sweeps sqlite/busybox bit-identiques. Le stub no-op (faux silencieux) est remplacé par un dispatch
+  correct — gain de soundness pour tout binaire appelant `RaiseException`.
+- **Reste EH** (briques suivantes) : `__except_handler3` réel (scope-table, filtre, unwind local — nécessite un CONTEXT
+  peuplé et le local-unwind), fautes **matérielles** (SIGSEGV/#DE → dispatch, natif seulement), exceptions C++
+  (`_CxxThrowException`/`__CxxFrameHandler`). Le résidu 7za est **orthogonal** (init locale C++, aucune exception avant
+  le crash — vérifié).
+
 <!-- NOUVELLES ENTRÉES ICI (garder l'ordre chronologique, plus récent en bas) -->

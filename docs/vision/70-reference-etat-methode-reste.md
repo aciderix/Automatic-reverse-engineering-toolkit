@@ -621,6 +621,15 @@ qui **échoue réellement** (le filet couvre tout le testé). Pistes si un jour 
 du filet : suivre les valeurs conservées `fstp st(i)`/`fxch` ; fp-returning auto-récursif
 (prouvé) ; host-back par signature d'idiome. Délicat (une fn à la fois, toutes portes).
 
+### P3.6 — EH MSVC lourd : brique 1 — dispatch SEH `RaiseException` ✅ FAIT (2026-07-17)
+`aret_RaiseException` (`aret_hle.c`) **dispatche** une exception software-raised dans la chaîne SEH `fs:[0]` (déjà
+maintenue dans le TEB synthétique) : parcourt les frames, appelle chaque handler cdecl via `aret_call`, `ContinueSearch`
+→ frame suivante, catch → transfert non-local (longjmp / scope-jump). Chaîne épuisée → abort bruyant (le stub no-op
+précédent continuait en silence = faux). Testé par `winecorpus/seh_raise.c` (frame SEH manuel inline-asm — mingw n'a
+pas `__try` ; 2 frames imbriqués, chain-walk) bit-identique Wine. winediff **115/115**. **Reste EH** : `__except_handler3`
+réel (scope-table + CONTEXT peuplé + local-unwind), fautes matérielles (SIGSEGV→dispatch, natif), C++
+(`_CxxThrowException`/`__CxxFrameHandler`).
+
 ### P3.5 — EH MSVC : 1re brique `push imm; …; ret` ✅ FAIT (2026-07-17)
 `find_ret_jumps` (`analysis/mod.rs`) reconnaît l'idiome de continuation `__finally` (`push <cont>; …; ret` = `ret`
 utilisé comme **saut** vers l'adresse poussée) par **interprétation abstraite forward** (pile symbolique, point-fixe) :

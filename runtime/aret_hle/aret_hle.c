@@ -2874,3 +2874,63 @@ uint32_t __aret_gs(void) {
     aret_teb_init();
     return 0; /* gs is unused in 32-bit Windows user mode */
 }
+
+/* Structured Exception Handling — software-raised dispatch (first EH brick).
+ *
+ * The SEH handler chain and its EXCEPTION_REGISTRATION frames already live on the
+ * machine stack, linked through the synthetic TEB's ExceptionList (`fs:[0]`): the
+ * lifted prologue `push handler; push scopetable; push -1; mov fs:[0],esp` writes
+ * them, and reads model `fs:[ea]` as a real load from the TEB (see ir/lift.rs). All
+ * that was missing was the DISPATCH. `RaiseException` walks that chain and calls
+ * each handler cdecl — `handler(ExceptionRecord*, EstablisherFrame, Context*,
+ * DispatcherContext)` — through `aret_call` (the handler is a transpiled function,
+ * e.g. `__except_handler3` or a hand-written one). A handler that catches transfers
+ * control non-locally (a `longjmp`, or `__except_handler3`'s scope-table jump) and
+ * never returns here; one that declines returns ExceptionContinueSearch (1) and we
+ * try the next frame. Chain exhausted with no catch ⇒ loud abort (the exception was
+ * real — never silently continue past it, which the weak import stub used to do).
+ *
+ * Hardware faults (a real SIGSEGV/#DE) are NOT yet routed here — only the software
+ * `RaiseException`/`_CxxThrowException` path. WASM has no SEH: there `RaiseException`
+ * stays a sound abort. */
+uint32_t aret_RaiseException(uint32_t esp) {
+    aret_teb_init();
+    uint32_t code = arg(esp, 0), flags = arg(esp, 1);
+    uint32_t nargs = arg(esp, 2), argp = arg(esp, 3);
+
+    /* EXCEPTION_RECORD (x86 layout), on the host stack — a valid pointer the lifted
+     * handler dereferences directly (shared-stack mode: memory is host memory). */
+    uint32_t rec[20];
+    memset(rec, 0, sizeof(rec));
+    rec[0] = code;                       /* ExceptionCode            */
+    rec[1] = flags;                      /* ExceptionFlags           */
+    rec[4] = nargs > 15 ? 15 : nargs;    /* NumberParameters         */
+    if (argp) {
+        const uint32_t *ap = (const uint32_t *)(uintptr_t)argp;
+        for (uint32_t i = 0; i < rec[4]; i++) rec[5 + i] = ap[i];
+    }
+    uint32_t ctx[200];                   /* a zeroed CONTEXT (defined, benign)  */
+    memset(ctx, 0, sizeof(ctx));
+
+    uint32_t *teb = (uint32_t *)(uintptr_t)__aret_fs();
+    uint32_t frame = teb[0];             /* ExceptionList head       */
+    while (frame != 0 && frame != 0xFFFFFFFFu) {
+        uint32_t *f = (uint32_t *)(uintptr_t)frame;
+        uint32_t handler = f[1];
+        /* Lay a cdecl frame for the handler in the free machine stack below `esp`
+         * ([esp+4]=rec, [esp+8]=frame, [esp+12]=ctx, [esp+16]=dispatch); the handler
+         * runs on the real machine stack below it. */
+        uint32_t hesp = esp - 0x80;
+        uint32_t *cf = (uint32_t *)(uintptr_t)hesp;
+        cf[1] = (uint32_t)(uintptr_t)rec;
+        cf[2] = frame;
+        cf[3] = (uint32_t)(uintptr_t)ctx;
+        cf[4] = frame;                   /* DispatcherContext (dummy)           */
+        uint32_t disp = (uint32_t)aret_call(handler, hesp, 0, 0, 0, 0);
+        if (disp == 0) return 0;         /* ExceptionContinueExecution          */
+        frame = f[0];                    /* ExceptionContinueSearch: next frame */
+    }
+    fprintf(stderr, "aret: unhandled exception %#x\n", (unsigned)code);
+    abort();
+    return 0;
+}
