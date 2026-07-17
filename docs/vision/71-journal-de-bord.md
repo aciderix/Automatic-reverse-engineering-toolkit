@@ -2516,4 +2516,35 @@ Détail : **70 §6** (roadmap). Résumé :
   faisant construire une table locale garbage. **La chasse 7za se recentre sur les shims du chemin de démarrage**, pas
   sur le lift — l'oracle a fait son travail : **écarter le lift par la preuve**.
 
+### 2026-07-17 — [ORACLE] funcdiff stubbe aussi les imports `@0` SCALAIRES — et la frontière sound (pas les retourneurs de pointeur)
+- **Point aveugle mesuré.** Après les appels indirects, funcdiff restait 0-divergence sur 7za — mais parce que la
+  chaîne de crash appelle **`GetACP`** (et d'autres `@0`), **absents de `stdcall_pops`** (les `@0` y sont omis, rien à
+  popper), donc **non stubbés** → **toute fonction appelant un `@0` était skippée**. L'oracle ne voyait pas ces
+  fonctions. Levier : stubber aussi les `@0` (pop 0 = **fait**, vérité terrain mingw `__imp__NAME@0`).
+- **Mécanisme** : nouvel ensemble `is_zero_pop_import` (`stdcall_pops.rs`, oracle-only, jamais lu par `build.rs`) ;
+  funcdiff l'ajoute au stub set et stubbe `ret 0`. Neutre pour le produit (un `@0` prend déjà la branche
+  `prev_unknown_import` que l'ajout ne change pas).
+- **DÉCOUVERTE — frontière sound (le stub `eax=0` et les pointeurs).** En incluant **tous** les `@0`, funcdiff a sorti
+  **1 divergence sur 7za** : fn `0x447f00`, `stack +0x7fd4 : lifted=0 unicorn=0xf4`. **Faux positif**, isolé par
+  expérience : en **excluant les `@0` retournant un POINTEUR/handle** (`GetCommandLineA/W`, `GetEnvironmentStrings(W)`,
+  `GetProcessHeap`, `GetConsoleWindow`, `GetCurrentProcess`), la divergence **disparaît** (7za : 0 div). Cause : le stub
+  rend `eax=0` ; quand le callee **déréférence** ce pointeur, Unicorn (qui mappe une page zéroée à l'adresse 0 pour
+  `fs:[disp]`/SEH) le parcourt tandis que l'interpréteur n'a pas de région là → divergence NULL-deref **artefact du
+  stub**, pas un bug de lift. Un `eax=0` **scalaire** (code page, compteur, id, errno, bool) est utilisé comme donnée
+  par les deux moteurs à l'identique → sûr.
+- **Décision (discipline > couverture)** : `ZERO_POP` restreint aux **14 `@0` scalaires** (`GetACP`/`GetOEMCP`/
+  `GetConsole[Output]CP`/`GetLastError`/`GetCurrentProcess{Id,}`→non, `GetCurrentProcessId`/`GetCurrentThreadId`/
+  `GetTickCount`/`GetVersion`/`GetLogicalDrives`/`TlsAlloc`/`AreFileApisANSI`/`DebugBreak`/`SetFileApisToOEM`).
+  Raison + contre-exemple `0x447f00` gravés dans le doc-comment de `is_zero_pop_import`. *(Le même risque « stub 0 =
+  faux pointeur » vaut en théorie pour un stdcall `@N` retournant un pointeur ; le corpus known-`@N` reste 0-div, donc
+  non touché — mais la leçon est notée.)*
+- **Mesuré : sound, couverture +.** Corpus lift **19832→20501** scorées (+669, fonctions appelant `GetLastError`/
+  `GetACP`/…), **0 divergence** ; 7za **38512 scorées, 0 divergence**. Portes : régression unifiée **PASS**, hash
+  transpile `19acad982194bf07` **inchangé** (oracle-only), winediff intact, `zero_pop_is_sorted` + `table_is_sorted` verts.
+- **Conséquence 7za** : l'oracle a **écarté le lift par la preuve** sur tout le chemin scorable — le crash de démarrage
+  n'est ni un lift modelable (0 div), ni un `@0` scalaire. Il reste dans (a) une fonction encore skippée (import à pop
+  **inconnu**/cdecl, ou `@0` **pointeur** qu'on ne peut pas stubber soundement, ou Switch/Asm/x87 sur ce chemin), ou
+  (b) un **shim HLE** du chemin locale (le plus probable, cf. entrée précédente : `GetACP` est le seul shim locale
+  atteint avant le crash — vérifier sa valeur de retour vs Windows).
+
 <!-- NOUVELLES ENTRÉES ICI (garder l'ordre chronologique, plus récent en bas) -->

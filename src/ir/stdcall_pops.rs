@@ -602,9 +602,59 @@ static TABLE: &[(&str, u32)] = &[
     ("shutdown", 8),
 ];
 
+/// Win32 imports with a **proven `@0`** decoration (zero arguments → nothing to
+/// pop) **whose return value is a SCALAR** (a code page, a count, an id, a error
+/// code, a bool). They are deliberately absent from `TABLE` (the product needs no
+/// `esp` compensation for them, cf. header), but the funcdiff oracle needs to know
+/// they are *known* zero-pop — not merely *unlisted* — so it can stub them
+/// **faithfully** (`ret 0`) and thereby score their callers instead of skipping
+/// every function that calls `GetLastError`/`GetACP`/… . The `@0` is ground truth
+/// (the `__imp__NAME@0` decoration in the i686 mingw import libs); the list is
+/// data-driven (imports real binaries call). Oracle-only: never consulted by
+/// `build.rs`. Sorted for binary search.
+///
+/// **Pointer/handle-returning `@0` imports are EXCLUDED** (e.g. `GetCommandLineA`,
+/// `GetEnvironmentStrings`, `GetProcessHeap`, `GetConsoleWindow`, `GetCurrentProcess`):
+/// a symmetric stub returns `eax = 0`, and when the callee then **dereferences** that
+/// pointer, Unicorn (which maps a zeroed page at address 0 for `fs:[disp]`/SEH) walks
+/// it while the interpreter has no region there — the two diverge on a NULL-deref that
+/// is an artifact of stubbing, not a lift bug (a false-correct/false-positive verdict).
+/// Proven: including them made 7za fn `0x447f00` diverge (`stack +0x7fd4`); excluding
+/// them restored 0 divergence. A scalar `eax = 0` is used as data by both engines
+/// identically, so it is safe. (See the journal 2026-07-17.)
+pub fn is_zero_pop_import(name: &str) -> bool {
+    let n = name.strip_prefix('_').unwrap_or(name);
+    ZERO_POP.binary_search(&n).is_ok()
+}
+
+static ZERO_POP: &[&str] = &[
+    "AreFileApisANSI",     // BOOL
+    "DebugBreak",          // void
+    "GetACP",              // UINT (code page)
+    "GetConsoleCP",        // UINT
+    "GetConsoleOutputCP",  // UINT
+    "GetCurrentProcessId", // DWORD
+    "GetCurrentThreadId",  // DWORD
+    "GetLastError",        // DWORD
+    "GetLogicalDrives",    // DWORD (bitmask)
+    "GetOEMCP",            // UINT
+    "GetTickCount",        // DWORD
+    "GetVersion",          // DWORD (packed)
+    "SetFileApisToOEM",    // void
+    "TlsAlloc",            // DWORD (slot index)
+];
+
 #[cfg(test)]
 mod tests {
-    use super::TABLE;
+    use super::{TABLE, ZERO_POP};
+
+    /// `ZERO_POP` is binary-searched by `is_zero_pop_import`; keep it sorted.
+    #[test]
+    fn zero_pop_is_sorted() {
+        for pair in ZERO_POP.windows(2) {
+            assert!(pair[0] < pair[1], "ZERO_POP not sorted: {:?} !< {:?}", pair[0], pair[1]);
+        }
+    }
 
     /// `stdcall_pop_bytes` binary-searches `TABLE`, so an out-of-order entry
     /// silently makes some imports unfindable — their pop is skipped and every

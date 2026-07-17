@@ -2591,7 +2591,11 @@ pub fn diff_function(
     let mut uc_img = img0.clone();
     let mut stub_blob: Vec<u8> = Vec::new();
     for (&slot, name) in &prog.imports {
-        let Some(n) = crate::ir::stdcall_pops::stdcall_pop_bytes(name) else { continue };
+        let Some(n) = crate::ir::stdcall_pops::stdcall_pop_bytes(name)
+            .or_else(|| crate::ir::stdcall_pops::is_zero_pop_import(name).then_some(0))
+        else {
+            continue;
+        };
         if slot < lo || slot + 4 > hi {
             continue;
         }
@@ -2802,18 +2806,22 @@ pub fn run_functions(path: &str, iters: u32) -> Result<Vec<FnMismatch>, String> 
     let ctx = ClosureCtx { funcs: &funcs, ret_pops: &ret_pops };
 
     // Symmetric import stubs (see STUB_IMPORTS), by the sanitized Named form
-    // `build_ir` lowers a `call [IAT]` to. Restricted to imports with a KNOWN
-    // __stdcall pop `@N`: there the lifted IR carries an explicit `esp += N` and the
-    // Unicorn stub does `ret N`, so the two stay in exact lockstep. Imports without
-    // a known pop (cdecl / unlisted) keep being skipped — sound, no regression.
-    // (Stubbing them too was tried and proven UNSOUND: for an unknown-pop import the
-    // push-model build.rs DROPS the compensating `sub esp, N` while Unicorn still runs
-    // it, so esp diverges and yields a false positive — e.g. 7za fn 0x447f00.)
+    // `build_ir` lowers a `call [IAT]` to. Restricted to imports whose pop is
+    // PROVEN: a known `@N` stdcall (`stdcall_pops`, the IR carries `esp += N`, the
+    // Unicorn stub does `ret N` — lockstep) OR a known `@0` zero-arg import
+    // (`is_zero_pop_import`, ground truth from mingw import libs; stub `ret 0`, the
+    // caller's `add esp` cleanup — if any — is lifted normally). Imports with an
+    // UNKNOWN pop stay skipped — stubbing them with a guessed `ret 0` would make the
+    // stub AND an (uncompensated) buggy lift agree while both wrong, blessing a
+    // miscompile (false-correct verdict) — proven unsound, see the journal 2026-07-17.
     // Modeled memcalls are excluded (they keep their real memory effect).
     let stub_imports: std::collections::HashSet<String> = prog
         .imports
         .values()
-        .filter(|n| crate::ir::stdcall_pops::stdcall_pop_bytes(n).is_some())
+        .filter(|n| {
+            crate::ir::stdcall_pops::stdcall_pop_bytes(n).is_some()
+                || crate::ir::stdcall_pops::is_zero_pop_import(n)
+        })
         .map(|n| crate::ir::build::sanitize_import(n))
         .filter(|n| !is_modeled_memcall(n, 3))
         .collect();
