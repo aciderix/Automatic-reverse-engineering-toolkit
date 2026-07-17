@@ -572,6 +572,18 @@ fn parse_pe_imports(data: &[u8]) -> BTreeMap<u64, String> {
                 let addr = base + iat as u64 + k * ptr; // the IAT slot a `call` targets
                 k += 1;
                 if thunk.is_ordinal() {
+                    // Import by ordinal (no name in the importer): resolve it to the
+                    // export name via the ground-truth (dll, ordinal) map so the normal
+                    // name-based shim routing applies (e.g. COMCTL32 #17 =
+                    // InitCommonControls). Unknown -> left unresolved (sound abort on use).
+                    if let Ok(dll) = it.name(desc.name.get(LE)) {
+                        let dll = String::from_utf8_lossy(dll).into_owned();
+                        if let Some(n) =
+                            crate::ir::ordinal_imports::ordinal_import_name(&dll, thunk.ordinal())
+                        {
+                            map.insert(addr, n.to_string());
+                        }
+                    }
                     continue;
                 }
                 if let Ok((_hint, name)) = it.hint_name(thunk.address()) {

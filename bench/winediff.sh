@@ -76,7 +76,19 @@ for src in "$CORPUS"/*.c; do
   # Optional per-program compile flags (winecorpus/NAME.cflags, whitespace-separated)
   # — e.g. -mstackrealign to exercise the GCC stack-realignment prologue.
   xcflags=""; [ -f "$CORPUS/$name.cflags" ] && xcflags="$(cat "$CORPUS/$name.cflags")"
-  if ! "$MINGW" -O1 -w $xcflags "$src" $res_obj -lversion -lole32 -loleaut32 -luser32 -lgdi32 -lcomctl32 -llz32 -o "$TMP/$name.exe" 2>"$TMP/err"; then
+  # Optional per-program import def (winecorpus/NAME.def): built into an import lib
+  # with dlltool and linked *first*, so a fixture can force an import that the named
+  # system libs would otherwise provide by name — e.g. an import BY ORDINAL (comctl32
+  # InitCommonControls @17). Placed right after $src so it wins the symbol.
+  imp_lib=""
+  if [ -f "$CORPUS/$name.def" ] && command -v "${MINGW%-gcc}-dlltool" >/dev/null 2>&1; then
+    if "${MINGW%-gcc}-dlltool" -d "$CORPUS/$name.def" -l "$TMP/$name.imp.a" 2>"$TMP/err"; then
+      imp_lib="$TMP/$name.imp.a"
+    else
+      echo "FAIL  $name (dlltool: $(head -1 "$TMP/err"))"; continue
+    fi
+  fi
+  if ! "$MINGW" -O1 -w $xcflags "$src" $imp_lib $res_obj -lversion -lole32 -loleaut32 -luser32 -lgdi32 -lcomctl32 -llz32 -o "$TMP/$name.exe" 2>"$TMP/err"; then
     echo "FAIL  $name (PE build: $(head -1 "$TMP/err"))"; continue
   fi
   # Optional per-program arguments: one per line in winecorpus/NAME.args. Passed

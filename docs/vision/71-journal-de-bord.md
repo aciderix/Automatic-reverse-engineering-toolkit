@@ -2841,4 +2841,28 @@ Détail : **70 §6** (roadmap). Résumé :
   (le refactor du registre est propre), hash transpile `19acad982194bf07` **inchangé**, `table_is_sorted_by_name`
   **ok**, régression unifiée **PASS**. Débloque `DEMO32` (mur suivant `CharToOemA` — import narrow/OEM, autre famille).
 
+### 2026-07-17 — [ABI][RECOV] Imports par ORDINAL résolus (COMCTL32 #17 = InitCommonControls) — le mur `0x80000011` d'itiem95
+- **Diagnostic (gdb sur le C généré).** `itiem95.exe` (CD 1997) abortait `indirect call to unrecovered function
+  0x80000011`, très tôt (chaîne `main → sub_10066e0 → sub_1003020 → sub_1003084 → aret_call(0x80000011)`). `sub_1003084`
+  fait `call *0x10010c8` (slot IAT). `0x80000011 = 0x80000000|0x11` = **import par ordinal 17**. objdump confirme : le
+  seul import ordinal d'itiem95 = **COMCTL32 #17** (`<none>`). COMCTL32 #17 = **InitCommonControls** (base ordinale 2,
+  EAT index 15).
+- **La cause (générale).** Le loader (`parse_pe_imports`) faisait `continue` sur `thunk.is_ordinal()` → l'import était
+  **jamais mappé** → le slot gardait la valeur brute `0x80000011`, appelée → abort opaque. C'est une **classe** (toute
+  appli liant comctl32/mfc/ws2_32 par ordinal), pas un cas isolé.
+- **Fix : résolution `(dll, ordinal) → nom`.** Nouveau module `src/ir/ordinal_imports.rs` : table COMCTL32 (126 entrées)
+  **extraite verbatim** de l'export table du `comctl32.dll` **que Wine exécute** — notre oracle. Wine matche la
+  numérotation d'ordinaux de Microsoft **par conception** (sinon les apps par-ordinal casseraient sous Wine) ⇒ le
+  mapping est **correct par construction** vs l'oracle (aucune supposition ; ordinaux ABI-stables). Le loader résout
+  l'ordinal en nom → le routage par-nom (shim) reprend. Le shim `aret_InitCommonControls` **existait déjà** (no-op) : il
+  ne manquait QUE la résolution d'ordinal. Inconnu (dll/ordinal) ⇒ non résolu (abort sound, jamais deviné).
+- **Testabilité.** Unit tests Rust (`comctl32 #17 → InitCommonControls`, dll/ordinal inconnu → None, table triée).
+  **Bit-exact vs Wine** : le harness winediff gagne le support `NAME.def` (dlltool → import lib liée **en premier**, pour
+  forcer un import par ordinal que `-lcomctl32` fournirait sinon par nom) ; fixture `winecorpus/comctl32_ordinal.{c,def}`
+  importe InitCommonControls **par ordinal 17** et appelle → Wine **et** ARET = `ok`.
+- **Mesuré.** `itiem95` : `0x80000011` **disparu** → avance au mur suivant `DialogBoxIndirectParamA` (import nommé, autre
+  famille). **Portes** : winediff **118→119/119** (`comctl32_ordinal`), hash transpile `19acad982194bf07` **inchangé**
+  (loader-only, inerte pour les binaires à imports **nommés** = tous les démonstrateurs), régression unifiée **PASS**,
+  tests ordinal_imports **3/3**.
+
 <!-- NOUVELLES ENTRÉES ICI (garder l'ordre chronologique, plus récent en bas) -->

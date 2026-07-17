@@ -15,6 +15,8 @@ pub mod lift;
 pub mod build;
 /// `__stdcall` Win32 import stack-pop counts (callee-pops-args ABI).
 pub mod stdcall_pops;
+/// Resolution of PE imports by ordinal (e.g. COMCTL32 #17 = InitCommonControls).
+pub mod ordinal_imports;
 
 use crate::disasm::Insn;
 use crate::loader::Program;

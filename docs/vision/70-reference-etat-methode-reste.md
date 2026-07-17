@@ -170,7 +170,7 @@ bash bench/regression.sh    # PORTE unifiée : difftest 271/271, in-place 3/3,
                             # recompilabilité gzip/ls/cat 100%
 bash bench/difftest.sh              # décompile O0→O3
 bash bench/difftest_transpile.sh    # transpile (hash 19acad982194bf07)
-bash bench/winediff.sh              # axe 2 vs Wine (118/118)
+bash bench/winediff.sh              # axe 2 vs Wine (119/119)
 bash bench/funcdiff.sh              # lift-closure + opt-diff vs Unicorn (0 div)
 # Sweeps de vrais binaires (téléchargent + comparent à Wine) :
 bash bench/sqlite_sweep.sh   bash bench/busybox_sweep.sh   bash bench/corpus_sweep.sh
@@ -190,7 +190,7 @@ bash bench/wallsweep.sh <dir1> [dir2…]  # AGRÈGE --mode walls sur un corpus :
 
 ### État régression (référence — doit rester vert)
 difftest **272/272** · transpile-diff **4/4** (H=`19acad982194bf07`) · winediff
-**118/118** · cpudiff vert (per-instruction + séquences génératives) · funcdiff corpus **0 divergence** (lift **~20,6k** scorées /
+**119/119** · cpudiff vert (per-instruction + séquences génératives) · funcdiff corpus **0 divergence** (lift **~20,6k** scorées /
 **~20k appels** — **imports (stubs `@N` + `@0` scalaires) + appels indirects résolus + intrinsèques mémoire host-backés (memmove/memcpy)** ; scratch sous-esp exclu ; opt ~10k scorées) · SMT **11/11** · in-place **3/3** · magicdiv **2³²** ·
 recompilabilité **100 %** · WASM **7/7**.
 
@@ -280,6 +280,13 @@ recompilabilité **100 %** · WASM **7/7**.
   i686), mesurés depuis les imports de **7za** (`ReadFile@20`/`WriteFile@20`/`Heap*`/`Virtual*`/
   `CreateFileW@28`/`RaiseException@16`/`RtlUnwind@16`…). Bénéfice **mesuré** : funcdiff **16,6k→18,4k**
   scorées (0 div — ces lifts, jadis skippés derrière imports, désormais **prouvés corrects**).
+- **Imports par ORDINAL résolus** (`src/ir/ordinal_imports.rs`, 2026-07-17) : un import sans nom (`0x80000000|ord`
+  dans l'IAT) était **skippé** par le loader → l'appel indirect abortait sur la valeur opaque. Désormais `(dll, ordinal)`
+  → nom d'export via une table **vérité-terrain** ; le routage par-nom (shim) prend le relais. `COMCTL32` extrait
+  **verbatim** de l'export table du comctl32.dll **que Wine exécute** (notre oracle → mapping correct *par construction* ;
+  ordinaux ABI-stables). Ex. `COMCTL32 #17 = InitCommonControls` (le vrai mur de `itiem95.exe`, CD 1997 → avance à
+  `DialogBoxIndirectParamA`). Inconnu ⇒ non résolu (abort sound). Gardé `winecorpus/comctl32_ordinal.{c,def}`
+  (import forcé par ordinal via dlltool, bit-identique Wine).
 - **tail-`jmp [import]`/`jmp reg`** reçoit **esp+4** (l'adresse de retour est encore
   sur la pile — TLS/Fls/encoded-ptr, l_alloc→realloc).
 - **stdcall pop sur `call reg`** (import chargé en registre puis appelé).

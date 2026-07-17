@@ -1,0 +1,3 @@
+LIBRARY comctl32.dll
+EXPORTS
+InitCommonControls@0 @17 NONAME
