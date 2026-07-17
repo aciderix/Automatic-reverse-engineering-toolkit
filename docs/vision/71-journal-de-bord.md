@@ -2737,4 +2737,26 @@ Détail : **70 §6** (roadmap). Résumé :
   `__except_handler3` statique-CRT — car mingw ne l'émet pas et un scope-table fait-main serait circulaire) ; fautes
   matérielles (SIGSEGV/#DE → dispatch, natif) ; C++ (`_CxxThrowException`/`__CxxFrameHandler`).
 
+### 2026-07-17 — [ORACLE][DEMO] Sweep du corpus MSVC 1997 (CD Chip ita 7-8-97) — lift 0-div sur du code inédit
+- **Source (fournie par l'utilisateur, gardée en mémoire, cf. 70 §7)** : `archive.org/download/chip-cd-ita-7-8-97/
+  Chip_CD.iso` (657 Mo ; **curl `-L`** — redirect miroir). `chip-cd-ita-3-97` = BIN/CUE 742 Mo (non balayé).
+  `network-32` **ne résout pas** (item dark, 0 fichier). Extraction : `7z x -r` (pas de mount, pas de root).
+- **Composition mesurée** : 424 PE, dont **49 PE32** — le gros du CD est **16-bit NE** (Win3.x) ou des
+  self-extractors InstallShield (confirme la note antérieure « CD 1997 surtout 16-bit »). Le 32-bit contient de
+  vrais MSVC static-CRT : `itiem95`, `ARTLANT`, DomuS3D `DEMO32`/`DEMODS3D`, `slidelib`, la **démo AutoCAD LT**
+  entière (`acis.dll` = noyau géométrique ACIS, `mfcans32`/`mfcuia32` MFC, `msvcrt20`), + les déjà-connus
+  `Ppview32`/`dxfix`/`itmnm2095`/`wzbeta32`.
+- **funcdiff (sweep par binaire)** : `ARTLANT` 20610, `DEMO32` 6559, `itiem95` 2959, `DEMODS3D` 1555, `slidelib`
+  1472 scorées — **0 divergence partout** (~34k fonctions de code MSVC **inédit**). Le lift est **prouvé correct**
+  sur ce nouveau matériel ; **aucun bug neuf** (contrairement à dxfix→fstcw et Ppview32→push-ret des sweeps
+  précédents). Les `.dll` (`acis`/`libacge`) scorent **0** : funcdiff ne peut pas piloter une DLL isolée (pas
+  d'entrée/main) → il faut le **loader multi-modules** (doc 80 §1.2, endgame GUI).
+- **Verdict (règle « borner puis pivoter »)** : ces CD sont un **bon vivier de code MSVC frais** (et de MSVC-C++/MFC
+  pour les briques EH C++/`__except_handler3` **futures**), mais (a) ils ne débloquent **pas seuls** la brique 3 —
+  funcdiff prouve le lift **par-fonction** correct, il n'**exécute** pas le dispatch EH runtime (`__except_handler3`
+  + unwind end-to-end) ; (b) le 7-8-97 n'a **pas** sorti de bug de lift. Pour la brique 3 il faut un binaire qui
+  **franchit réellement** un unwind `__try/__except` (chemin de démarrage, ou app pilotable headless), ou le loader
+  multi-modules pour animer les DLL MFC. Import scan **inopérant** ici (static-CRT ⇒ `__except_handler3` **interne**,
+  ni importé ni en clair). Pas de forensics spéculative : la valeur du jour = brique 2 (`RtlUnwind`) + validation large.
+
 <!-- NOUVELLES ENTRÉES ICI (garder l'ordre chronologique, plus récent en bas) -->

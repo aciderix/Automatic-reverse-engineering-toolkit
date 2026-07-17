@@ -838,6 +838,18 @@ la **vitesse** change.
   restants **par la donnée**. (Le corpus « 41 exe Win95 » d'une session antérieure venait d'une
   source ISO similaire, non committée — conteneur éphémère.) Listing/metadata :
   `https://archive.org/metadata/BestOfWindows95DotCom`.
+- **Corpus MSVC 32-bit 1997 — CD magazine Chip (ita)** (fourni par l'utilisateur, gardé en mémoire) :
+  `https://archive.org/download/chip-cd-ita-7-8-97/Chip_CD.iso` (ISO 657 Mo, curl **`-L`** obligatoire —
+  redirect vers un miroir `dnNNN.*.archive.org`) et `https://archive.org/details/chip-cd-ita-3-97` (image
+  BIN/CUE 742 Mo, non balayée). `network-32` **ne résout pas** (item dark, 0 fichier — écarté). **Mesure
+  (7-8-97, 2026-07-17)** : 424 PE au total, dont **49 PE32** (le reste = **16-bit NE** Win3.x ou
+  self-extractors InstallShield). Les EXE 32-bit runnables (`itiem95`, `ARTLANT`, `DEMO32`/`DEMODS3D`
+  DomuS3D, `slidelib`, + les connus `Ppview32`/`dxfix`/`itmnm2095`/`wzbeta32`) → **funcdiff 0 divergence**
+  (~34k fonctions scorées) : lift **prouvé correct**, **aucun bug neuf**. Matériel MSVC-C++/MFC lourd
+  présent (**AutoCAD LT** : `acis.dll` noyau ACIS, `mfcans32`/`mfcuia32`, `msvcrt20`) = bon vivier pour les
+  **briques EH C++/`__except_handler3`** futures, mais les `.dll` scorent 0 en funcdiff (il faut le
+  **loader multi-modules**, doc 80 §1.2, pour les piloter). ⇒ Utile comme **corpus de code MSVC frais**,
+  mais ne débloque pas seul la brique 3 (il faut un binaire qui **exécute** un unwind `__try/__except`).
 - Binaires de test committés : `bench/.cache/` (busybox/sqlite3/winetest, négations
   `.gitignore` + README sha256) et `bench/gauntlet/gauntlet-bins.tar.gz` (21 PE,
   auto-extrait par `score.sh`).
