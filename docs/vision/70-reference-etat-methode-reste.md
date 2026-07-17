@@ -190,8 +190,8 @@ bash bench/wallsweep.sh <dir1> [dir2…]  # AGRÈGE --mode walls sur un corpus :
 
 ### État régression (référence — doit rester vert)
 difftest **272/272** · transpile-diff **4/4** (H=`19acad982194bf07`) · winediff
-**114/114** · cpudiff vert (per-instruction + séquences génératives) · funcdiff corpus **0 divergence** (lift ~16,6k scorées /
-~7k appels — **fonctions à-imports incluses via stubs symétriques**, opt ~10k scorées) · SMT **11/11** · in-place **3/3** · magicdiv **2³²** ·
+**114/114** · cpudiff vert (per-instruction + séquences génératives) · funcdiff corpus **0 divergence** (lift **~18,4k** scorées /
+~7k appels — **fonctions à-imports incluses via stubs symétriques à pop `@N` prouvé**, opt ~10k scorées) · SMT **11/11** · in-place **3/3** · magicdiv **2³²** ·
 recompilabilité **100 %** · WASM **7/7**.
 
 ---
@@ -268,7 +268,13 @@ recompilabilité **100 %** · WASM **7/7**.
 - **Callee-pop `ret N`** modélisé : **imports** (`stdcall_pops.rs`) **et** fonctions
   **internes** (`compute_callee_pops`, direct = N constant, indirect = table runtime
   `__aret_callee_pop`, gardé par `has_callee_pops` → 0 régression cdecl). *(fix
-  cksum : la dérive esp −4/itér des drivers FAST_FUNC/stdcall.)*
+  cksum : la dérive esp −4/itér des drivers FAST_FUNC/stdcall.)* Sans le pop, un stdcall
+  non tabulé dérive esp en **push-model** → miscompile **silencieux** dans le code **FPO**
+  (masqué par `mov esp,ebp` là où un frame pointer existe). Table **élargie par la donnée**
+  (2026-07-17) : +51 `@N` **prouvés** (vérité terrain = décoration `@N` des import libs mingw
+  i686), mesurés depuis les imports de **7za** (`ReadFile@20`/`WriteFile@20`/`Heap*`/`Virtual*`/
+  `CreateFileW@28`/`RaiseException@16`/`RtlUnwind@16`…). Bénéfice **mesuré** : funcdiff **16,6k→18,4k**
+  scorées (0 div — ces lifts, jadis skippés derrière imports, désormais **prouvés corrects**).
 - **tail-`jmp [import]`/`jmp reg`** reçoit **esp+4** (l'adresse de retour est encore
   sur la pile — TLS/Fls/encoded-ptr, l_alloc→realloc).
 - **stdcall pop sur `call reg`** (import chargé en registre puis appelé).

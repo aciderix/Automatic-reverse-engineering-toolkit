@@ -2420,27 +2420,46 @@ Détail : **70 §6** (roadmap). Résumé :
   **CORRECT**. Le crash n'est **pas** là. La chasse se redirige vers un **ancêtre** (`0x470889`/`0x471830`/`0x471c08`,
   encore unmodelables car ils appellent des **imports cdecl / appels indirects**) ou vers le **shim MBToWC** lui-même.
   C'est exactement le rôle de l'oracle : **écarter** une piste fausse par la preuve, pas la deviner.
-- **Reste (increment 3)** : étendre le stub aux imports **cdecl** (pop 0, nettoyage appelant) et gérer les appels
-  indirects pour rendre les ancêtres modelables — puis pinpointer le vrai fautif. **⚠️ TENTÉ ET REJETÉ — voir
-  l'entrée suivante : élargir le stub aux imports à pop inconnu est UNSOUND.**
+- **Reste (increment 3)** : étendre le stub aux imports à pop non listé. **⚠️ TENTÉ — l'entrée suivante corrige le
+  mécanisme exact et livre la VOIE SOUND (ajouter les `@N` prouvés), qui a débloqué +1808 fonctions scorées.**
 
-### 2026-07-17 — [ORACLE] funcdiff : élargir les stubs aux imports à pop inconnu est UNSOUND (rejeté par preuve)
-- **Ce qu'on a tenté (increment 3 pressenti).** Pour rendre modelables les ancêtres de `sub_471a83` (qui appellent
-  des imports **cdecl** / à pop non listé), élargir le stub symétrique à **tous** les imports IAT : blob Unicorn
-  `mov eax,0; mov edx,0; ret @N` où `@N` = pop stdcall connu **ou 0** (cdecl/inconnu), en pariant sur la symétrie.
-- **Pourquoi c'est unsound (mesuré, pas supposé).** La symétrie stub↔IR ne tient QUE si le pop est connu : là l'IR
-  liftée porte un `esp += N` explicite qui verrouille le `ret N` du stub (lockstep). Pour un import **à pop inconnu**,
-  le modèle *push* de `build.rs` **supprime** la compensation `sub esp, N` de l'appelant (elle est censée être annulée
-  par le pop de l'appelé) — mais Unicorn, lui, **exécute** ce `sub esp, N` puis le `ret 0` du stub → **esp diverge** →
-  **faux positif**. Reproduit sur **7za fn `0x447f00`** : avec l'élargissement, divergence esp fantôme ; en revenant
-  au sous-ensemble pop-connu, la divergence **disparaît** (7za : 11374 scorées, **0 divergence**). L'instinct
-  « stubber = désactiver = deviner ? » était juste : hors du domaine prouvé, le stub **fabrique** un écart.
-- **Décision (discipline > couverture).** Reverté à l'ensemble **prouvablement sound** (pops connus uniquement). Le
-  commentaire de `run_functions` (`cpudiff.rs`) grave la raison + le contre-exemple pour que la frontière ne soit pas
-  re-franchie. Corpus busybox+sqlite **16604 scorées, 0 divergence** ; hash transpile `19acad982194bf07` inchangé.
-- **Conséquence pour la chasse 7za.** On **ne peut pas** rendre soundement modelables les ancêtres cdecl de
-  `sub_471a83` via ce mécanisme. Le miscompile 7za (segfault au démarrage) reste hors de portée de funcdiff tant
-  qu'on n'a pas une autre voie sound (p. ex. connaître le pop réel de chaque import cdecl par prototype, ou un
-  oracle end-to-end différent). `sub_471a83` lui-même reste **prouvé correct** (0 divergence) — le fautif est ailleurs.
+### 2026-07-17 — [ORACLE] funcdiff : pourquoi le stub pop-0 est unsound (mécanisme corrigé) + la voie sound
+> **Correction d'une entrée antérieure de ce jour.** J'avais écrit que l'élargissement du stub produisait un **faux
+> positif** via un `sub esp, N` supprimé par `build.rs`. **C'est faux, mesuré :** le motif « `call [import]`
+> immédiatement suivi de `sub esp,imm` » apparaît sur **0 site** dans busybox, sqlite ET 7za (`objdump` + grep). 7za
+> est **push-model** (20238 `push` vs 1698 `mov [esp+k]`). Voici le vrai mécanisme.
+- **Le vrai risque du stub pop-0 = faux NÉGATIF (bénir un lift faux), pas faux positif.** Pour un import **stdcall
+  non listé** (pop réel `N>0`) en push-model : (a) `build.rs` n'émet **pas** `esp += N` (il ne connaît pas `N`) → l'IR
+  liftée laisse esp **trop bas de N** ; (b) le stub Unicorn `ret 0` laisse esp **trop bas de N** aussi. Les deux se
+  trompent **du même montant** → ils **s'accordent** → funcdiff rend **0 divergence** = verdict « correct » **sur un
+  lift qui est en fait faux**. C'est **pire** qu'un faux positif : l'oracle *bénit* un miscompile (viole le principe
+  sacré). Mesuré : broadening pop-0 → 7za **15828 scorées, 0 divergence** — ce 0 est précisément le **symptôme** de la
+  cécité, pas une preuve de justesse. L'instinct « stubber = deviner ? » était juste : pop-0 sur un stdcall est un pari.
+- **Cause racine plus profonde (trou produit, pas seulement oracle).** Cette dérive esp est un **vrai miscompile
+  silencieux** du produit pour **tout code FPO** (sans frame pointer) appelant un stdcall non tabulé : les fonctions à
+  frame pointer la masquent (`mov esp,ebp` à l'épilogue efface la dérive), mais le code chaud optimisé (FPO) la
+  propage. C'est la **même classe** que le bug busybox `SetLastError` historique (cf. en-tête `stdcall_pops.rs`).
+- **La voie SOUND = ajouter les `@N` PROUVÉS** (jamais deviner pop-0). Source = vérité terrain : la décoration `@N` des
+  **import libs mingw i686** (`nm libkernel32.a | grep __imp__`), identique dans tout binaire. Mesure d'abord (règle
+  §2) : `objdump` des imports de **7za** (static-CRT, 140 imports **tous stdcall** OLEAUT32/USER32/KERNEL32) croisé à
+  la table → **51 fonctions à `N>0` manquantes** : `ReadFile@20`, `WriteFile@20`, `HeapAlloc@12`/`HeapFree@12`/
+  `HeapReAlloc@16`/`HeapSize@12`/`HeapCreate@12`/`HeapDestroy@4`, `VirtualAlloc@16`/`VirtualFree@12`, `CreateFileW@28`,
+  `FindFirstFileW@8`/`FindNextFileW@8`, `RaiseException@16`, `RtlUnwind@16`, `GetTempPath/FileName A/W`, `SearchPathA/W@24`,
+  `Interlocked{In,De}crement@4`, `IsBad{Read,Write}Ptr@8`, `Get/SystemTime`/`FileTime*` … (les `@0` — GetLastError,
+  GetTickCount, TlsAlloc, GetCommandLine* … — restent **omis**, rien à popper). Toutes **cdecl-safe** : un stdcall
+  connu ⇒ `build.rs` émet `esp += N` **et** le stub Unicorn devient `ret N` (fidèle).
+- **Bénéfice MESURÉ (correctness-critique, règle §2).** funcdiff corpus **16604 → 18412 scorées** (sqlite 11700 →
+  **13508**, +1808 fonctions), **0 divergence maintenue**. Ces +1808 appelaient ReadFile/WriteFile/Heap*/… — la **zone
+  aveugle** du doc 70 §7, auparavant *skippée* — désormais **prouvées correctes** avec stubs fidèles ; et le 0-divergence
+  **prouve** que les `esp += N` ajoutés matchent le `ret N` d'Unicorn (donc les arités sont bonnes et les lifts sains).
+  Neutre pour le modèle accumulate (le `+N` connu s'annule avec le `sub esp,N` lifté, comme le drop d'avant).
+- **Portes** : régression unifiée **PASS** (difftest 272, funcdiff 0 div, SMT 11/11, recompil. 100 %), hash transpile
+  **inchangé** (`19acad982194bf07` — les fixtures decompile n'importent pas de Win32), winediff **114/114**, sweeps
+  sqlite (on-disk ReadFile/WriteFile) + busybox **60/60** bit-identiques, `table_is_sorted_by_name` vert.
+- **7za : le crash de démarrage PERSISTE** (segfault avant la bannière) — donc les pops manquants **ne sont pas** *sa*
+  cause. `sub_471a83` reste prouvé correct ; le fautif est un ancêtre encore non-modelable (import non implémenté :
+  20 restent — CharPrevExA/CompareFileTime/FormatMessage*/GlobalMemoryStatus/… — ou `aesdec` AES-NI = abort sound) ou
+  la surface process/EH. **Borné puis pivoté** (règle §2) : on ne s'enferme pas dans du forensics mono-7za ; le fix des
+  pops vaut **pour lui-même** (soundness générale + oracle élargi), indépendamment de 7za.
 
 <!-- NOUVELLES ENTRÉES ICI (garder l'ordre chronologique, plus récent en bas) -->
