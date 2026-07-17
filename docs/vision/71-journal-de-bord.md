@@ -2547,4 +2547,27 @@ Détail : **70 §6** (roadmap). Résumé :
   (b) un **shim HLE** du chemin locale (le plus probable, cf. entrée précédente : `GetACP` est le seul shim locale
   atteint avant le crash — vérifier sa valeur de retour vs Windows).
 
+### 2026-07-17 — [ORACLE][DEMO] 7za : le blocage funcdiff précisé = blind-spot des APPELANTS d'intrinsèques host-backés (memmove)
+- **Diagnostic de modelabilité de la chaîne de crash** (`main → sub_46cf4c → sub_470889 → sub_471c08 → sub_471830 →
+  sub_471a83 → sub_472126 → LCMapStringW`) : `sub_471a83`/`sub_472126` = **modelable, 0 div** (prouvés corrects) ;
+  `sub_470889`/`sub_471c08`/`sub_471830` = **non-modelables car ils atteignent `sub_46bab0`** ; `sub_46cf4c` = non-modelable.
+- **`sub_46bab0` EST l'intrinsèque `memmove` MSVC** (bytes `558bec57568b750c8b4d108b7d088bc18bd103c63bfe76083bf80f82…`
+  = signature `msvc_crt.sig` exacte ; check de recouvrement + `rep movs` + tables de saut entrelacées). **Dans le
+  PRODUIT il est host-backé** → `aret_memmove` (correct, prouvé 500/500 vs libc) — pas la cause du crash.
+- **Le blind-spot est un ARTEFACT de funcdiff, pas un bug produit** : funcdiff tourne en `shared_stack=false`, or
+  `call_binding` (build.rs) n'applique le host-back `crt_symbol` **que si `shared_stack()`**. Donc funcdiff voit un
+  `call Direct(0x46bab0)` (memmove **brut**, tables entrelacées → `Switch`/`Asm`) → récurse → skip → **skippe tous les
+  appelants de memmove**. Le produit, lui, les compile correctement (via `aret_memmove`).
+- **⇒ Prochain levier oracle identifié (général)** : faire reconnaître à funcdiff les intrinsèques host-backés
+  (`crt_symbol` = memmove/memcpy/…) comme des **memcalls modélisés** au lieu de récurser dans le corps brut — soit en
+  activant `shared_stack` dans funcdiff (gros, re-valider les 20k), soit en précalculant `{addr → crt_symbol}` et en
+  modélisant l'effet mémoire à la frontière d'appel. Cela rendrait scorables les appelants de memmove/memcpy (**classe
+  large**, tout binaire static-CRT) et dirait si `sub_470889`/`sub_471c08`/`sub_46cf4c` cachent le miscompile 7za, ou
+  s'il faut chercher ailleurs (dépendance à de la mémoire heap non-init : `aret_HeapAlloc` honore pourtant
+  HEAP_ZERO_MEMORY→calloc et lit les bons args — écarté).
+- **Statut 7za** : crash **écarté** de tout lift scorable + des shims vérifiés (GetACP=1252 OK, memmove OK, HeapAlloc
+  OK). Reste dans l'ombre : les appelants de memmove (blind-spot ci-dessus) et `sub_46cf4c`. **Borné** : 3 increments
+  généraux livrés cette session (pops `@N`, appels indirects, `@0` scalaires) ; la résolution finale 7za attend le
+  levier memmove-callers.
+
 <!-- NOUVELLES ENTRÉES ICI (garder l'ordre chronologique, plus récent en bas) -->
