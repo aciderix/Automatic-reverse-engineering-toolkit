@@ -2934,3 +2934,84 @@ uint32_t aret_RaiseException(uint32_t esp) {
     abort();
     return 0;
 }
+
+/* Structured Exception Handling — local unwind (`RtlUnwind`).
+ *
+ * The primitive `__except_handler3` (via `__global_unwind2`) uses to run the cleanup
+ * (`__finally`) handlers of every frame between the raise point and the frame that
+ * catches. On i386 `RtlUnwind` IGNORES its TargetIp argument (that is an x64 concept):
+ * it walks `fs:[0]` from the head up to — but not including — the TargetFrame, calls
+ * each intervening handler cdecl with the EH_UNWINDING (0x2) flag set in the exception
+ * record, pops each frame off the chain, and then RETURNS NORMALLY (leaving `fs:[0]`
+ * at the TargetFrame). The non-local transfer to the __except block is performed by
+ * the caller afterwards, not here — so a plain-returning shim is the faithful model
+ * (verified bit-identical to Wine's ntdll RtlUnwind by winecorpus/seh_unwind.c).
+ *
+ * Signature (stdcall @16): RtlUnwind(TargetFrame, TargetIp, ExceptionRecord, ReturnValue).
+ * A NULL TargetFrame means an exit unwind (unwind the whole chain, EH_EXIT_UNWIND). A
+ * NULL ExceptionRecord means synthesize a STATUS_UNWIND record. WASM: no SEH — the
+ * import stays a sound abort there. */
+#define ARET_EH_UNWINDING   0x02u
+#define ARET_EH_EXIT_UNWIND 0x04u
+uint32_t aret_RtlUnwind(uint32_t esp) {
+    aret_teb_init();
+    uint32_t target = arg(esp, 0);       /* TargetFrame (endframe)  */
+    /* arg(esp,1) = TargetIp — unused on i386 (the caller does the transfer). */
+    uint32_t recp   = arg(esp, 2);       /* ExceptionRecord (optional) */
+    uint32_t retval = arg(esp, 3);       /* ReturnValue (-> eax)       */
+    int exit_unwind = (target == 0 || target == 0xFFFFFFFFu);
+
+    /* The exception record the intervening handlers see: the caller's if given (Wine
+     * ORs the unwinding flag into it in place), else a synthesized STATUS_UNWIND. */
+    uint32_t local_rec[20];
+    uint32_t *rec;
+    if (recp) {
+        rec = (uint32_t *)(uintptr_t)recp;
+    } else {
+        memset(local_rec, 0, sizeof(local_rec));
+        local_rec[0] = 0xC0000027u;      /* STATUS_UNWIND ExceptionCode */
+        rec = local_rec;
+    }
+    rec[1] |= ARET_EH_UNWINDING | (exit_unwind ? ARET_EH_EXIT_UNWIND : 0u);
+
+    uint32_t ctx[200];                   /* a zeroed CONTEXT (defined, benign) */
+    memset(ctx, 0, sizeof(ctx));
+
+    uint32_t *teb = (uint32_t *)(uintptr_t)__aret_fs();
+    uint32_t frame = teb[0];             /* ExceptionList head */
+    /* Bound the walk: a correct chain reaches `target` (or the ~0 sentinel for an exit
+     * unwind) well within this many frames; a cyclic/corrupt chain must abort loudly,
+     * never spin or silently continue. */
+    for (int guard = 0; guard < 100000; guard++) {
+        if (frame == 0xFFFFFFFFu || frame == 0) {
+            /* Reached the end of the chain. Fine for an exit unwind; for a targeted
+             * unwind it means the target frame was never found — a corrupt SEH state
+             * (STATUS_INVALID_UNWIND_TARGET on Windows). Abort loudly, never guess. */
+            if (exit_unwind) { teb[0] = 0xFFFFFFFFu; return retval; }
+            fprintf(stderr, "aret: RtlUnwind target frame %#x not on the SEH chain\n",
+                    (unsigned)target);
+            abort();
+        }
+        if (!exit_unwind && frame == target) break;   /* stop at (not incl.) target */
+
+        uint32_t *f = (uint32_t *)(uintptr_t)frame;
+        uint32_t handler = f[1];
+        uint32_t next = f[0];
+        /* Call the handler cdecl on the free machine stack below `esp`
+         * ([esp+4]=rec, [esp+8]=frame, [esp+12]=ctx, [esp+16]=dispatch), exactly as
+         * the dispatcher does; during unwind the disposition is advisory (the handler
+         * ran its __finally side effects), so we pop and continue. */
+        uint32_t hesp = esp - 0x80;
+        uint32_t *cf = (uint32_t *)(uintptr_t)hesp;
+        cf[1] = (uint32_t)(uintptr_t)rec;
+        cf[2] = frame;
+        cf[3] = (uint32_t)(uintptr_t)ctx;
+        cf[4] = frame;                   /* DispatcherContext (dummy) */
+        (void)aret_call(handler, hesp, 0, 0, 0, 0);
+
+        teb[0] = next;                   /* pop this frame off the chain */
+        frame = next;
+    }
+    /* fs:[0] now == target (the last pop left it there). Return the requested eax. */
+    return retval;
+}

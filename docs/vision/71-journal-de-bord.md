@@ -2705,4 +2705,36 @@ Détail : **70 §6** (roadmap). Résumé :
   (`_CxxThrowException`/`__CxxFrameHandler`). Le résidu 7za est **orthogonal** (init locale C++, aucune exception avant
   le crash — vérifié).
 
+### 2026-07-17 — [HLE-WIN32][EH] Chantier EH lourd, brique 2 : local unwind (`RtlUnwind`)
+- **Le manque + une croyance fausse corrigée.** `RtlUnwind` (le primitif que `__except_handler3`, via
+  `__global_unwind2`, utilise pour dérouler les frames intermédiaires en exécutant leurs handlers `__finally`) était un
+  **abort-sound** (froid, cf. 70 §4.5). Une croyance de session antérieure le disait **non testable vs Wine** car « il
+  ne revient pas — il transfère à TargetIp ». **C'est le comportement x64.** Sur **i386** (source Wine `signal_i386.c` +
+  **mesure directe**), `RtlUnwind` **IGNORE TargetIp** : il parcourt `fs:[0]` de la tête jusqu'à (**exclu**) la
+  TargetFrame, appelle chaque handler intermédiaire avec le flag **`EH_UNWINDING(0x2)`**, **pop** chaque frame, puis
+  **RETOURNE NORMALEMENT** (laissant `fs:[0]` = TargetFrame) ; le saut non-local vers le bloc `__except` est fait par
+  l'appelant **après**. ⇒ un **shim à retour normal est le modèle fidèle**, et il est **directement testable vs Wine**.
+- **Fix : `aret_RtlUnwind` (`aret_hle.c`).** stdcall @16 `RtlUnwind(TargetFrame, TargetIp, ExceptionRecord, ReturnValue)`.
+  Record : celui de l'appelant si fourni (Wine y OR le flag `EH_UNWINDING` en place), sinon un `STATUS_UNWIND(0xC0000027)`
+  synthétisé ; `EH_EXIT_UNWIND(0x4)` ajouté si TargetFrame NULL (exit unwind = dérouler toute la chaîne). Boucle sur
+  `fs:[0]` : pour chaque frame ≠ target, appelle le handler **cdecl** via `aret_call` (frame posé sous l'esp machine,
+  comme le dispatcher `RaiseException`), **pop** (`teb[0]=next`), avance. Stop à (exclu) target ⇒ `fs:[0]`=target. Retourne
+  `ReturnValue` (→ eax). **Bornes sound** : compteur de garde (chaîne cyclique → abort) ; target introuvable sur une
+  chaîne finie (`STATUS_INVALID_UNWIND_TARGET`) → **abort bruyant** (jamais deviné). WASM : reste un abort sound.
+- **Testabilité (la « muraille » tombée).** Le mental-model x64 faisait croire au blocage. La mesure i386 prouve le
+  contraire → fixture `winecorpus/seh_unwind.c` : deux frames SEH installés à la main (mingw n'a pas `__try`), **appel
+  DIRECT à `RtlUnwind`** (exactement ce que fait `__global_unwind2`) pour dérouler l'inner jusqu'à l'outer. Observe :
+  inner appelé **1×** avec le flag unwinding, outer (cible) **jamais**, `fs:[0]`=outer. **Piège d'auteur résolu** :
+  `RtlUnwind` restaure les registres non-volatils → GCC gardait une **copie périmée** du pointeur de frame en registre
+  callee-saved (comparaison `fs0==outer` fausse en `-O1` alors que les valeurs brutes `%p` étaient égales) → on **stashe
+  les pointeurs observés via des globals** pour un résultat stable `-O0`/`-O1`. Wine **et** ARET → `inner=1 flags=0x2
+  fs0_target=1`.
+- **Portes** : winediff **115→116/116** (seh_unwind), hash transpile `19acad982194bf07` **inchangé** (runtime-only,
+  additif : `aret_RtlUnwind` override le stub faible), régression unifiée **PASS**, difftest **272/272**, sweeps
+  sqlite/busybox bit-identiques. Gain de soundness pour tout binaire MSVC déroulant réellement une exception.
+- **Reste EH** : `__except_handler3` réel (scope-table + filtre + `local_unwind2` — maintenant que `RtlUnwind` existe,
+  c'est la **suite directe**, mais sa testabilité demande un **vrai binaire MSVC `__try/__except`** — le lift de
+  `__except_handler3` statique-CRT — car mingw ne l'émet pas et un scope-table fait-main serait circulaire) ; fautes
+  matérielles (SIGSEGV/#DE → dispatch, natif) ; C++ (`_CxxThrowException`/`__CxxFrameHandler`).
+
 <!-- NOUVELLES ENTRÉES ICI (garder l'ordre chronologique, plus récent en bas) -->

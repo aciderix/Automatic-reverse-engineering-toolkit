@@ -170,7 +170,7 @@ bash bench/regression.sh    # PORTE unifiée : difftest 271/271, in-place 3/3,
                             # recompilabilité gzip/ls/cat 100%
 bash bench/difftest.sh              # décompile O0→O3
 bash bench/difftest_transpile.sh    # transpile (hash 19acad982194bf07)
-bash bench/winediff.sh              # axe 2 vs Wine (114/114)
+bash bench/winediff.sh              # axe 2 vs Wine (116/116)
 bash bench/funcdiff.sh              # lift-closure + opt-diff vs Unicorn (0 div)
 # Sweeps de vrais binaires (téléchargent + comparent à Wine) :
 bash bench/sqlite_sweep.sh   bash bench/busybox_sweep.sh   bash bench/corpus_sweep.sh
@@ -190,7 +190,7 @@ bash bench/wallsweep.sh <dir1> [dir2…]  # AGRÈGE --mode walls sur un corpus :
 
 ### État régression (référence — doit rester vert)
 difftest **272/272** · transpile-diff **4/4** (H=`19acad982194bf07`) · winediff
-**114/114** · cpudiff vert (per-instruction + séquences génératives) · funcdiff corpus **0 divergence** (lift **~20,5k** scorées /
+**116/116** · cpudiff vert (per-instruction + séquences génératives) · funcdiff corpus **0 divergence** (lift **~20,5k** scorées /
 **~20k appels** — **imports (stubs `@N` + `@0` scalaires) + appels indirects résolus + intrinsèques mémoire host-backés (memmove/memcpy)** ; scratch sous-esp exclu ; opt ~10k scorées) · SMT **11/11** · in-place **3/3** · magicdiv **2³²** ·
 recompilabilité **100 %** · WASM **7/7**.
 
@@ -403,8 +403,10 @@ recompilabilité **100 %** · WASM **7/7**.
   GetVersionEx 6.2.9200 NT), `DosDateTimeToFileTime` (FAT→FILETIME, jours civils portables),
   `RtlMoveMemory`=memmove. Gardés par `winecorpus/win32_version_dostime.c`.
   `GetExitCodeProcess` (STILL_ACTIVE), `GetDiskFreeSpaceA` (statvfs), `SetFileAttributesA/W`
-  (READONLY↔chmod). Gardés par `winecorpus/win32_file_process.c`. **RtlUnwind = froid** (SEH,
-  jamais atteint hors propagation d'exception → abort sound suffit ; tier EH avec la GUI).
+  (READONLY↔chmod). Gardés par `winecorpus/win32_file_process.c`. **`RtlUnwind` = local unwind SEH implémenté**
+  (2026-07-17, brique EH 2) : parcourt `fs:[0]` jusqu'à (exclu) la TargetFrame, appelle chaque handler intermédiaire
+  avec `EH_UNWINDING(0x2)`, pop chaque frame, **retourne normalement** (`fs:[0]`=target) — le modèle i386 fidèle
+  (TargetIp ignoré ; le saut non-local est fait par l'appelant). Gardé `winecorpus/seh_unwind.c` (bit-identique Wine).
 - **USER32 message-only** (sans pixels, portable/WASM) : `RegisterClassW`/`Unregister`,
   `CreateWindowExW`/`DestroyWindow`, `DefWindowProcW`, `Get`/`Peek`/`Dispatch`/`Translate`/
   `Post`/`SendMessageW`, `PostQuitMessage`, `SetTimer`/`KillTimer`, `MsgWaitForMultipleObjectsEx` **+ jumeaux A** (M7 G1, doc 72).
@@ -629,6 +631,18 @@ précédent continuait en silence = faux). Testé par `winecorpus/seh_raise.c` (
 pas `__try` ; 2 frames imbriqués, chain-walk) bit-identique Wine. winediff **115/115**. **Reste EH** : `__except_handler3`
 réel (scope-table + CONTEXT peuplé + local-unwind), fautes matérielles (SIGSEGV→dispatch, natif), C++
 (`_CxxThrowException`/`__CxxFrameHandler`).
+
+### P3.7 — EH MSVC lourd : brique 2 — local unwind `RtlUnwind` ✅ FAIT (2026-07-17)
+`aret_RtlUnwind` (`aret_hle.c`) implémente le primitif d'**unwind local** que `__except_handler3` (via
+`__global_unwind2`) utilise pour dérouler les frames entre le raise et la frame qui catch. **i386 (≠ x64)** : TargetIp
+**ignoré**, parcourt `fs:[0]` jusqu'à (exclu) la TargetFrame, appelle chaque handler intermédiaire cdecl avec
+`EH_UNWINDING(0x2)`, pop chaque frame, **retourne normalement** (`fs:[0]`=target). Bornes sound : chaîne cyclique →
+abort, target introuvable → abort (`STATUS_INVALID_UNWIND_TARGET`). **La « muraille de testabilité » était une erreur
+de mental-model x64** (« ne revient pas ») ; la mesure i386 prouve le retour normal → testable **directement** vs Wine :
+`winecorpus/seh_unwind.c` (appel direct à `RtlUnwind`, 2 frames, `inner=1 flags=0x2 fs0_target=1` bit-identique Wine ;
+pointeurs stashés en globals pour survivre au restore de registres non-volatils). winediff **116/116**. **Reste EH** :
+`__except_handler3` réel (scope-table + filtre + `local_unwind2` — suite directe, mais testabilité = **vrai binaire MSVC
+`__try/__except`** requis, mingw ne l'émet pas), fautes matérielles (SIGSEGV/#DE), C++ (`__CxxFrameHandler`).
 
 ### P3.5 — EH MSVC : 1re brique `push imm; …; ret` ✅ FAIT (2026-07-17)
 `find_ret_jumps` (`analysis/mod.rs`) reconnaît l'idiome de continuation `__finally` (`push <cont>; …; ret` = `ret`
