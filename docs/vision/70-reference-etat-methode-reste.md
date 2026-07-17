@@ -190,8 +190,8 @@ bash bench/wallsweep.sh <dir1> [dir2…]  # AGRÈGE --mode walls sur un corpus :
 
 ### État régression (référence — doit rester vert)
 difftest **272/272** · transpile-diff **4/4** (H=`19acad982194bf07`) · winediff
-**114/114** · cpudiff vert (per-instruction + séquences génératives) · funcdiff corpus **0 divergence** (lift **~18,4k** scorées /
-~7k appels — **fonctions à-imports incluses via stubs symétriques à pop `@N` prouvé**, opt ~10k scorées) · SMT **11/11** · in-place **3/3** · magicdiv **2³²** ·
+**114/114** · cpudiff vert (per-instruction + séquences génératives) · funcdiff corpus **0 divergence** (lift **~19,8k** scorées /
+**~20k appels** — **fonctions à-imports (stubs `@N` prouvés) ET appels indirects résolus** incluses, opt ~10k scorées) · SMT **11/11** · in-place **3/3** · magicdiv **2³²** ·
 recompilabilité **100 %** · WASM **7/7**.
 
 ---
@@ -648,10 +648,18 @@ rend l'ancien handler** — le 0 du stub faisait échouer l'assert `.cold` de `_
 table de handlers par signal (retourne l'ancien, stocke le nouveau ; pas de délivrance = inchangé). Cf. §4.5
 + 71 `[HLE-WIN32] signal`. units = **environnemental** (`units.dat` absent, pas un bug).
 
-### P6 — Outillage funcdiff : closure SSA (opt-diff à travers les appels)
-Tentée, **retirée** (faux positif : `esp` fantôme incohérent à la frontière
-run_ssa↔run_closure). À reprendre en **threadant tout l'état CPU** (GP+flags+xmm+esp)
-proprement au call, testé par la garde opt + teeth-check avant de croire un verdict.
+### P6 — Outillage funcdiff : appels indirects résolus ✅ FAIT (2026-07-17)
+funcdiff **suit maintenant les appels indirects** (`call reg`, `call [table+idx*4]`, vtable
+`call [obj+k]`) : l'interpréteur **évalue l'expression d'adresse** → cible concrète `t` ; si `t`
+est une fonction récupérée à `ret N` connu → récurse via `call_direct` (mêmes mécaniques
+push-retaddr / pop). **Sound double sens** : lift correct ⇒ même fonction qu'Unicorn (lockstep) ;
+lift **faux** ⇒ cibles différentes ⇒ **divergence = vrai bug** (la classe invisible à la carte
+statique) ; cible non-fonction (vtable via pointeur seedé aléatoire) ⇒ skip, jamais de faux verdict.
+Effet mesuré : lift **18,4k→19,8k** scorées, appels suivis **7k→20k** (sqlite 4384→**17149**),
+**0 divergence** (donc ces 13k+ cibles indirectes sont liftées correctement). Les cibles **basées
+image** (tables `.rdata`, pointeur chargé d'une constante) résolvent déterministe → nouvelle
+couverture ; les vtables à objet aléatoire restent skippées (borne honnête).
+*(Ancienne P6 — closure SSA opt-diff — reste à faire séparément : threader tout l'état CPU au call.)*
 
 ### P6.5 — Fenêtre message-only USER32 ✅ FAIT (2026-07-10). Analyzer avance, nouveaux gaps
 **Sous-système message-only livré et vérifié** (`aret_win32.c`, ~15 fns : Register/

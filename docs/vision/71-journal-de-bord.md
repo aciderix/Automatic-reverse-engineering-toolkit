@@ -2487,4 +2487,33 @@ Détail : **70 §6** (roadmap). Résumé :
   indirect à callee-pop erroné sur ce chemin. **Le fix des 51 pops (entrée précédente) vaut indépendamment** — il n'a
   pas corrigé *ce* crash, mais il a élargi l'oracle de +1808 fonctions prouvées correctes, valeur générale réelle.
 
+### 2026-07-17 — [ORACLE] funcdiff suit les appels INDIRECTS résolus (vtables/tables/pointeurs) — +13k appels validés, 0 divergence
+- **Le point aveugle nommé.** Deux sessions convergeaient sur le même mur : funcdiff **skippait** toute fonction à
+  appel indirect (`check_expr_calls` : `Indirect(_) => None`). Or c'est là que naissent les miscompiles C++ (dispatch
+  vtable) et les corruptions (cf. l'entrée 7za). Levier choisi par l'utilisateur : **modéliser les appels indirects**.
+- **Mécanisme (sound par construction).** À un appel indirect, l'interpréteur **évalue l'expression d'adresse**
+  (`CallTarget::Indirect(e)`, où `e` = valeur du pointeur de fonction, cf. `lift.rs` `op_value`) → cible concrète `t` ;
+  puis **réutilise `call_direct(t)`** (mêmes mécaniques : push adresse de retour sentinelle, callee `ret N`). Trois
+  issues : (a) lift **correct** ⇒ `t_interp == t_unicorn` ⇒ même fonction ⇒ lockstep ; (b) lift **faux** (mauvaise
+  cible calculée) ⇒ fonctions différentes ⇒ **états divergent ⇒ vrai bug attrapé** ; (c) `t` **non-fonction** (vtable
+  via objet seedé aléatoire, ou pointeur garbage) ⇒ `call_direct` rend `None` ⇒ **skip l'itération**, jamais de faux
+  verdict. Les cibles **basées image** (tables de saut/pointeurs en `.rdata`, pointeur chargé d'une constante)
+  résolvent déterministe → **nouvelle couverture réelle**. Tail-call indirect (`jmp [x]`) exclu (discipline esp
+  différente) → skip sound.
+- **Trois éditions** (`cpudiff.rs`, oracle-only) : (1) `eval_or_call` case `Indirect(addr)` → `eval` + `call_direct` ;
+  (2) `run_closure` skip explicite du tail-call indirect ; (3) `check_expr_calls` autorise `Indirect` (valide juste
+  l'expression d'adresse, aucune cible statique ajoutée — la résolution est par-itération au runtime).
+- **Mesuré : 0 divergence, couverture explose.** Corpus busybox+sqlite : lift **18412→19832** scorées (busybox
+  4904→5120, sqlite 13508→**14712**), **appels suivis 7384→20449** (sqlite 4384→**17149** — +13k appels indirects
+  désormais validés), **0 divergence**. ⇒ ces 13k+ cibles indirectes sont **liftées correctement** (preuve, pas
+  supposition). Portes : régression unifiée **PASS**, hash transpile `19acad982194bf07` **inchangé** (oracle-only),
+  difftest 272, SMT 11/11, recompil. 100 %.
+- **7za avec appels indirects : toujours 0 divergence** (36916 scorées, 191054 appels). **Insight décisif** : si
+  *toutes* les fonctions du chemin de crash ont un lift **fidèle** (0 div), alors le transpilé calcule **exactement**
+  comme le hardware → le crash ne peut PAS venir d'un **lift modelable**. Il vient donc soit (a) d'une fonction encore
+  **skippée** par funcdiff (Switch/Asm/x87/import non modélisé sur ce chemin précis), soit (b) d'un **shim HLE** qui
+  renvoie autre chose que Windows (locale/codepage : GetStringTypeW/LCMapStringW-mesure/GetCPInfo/MultiByteToWideChar…)
+  faisant construire une table locale garbage. **La chasse 7za se recentre sur les shims du chemin de démarrage**, pas
+  sur le lift — l'oracle a fait son travail : **écarter le lift par la preuve**.
+
 <!-- NOUVELLES ENTRÉES ICI (garder l'ordre chronologique, plus récent en bas) -->

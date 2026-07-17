@@ -477,6 +477,14 @@ impl Interp {
                         let callee = *ctx.funcs.get(t)?;
                         return self.run_closure(callee, ctx, depth + 1, budget);
                     }
+                    // Indirect tail call (`jmp [x]`): no return address is pushed and
+                    // the callee's `ret` returns for us — a different esp discipline
+                    // from a normal call. Not modelled (the address+pop interplay is
+                    // ambiguous at nested depth), so skip; direct tail calls are the
+                    // case above, non-tail indirect calls go through `eval_or_call`.
+                    Stmt::Return(Some(Expr::Call { target: CallTarget::Indirect(_), .. })) => {
+                        return None;
+                    }
                     Stmt::Return(Some(e)) => return self.eval_or_call(e, ctx, depth, budget),
                     Stmt::Return(None) => return None, // no modelled return value
                     // A statement-position call: perform it for its side effects
@@ -546,6 +554,24 @@ impl Interp {
                     // its seeded, matching slot is harmless).
                     self.ret_slots.push(self.regs[4].wrapping_sub(4));
                     return Some(0);
+                }
+                // Indirect call (`call reg`, `call [table+idx*4]`, vtable `call
+                // [obj+k]`): resolve the *computed* target by evaluating its address
+                // expression, then follow it exactly like a direct call (same
+                // return-address push + callee `ret N` pop mechanics). This is sound
+                // both ways: if the lift computes the target CORRECTLY, the interpreter
+                // enters the same function Unicorn does and the states stay in lockstep;
+                // if the lift computes the WRONG target, the two diverge → a real bug is
+                // caught (the class the static map cannot see). If the address resolves
+                // to something that is not a recovered function with a known `ret N`
+                // (e.g. a vtable slot reached through a randomly-seeded object pointer),
+                // `call_direct` returns None → this iteration is skipped, never a false
+                // verdict. Image-based targets (jump/pointer tables in `.rdata`, a
+                // pointer loaded from a constant) resolve deterministically and become
+                // newly scorable.
+                CallTarget::Indirect(addr) => {
+                    let t = self.eval(addr)?;
+                    return self.call_direct(t, ctx, depth, budget);
                 }
                 _ => {}
             }
@@ -2207,7 +2233,11 @@ fn check_expr_calls(
                         return None;
                     }
                 }
-                CallTarget::Indirect(_) => return None,
+                // Indirect calls are allowed: the interpreter resolves the computed
+                // target per-iteration (`eval_or_call` → `call_direct`) and skips when
+                // it is not a recovered function, so no static target is added here.
+                // Still validate the address expression's own nested calls.
+                CallTarget::Indirect(addr) => check_expr_calls(addr, funcs, ret_pops, targets)?,
             }
             for a in args {
                 check_expr_calls(a, funcs, ret_pops, targets)?;
