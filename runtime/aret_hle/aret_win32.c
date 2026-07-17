@@ -1858,7 +1858,15 @@ uint32_t aret_LoadStringA(uint32_t esp) {
 #define U32_SCREEN_H 768
 
 #define U32_MAX_CLASSES 64
-static struct { uint16_t name[128]; uint32_t wndproc, hbr_bg; int used; } g_u32_class[U32_MAX_CLASSES];
+/* A registered window class. The full WNDCLASS(EX) fields are kept so GetClassInfo
+ * can return them verbatim (a program that registers then queries a class must read
+ * back exactly what it set). */
+static struct {
+    uint16_t name[128];
+    uint32_t wndproc, hbr_bg;
+    uint32_t style, cls_extra, wnd_extra, hinstance, hicon, hcursor, menu_name, hicon_sm;
+    int used;
+} g_u32_class[U32_MAX_CLASSES];
 
 #define U32_MAX_WIN 256
 /* A window object. For message-only windows only wndproc/parent matter; a visible
@@ -1930,19 +1938,43 @@ static void u32_a2w(const char *s, uint16_t *d, int cap) {
 static void u32_w2n(const uint16_t *s, char *d, int cap) {
     int i = 0; if (s) for (; s[i] && i < cap - 1; i++) d[i] = (char)(s[i] & 0xFF); d[i] = 0;
 }
-/* Register a class (shared A/W core): store wndproc + background brush + wide
- * name, return the atom. */
-static uint32_t u32_class_register(uint32_t wndproc, uint32_t hbr_bg, const uint16_t *wname) {
+/* Register a class (shared A/W core): store the full WNDCLASS(EX) so GetClassInfo
+ * round-trips it, and return the atom. */
+static uint32_t u32_class_register(uint32_t style, uint32_t wndproc, uint32_t cls_extra,
+                                   uint32_t wnd_extra, uint32_t hinstance, uint32_t hicon,
+                                   uint32_t hcursor, uint32_t hbr_bg, uint32_t menu_name,
+                                   uint32_t hicon_sm, const uint16_t *wname) {
     for (int i = 0; i < U32_MAX_CLASSES; i++) {
         if (!g_u32_class[i].used) {
             g_u32_class[i].used = 1;
+            g_u32_class[i].style = style;
             g_u32_class[i].wndproc = wndproc;
+            g_u32_class[i].cls_extra = cls_extra;
+            g_u32_class[i].wnd_extra = wnd_extra;
+            g_u32_class[i].hinstance = hinstance;
+            g_u32_class[i].hicon = hicon;
+            g_u32_class[i].hcursor = hcursor;
             g_u32_class[i].hbr_bg = hbr_bg;
+            g_u32_class[i].menu_name = menu_name;
+            g_u32_class[i].hicon_sm = hicon_sm;
             u32_wcpy(g_u32_class[i].name, wname, 128);
             return 0xC000u + (uint32_t)i;
         }
     }
     return 0;
+}
+/* Resolve a class reference (atom or wide-name pointer) to its registry index, or -1. */
+static int u32_class_index(uint32_t cref) {
+    if (cref == 0) return -1;
+    if (cref < 0x10000u) {
+        uint32_t idx = cref - 0xC000u;
+        if (idx < U32_MAX_CLASSES && g_u32_class[idx].used) return (int)idx;
+        return -1;
+    }
+    const uint16_t *name = (const uint16_t *)(uintptr_t)cref;
+    for (int i = 0; i < U32_MAX_CLASSES; i++)
+        if (g_u32_class[i].used && u32_weq(g_u32_class[i].name, name)) return i;
+    return -1;
 }
 /* Resolve a class reference (atom or name pointer) to its background brush, or 0. */
 static uint32_t u32_class_brush(uint32_t cref) {
@@ -2135,7 +2167,8 @@ uint32_t aret_RegisterClassW(uint32_t esp) {
     if (!wc) return 0;
     const uint16_t *name = (const uint16_t *)(uintptr_t)wc[9]; /* +36 lpszClassName */
     if (!name) return 0;
-    return u32_class_register(wc[1] /* +4 lpfnWndProc */, wc[7] /* +28 hbrBackground */, name);
+    /* WNDCLASS: style@0 wndproc@4 clsx@8 wndx@12 hInst@16 hIcon@20 hCursor@24 hbr@28 menu@32 */
+    return u32_class_register(wc[0], wc[1], wc[2], wc[3], wc[4], wc[5], wc[6], wc[7], wc[8], 0, name);
 }
 /* RegisterClassA(const WNDCLASSA*) — same 40-byte layout as WNDCLASSW but a narrow
  * class name; widen it and share the one registry. */
@@ -2146,7 +2179,7 @@ uint32_t aret_RegisterClassA(uint32_t esp) {
     if (!name) return 0;
     uint16_t wname[128];
     u32_a2w(name, wname, 128);
-    return u32_class_register(wc[1], wc[7], wname);
+    return u32_class_register(wc[0], wc[1], wc[2], wc[3], wc[4], wc[5], wc[6], wc[7], wc[8], 0, wname);
 }
 /* RegisterClassExW(const WNDCLASSEXW*) -> ATOM. WNDCLASSEX (32-bit) shifts every
  * field +4 vs WNDCLASS (cbSize @0): lpfnWndProc @+8, hbrBackground @+32,
@@ -2156,7 +2189,9 @@ uint32_t aret_RegisterClassExW(uint32_t esp) {
     if (!wc) return 0;
     const uint16_t *name = (const uint16_t *)(uintptr_t)wc[10]; /* +40 lpszClassName */
     if (!name) return 0;
-    return u32_class_register(wc[2] /* +8 lpfnWndProc */, wc[8] /* +32 hbrBackground */, name);
+    /* WNDCLASSEX: cbSize@0 style@4 wndproc@8 clsx@12 wndx@16 hInst@20 hIcon@24 hCursor@28
+     * hbr@32 menu@36 name@40 hIconSm@44 */
+    return u32_class_register(wc[1], wc[2], wc[3], wc[4], wc[5], wc[6], wc[7], wc[8], wc[9], wc[11], name);
 }
 /* RegisterClassExA(const WNDCLASSEXA*) — narrow class name; widen and share. */
 uint32_t aret_RegisterClassExA(uint32_t esp) {
@@ -2166,8 +2201,63 @@ uint32_t aret_RegisterClassExA(uint32_t esp) {
     if (!name) return 0;
     uint16_t wname[128];
     u32_a2w(name, wname, 128);
-    return u32_class_register(wc[2], wc[8], wname);
+    return u32_class_register(wc[1], wc[2], wc[3], wc[4], wc[5], wc[6], wc[7], wc[8], wc[9], wc[11], wname);
 }
+
+/* GetClassInfo(Ex)A/W(hInstance, lpClassName, lpWndClass) — fill the caller's
+ * WNDCLASS(EX) from a registered class and return the class atom (non-zero); return
+ * 0 if the class is not registered. Fields are returned verbatim as registered, so a
+ * register→query round-trip is exact (matching Wine). `lpClassName` may be an atom or
+ * a string pointer; the A form widens the string first. The WNDCLASS layout is shared
+ * A/W (only the string encoding of names differs, and names are pointers we pass
+ * through). `_ex` writes the WNDCLASSEX layout (every field shifted +4 past cbSize,
+ * plus hIconSm). */
+static uint32_t u32_get_class_info(uint32_t cref, uint32_t out, uint32_t clsname_ref, int is_ex) {
+    int i = u32_class_index(cref);
+    if (i < 0 || out == 0) return 0;
+    uint32_t *o = (uint32_t *)(uintptr_t)out;
+    if (is_ex) {
+        /* cbSize (o[0]) is caller-supplied — GetClassInfoEx leaves it untouched (Wine). */
+        o[1] = g_u32_class[i].style;
+        o[2] = g_u32_class[i].wndproc;
+        o[3] = g_u32_class[i].cls_extra;
+        o[4] = g_u32_class[i].wnd_extra;
+        o[5] = g_u32_class[i].hinstance;
+        o[6] = g_u32_class[i].hicon;
+        o[7] = g_u32_class[i].hcursor;
+        o[8] = g_u32_class[i].hbr_bg;
+        o[9] = g_u32_class[i].menu_name;
+        o[10] = clsname_ref;
+        o[11] = g_u32_class[i].hicon_sm;
+    } else {
+        o[0] = g_u32_class[i].style;
+        o[1] = g_u32_class[i].wndproc;
+        o[2] = g_u32_class[i].cls_extra;
+        o[3] = g_u32_class[i].wnd_extra;
+        o[4] = g_u32_class[i].hinstance;
+        o[5] = g_u32_class[i].hicon;
+        o[6] = g_u32_class[i].hcursor;
+        o[7] = g_u32_class[i].hbr_bg;
+        o[8] = g_u32_class[i].menu_name;
+        o[9] = clsname_ref;              /* lpszClassName = the queried name */
+    }
+    return 0xC000u + (uint32_t)i;        /* the class atom (non-zero) */
+}
+/* The A form widens a string class name into a temp so the shared wide registry
+ * lookup applies; an atom (< 0x10000) passes through unchanged. */
+static uint32_t u32_get_class_info_a(uint32_t esp, int is_ex) {
+    uint32_t cref = WP(1), out = WP(2);
+    uint16_t wtmp[128];
+    if (cref >= 0x10000u) {
+        u32_a2w((const char *)(uintptr_t)cref, wtmp, 128);
+        cref = (uint32_t)(uintptr_t)wtmp;
+    }
+    return u32_get_class_info(cref, out, WP(1), is_ex);
+}
+uint32_t aret_GetClassInfoA(uint32_t esp)   { return u32_get_class_info_a(esp, 0); }
+uint32_t aret_GetClassInfoExA(uint32_t esp) { return u32_get_class_info_a(esp, 1); }
+uint32_t aret_GetClassInfoW(uint32_t esp)   { return u32_get_class_info(WP(1), WP(2), WP(1), 0); }
+uint32_t aret_GetClassInfoExW(uint32_t esp) { return u32_get_class_info(WP(1), WP(2), WP(1), 1); }
 /* UnregisterClassW(lpClassName, hInstance) -> BOOL. */
 uint32_t aret_UnregisterClassW(uint32_t esp) {
     uint32_t cref = WU(0);

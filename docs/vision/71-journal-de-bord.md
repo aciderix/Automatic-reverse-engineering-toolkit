@@ -2824,4 +2824,21 @@ Détail : **70 §6** (roadmap). Résumé :
   **117/117**, sweeps sqlite (bit-identiques) + busybox **60/60**, **gauntlet 19/21** (inchangé). Zéro régression : le
   gate ne se déclenche que sur une frontière **prouvée**, jamais un faux positif.
 
+### 2026-07-17 — [HLE-WIN32] `GetClassInfo(Ex)A/W` — round-trip d'une classe fenêtre (mur DEMO32)
+- **Le manque (mesuré).** Après le fix récup points-to, `DEMO32.EXE` (CD Chip 1997) avançait jusqu'à
+  `GetClassInfoA` **non implémenté** → abort. Le registre de classes ne gardait que `wndproc`/`hbrBackground`/nom.
+- **Fix : registre de classe complet + 4 shims.** `g_u32_class` stocke désormais **tous** les champs `WNDCLASS(EX)`
+  (style, cbClsExtra, cbWndExtra, hInstance, hIcon, hCursor, hbrBackground, menu, hIconSm) — capturés par les 4
+  `RegisterClass(Ex)A/W` (offsets WNDCLASS 40 o / WNDCLASSEX 48 o). `GetClassInfoA/W`+`GetClassInfoExA/W`
+  (`u32_get_class_info`) rendent ces champs **verbatim** → un register→query round-trip est **exact**. Retour = l'atome
+  (non-nul) si trouvée, **0** sinon. La forme A **élargit** le nom (string→wide) pour la lookup partagée ; une classe
+  passée en **atome** (< 0x10000) passe直. `stdcall_pops` : +`GetClassInfo{,Ex}{A,W}`@12.
+- **Fidélité mesurée (piège trouvé).** `GetClassInfoEx` **n'écrit pas** `cbSize` (l'appelant le pré-remplit) : le
+  fixture poisonne la struct à `0xAB` et Wine **laisse** `cbSize=0xABABABAB` → le shim ne touche pas `o[0]`. Sans ça,
+  divergence (`cbSize=48` vs poison). Les handles/pointeurs (wndproc/hInstance/hIcon/hCursor/hbr) sont comparés en
+  **round-trip** (adresses non déterministes), les scalaires (style/extras) en **verbatim**.
+- **Portes** : winediff **117→118/118** (`user32_getclassinfo`), `user32_classex` (RegisterClassEx) **toujours vert**
+  (le refactor du registre est propre), hash transpile `19acad982194bf07` **inchangé**, `table_is_sorted_by_name`
+  **ok**, régression unifiée **PASS**. Débloque `DEMO32` (mur suivant `CharToOemA` — import narrow/OEM, autre famille).
+
 <!-- NOUVELLES ENTRÉES ICI (garder l'ordre chronologique, plus récent en bas) -->
