@@ -3111,4 +3111,24 @@ Détail : **70 §6** (roadmap). Résumé :
   alimentation du pipeline (le slot IAT résolu émet un appel vers le `sub_<va>` lifté au lieu du shim) — la 1ʳᵉ marche
   end-to-end du lifting DLL.
 
+### 2026-07-18 — [LOADER] Levier 1 incrément 2, brique 2.3a : **rebaser multi-modules** (appliquer les base-relocs)
+- **Le besoin.** user32/gdi32/comctl32 préfèrent **tous** la base `0x10000000` → charger ≥2 DLL dans un espace fusionné
+  force à **rebaser** toutes sauf une. Rebaser = appliquer les **base relocations** (`.reloc`) : chaque site tient une
+  adresse absolue 32-bit à décaler de `delta = new_base - old_base`. Le loader captait déjà les **sites** (`base_relocs`) ;
+  il manquait de les **appliquer**. Sous-brique isolée, testable.
+- **Fix.** `apply_base_relocations(sections, reloc_sites, delta) -> Result<usize>` (`src/loader/mod.rs`) : patche chaque
+  site (u32 LE += delta) en place, rend le nombre de sites patchés. **Sound** : un site hors de toute section chargée =
+  **erreur bruyante** (jamais sauté — un reloc non appliqué laisserait un pointeur absolu **périmé** = faux silencieux).
+  `delta==0` = no-op (module à sa base préférée). 32-bit only (tout site = `HIGHLOW` 4 o, le seul type qu'un `-m32`
+  émet ; un DIR64 64-bit demanderait le type par-site).
+- **Testabilité (synthétique + vraie DLL).** (1) `apply_base_relocations_shifts_absolute_pointers` : section avec un
+  pointeur absolu `0x10002000` + filler → rebase +0x10000000 → `0x20002000`, filler intact ; delta 0 = no-op ; site
+  hors-section = **Err**. (2) `apply_base_relocations_covers_real_gdi32` (gated Wine) : rebase de la **vraie gdi32** →
+  **tous** ses sites `.reloc` tombent dans une section chargée et sont patchés (`n == sites.len()`) — la primitive gère
+  le layout `.reloc` réel d'une DLL système.
+- **Portes** : build OK, bin unit tests **70/70**, hash transpile `19acad982194bf07` **inchangé** (fonction standalone).
+  **Suite (2.3, reste)** : fusionner app + DLL rebasés dans un `Program` unique (sections + exports/symboles décalés du
+  delta), seeder les exports liftés, router chaque slot IAT résolu (map 2.2) vers le `sub_<va>` lifté — la 1ʳᵉ marche
+  end-to-end. Garde dure : mono-module **byte-identique** (hash `19acad982194bf07`).
+
 <!-- NOUVELLES ENTRÉES ICI (garder l'ordre chronologique, plus récent en bas) -->

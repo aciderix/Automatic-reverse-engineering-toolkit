@@ -720,6 +720,44 @@ pub fn resolve_module_imports(
     out
 }
 
+/// Rebase a PE module's section bytes by applying its base relocations: each
+/// site holds a 32-bit absolute address that must shift by `delta` (=
+/// `new_base - old_base`) when the module loads somewhere other than its
+/// preferred base. Mutates `sections` in place and returns how many sites were
+/// patched. Errors if a site falls outside every loaded section — a relocation
+/// that can't be applied would leave a **stale absolute pointer** (a silent
+/// wrong value), so it is a loud failure, never skipped. 32-bit modules only:
+/// every site is a 4-byte `HIGHLOW`, the sole reloc type a `-m32` image emits
+/// (Levier 1 is entirely 32-bit); a wider image would need per-site type info.
+///
+/// This is the first brick of the multi-module address-space merge (doc 80 §1.2
+/// brick 2.3): user32/gdi32/comctl32 all prefer base 0x10000000, so loading two
+/// of them into one space forces rebasing all but one.
+pub fn apply_base_relocations(
+    sections: &mut [Section],
+    reloc_sites: &BTreeSet<u64>,
+    delta: i64,
+) -> Result<usize> {
+    if delta == 0 {
+        return Ok(0); // module stays at its preferred base — nothing to patch
+    }
+    let d = delta as u32; // two's-complement: correct for a wrapping add either sign
+    let mut patched = 0usize;
+    for &site in reloc_sites {
+        let sec = sections
+            .iter_mut()
+            .find(|s| site >= s.address && site + 4 <= s.address + s.data.len() as u64);
+        let Some(sec) = sec else {
+            bail!("base relocation at {site:#x} lies outside every loaded section");
+        };
+        let off = (site - sec.address) as usize;
+        let cur = u32::from_le_bytes(sec.data[off..off + 4].try_into().unwrap());
+        sec.data[off..off + 4].copy_from_slice(&cur.wrapping_add(d).to_le_bytes());
+        patched += 1;
+    }
+    Ok(patched)
+}
+
 /// Parse a PE's import table keeping the **source DLL** of each import: IAT slot
 /// virtual address → `PeImport{dll, name, ordinal}`. Parallel to
 /// `parse_pe_imports` (which resolves to a shim name and drops the module) —
@@ -1286,5 +1324,49 @@ mod tests {
         for va in resolved.values() {
             assert!(gdi_addrs.contains(va));
         }
+    }
+
+    #[test]
+    fn apply_base_relocations_shifts_absolute_pointers() {
+        let mk = |addr: u64, bytes: &[u8]| Section {
+            name: ".text".into(),
+            address: addr,
+            data: bytes.to_vec(),
+            executable: true,
+            writable: false,
+        };
+        // At 0x10001000: an absolute pointer 0x10002000 (into .data) + filler.
+        let mut secs = vec![mk(0x1000_1000, &[0x00, 0x20, 0x00, 0x10, 0xAA, 0xBB])];
+        let mut sites = BTreeSet::new();
+        sites.insert(0x1000_1000u64); // the pointer site
+        // Rebase +0x10000000: 0x10002000 -> 0x20002000, filler untouched.
+        let n = apply_base_relocations(&mut secs, &sites, 0x1000_0000).unwrap();
+        assert_eq!(n, 1);
+        assert_eq!(&secs[0].data[0..4], &0x2000_2000u32.to_le_bytes());
+        assert_eq!(&secs[0].data[4..6], &[0xAA, 0xBB]);
+
+        // Delta 0 is a no-op (module at its preferred base).
+        let mut s2 = secs.clone();
+        assert_eq!(apply_base_relocations(&mut s2, &sites, 0).unwrap(), 0);
+        assert_eq!(s2[0].data, secs[0].data);
+
+        // A site outside every section is a loud error, never silently skipped.
+        let mut bad = BTreeSet::new();
+        bad.insert(0x2000_0000u64);
+        assert!(apply_base_relocations(&mut secs, &bad, 0x1000).is_err());
+    }
+
+    /// Rebase Wine's real gdi32.dll: every one of its base-relocation sites must
+    /// fall inside a loaded section and get patched (a real DLL's .reloc layout).
+    #[test]
+    fn apply_base_relocations_covers_real_gdi32() {
+        let Some(data) = wine_dll("gdi32.dll") else {
+            return;
+        };
+        let mut prog = Program::load(&data).unwrap();
+        let sites = prog.base_relocs.clone();
+        assert!(!sites.is_empty(), "gdi32 has base relocations");
+        let n = apply_base_relocations(&mut prog.sections, &sites, 0x0010_0000).unwrap();
+        assert_eq!(n, sites.len(), "every gdi32 reloc site is inside a loaded section");
     }
 }
