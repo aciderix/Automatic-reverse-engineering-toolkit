@@ -538,6 +538,8 @@ static TABLE: &[(&str, u32)] = &[
     ("SleepEx", 8),
     ("SuspendThread", 4),
     ("SystemFunction036", 8),
+    ("SystemParametersInfoA", 16),
+    ("SystemParametersInfoW", 16),
     ("SystemTimeToFileTime", 8),
     ("TerminateProcess", 8),
     ("TextOutA", 20),

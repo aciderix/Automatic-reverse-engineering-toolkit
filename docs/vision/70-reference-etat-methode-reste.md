@@ -170,7 +170,7 @@ bash bench/regression.sh    # PORTE unifiée : difftest 271/271, in-place 3/3,
                             # recompilabilité gzip/ls/cat 100%
 bash bench/difftest.sh              # décompile O0→O3
 bash bench/difftest_transpile.sh    # transpile (hash 19acad982194bf07)
-bash bench/winediff.sh              # axe 2 vs Wine (120/120)
+bash bench/winediff.sh              # axe 2 vs Wine (121/121)
 bash bench/funcdiff.sh              # lift-closure + opt-diff vs Unicorn (0 div)
 # Sweeps de vrais binaires (téléchargent + comparent à Wine) :
 bash bench/sqlite_sweep.sh   bash bench/busybox_sweep.sh   bash bench/corpus_sweep.sh
@@ -190,7 +190,7 @@ bash bench/wallsweep.sh <dir1> [dir2…]  # AGRÈGE --mode walls sur un corpus :
 
 ### État régression (référence — doit rester vert)
 difftest **272/272** · transpile-diff **4/4** (H=`19acad982194bf07`) · winediff
-**120/120** · cpudiff vert (per-instruction + séquences génératives) · funcdiff corpus **0 divergence** (lift **~20,6k** scorées /
+**121/121** · cpudiff vert (per-instruction + séquences génératives) · funcdiff corpus **0 divergence** (lift **~20,6k** scorées /
 **~20k appels** — **imports (stubs `@N` + `@0` scalaires) + appels indirects résolus + intrinsèques mémoire host-backés (memmove/memcpy)** ; scratch sous-esp exclu ; opt ~10k scorées) · SMT **11/11** · in-place **3/3** · magicdiv **2³²** ·
 recompilabilité **100 %** · WASM **7/7**.
 
@@ -473,6 +473,13 @@ recompilabilité **100 %** · WASM **7/7**.
   focus/activation (`Set`/`GetFocus`/`ActiveWindow`/`ForegroundWindow`/`BringWindowToTop`), `InvalidateRect`/
   `ValidateRect`/… (no-op sound), `MessageBeep`, `CallWindowProcA/W` (appelle un wndproc lifté), `LoadCursorA/W`/
   `LoadIconA/W` (handles opaques), `MsgWaitForMultipleObjects`. Mesuré bit-identique Wine (`user32_helpers.c`).
+- **`SystemParametersInfo(A/W)`** (2026-07-17) : actions GET **display-indépendantes** modélisées à valeur
+  déterministe vérifiée vs Wine (`SPI_GETBEEP`=1/`GETBORDER`=1/`GETSCREENSAVEACTIVE`=1/`GETDRAGFULLWINDOWS`=0/
+  `GETWHEELSCROLLLINES`=3), `SPI_GETWORKAREA` = invariant écran 1024×768 (comme GetSystemMetrics), et la paire
+  **stateful** `SPI_{GET,SET}SCREENSAVEACTIVE` (SET stocke, GET relit — vérifié : SET(0);GET=0). SET non modélisés +
+  GET inconnus ⇒ **abort sound** (jamais un pvParam non écrit relu = faux silencieux). Débloque `ARTLANT` (avance au
+  rendu de texte GDI). Gardé `winecorpus/user32_spi.c` (valeurs display-indépendantes + round-trip stateful,
+  bit-identique Wine ; le workarea env-dépendant testé hors oracle bit-exact).
 - **`GetClassInfo(Ex)A/W`** (2026-07-17) : le registre de classes stocke désormais **tous** les champs
   `WNDCLASS(EX)` (style, cbClsExtra/WndExtra, hInstance, hIcon, hCursor, hbrBackground, menu, hIconSm) à
   l'enregistrement → `GetClassInfo` les rend **verbatim** (round-trip register→query exact, atome non-nul en retour ;

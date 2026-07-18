@@ -2916,6 +2916,39 @@ uint32_t aret_GetWindowTextLengthW(uint32_t esp) { return aret_GetWindowTextLeng
  * fixed values; screen dimensions return ARET's defined virtual-desktop size. Raw
  * screen values are environment-dependent (doc 72 §4.5): tested by invariant, never
  * bit-compared to Wine. Unmodelled indices return 0. */
+/* SystemParametersInfo(A/W)(uiAction, uiParam, pvParam, fWinIni) -> BOOL. Query
+ * (SPI_GET*) or set (SPI_SET*) a system-wide parameter. Only the GET actions with a
+ * display-independent, deterministic value (verified against Wine's headless default)
+ * are modelled — they fill *pvParam and return TRUE. SET actions and unmodelled GETs
+ * abort soundly: returning FALSE without filling pvParam would let a caller that
+ * ignores the return read uninitialised memory (valid data under Wine) — a false
+ * silent — and a no-op SET would diverge from a later GET. Values match GetSystemMetrics
+ * (virtual 1024x768 screen invariant, doc 72 4.5). */
+static int g_u32_screensave_active = 1;   /* SPI_{GET,SET}SCREENSAVEACTIVE, Wine default 1 */
+uint32_t aret_SystemParametersInfoA(uint32_t esp) {
+    uint32_t action = w32_arg(esp, 0), ui = w32_arg(esp, 1), pv = w32_arg(esp, 2);
+    switch (action) {
+    case 0x0030:  /* SPI_GETWORKAREA -> RECT{0,0,W,H} (no taskbar reserved) */
+        if (pv) { int32_t *r = (int32_t *)(uintptr_t)pv;
+                  r[0] = 0; r[1] = 0; r[2] = U32_SCREEN_W; r[3] = U32_SCREEN_H; }
+        return 1;
+    case 0x0001: if (pv) *(int32_t *)(uintptr_t)pv = 1; return 1; /* SPI_GETBEEP           */
+    case 0x0005: if (pv) *(int32_t *)(uintptr_t)pv = 1; return 1; /* SPI_GETBORDER         */
+    /* SCREENSAVEACTIVE is stateful: SET stores uiParam, GET reads it back (verified vs
+     * Wine — SET(0) then GET returns 0). SET returns TRUE; no display side effect. */
+    case 0x0010: if (pv) *(int32_t *)(uintptr_t)pv = g_u32_screensave_active; return 1;
+    case 0x0011: g_u32_screensave_active = (int)ui; return 1; /* SPI_SETSCREENSAVEACTIVE */
+    case 0x0026: if (pv) *(int32_t *)(uintptr_t)pv = 0; return 1; /* SPI_GETDRAGFULLWINDOWS */
+    case 0x0068: if (pv) *(int32_t *)(uintptr_t)pv = 3; return 1; /* SPI_GETWHEELSCROLLLINES */
+    default: {
+        char m[64]; snprintf(m, sizeof m, "SystemParametersInfoA: unmodelled action %#x", action);
+        aret_unmodelled(m);
+        return 0;
+    }
+    }
+}
+uint32_t aret_SystemParametersInfoW(uint32_t esp) { return aret_SystemParametersInfoA(esp); }
+
 uint32_t aret_GetSystemMetrics(uint32_t esp) {
     switch (WI(0)) {
     case 0:  case 78: return U32_SCREEN_W;  /* SM_CXSCREEN / SM_CXVIRTUALSCREEN */

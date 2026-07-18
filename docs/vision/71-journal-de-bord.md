@@ -2903,4 +2903,21 @@ Détail : **70 §6** (roadmap). Résumé :
   **120/120**, sweeps sqlite + busybox **60/60** bit-identiques, **gauntlet 19/21** (inchangé). Zéro régression malgré
   l'octet `0xC3` (plus permissif) — la preuve address-taken + frontière tient.
 
+### 2026-07-17 — [HLE-WIN32] `SystemParametersInfo(A/W)` — mur ARTLANT, actions GET vérifiées + SET stateful
+- **Le mur.** `ARTLANT.EXE` (CD 1997) butait sur `SystemParametersInfoA` non implémenté. gdb→ le diag d'abort a
+  révélé l'action précise : **`0x11` = `SPI_SETSCREENSAVEACTIVE`** (désactivation de l'écran de veille pendant la démo).
+- **Fix.** Actions GET display-indépendantes à valeur déterministe (vérifiées vs Wine headless) : `SPI_GETBEEP`=1,
+  `GETBORDER`=1, `GETSCREENSAVEACTIVE`=1(défaut), `GETDRAGFULLWINDOWS`=0, `GETWHEELSCROLLLINES`=3. `SPI_GETWORKAREA` =
+  invariant écran 1024×768 (comme GetSystemMetrics). **`SCREENSAVEACTIVE` rendu STATEFUL** (global défaut 1) : SET stocke
+  `uiParam`, GET relit — **vérifié vs Wine** (`SET(0);GET→0 ; SET(1);GET→1`). Un SET no-op aurait divergé d'un GET
+  ultérieur. Actions non modélisées ⇒ **abort sound** (retourner FALSE sans écrire pvParam = un appelant qui ignore le
+  retour lit de la mémoire non-init valide sous Wine = faux silencieux). `stdcall_pops` : +SystemParametersInfoA/W@16.
+- **Piège testabilité (résolu).** Le harness winediff lance Wine sur un Xvfb **1280×1024** ; `SPI_GETWORKAREA` y rend
+  {0,0,1280,1024} alors qu'ARET rend son invariant {0,0,1024,768} → DIFF. C'est **par conception** (valeurs écran =
+  invariant, hors oracle bit-exact, doc 72 §4.5) → le fixture ne teste **que** les valeurs display-indépendantes + le
+  round-trip stateful (auto-relatif). L'impl de WORKAREA reste correcte (invariant), juste non bit-testable headless.
+- **Mesuré.** `ARTLANT` avance au **rendu de texte GDI** (stock font sans face — chantier M7 graphisme). **Portes** :
+  winediff **120→121/121** (`user32_spi`), hash transpile `19acad982194bf07` **inchangé**, `table_is_sorted_by_name` ok,
+  régression unifiée **PASS**.
+
 <!-- NOUVELLES ENTRÉES ICI (garder l'ordre chronologique, plus récent en bas) -->
