@@ -417,6 +417,14 @@ recompilabilité **100 %** · WASM **7/7**.
   (SysAllocString, CoInitialize/CoTaskMemAlloc), temp-fichiers, SetEndOfFile/
   SetFileTime, PeekNamedPipe (FIONREAD), GetThreadLocale (en-US 0x0409), TEB/PEB
   (ProcessParameters), VirtualQuery, LockFile.
+- **TEB `StackBase`/`StackLimit` = vraies bornes de la pile machine** (`fs:[4]`/`fs:[8]`, 2026-07-17, bug **général**) :
+  l'entrée émise (`aret_main.c`) publie `__aret_set_stack_bounds(top=aret_stack+taille, bottom=aret_stack)` avant de
+  lancer le programme → un sas CRT MSVC qui lit `fs:[4]` (StackBase) et déréférence `[StackBase-8]` (idiome
+  stack-cookie / bornes) tombe dans `aret_stack` (valide), plus sur un placeholder bidon (`0x7FFF0000`→faute). Trouvé
+  par sweep Win95 (gifcon32, faute captée par le dispatch fautes matérielles). Placeholder gardé en repli (pas d'entrée,
+  ex. test unitaire). Hash inchangé, régression verte.
+- **`_controlfp`/`_controlfp_s`** (CRT, 2026-07-17) : mot de contrôle FP msvcrt **stateful** (défaut `0x0008001f` mesuré
+  Wine ; set = `(cur & ~mask)|(new & mask)`, query = courant) — bit-identique Wine. Débloque v/mpegplayer (sweep Win95).
 - **kernel32 divers (forte largeur corpus Win95)** : `GetVersion` (forme packée, cohérente avec
   GetVersionEx 6.2.9200 NT), `DosDateTimeToFileTime` (FAT→FILETIME, jours civils portables),
   `RtlMoveMemory`=memmove. Gardés par `winecorpus/win32_version_dostime.c`.
