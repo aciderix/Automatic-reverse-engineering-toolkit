@@ -980,4 +980,53 @@ mod tests {
     fn parse_pe_exports_empty_on_non_pe() {
         assert!(parse_pe_exports(b"not a pe file at all").is_empty());
     }
+
+    /// Measured against a real system DLL: Wine's own `comctl32.dll` (a genuine
+    /// PE32, and a real Levier-1 target). Gated on Wine's PE builtin being
+    /// present (like winediff needs Wine) — skips otherwise. Asserts only
+    /// version-robust, ABI-stable invariants (verified bit-exact vs
+    /// `objdump -p`: 191 exports = 160 address + 31 forward, 126 named), never
+    /// brittle version-specific magic counts.
+    #[test]
+    fn parse_pe_exports_matches_wine_comctl32() {
+        let candidates = [
+            "/usr/lib/i386-linux-gnu/wine/i386-windows/comctl32.dll",
+            "/usr/lib/wine/i386-windows/comctl32.dll",
+            "/opt/wine-stable/lib/wine/i386-windows/comctl32.dll",
+        ];
+        let Some(path) = candidates.iter().find(|p| std::path::Path::new(p).exists()) else {
+            return; // no Wine PE builtin here — skip (measurement-only test)
+        };
+        let data = std::fs::read(path).unwrap();
+        let exports = parse_pe_exports(&data);
+        assert!(!exports.is_empty(), "comctl32 should export symbols");
+
+        // InitCommonControls is COMCTL32 ordinal 17 by ABI (stable by design —
+        // this is exactly why import-by-ordinal resolution works), a local
+        // address (comctl32 is user-mode), and named.
+        let init = exports
+            .iter()
+            .find(|e| e.name.as_deref() == Some("InitCommonControls"))
+            .expect("comctl32 exports InitCommonControls");
+        assert_eq!(init.ordinal, 17);
+        assert!(matches!(init.target, PeExportTarget::Address(_)));
+
+        // comctl32 forwards some exports (to kernelbase/shlwapi); each forward
+        // must carry a non-empty target DLL and name/ordinal — never guessed.
+        let mut saw_forward = false;
+        for e in &exports {
+            match &e.target {
+                PeExportTarget::Address(va) => assert!(*va != 0),
+                PeExportTarget::ForwardByName(dll, name) => {
+                    assert!(!dll.is_empty() && !name.is_empty());
+                    saw_forward = true;
+                }
+                PeExportTarget::ForwardByOrdinal(dll, _) => {
+                    assert!(!dll.is_empty());
+                    saw_forward = true;
+                }
+            }
+        }
+        assert!(saw_forward, "comctl32 has forwarded exports");
+    }
 }
