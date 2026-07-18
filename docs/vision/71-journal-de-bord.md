@@ -3033,4 +3033,17 @@ Détail : **70 §6** (roadmap). Résumé :
   CreateProcess 27 / FormatMessage 11 faits) → prochaine vague : **re-mesurer** (le levier change) puis la famille GDI
   mapping-mode (`SetViewportOrgEx`/`Scale*`/…) — candidate au **lifting DLL** (Levier 1).
 
+### 2026-07-18 — [HLE-WIN32] `GetWindow`/`GetTopWindow` — nav hiérarchie fenêtres (plateau, plus fort levier après re-mesure)
+- **Re-mesure post-tête** (Levier 0) : la tête (UnhandledExceptionFilter/CreateProcess/FormatMessage) a **disparu** de la
+  liste — la distribution est devenue **plate** (plateau 3-5 binaires : familles fenêtre-nav / thread / imprimante / GDI
+  mapping-mode / menu). C'est le domaine du **Levier 1 (lifting DLL)**. Passe shim-main sur le plus fort levier du
+  plateau : `GetWindow`(4)+`GetTopWindow`(4).
+- **Fix.** `GetWindow(hwnd, cmd)` navigue la hiérarchie via le registre de fenêtres : enfants/fratrie partagent un parent
+  et sont ordonnés par **création** (= index `g_u32_win`), ce qui **matche le Z-order enfant par défaut de Wine**
+  (**mesuré** : c1,c2,c3 sous a → GW_CHILD=c1, GW_HWNDNEXT(c1)=c2, GW_HWNDLAST=c3, GW_HWNDFIRST(c3)=c1). GW_OWNER : 0 si
+  WS_CHILD, sinon le parent/owner stocké. `GetTopWindow(hwnd)` = premier enfant (GW_CHILD) ; NULL/desktop → premier
+  top-level. `stdcall_pops` : +GetWindow@8, GetTopWindow@4.
+- **Portes** : winediff **126→127/127** (`user32_getwindow`, `gwchild=1 next=2 last=3 first=1 topwin=1` = Wine), hash
+  transpile `19acad982194bf07` **inchangé**, `table_is_sorted_by_name` ok, régression unifiée **PASS**.
+
 <!-- NOUVELLES ENTRÉES ICI (garder l'ordre chronologique, plus récent en bas) -->

@@ -2759,6 +2759,51 @@ uint32_t aret_GetParent(uint32_t esp) {
     int i = u32_win_idx(WU(0));
     return i < 0 ? 0 : g_u32_win[i].parent;
 }
+/* GetWindow(hwnd, cmd) -> HWND: navigate the window hierarchy. Children/siblings share
+ * a parent and are ordered by creation (the g_u32_win index), which matches Wine's
+ * default child Z-order (measured: create c1,c2,c3 under a -> GW_CHILD=c1,
+ * GW_HWNDNEXT(c1)=c2, GW_HWNDLAST=c3, GW_HWNDFIRST=c1). NULL/desktop groups the
+ * top-levels (parent 0). */
+#define U32_GW_HWNDFIRST 0u
+#define U32_GW_HWNDLAST  1u
+#define U32_GW_HWNDNEXT  2u
+#define U32_GW_HWNDPREV  3u
+#define U32_GW_OWNER     4u
+#define U32_GW_CHILD     5u
+static uint32_t u32_first_child(uint32_t parent) {
+    for (int k = 0; k < U32_MAX_WIN; k++)
+        if (g_u32_win[k].used && g_u32_win[k].parent == parent) return (uint32_t)(k + 1);
+    return 0;
+}
+uint32_t aret_GetWindow(uint32_t esp) {
+    uint32_t hwnd = WU(0), cmd = WU(1);
+    if (cmd == U32_GW_CHILD)
+        return u32_first_child((hwnd == U32_DESKTOP) ? 0u : hwnd);
+    int i = u32_win_idx(hwnd);
+    if (i < 0) return 0;
+    if (cmd == U32_GW_OWNER)
+        return (g_u32_win[i].style & 0x40000000u /*WS_CHILD*/) ? 0u : g_u32_win[i].parent;
+    uint32_t p = g_u32_win[i].parent;                 /* the sibling group */
+    if (cmd == U32_GW_HWNDNEXT) {
+        for (int k = i + 1; k < U32_MAX_WIN; k++)
+            if (g_u32_win[k].used && g_u32_win[k].parent == p) return (uint32_t)(k + 1);
+    } else if (cmd == U32_GW_HWNDPREV) {
+        for (int k = i - 1; k >= 0; k--)
+            if (g_u32_win[k].used && g_u32_win[k].parent == p) return (uint32_t)(k + 1);
+    } else if (cmd == U32_GW_HWNDFIRST) {
+        return u32_first_child(p);
+    } else if (cmd == U32_GW_HWNDLAST) {
+        for (int k = U32_MAX_WIN - 1; k >= 0; k--)
+            if (g_u32_win[k].used && g_u32_win[k].parent == p) return (uint32_t)(k + 1);
+    }
+    return 0;
+}
+/* GetTopWindow(hwnd) -> the topmost child of hwnd in Z-order (= GW_CHILD), NULL if
+ * childless; NULL/desktop -> the first top-level. */
+uint32_t aret_GetTopWindow(uint32_t esp) {
+    uint32_t hwnd = WU(0);
+    return u32_first_child((hwnd == 0 || hwnd == U32_DESKTOP) ? 0u : hwnd);
+}
 /* GetDesktopWindow() -> HWND: the desktop pseudo-window. */
 uint32_t aret_GetDesktopWindow(uint32_t esp) { (void)esp; return U32_DESKTOP; }
 /* IsWindow(HWND) -> BOOL. */
