@@ -2835,6 +2835,15 @@ static uint8_t aret_peb[0x1000];
 static uint8_t aret_procparams[0x400]; /* RTL_USER_PROCESS_PARAMETERS + slack */
 static int aret_teb_ready = 0;
 
+/* The real shared-machine-stack bounds, published by the emitted entry
+ * (aret_main.c) before it runs the program. StackBase = highest address (top),
+ * StackLimit = lowest. Zero until set (a lone-shim/test context with no entry) →
+ * aret_teb_init falls back to a permissive placeholder range. */
+static uint32_t aret_stack_base_va = 0, aret_stack_limit_va = 0;
+void __aret_set_stack_bounds(uint32_t base, uint32_t limit) {
+    aret_stack_base_va = base;
+    aret_stack_limit_va = limit;
+}
 static void aret_teb_init(void) {
     if (aret_teb_ready) return;
     aret_teb_ready = 1;
@@ -2843,8 +2852,12 @@ static void aret_teb_init(void) {
     uint32_t *t = (uint32_t *)aret_teb;
     /* NT_TIB / TEB (x86 offsets) */
     t[0x00 / 4] = 0xFFFFFFFFu;       /* ExceptionList: end of SEH chain */
-    t[0x04 / 4] = 0x7FFF0000u;       /* StackBase  (permissive range)  */
-    t[0x08 / 4] = 0x00010000u;       /* StackLimit                     */
+    /* StackBase (fs:[4]) / StackLimit (fs:[8]): the REAL machine-stack bounds when the
+     * entry published them, so a CRT that reads fs:[4] and dereferences [StackBase-N]
+     * (MSVC stack-cookie / range setup) hits real memory. A permissive placeholder
+     * otherwise (no entry, e.g. a unit test) — never dereferenced there. */
+    t[0x04 / 4] = aret_stack_base_va  ? aret_stack_base_va  : 0x7FFF0000u; /* StackBase  */
+    t[0x08 / 4] = aret_stack_limit_va ? aret_stack_limit_va : 0x00010000u; /* StackLimit */
     t[0x18 / 4] = teb;               /* Self (linear TEB address)      */
     t[0x20 / 4] = (uint32_t)getpid();/* ClientId.UniqueProcess         */
     t[0x24 / 4] = (uint32_t)getpid();/* ClientId.UniqueThread          */

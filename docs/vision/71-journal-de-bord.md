@@ -2955,4 +2955,24 @@ Détail : **70 §6** (roadmap). Résumé :
   (embarquer/répliquer le System.fon de Wine au pixel), pas un resolve TrueType — session dédiée. Commentaire du code mis
   à jour avec la mesure (60 vs 72px) pour éviter de re-tenter. Aucune régression (hash inchangé, gdi_textout MATCH).
 
+### 2026-07-17 — [HLE-WIN32][LIFT] TEB StackBase/StackLimit = **vraies bornes** de la pile machine (bug général, sweep Win95)
+- **Trouvé par le sweep sur du code neuf.** Nouveau corpus téléchargé (ISO **BestOfWindows95DotCom** WIN95_09964,
+  565 Mo → 37 PE32 shareware Win95, compilateurs variés). Run end-to-end : `gifcon32.exe` → **faute matérielle**
+  `0xc0000005 at 0x7ffefff8` (captée par le dispatch fautes du jour). gdb → `sub_401000` (1re fonction, sas CRT).
+- **Cause racine (générale).** `sub_401000` fait `mov %fs:0x4,%edx` (lit **StackBase** du TEB) puis `mov -0x8(%edx),%eax`
+  (déréférence `[StackBase-8]`) — idiome CRT MSVC (stack-cookie / bornes de pile). ARET posait `fs:[4]=0x7FFF0000`
+  (placeholder **bidon**) → `[0x7FFF0000-8]=0x7FFEFFF8` = **mémoire non mappée** → segfault. La pile machine réelle est
+  `aret_stack[]` (BSS), à une tout autre adresse. **Tout binaire lisant `fs:[4]`/`fs:[8]` et déréférençant** était
+  touché (faux silencieux évité seulement parce que ça faultait).
+- **Fix.** L'entrée émise (`aret_main.c`, connaît `aret_stack`) publie les **vraies bornes** au TEB avant de lancer le
+  programme : `__aret_set_stack_bounds(top = aret_stack+taille, bottom = aret_stack)` → `aret_teb_init` pose
+  `fs:[4]=StackBase` (haut) / `fs:[8]=StackLimit` (bas) réels (placeholder gardé en repli si pas d'entrée, ex. test
+  unitaire — jamais déréférencé là). `[StackBase-8]` tombe alors dans `aret_stack` (valide). Ordre sûr : `main` publie
+  avant tout code lifté ; `aret_teb_init` est paresseux (1er accès fs, dans le programme).
+- **Mesuré.** `gifcon32` franchit la faute → avance au mur suivant (`0x408574`, gap récup). **Portes** : hash transpile
+  `19acad982194bf07` **inchangé** (le hash couvre les fonctions liftées, pas `aret_main`), régression unifiée **PASS**,
+  sweeps sqlite/busybox bit-identiques, gauntlet 19/21, winediff **122/122** — les démonstrateurs lisent aussi `fs:[4]`
+  au sas CRT et tournent avec les vraies bornes (plus correct que le placeholder). **Bug général corrigé** (soundness :
+  `fs:[4]` déréférençable = valeurs valides au lieu d'un crash).
+
 <!-- NOUVELLES ENTRÉES ICI (garder l'ordre chronologique, plus récent en bas) -->

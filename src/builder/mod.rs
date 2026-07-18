@@ -1091,10 +1091,16 @@ pub fn transpile(
          char **aret_real_argv = 0;\n\n\
          void __aret_map_memory(void);\n\
          void __aret_patch_iat(void);\n\
+         void __aret_set_stack_bounds(uint32_t base, uint32_t limit);\n\
          uint64_t sub_{entry:x}(uint64_t __esp, uint64_t a, uint64_t c, uint64_t d, uint64_t b);\n\n\
          int main(int argc, char **argv) {{\n\
          \x20   aret_real_argc = argc; aret_real_argv = argv;\n\
          {map_call}    uint8_t *top = aret_stack + sizeof(aret_stack) - 64;\n\
+         \x20   /* Publish the real machine-stack bounds to the synthetic TEB (fs:[4]=\n\
+         \x20      StackBase highest addr, fs:[8]=StackLimit lowest) so a CRT that reads\n\
+         \x20      them and dereferences near the top hits real memory, not a fake VA. */\n\
+         \x20   __aret_set_stack_bounds((uint32_t)(uintptr_t)(aret_stack + sizeof(aret_stack)),\n\
+         \x20                           (uint32_t)(uintptr_t)aret_stack);\n\
          {argv_prep}\
          \x20   /* Lay a cdecl frame so an entry at `main` reads argc/argv from the\n\
          \x20      shared machine stack at [esp+4]/[esp+8]; harmless for a no-arg\n\
