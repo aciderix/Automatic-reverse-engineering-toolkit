@@ -3076,4 +3076,21 @@ Détail : **70 §6** (roadmap). Résumé :
   l'app vers les exports de la DLL (nom → `sub_<va>` lifté), le compilateur hôte les linke. Puis incrément 3 = lifter
   comctl32 (pur user-mode) sur le HLE user32/gdi32 existant.
 
+### 2026-07-18 — [LOADER] Levier 1 incrément 2, brique 2.1 : imports gardant le **DLL source**
+- **Le besoin.** Pour la résolution inter-modules (Incrément 2), quand `app.exe` importe `InitCommonControls`, il faut
+  savoir qu'il vient **de comctl32** — pour lier le slot IAT vers l'**export lifté** de comctl32, pas vers un shim HLE.
+  Or `Program::imports` (slot IAT → nom résolu) **perd le module** (le nom de DLL n'était utilisé que transitoirement
+  pour résoudre les ordinaux). Brique isolée et testable : parser les imports **en gardant le DLL source**.
+- **Fix.** `parse_pe_imports_detailed(data) -> BTreeMap<u64, PeImport{dll, name, ordinal}>` (`src/loader/mod.rs`),
+  parallèle à `parse_pe_imports` : même parcours de l'import table (crate `object`), mais chaque slot IAT garde
+  `{dll (nom du module source), name: Option, ordinal: Option}`. Stocké sur `Program::pe_imports`, câblé dans `load`.
+  **Purement additif** : l'ancien `imports` (slot→nom de shim) est inchangé → le pipeline actuel ne bouge pas.
+- **Testabilité (vraie DLL Wine).** `parse_pe_imports_detailed_keeps_source_dll` (gated sur le builtin Wine) : la vraie
+  `comctl32.dll` importe **`gdi32.dll!BitBlt`** et **`advapi32.dll!RegCloseKey`** (vérifié vs `objdump -p`) → le parseur
+  les retrouve avec le bon DLL source (assertions ABI-stables, case-insensitive, pas de compteurs figés). Chaque import
+  porte un DLL non-vide + un nom ou un ordinal.
+- **Portes** : build OK, bin unit tests **66/66**, hash transpile `19acad982194bf07` **inchangé**, régression unifiée
+  **PASS**. **Suite** : brique 2.2 = le **résolveur** (imports app + tables d'exports des DLL chargées → slot IAT app →
+  VA de l'export lifté), puis 2.3 = fusion d'espace d'adressage + alimentation du pipeline.
+
 <!-- NOUVELLES ENTRÉES ICI (garder l'ordre chronologique, plus récent en bas) -->

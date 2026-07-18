@@ -76,6 +76,21 @@ pub struct PeExport {
     pub target: PeExportTarget,
 }
 
+/// A PE import as written in the importer, keeping the **source DLL**: which
+/// module it comes from, and the symbol by name and/or ordinal. Distinct from
+/// `Program::imports` (IAT slot → resolved shim name, which drops the module):
+/// the multi-module loader needs the source DLL to bind an app's import to that
+/// DLL's *lifted export* (doc 80 §1.2 brick 2) rather than to an HLE shim.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PeImport {
+    /// Name of the DLL the symbol is imported from (e.g. `COMCTL32.dll`).
+    pub dll: String,
+    /// Import name, if imported by name.
+    pub name: Option<String>,
+    /// Import ordinal, if imported by ordinal (mutually informative with `name`).
+    pub ordinal: Option<u32>,
+}
+
 /// C-runtime functions ARET provides natively (aret_hle/aret_crt). A
 /// statically-linked call to one of these (recognized by symbol, see
 /// `Program::crt_symbol`) is bound to the native shim instead of being lifted —
@@ -133,6 +148,10 @@ pub struct Program {
     pub symbols: BTreeMap<u64, KnownSymbol>,
     /// PE IAT slot virtual address -> imported function name.
     pub imports: BTreeMap<u64, String>,
+    /// PE IAT slot virtual address -> import keeping its **source DLL**
+    /// (`PeImport{dll, name, ordinal}`). Used by the multi-module loader to bind
+    /// a slot to another lifted module's export instead of an HLE shim.
+    pub pe_imports: BTreeMap<u64, PeImport>,
     /// Static-relocation site address -> resolved target (object files). A `call`
     /// in a `.o` stores only a placeholder displacement until linked; this maps
     /// the displacement field back to the real target so recursive/cross-function
@@ -253,6 +272,7 @@ impl Program {
 
         let mut imports = parse_pe_imports(data);
         add_elf_imports(&obj, &sections, bitness, &mut imports);
+        let pe_imports = parse_pe_imports_detailed(data);
 
         let relocs = parse_static_relocs(&obj);
         let base_relocs = parse_pe_base_relocs(data);
@@ -264,6 +284,7 @@ impl Program {
             sections,
             symbols,
             imports,
+            pe_imports,
             relocs,
             base_relocs,
         })
@@ -617,6 +638,72 @@ fn parse_pe_imports(data: &[u8]) -> BTreeMap<u64, String> {
                     let n = String::from_utf8_lossy(name).into_owned();
                     if !n.is_empty() {
                         map.insert(addr, n);
+                    }
+                }
+            }
+        }
+        Some(map)
+    }
+
+    collect::<pe::ImageNtHeaders32>(data, 4)
+        .filter(|m| !m.is_empty())
+        .or_else(|| collect::<pe::ImageNtHeaders64>(data, 8))
+        .unwrap_or_default()
+}
+
+/// Parse a PE's import table keeping the **source DLL** of each import: IAT slot
+/// virtual address → `PeImport{dll, name, ordinal}`. Parallel to
+/// `parse_pe_imports` (which resolves to a shim name and drops the module) —
+/// here the module is preserved so the multi-module loader can bind the slot to
+/// another lifted module's export. Brick 2 of DLL lifting (doc 80 §1.2).
+fn parse_pe_imports_detailed(data: &[u8]) -> BTreeMap<u64, PeImport> {
+    use object::read::pe::{ImageNtHeaders, ImageOptionalHeader, ImageThunkData};
+    use object::{pe, LittleEndian as LE};
+
+    fn collect<Nt: ImageNtHeaders>(data: &[u8], ptr: u64) -> Option<BTreeMap<u64, PeImport>> {
+        let dos = pe::ImageDosHeader::parse(data).ok()?;
+        let mut offset = dos.nt_headers_offset() as u64;
+        let (nt, dirs) = Nt::parse(data, &mut offset).ok()?;
+        let sections = nt.sections(data, offset).ok()?;
+        let base = nt.optional_header().image_base();
+        let mut map = BTreeMap::new();
+        let it = match dirs.import_table(data, &sections) {
+            Ok(Some(it)) => it,
+            _ => return Some(map),
+        };
+        let mut descs = it.descriptors().ok()?;
+        while let Ok(Some(desc)) = descs.next() {
+            let iat = desc.first_thunk.get(LE);
+            let int = desc.original_first_thunk.get(LE);
+            let name_rva = if int != 0 { int } else { iat };
+            let dll = match it.name(desc.name.get(LE)) {
+                Ok(d) => String::from_utf8_lossy(d).into_owned(),
+                Err(_) => continue,
+            };
+            let mut thunks = match it.thunks(name_rva) {
+                Ok(t) => t,
+                Err(_) => continue,
+            };
+            let mut k = 0u64;
+            while let Ok(Some(thunk)) = thunks.next::<Nt>() {
+                let addr = base + iat as u64 + k * ptr;
+                k += 1;
+                if thunk.is_ordinal() {
+                    map.insert(
+                        addr,
+                        PeImport {
+                            dll: dll.clone(),
+                            name: None,
+                            ordinal: Some(thunk.ordinal() as u32),
+                        },
+                    );
+                } else if let Ok((_hint, name)) = it.hint_name(thunk.address()) {
+                    let n = String::from_utf8_lossy(name).into_owned();
+                    if !n.is_empty() {
+                        map.insert(
+                            addr,
+                            PeImport { dll: dll.clone(), name: Some(n), ordinal: None },
+                        );
                     }
                 }
             }
@@ -1028,5 +1115,37 @@ mod tests {
             }
         }
         assert!(saw_forward, "comctl32 has forwarded exports");
+    }
+
+    /// Import parsing keeps the source DLL, measured against Wine's real
+    /// comctl32.dll (verified vs `objdump -p`: it imports gdi32.dll!BitBlt,
+    /// advapi32.dll!RegCloseKey, …). Gated on the Wine PE builtin; ABI-stable
+    /// imports asserted, not version-specific counts.
+    #[test]
+    fn parse_pe_imports_detailed_keeps_source_dll() {
+        let candidates = [
+            "/usr/lib/i386-linux-gnu/wine/i386-windows/comctl32.dll",
+            "/usr/lib/wine/i386-windows/comctl32.dll",
+            "/opt/wine-stable/lib/wine/i386-windows/comctl32.dll",
+        ];
+        let Some(path) = candidates.iter().find(|p| std::path::Path::new(p).exists()) else {
+            return;
+        };
+        let data = std::fs::read(path).unwrap();
+        let imports = parse_pe_imports_detailed(&data);
+        assert!(!imports.is_empty());
+        // Every import carries a non-empty source DLL and at least a name or ordinal.
+        for imp in imports.values() {
+            assert!(!imp.dll.is_empty());
+            assert!(imp.name.is_some() || imp.ordinal.is_some());
+        }
+        // Case-insensitive check for two stable, named cross-module imports.
+        let has = |dll: &str, sym: &str| {
+            imports.values().any(|i| {
+                i.dll.eq_ignore_ascii_case(dll) && i.name.as_deref() == Some(sym)
+            })
+        };
+        assert!(has("gdi32.dll", "BitBlt"), "comctl32 imports gdi32.BitBlt");
+        assert!(has("advapi32.dll", "RegCloseKey"), "comctl32 imports advapi32.RegCloseKey");
     }
 }
