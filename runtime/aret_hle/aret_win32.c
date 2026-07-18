@@ -3448,7 +3448,9 @@ static struct gdi_obj {
     int lf_height, lf_weight, lf_italic, lf_quality;     /* FONT (LOGFONT) */
     int lf_underline, lf_strikeout;                      /* FONT (LOGFONT) */
     char lf_face[64];                                    /* FONT face name */
-    int mapmode, savetop; int cur_x, cur_y;              /* DC map mode + save-stack + current pos */
+    int mapmode, savetop; int cur_x, cur_y;              /* DC map mode + save-stack + current pos (LOGICAL) */
+    int vp_ox, vp_oy, win_ox, win_oy;                    /* viewport/window origin (mapping-mode transform) */
+    int vp_ex, vp_ey, win_ex, win_ey;                    /* viewport/window extent (default 1 = identity) */
     struct { uint32_t font, brush, pen, tc, bc; int bm, mm; } sstk[8];  /* SaveDC/RestoreDC */
 } g_gdi[GDI_MAX];
 
@@ -3486,6 +3488,44 @@ static uint32_t gdi_getpx(struct gdi_obj *bm, int x, int y) {
     uint8_t *p = gdi_px(bm, x, y); if (!p) return 0xFFFFFFFFu; /* CLR_INVALID */
     return (uint32_t)p[2] | ((uint32_t)p[1] << 8) | ((uint32_t)p[0] << 16);
 }
+
+/* ---- Mapping-mode coordinate transform (logical <-> device) ----------------
+ * Defined here (before any drawing primitive) so every primitive can transform. */
+/* MulDiv: round(a*b/c) to nearest, ties AWAY from zero — Windows' GDI rounding
+ * (measured vs Wine: /3 gives 1->0, 2->1, 5->2, -2->-1, -8->-3). */
+static int gdi_muldiv(long long a, long long b, long long c) {
+    if (c == 0) return 0;
+    long long num = a * b;
+    if (c < 0) { num = -num; c = -c; }
+    long long half = c / 2;
+    return (int)(num >= 0 ? (num + half) / c : -((-num + half) / c));
+}
+/* Logical -> device: dev = (log - winOrg) * vpExt/winExt + vpOrg. Identity by
+ * default (MM_TEXT, org 0, ext 1) so untransformed drawing is unchanged. */
+static void dc_l2d(int d, int lx, int ly, int *dx, int *dy) {
+    *dx = gdi_muldiv(lx - g_gdi[d].win_ox, g_gdi[d].vp_ex, g_gdi[d].win_ex) + g_gdi[d].vp_ox;
+    *dy = gdi_muldiv(ly - g_gdi[d].win_oy, g_gdi[d].vp_ey, g_gdi[d].win_ey) + g_gdi[d].vp_oy;
+}
+/* Device -> logical (inverse), for DPtoLP. */
+static void dc_d2l(int d, int dx, int dy, int *lx, int *ly) {
+    *lx = gdi_muldiv(dx - g_gdi[d].vp_ox, g_gdi[d].win_ex, g_gdi[d].vp_ex) + g_gdi[d].win_ox;
+    *ly = gdi_muldiv(dy - g_gdi[d].vp_oy, g_gdi[d].win_ey, g_gdi[d].vp_ey) + g_gdi[d].win_oy;
+}
+/* Is the DC's mapping the identity (no transform needed)? Guards primitives that
+ * don't yet apply the transform: they abort soundly under a non-identity map. */
+static int dc_map_identity(int d) {
+    return g_gdi[d].vp_ox == 0 && g_gdi[d].vp_oy == 0 && g_gdi[d].win_ox == 0 &&
+           g_gdi[d].win_oy == 0 && g_gdi[d].vp_ex == g_gdi[d].win_ex &&
+           g_gdi[d].vp_ey == g_gdi[d].win_ey;
+}
+/* Soundness guard for a drawing primitive that does NOT yet apply the mapping
+ * transform: under a non-identity map it would draw at the wrong pixels, so abort
+ * loudly instead (never a silent-wrong). Transformed data-driven when measured. */
+#define GDI_MAP_GUARD(hdc, ret) do { \
+    int _gd = gdi_idx(hdc); \
+    if (_gd >= 0 && !dc_map_identity(_gd)) { \
+        aret_unimpl("GDI primitive under non-identity mapping mode pending"); return (ret); } \
+} while (0)
 
 /* ================================================================== */
 /* G2b — SDL2 window presentation (doc 72). Compiled only when the      */
@@ -3782,6 +3822,7 @@ uint32_t aret_GetDIBits(uint32_t esp) {
  * whole-image source — the ImageList blit path. Anything else (stretch, sub-rect,
  * other ROP/bpp) -> sound abort (never a silent partial draw). */
 uint32_t aret_StretchDIBits(uint32_t esp) {
+    GDI_MAP_GUARD(WU(0), 0);
     uint32_t hdc = WU(0);
     int xDest = WI(1), yDest = WI(2), wDest = WI(3), hDest = WI(4);
     int xSrc = WI(5), ySrc = WI(6), wSrc = WI(7), hSrc = WI(8);
@@ -3889,6 +3930,8 @@ static void u32_dc_defaults(int d) {
     g_gdi[d].sel_brush = u32_stock(0);    /* WHITE_BRUSH */
     g_gdi[d].sel_pen   = u32_stock(7);    /* BLACK_PEN */
     g_gdi[d].mapmode   = 1;               /* MM_TEXT */
+    g_gdi[d].vp_ox = g_gdi[d].vp_oy = g_gdi[d].win_ox = g_gdi[d].win_oy = 0;
+    g_gdi[d].vp_ex = g_gdi[d].vp_ey = g_gdi[d].win_ex = g_gdi[d].win_ey = 1; /* identity */
 }
 /* SaveDC(hdc) -> level. RestoreDC(hdc, level) -> BOOL. Get/SetMapMode. GetClipBox. */
 uint32_t aret_SaveDC(uint32_t esp) {
@@ -3912,8 +3955,82 @@ uint32_t aret_RestoreDC(uint32_t esp) {
     g_gdi[d].savetop = idx;
     return 1;
 }
-uint32_t aret_SetMapMode(uint32_t esp) { int d = gdi_idx(WU(0)); if (d < 0) return 0; int p = g_gdi[d].mapmode; g_gdi[d].mapmode = WI(1); return (uint32_t)p; }
+uint32_t aret_SetMapMode(uint32_t esp) {
+    int d = gdi_idx(WU(0)); if (d < 0) return 0;
+    int p = g_gdi[d].mapmode, m = WI(1);
+    if (m == 1) {                          /* MM_TEXT: 1:1 (y down) */
+        g_gdi[d].vp_ex = g_gdi[d].vp_ey = g_gdi[d].win_ex = g_gdi[d].win_ey = 1;
+    } else if (m != 8) {                   /* MM_ANISOTROPIC: app controls extents */
+        aret_unimpl("SetMapMode: only MM_TEXT/MM_ANISOTROPIC modelled (metric/isotropic pending)");
+        return 0;
+    }
+    g_gdi[d].mapmode = m;
+    return (uint32_t)p;
+}
 uint32_t aret_GetMapMode(uint32_t esp) { int d = gdi_idx(WU(0)); return d < 0 ? 0 : (uint32_t)g_gdi[d].mapmode; }
+/* Mapping-mode transform state (device = (log-winOrg)*vpExt/winExt + vpOrg).
+ * *OrgEx apply in every mode; *ExtEx only in MM_ISOTROPIC/ANISOTROPIC. The *Ex
+ * out-params receive the previous value (POINT for org, SIZE for extent). */
+static void u32_put_pt(uint32_t p, int x, int y) { if (p) { int32_t *o = (int32_t *)(uintptr_t)p; o[0] = x; o[1] = y; } }
+static int u32_ext_mode(int d) { return g_gdi[d].mapmode == 7 || g_gdi[d].mapmode == 8; }
+uint32_t aret_SetViewportOrgEx(uint32_t esp) {
+    int d = gdi_idx(WU(0)); if (d < 0) return 0;
+    u32_put_pt(WU(3), g_gdi[d].vp_ox, g_gdi[d].vp_oy);
+    g_gdi[d].vp_ox = WI(1); g_gdi[d].vp_oy = WI(2); return 1;
+}
+uint32_t aret_GetViewportOrgEx(uint32_t esp) { int d = gdi_idx(WU(0)); if (d < 0) return 0; u32_put_pt(WU(1), g_gdi[d].vp_ox, g_gdi[d].vp_oy); return 1; }
+uint32_t aret_SetWindowOrgEx(uint32_t esp) {
+    int d = gdi_idx(WU(0)); if (d < 0) return 0;
+    u32_put_pt(WU(3), g_gdi[d].win_ox, g_gdi[d].win_oy);
+    g_gdi[d].win_ox = WI(1); g_gdi[d].win_oy = WI(2); return 1;
+}
+uint32_t aret_GetWindowOrgEx(uint32_t esp) { int d = gdi_idx(WU(0)); if (d < 0) return 0; u32_put_pt(WU(1), g_gdi[d].win_ox, g_gdi[d].win_oy); return 1; }
+uint32_t aret_SetViewportExtEx(uint32_t esp) {
+    int d = gdi_idx(WU(0)); if (d < 0) return 0;
+    u32_put_pt(WU(3), g_gdi[d].vp_ex, g_gdi[d].vp_ey);
+    if (u32_ext_mode(d)) { g_gdi[d].vp_ex = WI(1); g_gdi[d].vp_ey = WI(2); } return 1;
+}
+uint32_t aret_GetViewportExtEx(uint32_t esp) { int d = gdi_idx(WU(0)); if (d < 0) return 0; u32_put_pt(WU(1), g_gdi[d].vp_ex, g_gdi[d].vp_ey); return 1; }
+uint32_t aret_SetWindowExtEx(uint32_t esp) {
+    int d = gdi_idx(WU(0)); if (d < 0) return 0;
+    u32_put_pt(WU(3), g_gdi[d].win_ex, g_gdi[d].win_ey);
+    if (u32_ext_mode(d)) { g_gdi[d].win_ex = WI(1); g_gdi[d].win_ey = WI(2); } return 1;
+}
+uint32_t aret_GetWindowExtEx(uint32_t esp) { int d = gdi_idx(WU(0)); if (d < 0) return 0; u32_put_pt(WU(1), g_gdi[d].win_ex, g_gdi[d].win_ey); return 1; }
+uint32_t aret_OffsetViewportOrgEx(uint32_t esp) {
+    int d = gdi_idx(WU(0)); if (d < 0) return 0;
+    u32_put_pt(WU(3), g_gdi[d].vp_ox, g_gdi[d].vp_oy);
+    g_gdi[d].vp_ox += WI(1); g_gdi[d].vp_oy += WI(2); return 1;
+}
+uint32_t aret_OffsetWindowOrgEx(uint32_t esp) {
+    int d = gdi_idx(WU(0)); if (d < 0) return 0;
+    u32_put_pt(WU(3), g_gdi[d].win_ox, g_gdi[d].win_oy);
+    g_gdi[d].win_ox += WI(1); g_gdi[d].win_oy += WI(2); return 1;
+}
+uint32_t aret_ScaleViewportExtEx(uint32_t esp) {
+    int d = gdi_idx(WU(0)); if (d < 0) return 0;
+    u32_put_pt(WU(5), g_gdi[d].vp_ex, g_gdi[d].vp_ey);
+    if (u32_ext_mode(d)) { g_gdi[d].vp_ex = gdi_muldiv(g_gdi[d].vp_ex, WI(1), WI(2));
+                           g_gdi[d].vp_ey = gdi_muldiv(g_gdi[d].vp_ey, WI(3), WI(4)); } return 1;
+}
+uint32_t aret_ScaleWindowExtEx(uint32_t esp) {
+    int d = gdi_idx(WU(0)); if (d < 0) return 0;
+    u32_put_pt(WU(5), g_gdi[d].win_ex, g_gdi[d].win_ey);
+    if (u32_ext_mode(d)) { g_gdi[d].win_ex = gdi_muldiv(g_gdi[d].win_ex, WI(1), WI(2));
+                           g_gdi[d].win_ey = gdi_muldiv(g_gdi[d].win_ey, WI(3), WI(4)); } return 1;
+}
+uint32_t aret_LPtoDP(uint32_t esp) {
+    int d = gdi_idx(WU(0)); if (d < 0) return 0;
+    int32_t *p = (int32_t *)WP(1); int n = WI(2);
+    for (int i = 0; i < n; i++) { int dx, dy; dc_l2d(d, p[2*i], p[2*i+1], &dx, &dy); p[2*i] = dx; p[2*i+1] = dy; }
+    return 1;
+}
+uint32_t aret_DPtoLP(uint32_t esp) {
+    int d = gdi_idx(WU(0)); if (d < 0) return 0;
+    int32_t *p = (int32_t *)WP(1); int n = WI(2);
+    for (int i = 0; i < n; i++) { int lx, ly; dc_d2l(d, p[2*i], p[2*i+1], &lx, &ly); p[2*i] = lx; p[2*i+1] = ly; }
+    return 1;
+}
 uint32_t aret_GetClipBox(uint32_t esp) {
     int32_t *r = (int32_t *)WP(1); if (!r) return 0;   /* ERROR */
     struct gdi_obj *bm = gdi_dc_surface(WU(0));
@@ -3966,25 +4083,29 @@ static void u32_fill_dc_brush(uint32_t hdc, uint32_t brush) {
 /* ---- drawing (bit-exact on the offscreen DIB) ---- */
 /* SetPixel(hdc, x, y, color) -> COLORREF set (or CLR_INVALID). */
 uint32_t aret_SetPixel(uint32_t esp) {
-    struct gdi_obj *bm = gdi_dc_surface(WU(0));
-    if (!bm) return 0xFFFFFFFFu;
+    int d = gdi_idx(WU(0)); struct gdi_obj *bm = gdi_dc_surface(WU(0));
+    if (!bm || d < 0) return 0xFFFFFFFFu;
+    int x, y; dc_l2d(d, WI(1), WI(2), &x, &y);
     uint32_t c = WU(3) & 0x00FFFFFFu;
-    if (!gdi_px(bm, WI(1), WI(2))) return 0xFFFFFFFFu;
-    gdi_put(bm, WI(1), WI(2), c);
+    if (!gdi_px(bm, x, y)) return 0xFFFFFFFFu;
+    gdi_put(bm, x, y, c);
     return c;
 }
 /* SetPixelV(hdc, x, y, color) -> BOOL. */
 uint32_t aret_SetPixelV(uint32_t esp) {
-    struct gdi_obj *bm = gdi_dc_surface(WU(0));
-    if (!bm || !gdi_px(bm, WI(1), WI(2))) return 0;
-    gdi_put(bm, WI(1), WI(2), WU(3) & 0x00FFFFFFu);
+    int d = gdi_idx(WU(0)); struct gdi_obj *bm = gdi_dc_surface(WU(0));
+    if (!bm || d < 0) return 0;
+    int x, y; dc_l2d(d, WI(1), WI(2), &x, &y);
+    if (!gdi_px(bm, x, y)) return 0;
+    gdi_put(bm, x, y, WU(3) & 0x00FFFFFFu);
     return 1;
 }
 /* GetPixel(hdc, x, y) -> COLORREF (or CLR_INVALID). */
 uint32_t aret_GetPixel(uint32_t esp) {
-    struct gdi_obj *bm = gdi_dc_surface(WU(0));
-    if (!bm) return 0xFFFFFFFFu;
-    return gdi_getpx(bm, WI(1), WI(2));
+    int d = gdi_idx(WU(0)); struct gdi_obj *bm = gdi_dc_surface(WU(0));
+    if (!bm || d < 0) return 0xFFFFFFFFu;
+    int x, y; dc_l2d(d, WI(1), WI(2), &x, &y);
+    return gdi_getpx(bm, x, y);
 }
 
 /* The DC's currently-selected pen: fills *color (COLORREF) and returns 1 if it is
@@ -4047,8 +4168,13 @@ uint32_t aret_LineTo(uint32_t esp) {
     struct gdi_obj *bm = gdi_dc_surface(WU(0));
     uint32_t c; int pr = gdi_pen(d, &c);
     if (pr < 0) return 0;                                   /* sound abort already raised */
-    if (pr && bm && bm->bpp == 32) gdi_bres(bm, g_gdi[d].cur_x, g_gdi[d].cur_y, WI(1), WI(2), c);
-    g_gdi[d].cur_x = WI(1); g_gdi[d].cur_y = WI(2);
+    if (pr && bm && bm->bpp == 32) {
+        int x0, y0, x1, y1;                                 /* transform logical -> device */
+        dc_l2d(d, g_gdi[d].cur_x, g_gdi[d].cur_y, &x0, &y0);
+        dc_l2d(d, WI(1), WI(2), &x1, &y1);
+        gdi_bres(bm, x0, y0, x1, y1, c);
+    }
+    g_gdi[d].cur_x = WI(1); g_gdi[d].cur_y = WI(2);         /* current position stays LOGICAL */
     return 1;
 }
 /* The DC's selected brush colour; returns 0 for a NULL/HOLLOW brush (no fill). */
@@ -4069,8 +4195,12 @@ uint32_t aret_Polyline(uint32_t esp) {
     uint32_t c; int pr = gdi_pen(d, &c);
     if (pr < 0) return 0;
     if (pr && bm && bm->bpp == 32 && pts && n >= 2)
-        for (int i = 0; i < n - 1; i++)
-            gdi_bres(bm, pts[2 * i], pts[2 * i + 1], pts[2 * i + 2], pts[2 * i + 3], c);
+        for (int i = 0; i < n - 1; i++) {
+            int x0, y0, x1, y1;
+            dc_l2d(d, pts[2 * i], pts[2 * i + 1], &x0, &y0);
+            dc_l2d(d, pts[2 * i + 2], pts[2 * i + 3], &x1, &y1);
+            gdi_bres(bm, x0, y0, x1, y1, c);
+        }
     return 1;
 }
 /* Rectangle(hdc, l, t, r, b) -> BOOL. Interior [l+1,r-1)×[t+1,b-1) filled with the
@@ -4078,7 +4208,9 @@ uint32_t aret_Polyline(uint32_t esp) {
 uint32_t aret_Rectangle(uint32_t esp) {
     int d = gdi_idx(WU(0)); if (d < 0 || g_gdi[d].type != GDIT_DC) return 0;
     struct gdi_obj *bm = gdi_dc_surface(WU(0));
-    int l = WI(1), t = WI(2), r = WI(3), b = WI(4);
+    int l, t, r, b;                                        /* transform corners logical -> device */
+    dc_l2d(d, WI(1), WI(2), &l, &t);
+    dc_l2d(d, WI(3), WI(4), &r, &b);
     uint32_t pc; int pr = gdi_pen(d, &pc);
     if (pr < 0) return 0;
     uint32_t bc; int hf = gdi_brush(d, &bc);
@@ -4102,6 +4234,7 @@ uint32_t aret_Rectangle(uint32_t esp) {
  * colour (measured on Wine — it uses the brush passed in, not the selected one).
  * Null brush -> nothing. */
 uint32_t aret_FrameRect(uint32_t esp) {
+    GDI_MAP_GUARD(WU(0), 0);
     struct gdi_obj *bm = gdi_dc_surface(WU(0));
     const int32_t *r = (const int32_t *)WP(1);
     if (!bm || !r) return 0;
@@ -4120,6 +4253,7 @@ uint32_t aret_FrameRect(uint32_t esp) {
 /* InvertRect(hdc, const RECT*) -> BOOL. XORs every pixel (all 32 bits, incl. the
  * unused alpha byte — measured identical to DSTINVERT on Wine) over [l,r)x[t,b). */
 uint32_t aret_InvertRect(uint32_t esp) {
+    GDI_MAP_GUARD(WU(0), 0);
     struct gdi_obj *bm = gdi_dc_surface(WU(0));
     const int32_t *r = (const int32_t *)WP(1);
     if (!bm || !r) return 0;
@@ -4134,6 +4268,7 @@ uint32_t aret_InvertRect(uint32_t esp) {
  * the current position, a Bresenham segment to each point (endpoint excluded),
  * updating the current position to the last point (measured on Wine). */
 uint32_t aret_PolylineTo(uint32_t esp) {
+    GDI_MAP_GUARD(WU(0), 0);
     int d = gdi_idx(WU(0)); if (d < 0 || g_gdi[d].type != GDIT_DC) return 0;
     struct gdi_obj *bm = gdi_dc_surface(WU(0));
     const int32_t *pts = (const int32_t *)(uintptr_t)WU(1); int n = WI(2);
@@ -4152,6 +4287,7 @@ uint32_t aret_PolylineTo(uint32_t esp) {
 }
 /* FillRect(hdc, const RECT*, hbrush) -> int. [left,right) x [top,bottom). */
 uint32_t aret_FillRect(uint32_t esp) {
+    GDI_MAP_GUARD(WU(0), 0);
     struct gdi_obj *bm = gdi_dc_surface(WU(0));
     const int32_t *r = (const int32_t *)WP(1);
     if (!bm || !r) return 0;
@@ -4164,6 +4300,7 @@ uint32_t aret_FillRect(uint32_t esp) {
 /* PatBlt(hdc, x, y, w, h, rop) -> BOOL. PATCOPY = fill with the selected brush;
  * BLACKNESS/WHITENESS = solid black/white. Other ROPs abort sound. */
 uint32_t aret_PatBlt(uint32_t esp) {
+    GDI_MAP_GUARD(WU(0), 0);
     struct gdi_obj *bm = gdi_dc_surface(WU(0));
     if (!bm) return 0;
     int x0 = WI(1), y0 = WI(2), x1 = x0 + WI(3), y1 = y0 + WI(4);
@@ -4202,6 +4339,7 @@ static int gdi_rop_apply(uint32_t rop, uint32_t s, uint32_t d, uint32_t *out) {
     }
 }
 uint32_t aret_BitBlt(uint32_t esp) {
+    GDI_MAP_GUARD(WU(0), 0);
     struct gdi_obj *dst = gdi_dc_surface(WU(0));
     uint32_t rop = WU(8), tmp;
     if (!gdi_rop_apply(rop, 0, 0, &tmp)) { aret_unimpl("BitBlt: unmodelled raster-op"); return 0; }
@@ -4918,6 +5056,7 @@ static uint32_t u32_drawtext(uint32_t hdc, const uint32_t *cps, int len, uint32_
 #endif
 }
 uint32_t aret_DrawTextA(uint32_t esp) {
+    GDI_MAP_GUARD(WU(0), 0);
     const char *s = WCS(1); int n = WI(2); if (n < 0) n = s ? (int)strlen(s) : 0;
     uint32_t cps[1024]; int m = n < 1024 ? n : 1024;
     for (int i = 0; i < m; i++) cps[i] = s ? u32_ansi_cp((unsigned char)s[i]) : 0;
@@ -4964,12 +5103,14 @@ static int u32_text_extent_ansi(uint32_t hdc, const char *s, int len, uint32_t p
 
 /* TextOutA(hdc, x, y, lpString, cbCount) -> BOOL. */
 uint32_t aret_TextOutA(uint32_t esp) {
+    GDI_MAP_GUARD(WU(0), 0);
     return u32_textout_ansi(WU(0), WI(1), WI(2), WCS(3), WI(4)) ? 1 : 0;
 }
 /* TextOutW(hdc, x, y, lpWideString, cchCount) -> BOOL. Full Unicode: each UTF-16
  * unit is a codepoint FT_Load_Char maps through the font's cmap (BMP; surrogate
  * pairs are a follow-up). */
 uint32_t aret_TextOutW(uint32_t esp) {
+    GDI_MAP_GUARD(WU(0), 0);
     const uint16_t *ws = (const uint16_t *)(uintptr_t)WU(3);
     int n = WI(4); if (n < 0) n = 0;
     uint32_t cps[1024]; int m = n < 1024 ? n : 1024;

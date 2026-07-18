@@ -170,7 +170,7 @@ bash bench/regression.sh    # PORTE unifiée : difftest 271/271, in-place 3/3,
                             # recompilabilité gzip/ls/cat 100%
 bash bench/difftest.sh              # décompile O0→O3
 bash bench/difftest_transpile.sh    # transpile (hash 19acad982194bf07)
-bash bench/winediff.sh              # axe 2 vs Wine (133/133)
+bash bench/winediff.sh              # axe 2 vs Wine (134/134)
 bash bench/funcdiff.sh              # lift-closure + opt-diff vs Unicorn (0 div)
 # Sweeps de vrais binaires (téléchargent + comparent à Wine) :
 bash bench/sqlite_sweep.sh   bash bench/busybox_sweep.sh   bash bench/corpus_sweep.sh
@@ -190,7 +190,7 @@ bash bench/wallsweep.sh <dir1> [dir2…]  # AGRÈGE --mode walls sur un corpus :
 
 ### État régression (référence — doit rester vert)
 difftest **272/272** · transpile-diff **4/4** (H=`19acad982194bf07`) · winediff
-**133/133** · cpudiff vert (per-instruction + séquences génératives) · funcdiff corpus **0 divergence** (lift **~20,6k** scorées /
+**134/134** · cpudiff vert (per-instruction + séquences génératives) · funcdiff corpus **0 divergence** (lift **~20,6k** scorées /
 **~20k appels** — **imports (stubs `@N` + `@0` scalaires) + appels indirects résolus + intrinsèques mémoire host-backés (memmove/memcpy)** ; scratch sous-esp exclu ; opt ~10k scorées) · SMT **11/11** · in-place **3/3** · magicdiv **2³²** ·
 recompilabilité **100 %** · WASM **7/7**.
 
@@ -1030,6 +1030,13 @@ la **vitesse** change.
   (sinon déclaration implicite → symbole fort non émis → stub faible gagne).
 
 ### Méthode qui marche
+- **Wine (et sa source) = livre de recettes, PAS runtime.** L'oracle Wine dit *quoi*
+  produire (différentiel) ; quand on bute pour **reproduire** un comportement en
+  autonome, **lire la source de Wine** (gdi32/user32/…) donne la **recette exacte**
+  (formule de transforme, poids de sort-key, layout de struct), qu'on **réimplémente
+  proprement dans ARET** — jamais on ne lie/dépend de Wine au runtime (autonomie
+  préservée). Précédents : FreeType (rasterizer), sort-keys de collation, tables
+  CharToOem. C'est la doctrine §1 rendue tactique.
 - **Le différentiel *large* attrape les faux silencieux** que les tests étroits
   masquent (`ceil(3.0)` cache `ceil(3.2)` ; `sin(0)` cache `sin(sin(1))`). Toujours
   balayer une grille, pas un point.

@@ -3406,4 +3406,23 @@ Détail : **70 §6** (roadmap). Résumé :
   transforme viewport/window) → chantier ciblé, vérifié **DIB-hash vs Wine**, pas un batch de shims triviaux. C'est le
   vrai « step 1/2 » de la vague, dicté par la mesure.
 
+### 2026-07-18 — [HLE-WIN32][GUI] Famille **GDI mapping-mode** (transforme logique→device) — tête mesurée du plateau Win95
+- **La tête mesurée** (re-mesure Levier 0) : la famille GDI mapping-mode (~12 fn, 3 binaires chacune). Implémentée à la
+  main, **recette lue/mesurée sur Wine** (doctrine « Wine = livre de recettes »).
+- **Recette (mesurée bit-exact vs Wine).** `device = (logical − winOrg) × vpExt / winExt + vpOrg`, arrondi **MulDiv**
+  (au plus proche, égalités **loin de zéro** — mesuré `/3` : 1→0, 2→1, 5→2, −8→−3). Inverse pour DPtoLP.
+- **Livré.** État par-DC (`vp_ox/oy`, `win_ox/oy`, `vp_ex/ey`, `win_ex/ey`, défaut **identité**) + `gdi_muldiv`/`dc_l2d`/
+  `dc_d2l`. Shims : `SetMapMode` (MM_TEXT + MM_ANISOTROPIC ; métrique/isotropique → abort sound), `Set/Get/Offset/Scale`
+  `{Viewport,Window}{Org,Ext}Ex`, `DPtoLP`/`LPtoDP`. Transforme appliquée dans les primitives **vectorielles**
+  (SetPixel/V/GetPixel, LineTo, Polyline, Rectangle) → dessin **pixel-identique Wine** sous mapping. `stdcall_pops` : +14 `@N`.
+- **Soundness (clé).** Défaut = **identité** → dessin non-transformé **inchangé** (zéro régression). Les primitives non
+  encore transformées (FillRect/PatBlt/BitBlt/TextOut/FrameRect/InvertRect/PolylineTo/StretchDIBits/DrawText) sont
+  **gardées** (`GDI_MAP_GUARD`) : sous mapping non-identité → **abort sound** (jamais un dessin faux silencieux) ;
+  transformées data-driven quand un binaire réel les y utilise.
+- **Fixture** `winecorpus/gdi_mapmode` : round-trip LPtoDP/DPtoLP + ScaleViewportExtEx + dessin (LineTo/Rectangle/SetPixel)
+  sous MM_ANISOTROPIC → **coordonnées ET DIB-hash bit-identiques Wine** (`lptodp=(17,7)`, `dibhash=a76efa65`).
+- **Portes** : winediff **133→134/134**, hash transpile `19acad982194bf07` **inchangé** (identité par défaut),
+  `table_is_sorted_by_name` ok, régression unifiée **PASS**. ⚠️ Piège corrigé : le macro `GDI_MAP_GUARD` doit être défini
+  **avant** la 1re primitive gardée (StretchDIBits) — sinon lien échoue (macro vu comme fonction).
+
 <!-- NOUVELLES ENTRÉES ICI (garder l'ordre chronologique, plus récent en bas) -->
