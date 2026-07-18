@@ -3233,4 +3233,18 @@ Détail : **70 §6** (roadmap). Résumé :
   vers le HLE (ex. `NtGdiBitBlt`→`aret` blit) et **mesurer** qu'une vraie fonction comctl32 traverse — piloté par un vrai
   chemin, une famille à la fois, garde winediff.
 
+### 2026-07-18 — [LOADER][STRATÉGIE] Levier 1 : la bonne config = **lifter comctl32 SEULE** (pas gdi32/user32) → zéro win32k
+- **Correction de trajectoire (mesurée).** Lifter gdi32/user32 était une **fausse piste** : notre HLE gdi32/user32
+  **marche déjà** (winediff le prouve) ; les lifter les *remplace* par du code lifté qui rebute alors sur le plancher
+  win32k (`NtGdi*`/`NtUser*`). La **bonne** config Levier 1 : lifter **comctl32 seule** (le tail qu'on n'a pas), ses
+  imports gdi32/user32/kernel32 se liant aux **shims HLE existants** → **aucun win32k**.
+- **Mesuré (fixture ImageList vs Wine).** App `ImageList_Create/Add/GetImageCount/Destroy` + `CreateBitmap`, lift
+  `--with-dll comctl32.dll` seul. Wine : `il=1 / before=0 idx=0 after=1`. ARET : comctl32 lift, mais le chemin ImageList
+  bute sur de **vrais gaps HLE ordinaires** — `CreateDIBSection` (on ne modélise que **32bpp BI_RGB**, ImageList veut
+  24bpp) et `CreatePatternBrush` (manquant). Pas un mur win32k : de la **couverture HLE bornée**.
+- **⇒ Le reste du Levier 1 (faire tourner de vraies comctl32) = couverture HLE data-driven** : les 144 shims
+  gdi32/user32/kernel32 manquants + étendre l'existant (CreateDIBSection multi-bpp), **une famille à la fois vs Wine**
+  (même méthode que toute la couche HLE). Borné, mesuré, pas de recherche, pas de win32k. À piloter par un vrai chemin
+  (ImageList, puis toolbar/listview…) quand on poursuit l'incrément 3.
+
 <!-- NOUVELLES ENTRÉES ICI (garder l'ordre chronologique, plus récent en bas) -->
