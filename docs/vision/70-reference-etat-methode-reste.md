@@ -680,6 +680,20 @@ résidu qui abort restera l'**obfusqué/fait-main/VM-packé** (indécidable, §9
 - **Levier 3 — Mop-up data-driven** du résidu, trié par le Levier 0.
 - **Ordre d'exécution** : (0) mesurer → (tête shim-main à fort levier) → (2 mécanismes de classe) → (1 lifting DLL pour
   la traîne) → (3 mop-up). Re-mesurer après chaque vague (le levier change).
+- **PLAN ORDONNÉ ACTUEL (2026-07-18, post-lifting-DLL — validé utilisateur)** : le Levier 1 (lifting DLL) est démontré
+  (contrôle comctl32 stateful bit-identique Wine, §5.0 supra). Ordre de la **prochaine vague**, du plus rendement/moins
+  risque au plus gros :
+  1. **RE-MESURER (Levier 0)** — relancer le vrai corpus (Win95 PE32 + Chip 1997) end-to-end, classer les causes d'abort
+     **maintenant** (après tout le travail Levier 1). Ré-ancre sur la donnée (le travail comctl32 récent était en partie
+     auto-dirigé). **Étape en cours.**
+  2. **Familles socle** (les 106 shims kernel32/CRT mesurés : locale, version-info, char-class, `CompareFileTime`… ;
+     atoms **déjà fait**) — le plus **général** (aide tout binaire), borné, batch vérifié vs Wine.
+  3. **Un vrai binaire GUI du corpus utilisant comctl32** — prouve la machinerie contrôles sur du réel shippé ; tire les
+     contrôles manquants (trackbar/toolbar/listview) dans l'ordre **mesuré**.
+  4. **MFC / VB40032** (le gros multiplicateur) — **gated sur l'EH C++** (`__CxxFrameHandler`, Levier 2, qu'on n'a pas) ;
+     un vrai binaire MFC = le **driver** qui force cette brique. Chantier dédié multi-sessions.
+  5. **win32k `NtGdi*`/`NtUser*`** — **différé** (inutile tant qu'on ne lifte pas gdi32/user32 eux-mêmes ; notre HLE les
+     couvre). Priorité basse, sur demande de la mesure seulement.
 
 ### P1 — sqlite3 mingw ✅ FONCTIONNEL (2026-07-05)
 **2 bugs généraux résolus, sqlite3 mingw = bit-identique à Wine** (scalaire, CRUD,
