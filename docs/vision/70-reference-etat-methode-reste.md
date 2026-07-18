@@ -170,7 +170,7 @@ bash bench/regression.sh    # PORTE unifiée : difftest 271/271, in-place 3/3,
                             # recompilabilité gzip/ls/cat 100%
 bash bench/difftest.sh              # décompile O0→O3
 bash bench/difftest_transpile.sh    # transpile (hash 19acad982194bf07)
-bash bench/winediff.sh              # axe 2 vs Wine (121/121)
+bash bench/winediff.sh              # axe 2 vs Wine (122/122)
 bash bench/funcdiff.sh              # lift-closure + opt-diff vs Unicorn (0 div)
 # Sweeps de vrais binaires (téléchargent + comparent à Wine) :
 bash bench/sqlite_sweep.sh   bash bench/busybox_sweep.sh   bash bench/corpus_sweep.sh
@@ -190,7 +190,7 @@ bash bench/wallsweep.sh <dir1> [dir2…]  # AGRÈGE --mode walls sur un corpus :
 
 ### État régression (référence — doit rester vert)
 difftest **272/272** · transpile-diff **4/4** (H=`19acad982194bf07`) · winediff
-**121/121** · cpudiff vert (per-instruction + séquences génératives) · funcdiff corpus **0 divergence** (lift **~20,6k** scorées /
+**122/122** · cpudiff vert (per-instruction + séquences génératives) · funcdiff corpus **0 divergence** (lift **~20,6k** scorées /
 **~20k appels** — **imports (stubs `@N` + `@0` scalaires) + appels indirects résolus + intrinsèques mémoire host-backés (memmove/memcpy)** ; scratch sous-esp exclu ; opt ~10k scorées) · SMT **11/11** · in-place **3/3** · magicdiv **2³²** ·
 recompilabilité **100 %** · WASM **7/7**.
 
@@ -433,11 +433,13 @@ recompilabilité **100 %** · WASM **7/7**.
 - **MessageBoxA/W** (M7 G5a, doc 72, **display-free**) : renvoie **-1** (repli sound = comportement Wine
   **sans écran**, mesuré : pas de blocage, pas de bouton deviné). Un vrai dialogue (SDL) arrivera avec G2b.
   Gardé `winecorpus/user32_messagebox` (marqueur `.nodisplay` → oracle Wine-sans-écran).
-- **Dialogs** (M7 G5b, doc 72, **display-free**) : `DialogBoxParamA/W`/`CreateDialogParamA/W` parsent le
-  **DLGTEMPLATE(EX)** → contrôles enfants (réutilise la table de fenêtres, champ `ctrl_id`) + **pompe modale**
-  (WM_INITDIALOG → DLGPROC via `aret_call`) ; `EndDialog`, `GetDlgItem`/`GetDlgCtrlID`, `Set`/`GetDlgItemText A/W`,
-  `Set`/`GetDlgItemInt`, `SendDlgItemMessageA/W`. DLGPROC qui n'`EndDialog` pas headless → **abort sound**.
-  Gardé `winecorpus/user32_dialog.{c,rc}` (bit-identique Wine sous Xvfb).
+- **Dialogs** (M7 G5b, doc 72, **display-free**) : `DialogBoxParamA/W`/`CreateDialogParamA/W` **et
+  `DialogBoxIndirectParamA/W`/`CreateDialogIndirectParamA/W`** (2026-07-17 — template **en mémoire** = pointeur direct,
+  pas une ressource ; core modal/modeless factorisé, débloque `itiem95`) parsent le **DLGTEMPLATE(EX)** → contrôles
+  enfants (réutilise la table de fenêtres, champ `ctrl_id`) + **pompe modale** (WM_INITDIALOG → DLGPROC via `aret_call`) ;
+  `EndDialog`, `GetDlgItem`/`GetDlgCtrlID`, `Set`/`GetDlgItemText A/W`, `Set`/`GetDlgItemInt`, `SendDlgItemMessageA/W`.
+  DLGPROC qui n'`EndDialog` pas headless → **abort sound** (limite honnête : un dialogue modal attend une entrée
+  utilisateur absente headless). Gardé `winecorpus/user32_dialog.{c,rc}` + `user32_dlgindirect.c` (bit-identique Wine).
 - **GDI de base** (M7 G6, doc 72) : table d'objets GDI (DC/bitmap/brush/pen/font, handles opaques) + **dessin
   DIB mémoire bit-exact** — `CreateDIBSection`(32bpp)/`CreateCompatibleDC`/`SelectObject`/`DeleteObject`,
   `SetPixel`/`GetPixel`/`FillRect`/`PatBlt`/`BitBlt`(SRCCOPY), `CreateSolidBrush`/`Pen`, `GetStockObject`/

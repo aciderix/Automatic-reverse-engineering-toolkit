@@ -3095,11 +3095,11 @@ static uint32_t u32_dlg_item(uint32_t hDlg, int id) {
     return 0;
 }
 
-/* DialogBoxParamA(hInst, lpTemplate, hWndParent, lpDialogFunc, dwInitParam) -> INT_PTR.
- * Modal: create, WM_INITDIALOG, pump until EndDialog, return the EndDialog result. */
-uint32_t aret_DialogBoxParamA(uint32_t esp) {
-    const uint8_t *tpl = u32_dlg_template(WU(1));
-    uint32_t dlgproc = WU(3), param = WU(4), parent = WU(2);
+/* Modal dialog core (shared by DialogBoxParam and DialogBoxIndirectParam — they
+ * differ only in where the DLGTEMPLATE comes from): create, WM_INITDIALOG, pump until
+ * EndDialog, return the EndDialog result. */
+static uint32_t u32_dialog_modal(uint32_t esp, const uint8_t *tpl, uint32_t dlgproc,
+                                 uint32_t parent, uint32_t param) {
     if (!tpl || !dlgproc) return (uint32_t)-1;
     if (g_u32_modal_hwnd) aret_unimpl("nested modal DialogBox (mono-thread model)");
     uint32_t hDlg = u32_dialog_create(tpl, dlgproc, parent);
@@ -3121,18 +3121,38 @@ uint32_t aret_DialogBoxParamA(uint32_t esp) {
     g_u32_modal_hwnd = 0;
     return (uint32_t)result;
 }
-uint32_t aret_DialogBoxParamW(uint32_t esp) { return aret_DialogBoxParamA(esp); }
-/* CreateDialogParamA(...) -> HWND. Modeless: create + WM_INITDIALOG, return HWND. */
-uint32_t aret_CreateDialogParamA(uint32_t esp) {
-    const uint8_t *tpl = u32_dlg_template(WU(1));
-    uint32_t dlgproc = WU(3), param = WU(4), parent = WU(2);
+/* Modeless dialog core (CreateDialogParam / CreateDialogIndirectParam). */
+static uint32_t u32_dialog_modeless(uint32_t esp, const uint8_t *tpl, uint32_t dlgproc,
+                                    uint32_t parent, uint32_t param) {
     if (!tpl || !dlgproc) return 0;
     uint32_t hDlg = u32_dialog_create(tpl, dlgproc, parent);
     if (!hDlg) return 0;
     u32_call_wndproc(esp, dlgproc, hDlg, U32_WM_INITDIALOG, 0, param);
     return hDlg;
 }
+/* DialogBoxParamA(hInst, lpTemplate, hWndParent, lpDialogFunc, dwInitParam) -> INT_PTR.
+ * lpTemplate is a resource name/id. */
+uint32_t aret_DialogBoxParamA(uint32_t esp) {
+    return u32_dialog_modal(esp, u32_dlg_template(WU(1)), WU(3), WU(2), WU(4));
+}
+uint32_t aret_DialogBoxParamW(uint32_t esp) { return aret_DialogBoxParamA(esp); }
+/* DialogBoxIndirectParamA(hInst, lpTemplate, hWndParent, lpDialogFunc, dwInitParam):
+ * lpTemplate is a DIRECT pointer to an in-memory DLGTEMPLATE (host memory in
+ * shared-stack mode), not a resource id. Same modal semantics otherwise. */
+uint32_t aret_DialogBoxIndirectParamA(uint32_t esp) {
+    return u32_dialog_modal(esp, (const uint8_t *)(uintptr_t)WU(1), WU(3), WU(2), WU(4));
+}
+uint32_t aret_DialogBoxIndirectParamW(uint32_t esp) { return aret_DialogBoxIndirectParamA(esp); }
+/* CreateDialogParamA(...) -> HWND. Modeless: create + WM_INITDIALOG, return HWND. */
+uint32_t aret_CreateDialogParamA(uint32_t esp) {
+    return u32_dialog_modeless(esp, u32_dlg_template(WU(1)), WU(3), WU(2), WU(4));
+}
 uint32_t aret_CreateDialogParamW(uint32_t esp) { return aret_CreateDialogParamA(esp); }
+/* CreateDialogIndirectParamA(...) — modeless, in-memory template. */
+uint32_t aret_CreateDialogIndirectParamA(uint32_t esp) {
+    return u32_dialog_modeless(esp, (const uint8_t *)(uintptr_t)WU(1), WU(3), WU(2), WU(4));
+}
+uint32_t aret_CreateDialogIndirectParamW(uint32_t esp) { return aret_CreateDialogIndirectParamA(esp); }
 /* EndDialog(hDlg, nResult) -> BOOL. Ends the active modal loop with a result. */
 uint32_t aret_EndDialog(uint32_t esp) {
     g_u32_modal_ended = 1; g_u32_modal_result = WI(1);

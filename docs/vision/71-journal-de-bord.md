@@ -2920,4 +2920,22 @@ Détail : **70 §6** (roadmap). Résumé :
   winediff **120→121/121** (`user32_spi`), hash transpile `19acad982194bf07` **inchangé**, `table_is_sorted_by_name` ok,
   régression unifiée **PASS**.
 
+### 2026-07-17 — [HLE-WIN32] `DialogBox/CreateDialogIndirectParamA/W` — dialogue depuis template mémoire (mur itiem95)
+- **Le mur.** `itiem95.exe` (CD 1997), après les fixes du jour, butait sur `DialogBoxIndirectParamA` non implémenté.
+  Diffère de `DialogBoxParamA` (déjà modélisé) **uniquement** par la source du DLGTEMPLATE : un **pointeur direct** en
+  mémoire (host memory en shared-stack) au lieu d'un id de ressource.
+- **Fix (factorisation).** Core modal (`u32_dialog_modal`) et modeless (`u32_dialog_modeless`) extraits — création +
+  WM_INITDIALOG + pompe jusqu'à EndDialog, identiques quelle que soit la source du template. `DialogBoxParam*` passe
+  `u32_dlg_template(id)`, `DialogBoxIndirectParam*` passe `(uint8_t*)WU(1)` direct ; idem CreateDialog*/Indirect.
+  `stdcall_pops` : +DialogBoxIndirectParamA/W@20, CreateDialogIndirectParamA/W@20.
+- **Testabilité (piège template résolu).** 1re fixture avec un contrôle → **Wine rejetait** le template (`result=-1`)
+  car un `DLGITEMTEMPLATE` doit être **DWORD-aligné** (mon struct `#pragma pack(1)` ne l'était pas — ARET, plus laxiste,
+  le lançait → divergence révélatrice). Simplifié à un template **zéro-contrôle** (header + menu/class 0 + titre) dont le
+  DLGPROC `EndDialog` sur WM_INITDIALOG → Wine **et** ARET = `init param=77 / result=4242`.
+- **Mesuré.** `itiem95` avance : `DialogBoxIndirectParamA` **résolu**, crée le dialogue → nouveau « mur » = **modal
+  headless** (`DLGPROC did not EndDialog and no events`) — la limite **honnête** (un dialogue modal attend une entrée
+  utilisateur absente headless), pas un bug. **Portes** : winediff **121→122/122** (`user32_dlgindirect`), hash transpile
+  `19acad982194bf07` **inchangé**, `table_is_sorted_by_name` ok, régression unifiée **PASS**. `user32_dialog` (ressource)
+  toujours vert = la factorisation est propre.
+
 <!-- NOUVELLES ENTRÉES ICI (garder l'ordre chronologique, plus récent en bas) -->
