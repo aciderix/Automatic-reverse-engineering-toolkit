@@ -152,6 +152,13 @@ struct Args {
     /// program's real post-init state (the A+B "save-state" path).
     #[arg(long)]
     snapshot: Option<PathBuf>,
+
+    /// DLL lifting (doc 80 §1.2): load a DLL alongside the binary and lift it
+    /// too, so the app's imports of its exports dispatch to the lifted code
+    /// instead of an HLE shim. Repeatable; each value is `name=path` (the name
+    /// must match the import DLL name, e.g. `--with-dll mydll.dll=./mydll.dll`).
+    #[arg(long, value_name = "NAME=PATH")]
+    with_dll: Vec<String>,
 }
 
 /// Parse a `{ "0xhexva": "Name" }` IAT map and merge it into `prog.imports`.
@@ -330,7 +337,22 @@ fn main() -> Result<()> {
     let data = std::fs::read(&args.binary)
         .with_context(|| format!("failed to read {}", args.binary.display()))?;
 
-    let mut prog = Program::load(&data)?;
+    let mut prog = if args.with_dll.is_empty() {
+        Program::load(&data)?
+    } else {
+        let mut dlls = Vec::with_capacity(args.with_dll.len());
+        for spec in &args.with_dll {
+            let (name, path) = spec
+                .split_once('=')
+                .with_context(|| format!("--with-dll expects NAME=PATH, got `{spec}`"))?;
+            let d = std::fs::read(path)
+                .with_context(|| format!("failed to read DLL {path}"))?;
+            dlls.push((name.to_string(), d));
+        }
+        let p = loader::load_with_modules(&data, &dlls)?;
+        eprintln!("note: lifted {} DLL module(s) alongside the binary", dlls.len());
+        p
+    };
 
     if let Some(path) = &args.iat_symbols {
         let n = merge_iat_symbols(&mut prog, path)?;

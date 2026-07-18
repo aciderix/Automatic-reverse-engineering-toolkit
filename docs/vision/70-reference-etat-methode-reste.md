@@ -170,7 +170,7 @@ bash bench/regression.sh    # PORTE unifiée : difftest 271/271, in-place 3/3,
                             # recompilabilité gzip/ls/cat 100%
 bash bench/difftest.sh              # décompile O0→O3
 bash bench/difftest_transpile.sh    # transpile (hash 19acad982194bf07)
-bash bench/winediff.sh              # axe 2 vs Wine (127/127)
+bash bench/winediff.sh              # axe 2 vs Wine (128/128)
 bash bench/funcdiff.sh              # lift-closure + opt-diff vs Unicorn (0 div)
 # Sweeps de vrais binaires (téléchargent + comparent à Wine) :
 bash bench/sqlite_sweep.sh   bash bench/busybox_sweep.sh   bash bench/corpus_sweep.sh
@@ -190,7 +190,7 @@ bash bench/wallsweep.sh <dir1> [dir2…]  # AGRÈGE --mode walls sur un corpus :
 
 ### État régression (référence — doit rester vert)
 difftest **272/272** · transpile-diff **4/4** (H=`19acad982194bf07`) · winediff
-**127/127** · cpudiff vert (per-instruction + séquences génératives) · funcdiff corpus **0 divergence** (lift **~20,6k** scorées /
+**128/128** · cpudiff vert (per-instruction + séquences génératives) · funcdiff corpus **0 divergence** (lift **~20,6k** scorées /
 **~20k appels** — **imports (stubs `@N` + `@0` scalaires) + appels indirects résolus + intrinsèques mémoire host-backés (memmove/memcpy)** ; scratch sous-esp exclu ; opt ~10k scorées) · SMT **11/11** · in-place **3/3** · magicdiv **2³²** ·
 recompilabilité **100 %** · WASM **7/7**.
 
@@ -655,10 +655,13 @@ résidu qui abort restera l'**obfusqué/fait-main/VM-packé** (indécidable, §9
   forwards verbatim) · **2.1** `parse_pe_imports_detailed` (imports gardant le DLL source) · **2.2** `resolve_module_imports`
   (imports app → VA d'export liftée) · **2.3a** `apply_base_relocations` (rebaser, sound sur site hors-section) · **2.3b**
   `merge_modules` (fusion app+DLL rebasés, exports→symboles-fonction, anti-chevauchement) · **2.3c** `load_with_modules`
-  (assemble tout + **route** chaque slot IAT résolu → patch VA + retrait de `imports`). Tout **inerte** pour le pipeline
-  (aucune régression, hash inchangé). **Reste (1ʳᵉ marche end-to-end, chantier emit ciblé)** : flag CLI + **vérifier le
-  dispatch emit** du `call [slot]` patché vers le `sub_<va>` lifté (run vs Wine, app+DLL minimaux). Puis incrément 3 =
-  lifter comctl32 (pur user-mode) sur le HLE user32/gdi32, puis routage `win32k` pour user32/gdi32.
+  (assemble tout + **route** chaque slot IAT résolu → patch VA + retrait de `imports`).
+  **✅ 1ʳᵉ MARCHE END-TO-END PROUVÉE (2026-07-18)** : flag CLI **`--with-dll nom=chemin`** → une app qui importe d'un DLL
+  est liftée **avec** lui, ses appels d'import dispatchent vers le **code DLL lifté** (le dispatch indirect existant
+  suffit — **0 changement emit**), **bit-identique à Wine** (`bench/winecorpus/dll_lifting`, winediff 128/128 ; contrôle :
+  sans le flag, imports non résolus → la sortie `42` ne peut venir que du code lifté). Défaut inchangé (sans flag,
+  `Program::load`). **Reste** : incrément 3 = lifter comctl32 (pur user-mode) sur le HLE user32/gdi32 — replier aussi les
+  **imports du DLL** dans `merge_modules` (comctl32 importe gdi32/user32) ; puis routage `win32k` pour user32/gdi32.
 - **Levier 2 — Finir les mécanismes bornés qui débloquent une CLASSE** : EH C++ (`__CxxFrameHandler`), bitmap-fonts,
   runtime VB. Chacun = une session, des milliers de binaires.
 - **Levier 3 — Mop-up data-driven** du résidu, trié par le Levier 0.

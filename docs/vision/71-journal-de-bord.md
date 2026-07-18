@@ -3169,4 +3169,27 @@ Détail : **70 §6** (roadmap). Résumé :
   content-based dans le modèle shared-stack) via un **run end-to-end vs Wine** (une app minimale important d'un DLL
   minimal, les deux liftés). C'est la zone emit porteuse → garde dure hash + régression + fixture runnable.
 
+### 2026-07-18 — [LOADER][LIFT][DEMO] Levier 1 : **1ʳᵉ marche end-to-end du lifting DLL** — une app appelle du code DLL lifté, bit-identique à Wine
+- **Le jalon.** Une app Windows qui **importe d'un DLL** est liftée **avec ce DLL** → les appels d'import dispatchent
+  vers le **code DLL lifté** (pas un shim HLE), sortie **bit-identique à Wine**. C'est la thèse du Levier 1 prouvée en
+  exécution, pas juste en structure.
+- **Le câblage (minimal, zone emit non touchée).** Flag CLI **`--with-dll nom=chemin`** (`src/main.rs`, répétable) →
+  bascule sur `load_with_modules` (briques Inc.1→2.3c). **Rien d'autre à changer dans l'emit** : le mécanisme de dispatch
+  indirect existant suffit. `load_with_modules` écrit la **VA d'export** dans le slot IAT (au lieu de la laisser à un
+  shim) et le retire de `imports` ; à l'exécution `call [slot]` lit cette VA et `aret_call` la trouve dans la table de
+  dispatch (l'export lifté est une fonction interne récupérée `sub_<va>`) → appelle le vrai code. `__aret_patch_iat`
+  n'écrase pas le slot (il n'itère que `imports`, d'où le slot est retiré). L'ABI colle (l'export lifté suit l'ABI
+  `sub_` interne, esp threadé). **Défaut inchangé** : sans `--with-dll`, `Program::load` — zéro impact.
+- **Preuve mesurée (fixture + contrôle).** `bench/winecorpus/dll_lifting.{c,dll.c}` : app importe `lift_add`/`lift_mul`/
+  `lift_poly` (boucle+branche) d'un DLL compagnon. **Avec `--with-dll`** → `add=42 mul=42 poly=55`, **SOUND**, =Wine.
+  **Contrôle sans `--with-dll`** → `dll_add`/`dll_mul` = imports non implémentés (stubs → `0`), INCOMPLETE : la sortie
+  `42` **ne peut venir que** du code DLL lifté (aucun shim `aret_lift_*` n'existe). Harness winediff étendu : convention
+  `NAME.dll.c` (DLL compagnon construit + lié + lifté via `--with-dll` ; Wine le charge normalement depuis $TMP ;
+  `*.dll.c` exclus du loop standalone). **winediff 127→128/128** (`dll_lifting`, bit-identique Wine).
+- **Portes** : build OK, bin unit tests **72/72**, hash transpile `19acad982194bf07` **inchangé** (flag guardé), régression
+  unifiée **PASS**, winediff **128/128**. **⇒ Le Levier 1 est prouvé end-to-end sur un DLL réel.** Reste pour le vrai
+  monde : lifter comctl32 (pur user-mode) sur le HLE user32/gdi32 (incrément 3) — replier aussi les **imports du DLL**
+  (mydll→msvcrt) dans `merge_modules` (aujourd'hui la fixture est self-contained ; comctl32 importe gdi32/user32) ;
+  puis routage `win32k` pour user32/gdi32.
+
 <!-- NOUVELLES ENTRÉES ICI (garder l'ordre chronologique, plus récent en bas) -->

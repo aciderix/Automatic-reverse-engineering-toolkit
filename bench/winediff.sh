@@ -60,6 +60,9 @@ norm() { tr -d '\r'; }   # ignore CRLF-vs-LF line-ending differences
 
 pass=0; total=0
 for src in "$CORPUS"/*.c; do
+  # Companion DLL sources (NAME.dll.c) are built by their app fixture, not run
+  # standalone — skip them in the main loop.
+  case "$src" in *.dll.c) continue;; esac
   name="$(basename "$src" .c)"; total=$((total+1))
   # Optional Windows resource (NAME.rc): compiled with windres and linked in, so
   # tests can embed resources (e.g. a VS_VERSIONINFO block for the version APIs).
@@ -88,6 +91,20 @@ for src in "$CORPUS"/*.c; do
       echo "FAIL  $name (dlltool: $(head -1 "$TMP/err"))"; continue
     fi
   fi
+  # Optional companion DLL (winecorpus/NAME.dll.c): built as a real PE DLL the app
+  # imports from; ARET lifts it too via `--with-dll` (DLL lifting, doc 80 §1.2) so
+  # the app's imports of its exports dispatch to lifted code, not an HLE shim. The
+  # DLL sits in $TMP next to the app, so Wine (the oracle) loads it normally.
+  withdll=()
+  if [ -f "$CORPUS/$name.dll.c" ]; then
+    dllname="${name}dll.dll"
+    if ! "$MINGW" -O1 -w -shared "$CORPUS/$name.dll.c" -o "$TMP/$dllname" \
+         -Wl,--out-implib,"$TMP/$name.dllimp.a" 2>"$TMP/err"; then
+      echo "FAIL  $name (DLL build: $(head -1 "$TMP/err"))"; continue
+    fi
+    imp_lib="$imp_lib $TMP/$name.dllimp.a"       # link the app against the DLL
+    withdll=(--with-dll "$dllname=$TMP/$dllname") # and lift the DLL under ARET
+  fi
   if ! "$MINGW" -O1 -w $xcflags "$src" $imp_lib $res_obj -lversion -lole32 -loleaut32 -luser32 -lgdi32 -lcomctl32 -llz32 -o "$TMP/$name.exe" 2>"$TMP/err"; then
     echo "FAIL  $name (PE build: $(head -1 "$TMP/err"))"; continue
   fi
@@ -111,7 +128,7 @@ for src in "$CORPUS"/*.c; do
   oracle="$(cd "$TMP" && "${disp[@]}" wine "$TMP/$name.exe" "${pargs[@]}" <"$infile" 2>/dev/null | norm)"
   # ARET: transpile + run the same PE natively (args after `--`).
   rm -rf "$TMP/out"
-  got="$(cd "$TMP" && "${disp[@]}" "$ARET" "$TMP/$name.exe" --mode transpile --out-dir "$TMP/out" --run -- "${pargs[@]}" <"$infile" 2>"$TMP/aerr" \
+  got="$(cd "$TMP" && "${disp[@]}" "$ARET" "$TMP/$name.exe" "${withdll[@]}" --mode transpile --out-dir "$TMP/out" --run -- "${pargs[@]}" <"$infile" 2>"$TMP/aerr" \
         | extract_aret | norm)"
   if [ "$oracle" = "$got" ]; then
     pass=$((pass+1)); echo "  ok    $name"
