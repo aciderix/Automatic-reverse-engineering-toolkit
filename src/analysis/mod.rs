@@ -307,7 +307,12 @@ fn preceded_by_terminator(prog: &Program, global: &BTreeMap<u64, Insn>, addr: u6
     if addr == 0 {
         return false;
     }
-    // (A) a decoded terminator instruction ends exactly at `addr`.
+    // (A) a decoded terminator instruction (in the reachable stream) ends exactly at
+    // `addr` — the authoritative linear decode of the preceding function. Only trust an
+    // instruction already in `global`: a *fresh* decode at `addr-k` is unsound here
+    // because x86 is not self-synchronising (decoding from a mid-instruction byte can
+    // yield a spurious short instruction that ends at `addr` yet is not the real
+    // predecessor), which both misses real terminators and could match false ones.
     for k in 1..=15u64 {
         if let Some(prev) = global.get(&(addr - k)) {
             if prev.next_addr() == addr {
@@ -315,8 +320,15 @@ fn preceded_by_terminator(prog: &Program, global: &BTreeMap<u64, Insn>, addr: u6
             }
         }
     }
-    // (B) int3 padding immediately before `addr`.
-    prog.read_from(addr - 1).is_some_and(|b| b.first() == Some(&0xCC))
+    // (B) the byte immediately before `addr` is a one-byte function terminator: `int3`
+    // (0xCC) inter-function padding, or a plain `ret` (0xC3). This catches an FPO
+    // callee whose *preceding* function was never recovered (so its `ret` is absent
+    // from `global`, and (A) cannot see it). Both bytes are single-byte instructions,
+    // so `addr` is a real boundary; combined with the address-taken pointer that
+    // sourced this candidate, a coincidental interior match is vanishingly unlikely
+    // (and would abort soundly, never miscompile).
+    prog.read_from(addr - 1)
+        .is_some_and(|b| matches!(b.first(), Some(0xCC) | Some(0xC3)))
 }
 
 /// Pure byte test for a recognised function-entry prologue (frame setup, stack

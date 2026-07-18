@@ -336,9 +336,13 @@ recompilabilité **100 %** · WASM **7/7**.
   **isolé** (hors table ≥3) initialisé statiquement en `.data`, dont la cible est une fonction **FPO** (ouvre sur `push
   imm`/`cmp [m],imm`, pas de prologue reconnu), échouait `looks_like_func_start` → l'appel indirect abortait. Fix
   **sound par frontière** : la cible est un vrai début de fonction dès qu'une frontière **prouvée** la précède — (A) une
-  insn décodée finit exactement là et est un terminateur (`ret`/`ret N`/`jmp`), ou (B) l'octet avant = `int3` (padding
-  MSVC). Ne peut pas tronquer (rien ne franchit un terminateur). Mur mesuré dominant sur le corpus MSVC 1997 (avance
-  slidelib/DEMO32/itiem95) ; **+89 fonctions récupérées dans busybox/sqlite** (funcdiff 20501→20590, 0 div).
+  insn **déjà décodée** (dans `global`) finit exactement là et est un terminateur (`ret`/`ret N`/`jmp`), ou (B) l'octet
+  avant = **`int3`(0xCC)** padding **ou `ret`(0xC3)** — 1 octet, donc `addr` est une vraie frontière même quand la
+  fonction *précédente* n'est pas récupérée (son `ret` absent de `global`, cas `slidelib 0x404926`). ⚠️ **Pas de
+  décodage frais** à `addr-k` (x86 non auto-synchronisant : un octet `ret`/imm intérieur donnerait une fausse insn courte
+  finissant à `addr` — cassait `0x405f22`). Ne peut pas tronquer (rien ne franchit un terminateur). Mur mesuré dominant
+  sur le corpus MSVC 1997 (avance slidelib/DEMO32/itiem95) ; **+89 fonctions récupérées dans busybox/sqlite** (funcdiff
+  20501→20590, 0 div ; l'extension `0xC3` : slidelib 103→111 fn, régression complète verte).
 - **FLIRT** : opérandes **relocalisés wildcardés** (`.reloc`) ; **thunks jamais
   signaturés** (résolus structurellement) ; glue reconnue = `looks_like_func_start`.
   ⚠️ FLIRT est **cosmétique** pour nos cibles (reconnaît du code de biblio, pas le

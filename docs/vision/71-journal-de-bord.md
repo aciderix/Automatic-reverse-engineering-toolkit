@@ -2881,4 +2881,26 @@ Détail : **70 §6** (roadmap). Résumé :
   signature round-trip 256 octets `sig=67a9e5e5` = Wine), hash transpile `19acad982194bf07` **inchangé**,
   `table_is_sorted_by_name` ok, régression unifiée **PASS**.
 
+### 2026-07-17 — [RECOV] `preceded_by_terminator` étendu au `ret`(0xC3) — slidelib `0x404926`, + wzbeta32 = C++ EH (borné)
+- **Suite du sweep end-to-end.** Après les fixes du jour, re-run des MSVC du CD 1997 : `slidelib`→`0x404926`,
+  `wzbeta32`→`0x400000`, `ARTLANT`→`SystemParametersInfoA`, `itiem95`→`DialogBoxIndirectParamA`.
+- **wzbeta32 `0x400000` = C++ EH (diagnostiqué, borné).** gdb : `sub_404b88` (chaîne startup). Sa disasm = machinerie
+  **exception C++ MSVC** : walk `fs:0`, `cmp eax, 0x56433230` ("VC20" magic), struct de registration, dispatch tail
+  `jmp *[edx+0x14]`. C'est `__CxxFrameHandler`/EH C++ — **même chantier que la brique EH restante** (`__except_handler3`/
+  C++), pas un bug isolé. `0x400000` (image base) = champ EH non peuplé. **Borné** (chantier EH lourd).
+- **slidelib `0x404926` = même motif FPO, gap de la brique récup.** Disasm : `0x404926` précédé d'un `ret`(0xC3) à
+  `0x404925`, référencé **1×** par un pointeur `.data` isolé (`0x40b168`, entouré de zéros) — exactement le motif de
+  `0x405f22`. Mais `preceded_by_terminator` le ratait : la fonction *précédente* n'est pas récupérée → son `ret` absent
+  de `global` → (A) échoue ; et (B) ne testait que `int3`(0xCC), pas `ret`(0xC3).
+- **Fix (extension sound de (B)).** (B) accepte désormais l'octet-avant ∈ {`0xCC` int3, `0xC3` ret} — tous deux
+  **1 octet** ⇒ `addr` est une vraie frontière. **Piège évité** : tentative initiale de *décoder frais* à `addr-k` →
+  cassait `0x405f22` (x86 non auto-synchronisant : `decode_at(addr-2)` trouvait un faux `adc [eax],al` de 2 o finissant
+  à `addr` **avant** d'atteindre le vrai `ret 0x10` de 3 o à `addr-3`, et comme non-terminateur → rejet). Donc (A) reste
+  **`global`-only** (décode linéaire autoritaire), (B) = test d'octet direct.
+- **Mesuré.** `slidelib` 103→**111 fonctions**, franchit `0x405f22` **et** `0x404926` (ne bute plus sur un appel
+  indirect). **Portes (récup = zone la plus risquée → tout passé)** : hash transpile `19acad982194bf07` **inchangé**,
+  régression unifiée **PASS** (difftest 272/272, funcdiff **20558 / 0 div**, SMT 11/11, recompilabilité 100%), winediff
+  **120/120**, sweeps sqlite + busybox **60/60** bit-identiques, **gauntlet 19/21** (inchangé). Zéro régression malgré
+  l'octet `0xC3` (plus permissif) — la preuve address-taken + frontière tient.
+
 <!-- NOUVELLES ENTRÉES ICI (garder l'ordre chronologique, plus récent en bas) -->
