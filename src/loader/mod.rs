@@ -148,6 +148,11 @@ pub struct Program {
     pub image_base: u64,
     /// This module's own exports (PE Export Directory); empty for a plain exe.
     pub exports: Vec<PeExport>,
+    /// Lifted DLL initializers to run before the app entry (DLL lifting): each
+    /// `(entry_va, hinstance)` is a merged DLL's rebased entry point, called as
+    /// `DllMain(hinstance, DLL_PROCESS_ATTACH, 0)` so the DLL registers its
+    /// window classes / inits its globals — empty unless DLLs were merged in.
+    pub dll_inits: Vec<(u64, u64)>,
     pub sections: Vec<Section>,
     /// address -> symbol, sorted, used to name functions and resolve call targets.
     pub symbols: BTreeMap<u64, KnownSymbol>,
@@ -292,6 +297,7 @@ impl Program {
             entry: obj.entry(),
             image_base,
             exports,
+            dll_inits: Vec::new(),
             sections,
             symbols,
             imports,
@@ -671,6 +677,10 @@ pub struct LoadedModule {
     pub name: String,
     /// The module's exports (from `parse_pe_exports`).
     pub exports: Vec<PeExport>,
+    /// The module's rebased entry point (`_DllMainCRTStartup`), 0 if none.
+    pub init_entry: u64,
+    /// The module's rebased image base — passed as `hinstDLL` to its DllMain.
+    pub hinstance: u64,
 }
 
 /// Normalize a DLL name for matching: lowercase, drop a trailing `.dll`. So
@@ -793,6 +803,8 @@ pub fn merge_modules(
             .unwrap_or(0);
         let new_base = (cur_end + 0xffff) & !0xffff; // round up to 64K
         let delta = new_base as i64 - dll.image_base as i64;
+        // Rebased entry point (_DllMainCRTStartup) — 0 if the DLL has none.
+        let init_entry = if dll.entry != 0 { (dll.entry as i64 + delta) as u64 } else { 0 };
 
         apply_base_relocations(&mut dll.sections, &dll.base_relocs, delta)?;
         for s in &mut dll.sections {
@@ -824,6 +836,14 @@ pub fn merge_modules(
                     .or_insert_with(|| KnownSymbol { address: *va, name: n.clone(), is_function: true });
             }
         }
+        // Seed the DLL entry (DllMain wrapper) as a function so it is recovered.
+        if init_entry != 0 {
+            primary.symbols.entry(init_entry).or_insert_with(|| KnownSymbol {
+                address: init_entry,
+                name: format!("DllMainCRTStartup_{init_entry:x}"),
+                is_function: true,
+            });
+        }
         // Fold the module's own symbols (shifted) in too, without clobbering.
         for (addr, sym) in std::mem::take(&mut dll.symbols) {
             let a = (addr as i64 + delta) as u64;
@@ -842,7 +862,7 @@ pub fn merge_modules(
             primary.pe_imports.entry(s).or_insert(imp);
         }
         primary.sections.append(&mut dll.sections);
-        loaded.push(LoadedModule { name, exports });
+        loaded.push(LoadedModule { name, exports, init_entry, hinstance: new_base });
     }
     Ok(loaded)
 }
@@ -865,6 +885,12 @@ pub fn load_with_modules(primary_data: &[u8], dlls: &[(String, Vec<u8>)]) -> Res
         dll_progs.push((name.clone(), Program::load(data)?));
     }
     let modules = merge_modules(&mut primary, dll_progs)?;
+    // DLL initializers (DllMain) to run before the app entry, in load order.
+    primary.dll_inits = modules
+        .iter()
+        .filter(|m| m.init_entry != 0)
+        .map(|m| (m.init_entry, m.hinstance))
+        .collect();
     let resolved = resolve_module_imports(&primary.pe_imports, &modules);
     let ptr = primary.bitness.bits() as u64 / 8;
     for (&slot, &export_va) in &resolved {
@@ -1390,6 +1416,8 @@ mod tests {
     fn resolve_module_imports_binds_by_name_and_ordinal() {
         let module = LoadedModule {
             name: "mydll.dll".into(),
+            init_entry: 0,
+            hinstance: 0,
             exports: vec![
                 PeExport { ordinal: 5, name: Some("Alpha".into()), target: PeExportTarget::Address(0x2000) },
                 PeExport { ordinal: 6, name: None, target: PeExportTarget::Address(0x2100) },
@@ -1427,7 +1455,12 @@ mod tests {
             return;
         };
         let app_imports = parse_pe_imports_detailed(&comctl);
-        let gdi_mod = LoadedModule { name: "gdi32.dll".into(), exports: parse_pe_exports(&gdi) };
+        let gdi_mod = LoadedModule {
+            name: "gdi32.dll".into(),
+            init_entry: 0,
+            hinstance: 0,
+            exports: parse_pe_exports(&gdi),
+        };
         let resolved = resolve_module_imports(&app_imports, std::slice::from_ref(&gdi_mod));
         assert!(!resolved.is_empty(), "comctl32 imports from gdi32 should resolve");
 

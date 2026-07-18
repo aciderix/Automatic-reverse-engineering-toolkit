@@ -3304,4 +3304,27 @@ Détail : **70 §6** (roadmap). Résumé :
 - **Portes** : exploration mesurée, **aucun code changé**, aucune fixture ajoutée (la progress bar n'est pas verte —
   honnête). Le jalon ImageList (contrôle stateless réel bit-identique Wine, winediff 130/130) reste la preuve acquise.
 
+### 2026-07-18 — [LOADER][BUILD] Levier 1 : **DllMain des DLL liftés exécuté au démarrage** — comctl32 enregistre ses classes de contrôle
+- **Le mur (débogué au tour précédent).** Un contrôle comctl32 stateful (progress bar) : `CreateWindowEx("msctls_progress32")`
+  retournait 0 car la classe n'était pas enregistrée. Isolé : dans ce comctl32, les classes sont enregistrées dans le
+  **DllMain (DLL_PROCESS_ATTACH)**, qu'on **n'appelait pas** en liftant. C'est un gap **général** : tout DLL stateful
+  initialise dans DllMain (classes, globals, TLS).
+- **Fix (brique générale, 3 couches).** (1) `Program::dll_inits: Vec<(entry_va, hinstance)>` — les initialiseurs des DLL
+  fusionnés. (2) `merge_modules` calcule l'**entrée rebasée** de chaque DLL (`_DllMainCRTStartup`), la **seed comme
+  fonction** (récupérée), et remonte `(entry, base)` ; `load_with_modules` les pose dans `prog.dll_inits`. (3) le builder
+  émet, dans `aret_main.c` **avant l'entrée de l'app**, un appel `DllMain(hinstDLL=base, DLL_PROCESS_ATTACH=1, 0)` par DLL
+  (frame stdcall sur la pile machine partagée, retourne avant le frame de l'app). **Défaut inchangé** : sans DLL fusionné,
+  `dll_inits` vide → `aret_main.c` byte-identique (hash couvre les fonctions liftées de toute façon).
+- **Mesuré : ça marche exactement comme Wine.** Le DllMain lifté de comctl32 tourne au démarrage et enregistre **toutes**
+  ses classes de contrôle via `RegisterClassW` routé vers le HLE (`msctls_progress32` wndproc lifté `4ad5f0`, trackbar,
+  toolbar, statusbar, listview, tab, …). `CreateWindowEx(PROGRESS_CLASS)` → **`pb=1`** (avant : 0). +shim
+  `DisableThreadLibraryCalls` (no-op sound, appelé par le DllMain).
+- **Fixture** `winecorpus/comctl32_class_reg.{c,withdll}` (display-free) : **`preinit_progress=1`** (la classe existe
+  **avant** `InitCommonControlsEx` = le DllMain a tourné au chargement, comme Wine) + progress/trackbar/toolbar/status=1,
+  bogus=0 — **bit-identique à Wine** (l'atome GetClassInfo étant opaque, on compare enregistré-ou-non).
+- **Portes** : winediff **130→131/131**, hash transpile `19acad982194bf07` **inchangé**, `table_is_sorted_by_name` ok,
+  régression unifiée **PASS** ; `comctl32_imagelist`/`dll_lifting` **toujours verts** (ils liftent avec DllMain actif).
+  **Reste (couche suivante)** : le **round-trip des messages** du contrôle (`PBM_SETPOS`/`GETPOS` → `pos=50`) — la fenêtre
+  est créée mais l'état du contrôle (extra-bytes `cbWndExtra` / struct alloué en WM_(NC)CREATE) n'est pas encore backé.
+
 <!-- NOUVELLES ENTRÉES ICI (garder l'ordre chronologique, plus récent en bas) -->

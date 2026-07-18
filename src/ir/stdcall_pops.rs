@@ -121,6 +121,7 @@ static TABLE: &[(&str, u32)] = &[
     ("DialogBoxIndirectParamW", 20),
     ("DialogBoxParamA", 20),
     ("DialogBoxParamW", 20),
+    ("DisableThreadLibraryCalls", 4),
     ("DispatchMessageA", 4),
     ("DispatchMessageW", 4),
     ("DosDateTimeToFileTime", 12),

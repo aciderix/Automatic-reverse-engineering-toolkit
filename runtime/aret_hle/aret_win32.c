@@ -4264,6 +4264,10 @@ uint32_t aret_ImageList_Destroy(uint32_t esp) { int m = iml_idx(WU(0)); if (m < 
  * -> BOOL. Registering the control classes is a no-op in our model. */
 uint32_t aret_InitCommonControls(uint32_t esp) { (void)esp; return 0; }
 uint32_t aret_InitCommonControlsEx(uint32_t esp) { (void)esp; return 1; }
+/* DisableThreadLibraryCalls(hModule) -> BOOL: opt out of DLL_THREAD_ATTACH/DETACH
+ * notifications. We don't deliver those to lifted DllMains anyway, so it's a
+ * sound success no-op. (Called by comctl32's DllMain at process attach.) */
+uint32_t aret_DisableThreadLibraryCalls(uint32_t esp) { (void)esp; return 1; }
 
 /* ---- Bitmap resources: LoadBitmap / LoadImage(IMAGE_BITMAP) ---- */
 /* Decode a packed DIB (BITMAPINFOHEADER + palette + bits, no BITMAPFILEHEADER)

@@ -1080,6 +1080,21 @@ pub fn transpile(
     // aret_main.c — a native entry that maps memory, sets up the single shared
     // machine stack, then drives the transpiled entry point with the stack-top
     // pointer. Every transpiled function threads this `__esp` through its calls.
+    // Lifted DLL initializers (DllMain), run before the app entry so a merged
+    // DLL registers its window classes / inits globals. Each is called as
+    // `_DllMainCRTStartup(hinstDLL, DLL_PROCESS_ATTACH=1, 0)` on the shared
+    // machine stack; it returns before the app entry frame is laid at `top`.
+    let mut dll_init_decls = String::new();
+    let mut dll_init_calls = String::new();
+    for &(entry, base) in &prog.dll_inits {
+        dll_init_decls.push_str(&format!(
+            "         uint64_t sub_{entry:x}(uint64_t,uint64_t,uint64_t,uint64_t,uint64_t);\n"
+        ));
+        dll_init_calls.push_str(&format!(
+            "    {{ uint32_t *dsp=(uint32_t*)top; dsp[0]=0; dsp[1]=0x{base:x}u; dsp[2]=1u; dsp[3]=0u; \
+             sub_{entry:x}((uint64_t)(uintptr_t)top, 0x{base:x}u, 1u, 0, 0); }}\n"
+        ));
+    }
     let main_c = format!(
         "#include <stdint.h>\n\n\
          /* One shared machine stack for all transpiled functions (UBT M3). */\n\
@@ -1092,7 +1107,8 @@ pub fn transpile(
          void __aret_map_memory(void);\n\
          void __aret_patch_iat(void);\n\
          void __aret_set_stack_bounds(uint32_t base, uint32_t limit);\n\
-         uint64_t sub_{entry:x}(uint64_t __esp, uint64_t a, uint64_t c, uint64_t d, uint64_t b);\n\n\
+         uint64_t sub_{entry:x}(uint64_t __esp, uint64_t a, uint64_t c, uint64_t d, uint64_t b);\n\
+         {dll_init_decls}\
          int main(int argc, char **argv) {{\n\
          \x20   aret_real_argc = argc; aret_real_argv = argv;\n\
          {map_call}    uint8_t *top = aret_stack + sizeof(aret_stack) - 64;\n\
@@ -1101,6 +1117,7 @@ pub fn transpile(
          \x20      them and dereferences near the top hits real memory, not a fake VA. */\n\
          \x20   __aret_set_stack_bounds((uint32_t)(uintptr_t)(aret_stack + sizeof(aret_stack)),\n\
          \x20                           (uint32_t)(uintptr_t)aret_stack);\n\
+         {dll_init_calls}\
          {argv_prep}\
          \x20   /* Lay a cdecl frame so an entry at `main` reads argc/argv from the\n\
          \x20      shared machine stack at [esp+4]/[esp+8]; harmless for a no-arg\n\
