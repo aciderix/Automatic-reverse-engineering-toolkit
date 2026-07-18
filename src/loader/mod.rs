@@ -829,6 +829,18 @@ pub fn merge_modules(
             let a = (addr as i64 + delta) as u64;
             primary.symbols.entry(a).or_insert(KnownSymbol { address: a, ..sym });
         }
+        // Fold the module's OWN imports (shifted) so its calls into other DLLs
+        // (comctl32 → gdi32/user32/kernel32) stay shim-bound — or get routed too
+        // if that DLL is also loaded (resolve_module_imports sees pe_imports).
+        // A self-contained DLL (the minimal fixture) has none; a real one does.
+        for (slot, name) in std::mem::take(&mut dll.imports) {
+            let s = (slot as i64 + delta) as u64;
+            primary.imports.entry(s).or_insert(name);
+        }
+        for (slot, imp) in std::mem::take(&mut dll.pe_imports) {
+            let s = (slot as i64 + delta) as u64;
+            primary.pe_imports.entry(s).or_insert(imp);
+        }
         primary.sections.append(&mut dll.sections);
         loaded.push(LoadedModule { name, exports });
     }
@@ -1497,8 +1509,14 @@ mod tests {
         let mut primary = Program::load(&comctl).unwrap();
         let gdi_prog = Program::load(&gdi).unwrap();
         let primary_secs_before = primary.sections.len();
+        let imports_before = primary.imports.len();
+        let gdi_imports = gdi_prog.imports.len();
+        assert!(gdi_imports > 0, "gdi32 imports from ntdll/kernel32/…");
 
         let loaded = merge_modules(&mut primary, vec![("gdi32.dll".into(), gdi_prog)]).unwrap();
+
+        // gdi32's own imports (shifted) are folded in (none collide by VA).
+        assert_eq!(primary.imports.len(), imports_before + gdi_imports);
         assert_eq!(loaded.len(), 1);
         let gdi_mod = &loaded[0];
 

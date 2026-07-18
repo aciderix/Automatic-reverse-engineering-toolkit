@@ -3192,4 +3192,18 @@ Détail : **70 §6** (roadmap). Résumé :
   (mydll→msvcrt) dans `merge_modules` (aujourd'hui la fixture est self-contained ; comctl32 importe gdi32/user32) ;
   puis routage `win32k` pour user32/gdi32.
 
+### 2026-07-18 — [LOADER] Levier 1 : `merge_modules` replie aussi les **imports du DLL** (vers les vraies DLL)
+- **Le manque (vers comctl32).** La fixture `dll_lifting` est **self-contained** (le DLL n'importe rien), mais une
+  **vraie** DLL importe d'autres modules (comctl32 → gdi32/user32/kernel32/advapi32, gdi32 → ntdll/win32u/ucrtbase…).
+  `merge_modules` repliait sections + symboles + exports, mais **pas les imports du DLL** → après fusion, les appels du
+  DLL vers ses propres imports étaient **perdus** (ni shim, ni routés).
+- **Fix.** `merge_modules` replie maintenant `dll.imports` **et** `dll.pe_imports` (clés **décalées** du delta de rebase)
+  dans le primary (sans clobber). ⇒ un import du DLL reste **shim-bound**, ou est **routé** aussi si ce module cible est
+  lui-même chargé (`resolve_module_imports` voit les `pe_imports` repliés → chaînes inter-DLL supportées).
+- **Testabilité.** `merge_modules_rebases_and_folds_exports` étendu : fusionner gdi32 dans comctl32 → `primary.imports`
+  gagne **exactement** le nombre d'imports de gdi32 (`imports_before + gdi_imports`, aucune collision de VA). Fixture
+  `dll_lifting` **toujours verte** (`add=42 mul=42 poly=55`, SOUND — self-contained, repli = no-op).
+- **Portes** : bin unit tests **72/72**, hash transpile `19acad982194bf07` **inchangé**, fixture end-to-end OK. Prochaine
+  étape réelle : tenter de lifter **comctl32** (pur user-mode) sur le HLE user32/gdi32 — mesurer ce qui lift / abort sound.
+
 <!-- NOUVELLES ENTRÉES ICI (garder l'ordre chronologique, plus récent en bas) -->
