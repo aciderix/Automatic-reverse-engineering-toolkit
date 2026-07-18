@@ -3020,4 +3020,17 @@ Détail : **70 §6** (roadmap). Résumé :
 - **Portes** : winediff **124→125/125**, hash transpile `19acad982194bf07` **inchangé** (runtime-only), régression
   unifiée **PASS**. Reste tête : `FormatMessageA` (11, table de messages système), puis famille GDI mapping-mode.
 
+### 2026-07-18 — [HLE-WIN32] `FormatMessageA/W` (FROM_SYSTEM) — tête mesurée #3, table de messages extraite de Wine
+- **Tête #3** (11/37). `FormatMessage(FROM_SYSTEM)` traduit un code d'erreur en texte. Strings **extraites verbatim de
+  Wine** (l'oracle) → table `u32_sys_msg` (22 codes courants : 0/1/2/3/5/6/8/13/14/32/33/38/50/87/112/122/183/206/234/
+  259/1223), chacune finissant `.\r\n`. `FORMAT_MESSAGE_ALLOCATE_BUFFER` → `LocalAlloc` (malloc, LocalFree=free) + écrit
+  le pointeur via `buffer`. `FORMAT_MESSAGE_FROM_STRING`/`FROM_HMODULE`/inserts **et** un code hors table ⇒ **abort
+  sound** (jamais une string vide/fausse ; la table grandit par la donnée). W = même table, élargie.
+- **Testabilité.** Fixture `winecorpus/win32_formatmessage.c` : 12 codes (message + longueur + octets exacts incl. CRLF)
+  + le chemin ALLOCATE_BUFFER. Wine **et** ARET **bit-identiques**.
+- **Portes** : winediff **125→126/126**, hash transpile `19acad982194bf07` **inchangé** (runtime-only),
+  `table_is_sorted_by_name` ok, régression unifiée **PASS**. **Tête mesurée épuisée** (UnhandledExceptionFilter 31 /
+  CreateProcess 27 / FormatMessage 11 faits) → prochaine vague : **re-mesurer** (le levier change) puis la famille GDI
+  mapping-mode (`SetViewportOrgEx`/`Scale*`/…) — candidate au **lifting DLL** (Levier 1).
+
 <!-- NOUVELLES ENTRÉES ICI (garder l'ordre chronologique, plus récent en bas) -->

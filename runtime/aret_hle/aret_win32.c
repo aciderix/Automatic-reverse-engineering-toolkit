@@ -722,6 +722,71 @@ uint32_t aret_CharToOemA(uint32_t esp)  { return u32_xlate_z(WP(0), WP(1), u32_a
 uint32_t aret_OemToCharA(uint32_t esp)  { return u32_xlate_z(WP(0), WP(1), u32_oem_to_ansi); }
 uint32_t aret_CharToOemBuffA(uint32_t esp) { return u32_xlate_n(WP(0), WP(1), WP(2), u32_ansi_to_oem); }
 uint32_t aret_OemToCharBuffA(uint32_t esp) { return u32_xlate_n(WP(0), WP(1), WP(2), u32_oem_to_ansi); }
+
+/* System error message table — the exact strings Wine's FormatMessage(FROM_SYSTEM)
+ * produces (extracted verbatim, our oracle), each ending ".\r\n". Covers the common
+ * error codes programs format; a code NOT here aborts soundly (never an empty/wrong
+ * message) and is added when a real binary needs it. */
+static const struct { uint32_t code; const char *msg; } u32_sys_msg[] = {
+    {0, "Success.\r\n"},        {1, "Invalid function.\r\n"},   {2, "File not found.\r\n"},
+    {3, "Path not found.\r\n"}, {4, "Too many open files.\r\n"},{5, "Access denied.\r\n"},
+    {6, "Invalid handle.\r\n"}, {8, "Not enough memory.\r\n"},  {13, "Invalid data.\r\n"},
+    {14, "Out of memory.\r\n"}, {32, "Sharing violation.\r\n"}, {33, "Lock violation.\r\n"},
+    {38, "End of file.\r\n"},   {50, "Request not supported.\r\n"}, {87, "Invalid parameter.\r\n"},
+    {112, "Disk full.\r\n"},    {122, "Insufficient buffer.\r\n"}, {183, "File already exists.\r\n"},
+    {206, "File name is too long.\r\n"}, {234, "More data available.\r\n"},
+    {259, "No more data available.\r\n"}, {1223, "Operation canceled by user.\r\n"},
+};
+static const char *u32_sys_msg_lookup(uint32_t code) {
+    for (int i = 0; i < (int)(sizeof u32_sys_msg / sizeof u32_sys_msg[0]); i++)
+        if (u32_sys_msg[i].code == code) return u32_sys_msg[i].msg;
+    return 0;
+}
+/* FormatMessage(A/W)(flags, source, msgId, langId, buffer, size, args) -> chars
+ * written (excl. NUL). Only FORMAT_MESSAGE_FROM_SYSTEM is modelled (the dominant use:
+ * turn an error code into its text), optionally with ALLOCATE_BUFFER (LocalAlloc the
+ * result and store the pointer through `buffer`). FROM_STRING / FROM_HMODULE / insert
+ * processing, and a code not in the verified table, abort soundly — never a wrong or
+ * empty string. */
+uint32_t aret_FormatMessageA(uint32_t esp) {
+    uint32_t flags = WU(0), msgId = WU(2), buf = WU(4), size = WU(5);
+    if (!(flags & 0x00001000u)) { aret_unimpl("FormatMessageA: only FORMAT_MESSAGE_FROM_SYSTEM modelled"); return 0; }
+    const char *msg = u32_sys_msg_lookup(msgId);
+    if (!msg) { char m[80]; snprintf(m, sizeof m, "FormatMessageA: unmodelled system message %u", msgId); aret_unimpl(m); return 0; }
+    uint32_t len = (uint32_t)strlen(msg);
+    if (flags & 0x00000100u /*ALLOCATE_BUFFER*/) {
+        char *p = (char *)malloc(len + 1);
+        if (!p) { g_last_error = 8u; return 0; }
+        memcpy(p, msg, len + 1);
+        if (buf) *(uint32_t *)(uintptr_t)buf = (uint32_t)(uintptr_t)p;   /* buffer is LPSTR* */
+        return len;
+    }
+    if (!buf || size == 0) return 0;
+    uint32_t n = len < size - 1 ? len : size - 1;
+    char *d = (char *)(uintptr_t)buf;
+    memcpy(d, msg, n); d[n] = 0;
+    return n;
+}
+uint32_t aret_FormatMessageW(uint32_t esp) {
+    uint32_t flags = WU(0), msgId = WU(2), buf = WU(4), size = WU(5);
+    if (!(flags & 0x00001000u)) { aret_unimpl("FormatMessageW: only FORMAT_MESSAGE_FROM_SYSTEM modelled"); return 0; }
+    const char *msg = u32_sys_msg_lookup(msgId);
+    if (!msg) { char m[80]; snprintf(m, sizeof m, "FormatMessageW: unmodelled system message %u", msgId); aret_unimpl(m); return 0; }
+    uint32_t len = (uint32_t)strlen(msg);
+    if (flags & 0x00000100u /*ALLOCATE_BUFFER*/) {
+        uint16_t *p = (uint16_t *)malloc((len + 1) * 2);
+        if (!p) { g_last_error = 8u; return 0; }
+        for (uint32_t i = 0; i <= len; i++) p[i] = (uint16_t)(unsigned char)msg[i];
+        if (buf) *(uint32_t *)(uintptr_t)buf = (uint32_t)(uintptr_t)p;
+        return len;
+    }
+    if (!buf || size == 0) return 0;
+    uint32_t n = len < size - 1 ? len : size - 1;
+    uint16_t *d = (uint16_t *)(uintptr_t)buf;
+    for (uint32_t i = 0; i < n; i++) d[i] = (uint16_t)(unsigned char)msg[i];
+    d[n] = 0;
+    return n;
+}
 /* Locale IDs: report en-US (LCID 0x0409) — the CRT reads GetThreadLocale for
  * locale-dependent classification (GNU m4/grep query it at startup; a 0 stub made
  * their locale setup misbehave and swallow output). */
