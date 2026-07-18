@@ -3347,4 +3347,23 @@ Détail : **70 §6** (roadmap). Résumé :
   `ResolveDelayLoadedAPI`, non implémenté → pointeur 0 → appel indirect vers 0). Prochaine brique : supporter le
   delay-load (table `IMAGE_DIRECTORY_ENTRY_DELAY_IMPORT` + `ResolveDelayLoadedAPI`).
 
+### 2026-07-18 — [HLE-WIN32][STRATÉGIE] Progress bar : mur isolé = **delay-load uxtheme** (comctl32 theming), frontière documentée
+- **La couche suivante mesurée.** Après DllMain + WM_CREATE + extra-bytes, le WM_CREATE lifté de la progress bar appelle
+  **`ResolveDelayLoadedAPI`** → parse du descripteur : c'est **`uxtheme.dll.OpenThemeData`**. Le comctl32 de Wine
+  **delay-load uxtheme** (styles visuels) via un delay-load **manuel** (la delay-import directory PE standard est **vide**,
+  objdump — c'est un descripteur en .data résolu à runtime).
+- **Pourquoi c'est un vrai chantier (pas un quick win).** Résoudre proprement un import **à runtime** se heurte au modèle
+  de dispatch **statique** d'ARET (`aret_call` = table VA→fn figée à l'émission) : il faudrait (1) un **résolveur runtime**
+  (nom → VA synthétique + fallback dans `aret_call`), **et** (2) le **pop stdcall** de l'appel indirect delay-résolu
+  (fallback dans `__aret_callee_pop`, sinon l'esp du comctl32 lifté dérive de N par appel). Bounded mais réel (3 points de
+  contact dans le code généré + une table de shims theme).
+- **Décision d'intégrité (sound).** `aret_ResolveDelayLoadedAPI` **abort dur nommé** — `aret_unmodelled("delay-load
+  uxtheme.dll.OpenThemeData ...")` — au lieu du crash générique « indirect call to 0 » (le slot non résolu). La frontière
+  est **bruyante et nommée**, jamais un faux silencieux. `stdcall_pops` : +ResolveDelayLoadedAPI@24.
+- **La donnée stratégique.** Les contrôles comctl32 qui **thément** (progress bar, trackbar, …) butent sur ce delay-load
+  uxtheme ; ceux dont on n'exerce que la **logique/état sans theming** (ImageList) tournent. Le brick **résolveur runtime
+  delay-load** (+ shims uxtheme « pas de thème » → fallback classic) est la prochaine étape ciblée, avec les 3 exigences
+  ci-dessus désormais **précisément identifiées**. Portes : winediff **132/132** (aucune régression — aucune fixture
+  existante ne delay-load), hash transpile `19acad982194bf07` **inchangé**.
+
 <!-- NOUVELLES ENTRÉES ICI (garder l'ordre chronologique, plus récent en bas) -->

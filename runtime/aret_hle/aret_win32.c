@@ -4320,6 +4320,32 @@ uint32_t aret_ImageList_Destroy(uint32_t esp) { int m = iml_idx(WU(0)); if (m < 
  * -> BOOL. Registering the control classes is a no-op in our model. */
 uint32_t aret_InitCommonControls(uint32_t esp) { (void)esp; return 0; }
 uint32_t aret_InitCommonControlsEx(uint32_t esp) { (void)esp; return 1; }
+/* ResolveDelayLoadedAPI(base, descriptor, failDllHook, failSysHook, thunk, flags):
+ * the delay-load helper a lifted DLL calls to resolve an API on first use (Wine's
+ * comctl32 manually delay-loads uxtheme for visual styles). Resolving it soundly
+ * would need a *runtime* import resolver (ARET's dispatch table is static) plus
+ * stdcall-pop bookkeeping for the resolved indirect call — a bounded but real
+ * chantier. Until then we ABORT with the exact DLL.function (a clear diagnostic,
+ * not the generic "indirect call to 0" the un-resolved slot would cause), so the
+ * boundary is loud and named. Parses the IMAGE_DELAYLOAD_DESCRIPTOR (RVA-based)
+ * to report which API. */
+uint32_t aret_ResolveDelayLoadedAPI(uint32_t esp) {
+    uint32_t base = WU(0);
+    const uint8_t *d = (const uint8_t *)WP(1);
+    uint32_t thunk = WU(4);
+    char m[160];
+    if (d) {
+        const char *dll = (const char *)(uintptr_t)(base + *(const uint32_t *)(d + 4));
+        int idx = (int)((thunk - (base + *(const uint32_t *)(d + 12))) / 4);
+        const uint32_t *intt = (const uint32_t *)(uintptr_t)(base + *(const uint32_t *)(d + 16));
+        const char *fn = (const char *)(uintptr_t)(base + intt[idx] + 2);
+        snprintf(m, sizeof m, "delay-load %s.%s (runtime import resolution not modelled)", dll, fn);
+    } else {
+        snprintf(m, sizeof m, "ResolveDelayLoadedAPI (no descriptor)");
+    }
+    aret_unmodelled(m);   /* hard, named abort — never fall through to a 0 pointer */
+    return 0;
+}
 /* DisableThreadLibraryCalls(hModule) -> BOOL: opt out of DLL_THREAD_ATTACH/DETACH
  * notifications. We don't deliver those to lifted DllMains anyway, so it's a
  * sound success no-op. (Called by comctl32's DllMain at process attach.) */

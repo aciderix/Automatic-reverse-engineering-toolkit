@@ -487,6 +487,7 @@ static TABLE: &[(&str, u32)] = &[
     ("RemovePropA", 8),
     ("RemovePropW", 8),
     ("ResetEvent", 4),
+    ("ResolveDelayLoadedAPI", 24),
     ("RestoreDC", 8),
     ("ResumeThread", 4),
     ("RtlMoveMemory", 12),
