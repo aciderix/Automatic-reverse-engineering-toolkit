@@ -65,8 +65,13 @@ par appeler le HLE (`aret_CreateWindowExA`, `aret_DrawText`…) pour le rendu.
 - **Contrainte externe (pas de soundness)** : **licence**. Win95 = proprio
   non-redistribuable ; ReactOS binaire = **GPL** (contamine la sortie) ; WineLib = LGPL.
   Décision consciente à prendre.
-- **Statut** : **endgame M7-GUI autonome**, à garder en tête. Non engagé (loader
-  multi-modules = prérequis lourd).
+- **Statut** : **✅ RÉALISÉ ET DÉMONTRÉ (2026-07-18)**. Loader multi-modules complet (`load_with_modules` : Export
+  Directory + imports-avec-DLL-source + résolveur inter-modules + rebaser + fusion + routage IAT), flag CLI `--with-dll`,
+  invocation du **DllMain** des DLL liftés, **résolveur delay-load runtime**. **De vrais contrôles comctl32 tournent
+  bit-identiques à Wine**, liftés de la vraie comctl32.dll sur le HLE gdi32 : ImageList (stateless) **et une progress bar
+  stateful complète** (classes via DllMain, WM_CREATE→`cbWndExtra`, messages→WNDPROC lifté, theming uxtheme→classic).
+  Détail : doc 70 §5.0 (Levier 1) + doc 71 (entrées 2026-07-18). Reste : les autres contrôles = **même machinerie**
+  (data-driven) ; MFC/VB par le même lifting ; win32k `NtGdi*`/`NtUser*` seulement si on lifte gdi32/user32 eux-mêmes.
 
 ### 1.3 SEH / RtlUnwind natif dans le HLE — ✅ compatible, gros chantier
 Implémenter le SEH **entièrement dans le runtime** (ne PAS lier l'EH C++ de l'hôte).
@@ -208,5 +213,5 @@ Le glissement « traduire factuellement » **réduit** le devinement. La conditi
 5. **Licence = décision externe consciente** (GPL/proprio/LGPL), pas un problème de
    soundness mais à trancher avant d'embarquer du code lifté redistribué.
 
-**Priorité** : (1) **fibers** ✅ **COMPLET** (incr. 1-4) → (2) lifting comctl32 [endgame GUI] → (3) PGL
+**Priorité** : (1) **fibers** ✅ **COMPLET** (incr. 1-4) → (2) **lifting comctl32** ✅ **DÉMONTRÉ** (contrôle stateful réel bit-identique Wine, 2026-07-18) → (3) PGL
 opt-in → (4) SEH in-HLE → (5) SoftFloat floatx80 [ère ARM/WASM].

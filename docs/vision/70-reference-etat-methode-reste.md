@@ -663,9 +663,18 @@ résidu qui abort restera l'**obfusqué/fait-main/VM-packé** (indécidable, §9
   `Program::load`). **Carte mesurée (2026-07-18, `--mode walls --with-dll` sur vraies DLL Wine)** : comctl32+gdi32+user32
   liftées ensemble = **7150 fonctions liftées**, le tail user-mode nommé **s'effondre**, il reste **356 imports** =
   **250 syscalls `NtGdi*`/`NtUser*` (LE MUR WIN32K, à router vers le HLE qui rend déjà DIB/BitBlt/paint)** + **106 shims
-  kernel32/CRT ordinaires** (atoms/locale/version/IME/char-class, data-driven). **Reste (incrément 3, bornés/mesurés,
-  pas de recherche)** : (1) FLIRT chirurgical `NtGdi*`/`NtUser*`→HLE ; (2) les 106 shims ; (3) ~17 unresolved-direct +
-  `jl 0x100afcd4`×16 (récup mineure).
+  kernel32/CRT ordinaires** (atoms/locale/version/IME/char-class, data-driven). **Config correcte : lifter comctl32
+  SEULE** (nos user32/gdi32 HLE marchent déjà → pas de win32k) ; ses imports se lient aux shims HLE.
+  **✅ INCRÉMENT 3 DÉMONTRÉ (2026-07-18) — de vrais contrôles comctl32 tournent bit-identiques à Wine** (liftés de la vraie
+  comctl32.dll de Wine, sur le HLE gdi32) : **ImageList** (API stateless, `winecorpus/comctl32_imagelist`) **et surtout
+  une progress bar STATEFUL complète** (`winecorpus/comctl32_progress` : `pos=50 lo=0 hi=100`, PBM_DELTAPOS = Wine). La
+  **machinerie générale des contrôles est complète** : DllMain lifté exécuté au démarrage (enregistre les classes) →
+  `CreateWindowEx` (WM_NCCREATE/WM_CREATE → état dans `cbWndExtra`) → messages dispatchés au **WNDPROC comctl32 lifté** →
+  **résolveur delay-load runtime** (uxtheme→classic ; VA synthétique + `aret_delay_dispatch`/`aret_delay_pop`). Familles
+  socle comblées au passage (atoms A/W, `GetDIBits`/`CreatePatternBrush`/`StretchDIBits`, `DisableThreadLibraryCalls`).
+  **Reste** : les autres contrôles (trackbar/toolbar/listview…) = **même machinerie**, data-driven (shims gdi32/user32
+  manquants selon le contrôle) ; + les 106 shims socle ; + (optionnel, pour lifter gdi32/user32 eux-mêmes) FLIRT
+  chirurgical `NtGdi*`/`NtUser*`→HLE ; + ~17 unresolved-direct / `jl 0x100afcd4`×16 (récup mineure).
 - **Levier 2 — Finir les mécanismes bornés qui débloquent une CLASSE** : EH C++ (`__CxxFrameHandler`), bitmap-fonts,
   runtime VB. Chacun = une session, des milliers de binaires.
 - **Levier 3 — Mop-up data-driven** du résidu, trié par le Levier 0.
@@ -835,7 +844,7 @@ bornée** : `WSAStartup`/Winsock, `CreateEventW`, `wcschr`, `LoadLibraryW`, et l
 | CRT+/W32 | Vrai CRT (forward libc) + Win32 native (kernel32→POSIX) | prog. C large + Win32 hors-GUI | ✅ |
 | UNPACK | Déballage dynamique Unicorn (émule stub → OEP → dump) | packers non-VM | ✅ |
 | M6 | Cible **WebAssembly** (`--target wasm`, wasmtime) | cible universelle | ✅ (7/7) |
-| **M7** | **GUI / graphisme** (USER32/GDI via **SDL2** portable, puis DXVK/vkd3d) | applis fenêtrées, puis **jeux** | 🚧 **plan doc 72** — **couche USER32/GDI display-free quasi complète** : fenêtres/classes/messages (A+W), modèle fenêtre étendu, ressources/LoadString, MessageBox, **dialogs (DLGTEMPLATE+modal)**, **GDI DIB bit-exact**, menus, helpers, SID/token, rect/char/…, **+ fenêtre SDL VISIBLE (G2b : `SDL_Window`+présentation framebuffer+pompe `SDL_PollEvent`)** **+ GDI texte FreeType bit-identique Wine (G3, autonome)** **+ GDI vectoriel/raster complet (G6 : lignes/Rectangle/Polyline(To)/FrameRect/InvertRect/BitBlt-ROPs)** (winediff **102/102**). **Reste** : widgets natifs (BUTTON/EDIT), Ellipse/courbes (niveau-recherche), + hors-GUI : **threads coopératifs** (fibers, incrément 1 fait — §4.7), **EH/RtlUnwind** |
+| **M7** | **GUI / graphisme** (USER32/GDI via **SDL2** portable, puis DXVK/vkd3d) | applis fenêtrées, puis **jeux** | 🚧 **plan doc 72** — **couche USER32/GDI display-free quasi complète** : fenêtres/classes/messages (A+W), modèle fenêtre étendu, ressources/LoadString, MessageBox, **dialogs (DLGTEMPLATE+modal)**, **GDI DIB bit-exact**, menus, helpers, SID/token, rect/char/…, **+ fenêtre SDL VISIBLE (G2b : `SDL_Window`+présentation framebuffer+pompe `SDL_PollEvent`)** **+ GDI texte FreeType bit-identique Wine (G3, autonome)** **+ GDI vectoriel/raster complet (G6 : lignes/Rectangle/Polyline(To)/FrameRect/InvertRect/BitBlt-ROPs)** **+ LIFTING DLL : vrais contrôles comctl32 (ImageList, progress bar stateful) bit-identiques Wine (§5.0 Levier 1)**. **Reste** : autres contrôles comctl32 (même machinerie, data-driven), Ellipse/courbes (niveau-recherche), + hors-GUI : **threads coopératifs** (fibers, §4.7), **EH/RtlUnwind** |
 
 > **Règle** : on ne s'engage pas sur M_n+1 tant que M_n ne tourne pas proprement ;
 > chaque palier = un artefact démontrable + un test de non-régression.
