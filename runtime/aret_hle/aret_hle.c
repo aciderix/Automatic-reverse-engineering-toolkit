@@ -2341,7 +2341,31 @@ uint32_t aret_LoadLibraryA(uint32_t esp) { (void)esp; return 0x10000000u; }
 uint32_t aret_LoadLibraryExA(uint32_t esp) { (void)esp; return 0x10000000u; }
 uint32_t aret_LoadLibraryExW(uint32_t esp) { (void)esp; return 0x10000000u; }
 uint32_t aret_FreeLibrary(uint32_t esp) { (void)esp; return 1; }
-uint32_t aret_SetUnhandledExceptionFilter(uint32_t esp) { (void)esp; return 0; }
+/* The process top-level unhandled-exception filter (SetUnhandledExceptionFilter
+ * installs it, UnhandledExceptionFilter runs it). Stateful: the setter returns the
+ * previously installed filter, like Wine — a program that saves and restores it must
+ * get its own pointer back. */
+static uint32_t g_top_exception_filter = 0;
+uint32_t aret_SetUnhandledExceptionFilter(uint32_t esp) {
+    uint32_t prev = g_top_exception_filter;
+    g_top_exception_filter = arg(esp, 0);
+    return prev;
+}
+/* UnhandledExceptionFilter(ExceptionInfo) -> LONG. The CRT's top-level __except calls
+ * this when an exception reaches the outermost frame unhandled: run the installed
+ * top-level filter if any (its LONG disposition is returned), else return
+ * EXCEPTION_EXECUTE_HANDLER (1) so the CRT runs its terminate handler — there is no
+ * debugger to attach to. The filter is WINAPI(EXCEPTION_POINTERS*); lay its single
+ * argument on the free machine stack below esp and dispatch through aret_call. */
+uint32_t aret_UnhandledExceptionFilter(uint32_t esp) {
+    if (g_top_exception_filter) {
+        uint32_t hesp = esp - 0x40;
+        uint32_t *cf = (uint32_t *)(uintptr_t)hesp;
+        cf[1] = arg(esp, 0);         /* ExceptionInfo @ [esp+4] */
+        return (uint32_t)aret_call(g_top_exception_filter, hesp, 0, 0, 0, 0);
+    }
+    return 1;                        /* EXCEPTION_EXECUTE_HANDLER */
+}
 uint32_t aret_VirtualProtect(uint32_t esp) { (void)esp; return 1; }
 /* VirtualQuery(lpAddress, lpBuffer, dwLength): report the page containing
  * lpAddress as committed, image-backed, executable-readwrite memory. mingw-w64's

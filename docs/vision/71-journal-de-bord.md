@@ -2990,4 +2990,22 @@ Détail : **70 §6** (roadmap). Résumé :
 - **Mesuré.** `v.exe` franchit `_controlfp` → tourne (endpoint). **Portes** : winediff **122→123/123** (`crt_controlfp`),
   hash transpile `19acad982194bf07` **inchangé** (runtime-only), régression unifiée **PASS**.
 
+### 2026-07-18 — [STRATÉGIE][HLE-WIN32] Stratégie « zéro-abort 32-bit » (mesurée) + tête de liste : UnhandledExceptionFilter
+- **Stratégie posée (doc 70 §5.0).** But : plus aucun abort sur le vrai logiciel compilé 32-bit (pas silencé — couvert),
+  le résidu abort restant l'obfusqué/fait-main (§9). **Anti-années** : jamais de fix à l'intuition, toujours en tête
+  d'une liste MESURÉE. Leviers : (0) `wallsweep` mesure+classe → (tête shim-main fort levier) → (2) mécanismes de classe
+  (EH C++, bitmap-font, VB runtime) → (1) **lifting DLL** (ReactOS user32/gdi32/comctl32/VB40032 → code lifté prouvé,
+  autonome — effondre la traîne + runtimes tiers d'un coup, doc 80 §1.2) → (3) mop-up. Re-mesurer après chaque vague.
+- **Mesure (Levier 0, corpus Win95 37 PE32).** Instructions non-liftées = **bruit** (`outs`/`into`/`daa` = I/O port
+  privilégié + data-en-code → abort correct ; lift complet). Tête imports : **UnhandledExceptionFilter 31/37**,
+  **CreateProcessA 27**, **FormatMessageA 11**, puis traîne cohérente GDI mapping-mode / DDE / imprimante (2-3 chacun).
+- **Fix (tête #1).** `SetUnhandledExceptionFilter` était un stub `return 0` → rendu **stateful** (retourne le filtre
+  précédent, comme Wine). `UnhandledExceptionFilter(ExceptionInfo)` implémenté : lance le filtre top-level installé via
+  `aret_call` (retourne sa disposition), sinon `EXCEPTION_EXECUTE_HANDLER(1)` (le CRT termine, pas de debugger). Gardé
+  `winecorpus/win32_unhandledfilter.c` (chaîne stateful relative, env-indépendante — la 1re valeur diffère par
+  conception : Wine a un filtre défaut, ARET part de 0). Wine **et** ARET → `p1_is_fa=1 p2_is_fb=1`.
+- **Portes** : winediff **123→124/124**, hash transpile `19acad982194bf07` **inchangé** (runtime-only), régression
+  unifiée **PASS**. Prochaines têtes mesurées : `CreateProcessA` (échec sound, 27 binaires — non bit-testable, Wine
+  réussit), `FormatMessageA` (11, testable), puis la famille GDI mapping-mode.
+
 <!-- NOUVELLES ENTRÉES ICI (garder l'ordre chronologique, plus récent en bas) -->

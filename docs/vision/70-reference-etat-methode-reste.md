@@ -170,7 +170,7 @@ bash bench/regression.sh    # PORTE unifiée : difftest 271/271, in-place 3/3,
                             # recompilabilité gzip/ls/cat 100%
 bash bench/difftest.sh              # décompile O0→O3
 bash bench/difftest_transpile.sh    # transpile (hash 19acad982194bf07)
-bash bench/winediff.sh              # axe 2 vs Wine (123/123)
+bash bench/winediff.sh              # axe 2 vs Wine (124/124)
 bash bench/funcdiff.sh              # lift-closure + opt-diff vs Unicorn (0 div)
 # Sweeps de vrais binaires (téléchargent + comparent à Wine) :
 bash bench/sqlite_sweep.sh   bash bench/busybox_sweep.sh   bash bench/corpus_sweep.sh
@@ -190,7 +190,7 @@ bash bench/wallsweep.sh <dir1> [dir2…]  # AGRÈGE --mode walls sur un corpus :
 
 ### État régression (référence — doit rester vert)
 difftest **272/272** · transpile-diff **4/4** (H=`19acad982194bf07`) · winediff
-**123/123** · cpudiff vert (per-instruction + séquences génératives) · funcdiff corpus **0 divergence** (lift **~20,6k** scorées /
+**124/124** · cpudiff vert (per-instruction + séquences génératives) · funcdiff corpus **0 divergence** (lift **~20,6k** scorées /
 **~20k appels** — **imports (stubs `@N` + `@0` scalaires) + appels indirects résolus + intrinsèques mémoire host-backés (memmove/memcpy)** ; scratch sous-esp exclu ; opt ~10k scorées) · SMT **11/11** · in-place **3/3** · magicdiv **2³²** ·
 recompilabilité **100 %** · WASM **7/7**.
 
@@ -632,6 +632,28 @@ recompilabilité **100 %** · WASM **7/7**.
 > stdcall_pops, récup simple) sont **quasi épuisées**. Ce qui reste = un ensemble
 > **borné** de problèmes **profonds**, chacun ≈ une session dédiée de forensics.
 > On passe de « largeur de shims » à « profondeur lifter ». Fini, mais plus lent.
+
+### §5.0 — STRATÉGIE BÉTON « zéro-abort 32-bit » (objectif : couvrir tout vrai binaire 32-bit, sans y passer des années)
+**But** : plus aucun abort sur le **vrai logiciel compilé** (pas en le silençant — en le couvrant parfaitement). Le
+résidu qui abort restera l'**obfusqué/fait-main/VM-packé** (indécidable, §9) — que le vrai logiciel ne contient pas.
+**Règle anti-années** : on ne code **jamais** un fix à l'intuition — **toujours en tête d'une liste MESURÉE**.
+- **Levier 0 — MESURER (fondation).** `wallsweep.sh` (agrège `--mode walls`) sur un **grand corpus** → liste **finie,
+  classée par #binaires bloqués** des causes d'abort. Transforme « couvrir tout » (infini ressenti) en **liste finie
+  priorisée**. **Mesure 2026-07-18 (corpus Win95, 37 PE32)** : instructions non-liftées = **bruit** (`outs`/`into`/`daa`
+  = I/O port privilégié + data-en-code → abort correct ; le lift est complet). Tête des imports : **UnhandledExceptionFilter
+  31/37**, **CreateProcessA 27**, **FormatMessageA 11**, puis traîne **cohérente** GDI mapping-mode
+  (`SetViewportOrgEx`/`SetWindowExtEx`/`Scale*`/`PtVisible`…), **DDE**, **imprimante**.
+- **Levier 1 — Effondrer la traîne d'imports d'un coup : LIFTING DE DLL** (doc 80 §1.2, **la forme pure de la doctrine**,
+  **autonome + WASM**). Passer `user32`/`gdi32`/`comctl32`/`msvcrt`/`VB40032` (ReactOS) à *notre* lifter → chaque API =
+  code lifté **prouvé** (cpudiff/funcdiff), plus un shim main. **Un seul investissement** (loader multi-modules + Export
+  Directory + router le fond `win32k` vers le HLE) couvre **toute** la traîne **et** les runtimes tiers (VB/MFC) « gratis ».
+  C'est LE multiplicateur qui évite d'écrire 2000 shims. Décision licence (ReactOS=GPL). *Le shim-main reste la voie
+  rapide pour la tête à fort levier ; le lifting DLL pour la traîne + les runtimes.*
+- **Levier 2 — Finir les mécanismes bornés qui débloquent une CLASSE** : EH C++ (`__CxxFrameHandler`), bitmap-fonts,
+  runtime VB. Chacun = une session, des milliers de binaires.
+- **Levier 3 — Mop-up data-driven** du résidu, trié par le Levier 0.
+- **Ordre d'exécution** : (0) mesurer → (tête shim-main à fort levier) → (2 mécanismes de classe) → (1 lifting DLL pour
+  la traîne) → (3 mop-up). Re-mesurer après chaque vague (le levier change).
 
 ### P1 — sqlite3 mingw ✅ FONCTIONNEL (2026-07-05)
 **2 bugs généraux résolus, sqlite3 mingw = bit-identique à Wine** (scalaire, CRUD,
