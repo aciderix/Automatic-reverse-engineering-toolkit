@@ -3058,12 +3058,17 @@ Détail : **70 §6** (roadmap). Résumé :
   `sub_<va>` lifté) pour une cible **locale**, ou `ForwardByName(dll,name)`/`ForwardByOrdinal(dll,ord)` pour un **forward**
   (enregistré verbatim, résolu plus tard par le loader — **jamais deviné**, sinon abort sound). Les trous de l'EAT
   (adresse 0, gaps d'une plage d'ordinaux creuse) sont **sautés** (RVA 0 = en-tête DOS, jamais un export valide).
-- **Testabilité (double : forgé déterministe + vraie DLL).** (1) Unit test `parse_pe_exports_reads_the_export_directory` :
+- **Testabilité (double : forgé déterministe + VRAIES DLL système).** (1) Unit test `parse_pe_exports_reads_the_export_directory` :
   PE32 DLL **forgé octet par octet** (ordinal base 5 ; ord5 "Alpha"→local, ord6 sans nom→ordinal-only, ord7→trou EAT
   sauté, ord8 "Gamma"→forward "OTHER.Delta") — vérité terrain **que je contrôle exactement** → couvre base d'ordinaux,
-  named local, ordinal-only, saut de trou, forward-by-name. + `parse_pe_exports_empty_on_non_pe`. (2) **Mesuré vs objdump**
-  (règle « mesurer, pas affirmer ») : vraie DLL mingw (`__declspec(dllexport) Add/Sub/gCounter`), parseur **bit-exact vs
-  `i686-w64-mingw32-objdump -p`** (Add→base+0x14d0, Sub→+0x14dd, gCounter→+0x602c ; ordinaux 1/2/3) — test jetable, retiré.
+  named local, ordinal-only, saut de trou, forward-by-name. + `parse_pe_exports_empty_on_non_pe`. (2) **Mesuré vs objdump
+  sur les VRAIES DLL de Wine** (règle « mesurer, pas affirmer » ; ce sont les cibles réelles du Levier 1) : les PE32
+  builtin de Wine (`/usr/lib/i386-linux-gnu/wine/i386-windows/`) parsés **bit-exact vs `i686-w64-mingw32-objdump -p`** —
+  **comctl32 191 (160 addr + 31 fwd), user32 780, gdi32 496 (481 addr + 15 fwd), comdlg32 28** ; forwards résolus
+  correctement (`comctl32→kernelbase.StrChrA`, `gdi32→win32u.NtGdiDd…`), `InitCommonControls` ressort **ord=17** (= la
+  table `ordinal_imports`). Verrouillé en test committé `parse_pe_exports_matches_wine_comctl32` (gated sur la présence
+  du builtin Wine, comme winediff ; assertions **robustes aux versions** = invariants ABI-stables, pas des compteurs
+  figés). (Un vrai DLL mingw `Add/Sub/gCounter` a aussi servi de premier cross-check jetable.)
 - **Portes (additif, hors chemin actif — `parse_pe_exports` pas encore appelée hors test).** Build OK (warning dead_code
   attendu, levé à l'incrément 2), unit tests bin **64/64**, hash transpile `19acad982194bf07` **inchangé**, régression
   unifiée **PASS** (difftest 272/272, funcdiff 20558 / 0 div, SMT 11/11, recompilabilité 100 %), winediff **127/127**.
