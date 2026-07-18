@@ -3327,4 +3327,24 @@ Détail : **70 §6** (roadmap). Résumé :
   **Reste (couche suivante)** : le **round-trip des messages** du contrôle (`PBM_SETPOS`/`GETPOS` → `pos=50`) — la fenêtre
   est créée mais l'état du contrôle (extra-bytes `cbWndExtra` / struct alloué en WM_(NC)CREATE) n'est pas encore backé.
 
+### 2026-07-18 — [HLE-WIN32] Création de fenêtre : **WM_NCCREATE/WM_CREATE dispatchés + extra-bytes `cbWndExtra`** (état des contrôles)
+- **La couche suivante du contrôle stateful.** Après le DllMain (classes enregistrées), la progress bar créait sa fenêtre
+  (`pb=1`) mais son état ne round-trippait pas (`PBM_SETPOS`/`GETPOS`) : un contrôle **alloue son état en `WM_(NC)CREATE`**
+  et le range dans les **extra-bytes `cbWndExtra`** via `SetWindowLong(hwnd, 0, infoPtr)`. Notre modèle ne faisait ni
+  l'un ni l'autre.
+- **Fix (général, correct Windows).** (1) `CreateWindowEx(A/W)` envoie désormais **WM_NCCREATE puis WM_CREATE** au WNDPROC
+  (via `u32_create_dispatch`, avec une `CREATESTRUCTA` malloc'd guest-accessible) ; WM_NCCREATE→FALSE ou WM_CREATE→-1
+  **échoue la création** (destroy + retour 0), comme Windows. (2) Chaque fenêtre a `cbWndExtra` octets (`extra[64]`, len
+  du champ classe) ; `Set`/`GetWindowLong` à offset **≥0** lisent/écrivent 4 octets dedans (l'idiome de stockage d'état
+  de contrôle). (3) `DefWindowProc(WM_NCCREATE)`→**TRUE**, `(WM_CREATE)`→0 (sinon le dispatch échouait sur les fenêtres
+  à DefWindowProc).
+- **Vérifié bit-identique Wine (headless, message-only).** `winecorpus/user32_wmcreate` : WNDPROC met des flags en
+  WM_NCCREATE/WM_CREATE + stocke via `SetWindowLong(0/4)` → `ncc=1 created=1 win=1 e0=1234 e4=5678` = Wine. **Zéro
+  régression** : les fixtures GUI existantes reçoivent maintenant WM_CREATE (comme Wine) et restent toutes vertes.
+- **Portes** : winediff **131→132/132** (`user32_wmcreate`), hash transpile `19acad982194bf07` **inchangé**, régression
+  unifiée **PASS**. **Reste (mur suivant isolé) pour la progress bar** : son WM_CREATE lifté bute sur
+  **`ResolveDelayLoadedAPI`** → comctl32 utilise des **imports delay-loaded** (résolution paresseuse ; le stub appelle
+  `ResolveDelayLoadedAPI`, non implémenté → pointeur 0 → appel indirect vers 0). Prochaine brique : supporter le
+  delay-load (table `IMAGE_DIRECTORY_ENTRY_DELAY_IMPORT` + `ResolveDelayLoadedAPI`).
+
 <!-- NOUVELLES ENTRÉES ICI (garder l'ordre chronologique, plus récent en bas) -->

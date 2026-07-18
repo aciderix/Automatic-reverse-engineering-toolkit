@@ -2029,6 +2029,8 @@ static struct {
     uint32_t bg_brush;       /* class hbrBackground (HBRUSH) for the default erase */
     int unicode;             /* created via a W API (IsWindowUnicode) */
     int check_state;         /* dialog button check state (BM_GETCHECK/CheckDlgButton) */
+    int extra_len;           /* cbWndExtra bytes (from the class) */
+    uint8_t extra[64];       /* cbWndExtra storage: SetWindowLong at offset >=0 (control state ptr) */
 #ifdef ARET_HAVE_SDL
     void *sdl_win, *sdl_ren, *sdl_tex;  /* SDL window/renderer/streaming texture */
     uint32_t client_bmp;     /* HBITMAP of the client-area framebuffer (GDI draws here) */
@@ -2185,6 +2187,8 @@ static uint32_t u32_window_create(uint32_t wndproc, uint32_t exstyle, uint32_t s
             g_u32_win[i].needs_paint = 0;
             g_u32_win[i].needs_erase = 0;
             g_u32_win[i].bg_brush = 0;
+            g_u32_win[i].extra_len = 0;
+            memset(g_u32_win[i].extra, 0, sizeof g_u32_win[i].extra);
             int k = 0; if (title) for (; title[k] && k < 255; k++) g_u32_win[i].title[k] = title[k];
             g_u32_win[i].title[k] = 0;
             /* A visible top-level window (no parent, not a child control) starts
@@ -2217,6 +2221,11 @@ static uint32_t u32_class_wndproc(uint32_t cref) {
         if (g_u32_class[i].used && u32_weq(g_u32_class[i].name, name)) return g_u32_class[i].wndproc;
     return 0;
 }
+/* The cbWndExtra byte count a class was registered with (0 if unknown). */
+static uint32_t u32_class_wndextra(uint32_t cref) {
+    int idx = u32_class_index(cref);
+    return idx >= 0 ? g_u32_class[idx].wnd_extra : 0;
+}
 
 static uint32_t u32_win_wndproc(uint32_t hwnd) {
     if (hwnd >= 1 && hwnd <= U32_MAX_WIN && g_u32_win[hwnd - 1].used) return g_u32_win[hwnd - 1].wndproc;
@@ -2232,6 +2241,31 @@ static uint32_t u32_call_wndproc(uint32_t esp, uint32_t wndproc,
     uint32_t *f = (uint32_t *)(uintptr_t)frame;
     f[0] = 0; f[1] = hwnd; f[2] = msg; f[3] = wp; f[4] = lp;
     return (uint32_t)aret_call(wndproc, frame, 0, 0, 0, 0);
+}
+
+/* Send WM_NCCREATE then WM_CREATE to a freshly created window's WNDPROC, with a
+ * CREATESTRUCTA (a control allocates its state here and stores it via
+ * SetWindowLong(0)). Returns 1 if creation is accepted, 0 if the proc rejected
+ * it (WM_NCCREATE -> FALSE, or WM_CREATE -> -1) — Windows then fails the create.
+ * The CREATESTRUCT is malloc'd (guest-accessible, reentrant-safe), freed after. */
+static int u32_create_dispatch(uint32_t esp, int i, uint32_t hinstance, uint32_t hmenu_or_id) {
+    uint32_t wp = g_u32_win[i].wndproc;
+    if (!wp) return 1;                       /* no proc -> nothing to initialise */
+    uint32_t *cs = (uint32_t *)malloc(48);   /* CREATESTRUCTA (32-bit layout) */
+    if (!cs) return 1;
+    cs[0] = 0;                    cs[1] = hinstance;         cs[2] = hmenu_or_id;
+    cs[3] = g_u32_win[i].parent;  cs[4] = (uint32_t)g_u32_win[i].h; cs[5] = (uint32_t)g_u32_win[i].w;
+    cs[6] = (uint32_t)g_u32_win[i].y; cs[7] = (uint32_t)g_u32_win[i].x;
+    cs[8] = g_u32_win[i].style;   cs[9] = 0; cs[10] = 0;     cs[11] = g_u32_win[i].exstyle;
+    uint32_t hwnd = (uint32_t)(i + 1), csp = (uint32_t)(uintptr_t)cs;
+    int ok = 1;
+    if (u32_call_wndproc(esp, wp, hwnd, 0x0081u /* WM_NCCREATE */, 0, csp) == 0) {
+        ok = 0;
+    } else if (u32_call_wndproc(esp, wp, hwnd, 0x0001u /* WM_CREATE */, 0, csp) == (uint32_t)-1) {
+        ok = 0;
+    }
+    free(cs);
+    return ok;
 }
 
 static int  u32_q_empty(void) { return g_u32_qh == g_u32_qt; }
@@ -2435,7 +2469,10 @@ uint32_t aret_CreateWindowExW(uint32_t esp) {
     if (h) { u32_class_name(WU(1), 1, g_u32_win[h - 1].classname, sizeof g_u32_win[h - 1].classname);
              g_u32_win[h - 1].bg_brush = u32_class_brush(WU(1));
              g_u32_win[h - 1].unicode = 1;
-             if (WU(3) & 0x40000000u) g_u32_win[h - 1].ctrl_id = (int)WU(9);  /* WS_CHILD: hMenu=id */ }
+             uint32_t we = u32_class_wndextra(WU(1));
+             g_u32_win[h - 1].extra_len = we > 64 ? 64 : (int)we;
+             if (WU(3) & 0x40000000u) g_u32_win[h - 1].ctrl_id = (int)WU(9);  /* WS_CHILD: hMenu=id */
+             if (!u32_create_dispatch(esp, (int)h - 1, WU(8), WU(9))) { g_u32_win[h - 1].used = 0; return 0; } }
     return h;
 }
 /* CreateWindowExA — className@1 is a narrow name (or an atom). Widen a name to
@@ -2452,7 +2489,10 @@ uint32_t aret_CreateWindowExA(uint32_t esp) {
                                    WU(4), WU(5), WU(6), WU(7), WU(8), WCS(2), u32_is_ctrl_class(WU(1), 0));
     if (h) { u32_class_name(WU(1), 0, g_u32_win[h - 1].classname, sizeof g_u32_win[h - 1].classname);
              g_u32_win[h - 1].bg_brush = u32_class_brush(cref);
-             if (WU(3) & 0x40000000u) g_u32_win[h - 1].ctrl_id = (int)WU(9);  /* WS_CHILD: hMenu=id */ }
+             uint32_t we = u32_class_wndextra(cref);
+             g_u32_win[h - 1].extra_len = we > 64 ? 64 : (int)we;
+             if (WU(3) & 0x40000000u) g_u32_win[h - 1].ctrl_id = (int)WU(9);  /* WS_CHILD: hMenu=id */
+             if (!u32_create_dispatch(esp, (int)h - 1, WU(8), WU(9))) { g_u32_win[h - 1].used = 0; return 0; } }
     return h;
 }
 /* DestroyWindow(HWND) -> BOOL. */
@@ -2506,6 +2546,8 @@ static int u32_defproc_text(uint32_t hwnd, uint32_t msg, uint32_t wp, uint32_t l
  * Returns 1 if handled, with the result in *out. */
 static int u32_defproc_common(uint32_t esp, uint32_t hwnd, uint32_t msg, uint32_t wp, uint32_t *out) {
     int i = (hwnd >= 1 && hwnd <= U32_MAX_WIN && g_u32_win[hwnd - 1].used) ? (int)hwnd - 1 : -1;
+    if (msg == 0x0081u /* WM_NCCREATE */) { *out = 1; return 1; }  /* accept creation */
+    if (msg == 0x0001u /* WM_CREATE */)   { *out = 0; return 1; }  /* 0 = success (not -1) */
     if (msg == U32_WM_PAINT) { if (i >= 0) g_u32_win[i].needs_paint = 0; *out = 0; return 1; }
     if (msg == U32_WM_ERASEBKGND) {   /* default erase: fill client with class brush */
         if (i >= 0 && g_u32_win[i].bg_brush) u32_fill_dc_brush(wp /* HDC */, g_u32_win[i].bg_brush);
@@ -2834,7 +2876,13 @@ uint32_t aret_GetWindowLongA(uint32_t esp) {
     case -21: return g_u32_win[i].userdata;  /* GWL_USERDATA */
     case -4:  return g_u32_win[i].wndproc;   /* GWL_WNDPROC */
     case -8:  return g_u32_win[i].parent;    /* GWL_HWNDPARENT */
-    default:  return 0;
+    default:  {                              /* cbWndExtra bytes (control state) */
+        int off = WI(1);
+        if (off >= 0 && off + 4 <= (int)sizeof g_u32_win[i].extra) {
+            uint32_t v; memcpy(&v, g_u32_win[i].extra + off, 4); return v;
+        }
+        return 0;
+    }
     }
 }
 uint32_t aret_GetWindowLongW(uint32_t esp) { return aret_GetWindowLongA(esp); }
@@ -2849,7 +2897,15 @@ uint32_t aret_SetWindowLongA(uint32_t esp) {
     case -20: old = g_u32_win[i].exstyle;  g_u32_win[i].exstyle = v;  return old;
     case -21: old = g_u32_win[i].userdata; g_u32_win[i].userdata = v; return old;
     case -4:  old = g_u32_win[i].wndproc;  g_u32_win[i].wndproc = v;  return old;
-    default:  return 0;
+    default:  {                            /* cbWndExtra bytes (control state) */
+        int off = WI(1);
+        if (off >= 0 && off + 4 <= (int)sizeof g_u32_win[i].extra) {
+            memcpy(&old, g_u32_win[i].extra + off, 4);
+            memcpy(g_u32_win[i].extra + off, &v, 4);
+            return old;
+        }
+        return 0;
+    }
     }
 }
 uint32_t aret_SetWindowLongW(uint32_t esp) { return aret_SetWindowLongA(esp); }
