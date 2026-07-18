@@ -3284,4 +3284,24 @@ Détail : **70 §6** (roadmap). Résumé :
   `table_is_sorted_by_name` ok, régression unifiée **PASS**. **Suite Phase B** : un vrai widget (Progress/Toolbar) — même
   boucle, comblera les familles socle suivantes (char-class, régions GDI, DIB multi-bpp) mesurées vs Wine.
 
+### 2026-07-18 — [LOADER][STRATÉGIE] Levier 1 : la profondeur suivante = **enregistrement de classe des contrôles comctl32** (mesuré, borné)
+- **Phase B, prochain palier tenté : un vrai widget (Progress bar).** Bien plus profond qu'ImageList : les messages `PBM_*`
+  doivent dispatcher vers le **WNDPROC comctl32 lifté** via notre modèle fenêtre/message. Cible Wine (sous Xvfb) :
+  `parent=1 pb=1 pos=50 lo=0 hi=100`.
+- **Mur mesuré : la classe de contrôle n'est pas enregistrée.** ARET : `parent=1` (notre fenêtre HLE marche) mais **`pb=0`**
+  — `CreateWindowExA("msctls_progress32")` retourne 0 **proprement** (aucun abort runtime), car la classe n'est pas dans
+  le registre. **Diagnostic isolé** : `InitCommonControlsEx` **EST routé** vers le comctl32 lifté (slot IAT `0x40e254`
+  retiré des imports, le stub HLE `aret_InitCommonControlsEx` n'est **jamais** appelé), il **tourne sans abort**, mais son
+  chemin d'enregistrement (RegisterClassW routé vers le HLE) n'aboutit pas à une classe **retrouvable** par
+  `CreateWindowExA`. (Ce n'est donc **pas** le stub, ni un DllMain non appelé — c'est le chemin de registration lifté qui
+  diverge.)
+- **La donnée stratégique.** ImageList (API **stateless** : count/index/iconsize calculés par le code lifté, sur nos
+  primitives gdi32) **marche** (bit-identique Wine). Les **contrôles stateful** (fenêtre + WNDPROC lifté) exigent en plus
+  que la **machinerie d'enregistrement de classe** de comctl32 fonctionne bout-en-bout à travers le HLE
+  (`RegisterClassW`, possiblement noms de classe **par atome** — qu'on vient d'implémenter — et/ou un early-return dans une
+  fonction partial-asm). **Prochaine brique = déboguer ce chemin** (recompiler `-O0 -g`, gdb le comctl32 lifté depuis
+  `InitCommonControlsEx` → voir où la registration diverge du comportement Wine). Borné, mesuré, une session dédiée.
+- **Portes** : exploration mesurée, **aucun code changé**, aucune fixture ajoutée (la progress bar n'est pas verte —
+  honnête). Le jalon ImageList (contrôle stateless réel bit-identique Wine, winediff 130/130) reste la preuve acquise.
+
 <!-- NOUVELLES ENTRÉES ICI (garder l'ordre chronologique, plus récent en bas) -->
