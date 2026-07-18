@@ -83,6 +83,13 @@ void aret_unimpl(const char *name);
  * `partial(asm)` count lists how many functions still contain one statically. */
 void aret_unmodelled(const char *insn);
 
+/* Runtime delay-load resolver fallbacks (DLL lifting): a delay-loaded import gets
+ * a synthetic VA at runtime, so the static dispatch defers a miss to these — one
+ * dispatches the call, the other reports its stdcall pop. Both return 0/no-op
+ * when no delay-import was resolved (the common case). */
+int aret_delay_dispatch(uint32_t va, uint32_t esp, uint64_t *out);
+uint32_t aret_delay_pop(uint32_t va);
+
 /* No-op shim (returns 0) for recognized startup-glue functions (mingw/MSVC
  * global ctor/dtor runners, EH-frame registration, pseudo-relocator) we bind
  * away instead of lifting their indirect-call-heavy table walks. */

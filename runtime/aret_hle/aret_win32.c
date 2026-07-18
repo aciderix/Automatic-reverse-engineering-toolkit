@@ -4320,30 +4320,92 @@ uint32_t aret_ImageList_Destroy(uint32_t esp) { int m = iml_idx(WU(0)); if (m < 
  * -> BOOL. Registering the control classes is a no-op in our model. */
 uint32_t aret_InitCommonControls(uint32_t esp) { (void)esp; return 0; }
 uint32_t aret_InitCommonControlsEx(uint32_t esp) { (void)esp; return 1; }
-/* ResolveDelayLoadedAPI(base, descriptor, failDllHook, failSysHook, thunk, flags):
- * the delay-load helper a lifted DLL calls to resolve an API on first use (Wine's
- * comctl32 manually delay-loads uxtheme for visual styles). Resolving it soundly
- * would need a *runtime* import resolver (ARET's dispatch table is static) plus
- * stdcall-pop bookkeeping for the resolved indirect call — a bounded but real
- * chantier. Until then we ABORT with the exact DLL.function (a clear diagnostic,
- * not the generic "indirect call to 0" the un-resolved slot would cause), so the
- * boundary is loud and named. Parses the IMAGE_DELAYLOAD_DESCRIPTOR (RVA-based)
- * to report which API. */
+/* ---- Runtime delay-load resolver -------------------------------------------
+ * A lifted DLL can delay-load an API on first use (Wine's comctl32 delay-loads
+ * uxtheme for visual styles) by calling ResolveDelayLoadedAPI, which must return
+ * a callable address. ARET's dispatch table is static, so a resolved import gets
+ * a synthetic VA at runtime; `aret_call` dispatches it through the
+ * `aret_delay_dispatch` fallback and `__aret_callee_pop` gets its stdcall pop
+ * through the `aret_delay_pop` fallback. We only resolve APIs we model soundly —
+ * uxtheme to a "no visual theme" behaviour so the control falls back to classic
+ * rendering (its logic/state is unaffected). Anything else -> named hard abort. */
+static uint32_t aret_theme_null(uint32_t esp) { (void)esp; return 0; } /* NULL/FALSE/S_OK */
+
+static int u32_stricmp_(const char *a, const char *b) {
+    for (;; a++, b++) {
+        int ca = (unsigned char)*a, cb = (unsigned char)*b;
+        if (ca >= 'A' && ca <= 'Z') ca += 32;
+        if (cb >= 'A' && cb <= 'Z') cb += 32;
+        if (ca != cb) return 0;
+        if (!ca) return 1;
+    }
+}
+/* Known delay-loadable APIs we model. uxtheme "no theme": the query functions
+ * report not-themed / a NULL handle, so a control takes its classic path. */
+static const struct { const char *dll, *fn; uint32_t (*shim)(uint32_t); uint16_t pop; } k_delay[] = {
+    { "uxtheme.dll", "OpenThemeData",             aret_theme_null, 8  },
+    { "uxtheme.dll", "OpenThemeDataEx",           aret_theme_null, 12 },
+    { "uxtheme.dll", "CloseThemeData",            aret_theme_null, 4  },
+    { "uxtheme.dll", "IsThemeActive",             aret_theme_null, 0  },
+    { "uxtheme.dll", "IsAppThemed",               aret_theme_null, 0  },
+    { "uxtheme.dll", "GetWindowTheme",            aret_theme_null, 4  },
+    { "uxtheme.dll", "SetWindowTheme",            aret_theme_null, 12 },
+    { "uxtheme.dll", "EnableThemeDialogTexture",  aret_theme_null, 8  },
+    { "uxtheme.dll", "DrawThemeParentBackground", aret_theme_null, 16 },
+    { NULL, NULL, NULL, 0 }
+};
+#define DELAY_VA_BASE 0x7EDA0000u
+static struct { uint32_t va; uint32_t (*shim)(uint32_t); uint16_t pop; } g_delay_res[64];
+static int g_delay_res_n;
+
+/* Dispatch a resolved delay VA (called by aret_call on a static-table miss). */
+int aret_delay_dispatch(uint32_t va, uint32_t esp, uint64_t *out) {
+    for (int i = 0; i < g_delay_res_n; i++)
+        if (g_delay_res[i].va == va) { *out = g_delay_res[i].shim(esp + 4); return 1; }
+    return 0;
+}
+/* Stdcall pop for a resolved delay VA (called by __aret_callee_pop). */
+uint32_t aret_delay_pop(uint32_t va) {
+    for (int i = 0; i < g_delay_res_n; i++)
+        if (g_delay_res[i].va == va) return g_delay_res[i].pop;
+    return 0;
+}
+
+/* ResolveDelayLoadedAPI(base, descriptor, failDllHook, failSysHook, thunk, flags)
+ * — parse the IMAGE_DELAYLOAD_DESCRIPTOR (RVA-based), resolve the API to a
+ * synthetic VA (patching the delay-IAT slot so later calls dispatch directly),
+ * and return it. A modelled API -> its synthetic VA; anything else -> named hard
+ * abort (never a 0 pointer / silent wrong). */
 uint32_t aret_ResolveDelayLoadedAPI(uint32_t esp) {
     uint32_t base = WU(0);
     const uint8_t *d = (const uint8_t *)WP(1);
     uint32_t thunk = WU(4);
     char m[160];
-    if (d) {
-        const char *dll = (const char *)(uintptr_t)(base + *(const uint32_t *)(d + 4));
-        int idx = (int)((thunk - (base + *(const uint32_t *)(d + 12))) / 4);
-        const uint32_t *intt = (const uint32_t *)(uintptr_t)(base + *(const uint32_t *)(d + 16));
-        const char *fn = (const char *)(uintptr_t)(base + intt[idx] + 2);
-        snprintf(m, sizeof m, "delay-load %s.%s (runtime import resolution not modelled)", dll, fn);
-    } else {
-        snprintf(m, sizeof m, "ResolveDelayLoadedAPI (no descriptor)");
+    if (!d) { aret_unmodelled("ResolveDelayLoadedAPI (no descriptor)"); return 0; }
+    const char *dll = (const char *)(uintptr_t)(base + *(const uint32_t *)(d + 4));
+    int idx = (int)((thunk - (base + *(const uint32_t *)(d + 12))) / 4);
+    const uint32_t *intt = (const uint32_t *)(uintptr_t)(base + *(const uint32_t *)(d + 16));
+    const char *fn = (const char *)(uintptr_t)(base + intt[idx] + 2);
+    for (int i = 0; k_delay[i].dll; i++) {
+        if (u32_stricmp_(dll, k_delay[i].dll) && strcmp(fn, k_delay[i].fn) == 0) {
+            /* find or assign a synthetic VA for this (dll, fn) */
+            for (int j = 0; j < g_delay_res_n; j++)
+                if (g_delay_res[j].shim == k_delay[i].shim && g_delay_res[j].pop == k_delay[i].pop) {
+                    *(uint32_t *)(uintptr_t)thunk = g_delay_res[j].va;
+                    return g_delay_res[j].va;
+                }
+            if (g_delay_res_n >= 64) break;
+            uint32_t va = DELAY_VA_BASE + (uint32_t)g_delay_res_n;
+            g_delay_res[g_delay_res_n].va = va;
+            g_delay_res[g_delay_res_n].shim = k_delay[i].shim;
+            g_delay_res[g_delay_res_n].pop = k_delay[i].pop;
+            g_delay_res_n++;
+            *(uint32_t *)(uintptr_t)thunk = va; /* patch the delay-IAT slot */
+            return va;
+        }
     }
-    aret_unmodelled(m);   /* hard, named abort — never fall through to a 0 pointer */
+    snprintf(m, sizeof m, "delay-load %s.%s (not modelled)", dll, fn);
+    aret_unmodelled(m);
     return 0;
 }
 /* DisableThreadLibraryCalls(hModule) -> BOOL: opt out of DLL_THREAD_ATTACH/DETACH

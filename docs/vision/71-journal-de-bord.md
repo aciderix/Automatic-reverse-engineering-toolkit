@@ -3366,4 +3366,26 @@ Détail : **70 §6** (roadmap). Résumé :
   ci-dessus désormais **précisément identifiées**. Portes : winediff **132/132** (aucune régression — aucune fixture
   existante ne delay-load), hash transpile `19acad982194bf07` **inchangé**.
 
+### 2026-07-18 — [LOADER][HLE-WIN32][DEMO] Levier 1 : **une vraie progress bar comctl32 fonctionne bit-identique à Wine** (résolveur delay-load)
+- **Le jalon : un contrôle comctl32 STATEFUL complet.** `pb=1 / pos=50 lo=0 hi=100 / pos2=85` (avec `PBM_DELTAPOS`) =
+  **Wine, exactement**. Toute la pile bouclée : DllMain enregistre la classe → `CreateWindowEx` crée la fenêtre
+  (WM_NCCREATE/WM_CREATE allouent l'état dans `cbWndExtra`) → les messages `PBM_*` **dispatchent vers le WNDPROC comctl32
+  lifté** → son état range/pos round-trippe. Le contrôle **exécute son vrai code lifté**, on ne fournit que la plateforme.
+- **La brique qui débloque : résolveur delay-load runtime** (les 3 exigences cadrées, réalisées). (1) Table de shims
+  connus `k_delay` (uxtheme « pas de thème » : `OpenThemeData`→NULL, `IsThemeActive`/`IsAppThemed`→FALSE, …) → un contrôle
+  retombe en **rendu classic**, sa logique intacte. (2) `ResolveDelayLoadedAPI` parse l'`IMAGE_DELAYLOAD_DESCRIPTOR`,
+  assigne une **VA synthétique** (`0x7EDA….`) à l'API résolue, patche le slot delay-IAT, la retourne. (3) le dispatch
+  **statique** défère : `aret_call` (miss) → `aret_delay_dispatch` (appelle le shim), `__aret_callee_pop` → `aret_delay_pop`
+  (le **pop stdcall** de l'appel indirect delay-résolu, sinon l'esp du comctl32 lifté dérivait). API non modélisée →
+  **abort dur nommé** (jamais un 0 deviné). `stdcall_pops` : +ResolveDelayLoadedAPI@24.
+- **Inerte hors delay-load.** Sans DLL lifté / delay-load, `g_delay_res` est vide → `aret_delay_dispatch`/`aret_delay_pop`
+  rendent 0 → `aret_call`/`__aret_callee_pop` **identiques** à avant. Hash couvre les fonctions liftées de toute façon.
+- **Fixture** `winecorpus/comctl32_progress.{c,withdll}` (display-free, message-only) : range/pos + DELTAPOS,
+  **bit-identique Wine**. **Portes** : winediff **132→133/133**, hash transpile `19acad982194bf07` **inchangé**,
+  `table_is_sorted_by_name` ok, régression unifiée **PASS** (le changement `__aret_callee_pop` touche tous les appels
+  indirects stdcall — vérifié : `aret_delay_pop`=0 hors delay-load).
+- **⇒ Le Levier 1 est prouvé sur un contrôle comctl32 stateful réel end-to-end.** Chemins couverts : ImageList (API
+  stateless) **et** progress bar (contrôle stateful, messages, état, theming). Les autres contrôles (trackbar, toolbar,
+  listview…) suivent la **même** machinerie — au fil des workloads réels, data-driven.
+
 <!-- NOUVELLES ENTRÉES ICI (garder l'ordre chronologique, plus récent en bas) -->

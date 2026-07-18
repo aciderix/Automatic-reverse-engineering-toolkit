@@ -489,6 +489,7 @@ fn emit_dispatch(internal: &[u64], host: &[(u64, String)], iat: &[(u64, String)]
 \x20       if (aret_tab[m].va == va) return aret_tab[m].fn(esp, a, c, d, b);\n\
 \x20       if (aret_tab[m].va < va) lo = m + 1; else hi = m - 1;\n\
 \x20   }\n\
+\x20   { uint64_t r; if (aret_delay_dispatch(va, (uint32_t)esp, &r)) return r; }  /* runtime delay-load */\n\
 \x20   { char msg[64]; snprintf(msg, sizeof msg, \"indirect call to unrecovered function 0x%x\", va); aret_unmodelled(msg); }\n\
 \x20   return 0;\n\
 }\n",
@@ -507,7 +508,7 @@ fn emit_dispatch(internal: &[u64], host: &[(u64, String)], iat: &[(u64, String)]
         .collect();
     pops.sort_by_key(|(va, _)| *va);
     if pops.is_empty() {
-        s.push_str("uint32_t __aret_callee_pop(uint32_t va){ (void)va; return 0; }\n");
+        s.push_str("uint32_t __aret_callee_pop(uint32_t va){ return aret_delay_pop(va); }\n");
     } else {
         s.push_str("struct aret_pe { uint32_t va; uint16_t pop; };\n");
         s.push_str("static const struct aret_pe aret_poptab[] = {\n");
@@ -523,7 +524,7 @@ fn emit_dispatch(internal: &[u64], host: &[(u64, String)], iat: &[(u64, String)]
 \x20       if (aret_poptab[m].va == va) return aret_poptab[m].pop;\n\
 \x20       if (aret_poptab[m].va < va) lo = m + 1; else hi = m - 1;\n\
 \x20   }\n\
-\x20   return 0;\n\
+\x20   return aret_delay_pop(va);\n\
 }\n",
         );
     }
