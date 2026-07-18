@@ -37,6 +37,13 @@ if command -v Xvfb >/dev/null 2>&1; then
 fi
 MINGW="${MINGW:-i686-w64-mingw32-gcc}"
 WINDRES="${WINDRES:-${MINGW%-gcc}-windres}"
+# Wine's PE builtin DLL dir (for `NAME.withdll` fixtures that lift a system DLL
+# like comctl32 alongside the app — the same DLL Wine loads as the oracle).
+WINE_PE_DIR=""
+for d in /usr/lib/i386-linux-gnu/wine/i386-windows /usr/lib/wine/i386-windows \
+         /opt/wine-stable/lib/wine/i386-windows; do
+  [ -d "$d" ] && WINE_PE_DIR="$d" && break
+done
 
 if ! command -v "$MINGW" >/dev/null 2>&1; then
   echo "SKIP  ($MINGW unavailable; install mingw-w64)"; exit 0
@@ -104,6 +111,23 @@ for src in "$CORPUS"/*.c; do
     fi
     imp_lib="$imp_lib $TMP/$name.dllimp.a"       # link the app against the DLL
     withdll=(--with-dll "$dllname=$TMP/$dllname") # and lift the DLL under ARET
+  fi
+  # Optional system-DLL lifting (winecorpus/NAME.withdll): one DLL name per line
+  # (e.g. `comctl32.dll`) that ARET lifts from Wine's own PE builtins — the app
+  # links against them normally and Wine (oracle) loads the same DLLs. Skips the
+  # fixture if the builtin dir or a named DLL is missing (like a toolchain gate).
+  if [ -f "$CORPUS/$name.withdll" ]; then
+    if [ -z "$WINE_PE_DIR" ]; then echo "SKIP  $name (no Wine PE builtin dir)"; continue; fi
+    miss=""
+    while IFS= read -r dll || [ -n "$dll" ]; do
+      [ -z "$dll" ] && continue
+      if [ -f "$WINE_PE_DIR/$dll" ]; then
+        withdll+=(--with-dll "$dll=$WINE_PE_DIR/$dll")
+      else
+        miss="$dll"
+      fi
+    done < "$CORPUS/$name.withdll"
+    [ -n "$miss" ] && { echo "SKIP  $name ($miss not in $WINE_PE_DIR)"; continue; }
   fi
   if ! "$MINGW" -O1 -w $xcflags "$src" $imp_lib $res_obj -lversion -lole32 -loleaut32 -luser32 -lgdi32 -lcomctl32 -llz32 -o "$TMP/$name.exe" 2>"$TMP/err"; then
     echo "FAIL  $name (PE build: $(head -1 "$TMP/err"))"; continue

@@ -3266,4 +3266,22 @@ Détail : **70 §6** (roadmap). Résumé :
   hash transpile `19acad982194bf07` **inchangé**, `table_is_sorted_by_name` ok, régression unifiée **PASS**. Prochaines
   familles socle (même méthode) : char-classification (`IsCharAlpha*`…), locale-getters, version-info.
 
+### 2026-07-18 — [LOADER][HLE-WIN32][DEMO] Levier 1 : **1ère vraie fonctionnalité comctl32 (ImageList) tourne bit-identique à Wine**
+- **Le jalon Phase B.** Une vraie API comctl32 (**ImageList**), **liftée depuis la vraie comctl32.dll de Wine**
+  (`--with-dll`), tourne sur le HLE gdi32 d'ARET, **bit-identique à Wine, exit 0**. Pas un DLL jouet : du **vrai code
+  comctl32** (2577 fonctions liftées) qui appelle notre gdi32 HLE. Piloté par un vrai chemin (méthode : lifter → buter →
+  combler le mur mesuré → relancer).
+- **Murs comblés (mesurés vs Wine, primitives gdi32 pures)** : `GetDIBits` (query = décrit le bitmap, ret=height, comp=3
+  BITFIELDS ; copy 32bpp = copie scanline honorant l'orientation biHeight vs source top-down/bottom-up — **mesuré** :
+  bottom-up→copie directe), `CreatePatternBrush` (tient le bitmap de motif), `StretchDIBits` (blit DIB 32bpp SRCCOPY 1:1
+  whole-image → surface DC ; stretch/sub-rect/autre ROP/bpp = **abort sound**). `stdcall_pops` : +GetDIBits@28,
+  CreatePatternBrush@4, StretchDIBits@52. NB : la **logique** ImageList (count/index/iconsize) vient du **code comctl32
+  lifté** — on ne fournit que les primitives gdi32, comctl32 fait le reste (c'est tout l'intérêt du lifting).
+- **Fixture** `winecorpus/comctl32_imagelist.{c,withdll}` : convention **`.withdll`** ajoutée au harness (une ligne =
+  un DLL système à lifter depuis les PE builtin de Wine ; gated sur leur présence). Sortie ARET =
+  `create=1/count0=0/add_idx=0 count1=1/iconsize=16x16/remove=1 count2=1` = **Wine**, exit 0.
+- **Portes** : winediff **129→130/130** (`comctl32_imagelist`), hash transpile `19acad982194bf07` **inchangé**,
+  `table_is_sorted_by_name` ok, régression unifiée **PASS**. **Suite Phase B** : un vrai widget (Progress/Toolbar) — même
+  boucle, comblera les familles socle suivantes (char-class, régions GDI, DIB multi-bpp) mesurées vs Wine.
+
 <!-- NOUVELLES ENTRÉES ICI (garder l'ordre chronologique, plus récent en bas) -->

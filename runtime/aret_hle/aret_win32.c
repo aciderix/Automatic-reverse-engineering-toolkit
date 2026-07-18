@@ -3387,6 +3387,7 @@ static struct gdi_obj {
     uint32_t text_color, bk_color; int bk_mode; uint32_t text_align;  /* DC */
     int w, h, topdown, bpp; uint8_t *bits; int owns_bits; /* BITMAP */
     uint32_t color;                                      /* BRUSH/PEN */
+    uint32_t pat_bitmap;                                  /* BRUSH: pattern bitmap handle (CreatePatternBrush) */
     int pen_style, pen_width;                            /* PEN */
     int lf_height, lf_weight, lf_italic, lf_quality;     /* FONT (LOGFONT) */
     int lf_underline, lf_strikeout;                      /* FONT (LOGFONT) */
@@ -3679,6 +3680,81 @@ uint32_t aret_CreateDIBSection(uint32_t esp) {
     if (ppv) *ppv = (uint32_t)(uintptr_t)g_gdi[i].bits;
     return gdi_handle(i);
 }
+/* GetDIBits(hdc, hbmp, uStartScan, cScanLines, lpvBits, lpbi, uUsage): read a
+ * bitmap's pixels into a DIB buffer, or (lpvBits NULL) describe it. Our bitmaps
+ * are 32bpp [B,G,R,0] internally, so a 32bpp read is a per-scanline copy honouring
+ * the output orientation (biHeight sign) against the source's top-down/bottom-up.
+ * Measured vs Wine: 32bpp query reports BI_BITFIELDS(3) and returns the height;
+ * copy returns the scanline count. Non-32bpp output -> sound abort. */
+uint32_t aret_GetDIBits(uint32_t esp) {
+    uint32_t hbmp = WU(1), start = WU(2), lines = WU(3);
+    uint8_t *bits = (uint8_t *)WP(4);
+    uint8_t *bmi = (uint8_t *)WP(5);
+    int b = gdi_idx(hbmp);
+    if (b < 0 || g_gdi[b].type != GDIT_BITMAP || !g_gdi[b].bits || !bmi) { g_last_error = 6u; return 0; }
+    struct gdi_obj *bm = &g_gdi[b];
+    int32_t *biW = (int32_t *)(bmi + 4);
+    int32_t *biH = (int32_t *)(bmi + 8);
+    uint16_t *biPlanes = (uint16_t *)(bmi + 12);
+    uint16_t *biBpp = (uint16_t *)(bmi + 14);
+    uint32_t *biComp = (uint32_t *)(bmi + 16);
+    uint32_t *biSizeImg = (uint32_t *)(bmi + 20);
+    if (!bits) {
+        /* query mode (biBitCount 0 = "describe the bitmap"). */
+        *biW = bm->w; *biH = bm->h; *biPlanes = 1; *biBpp = 32;
+        *biComp = 3u /*BI_BITFIELDS — matches Wine for 32bpp*/;
+        *biSizeImg = (uint32_t)(bm->w * bm->h * 4);
+        return (uint32_t)bm->h;
+    }
+    if (*biBpp != 32) { aret_unimpl("GetDIBits: only 32bpp output modelled"); return 0; }
+    int td_out = *biH < 0;                         /* negative height = top-down output */
+    uint32_t copied = 0;
+    for (uint32_t r = 0; r < lines; r++) {
+        int scan = (int)(start + r);
+        if (scan >= bm->h) break;
+        int image_y = td_out ? scan : (bm->h - 1 - scan);      /* 0 = top row of the image */
+        int mem_row = bm->topdown ? image_y : (bm->h - 1 - image_y);
+        memcpy(bits + (size_t)r * bm->w * 4,
+               bm->bits + (size_t)mem_row * bm->w * 4,
+               (size_t)bm->w * 4);
+        copied++;
+    }
+    return copied;
+}
+/* StretchDIBits(hdc, xD,yD,wD,hD, xS,yS,wS,hS, lpBits, lpbmi, usage, rop): draw
+ * source DIB bits onto the DC surface. Modelled: 32bpp SRCCOPY, 1:1 (no stretch),
+ * whole-image source — the ImageList blit path. Anything else (stretch, sub-rect,
+ * other ROP/bpp) -> sound abort (never a silent partial draw). */
+uint32_t aret_StretchDIBits(uint32_t esp) {
+    uint32_t hdc = WU(0);
+    int xDest = WI(1), yDest = WI(2), wDest = WI(3), hDest = WI(4);
+    int xSrc = WI(5), ySrc = WI(6), wSrc = WI(7), hSrc = WI(8);
+    const uint8_t *src = (const uint8_t *)WP(9);
+    const uint8_t *bmi = (const uint8_t *)WP(10);
+    uint32_t rop = WU(12);
+    struct gdi_obj *dst = gdi_dc_surface(hdc);
+    if (!dst || !src || !bmi) return 0;
+    int sw = *(const int32_t *)(bmi + 4);
+    int sh_raw = *(const int32_t *)(bmi + 8);
+    uint16_t sbpp = *(const uint16_t *)(bmi + 14);
+    int sh = sh_raw < 0 ? -sh_raw : sh_raw, s_topdown = sh_raw < 0;
+    if (sbpp != 32 || rop != 0x00CC0020u /*SRCCOPY*/ || wDest != wSrc || hDest != hSrc) {
+        aret_unimpl("StretchDIBits: only 32bpp SRCCOPY 1:1 modelled"); return 0;
+    }
+    if (xSrc != 0 || ySrc != 0 || wSrc != sw || hSrc != sh) {
+        aret_unimpl("StretchDIBits: only whole-image source modelled"); return 0;
+    }
+    for (int iy = 0; iy < sh; iy++) {                       /* iy = image row from the top */
+        int srow = s_topdown ? iy : (sh - 1 - iy);
+        const uint8_t *sp = src + (size_t)srow * sw * 4;
+        for (int ix = 0; ix < sw; ix++) {
+            const uint8_t *px = sp + ix * 4;
+            uint32_t c = (uint32_t)px[2] | ((uint32_t)px[1] << 8) | ((uint32_t)px[0] << 16);
+            gdi_put(dst, xDest + ix, yDest + iy, c);
+        }
+    }
+    return (uint32_t)sh;
+}
 /* CreateCompatibleBitmap(hdc, w, h) -> HBITMAP (32bpp, not app-exposed). */
 uint32_t aret_CreateCompatibleBitmap(uint32_t esp) {
     int w = WI(1), h = WI(2);
@@ -3694,6 +3770,14 @@ uint32_t aret_CreateCompatibleBitmap(uint32_t esp) {
 uint32_t aret_CreateSolidBrush(uint32_t esp) {
     int i = gdi_alloc(GDIT_BRUSH); if (!i) return 0;
     g_gdi[i].color = WU(0) & 0x00FFFFFFu;
+    return gdi_handle(i);
+}
+/* CreatePatternBrush(hbmp) -> HBRUSH holding the pattern bitmap. The pattern is
+ * used by PatBlt/FillRect (pattern fills); here we retain the source bitmap so a
+ * later blit can sample it. */
+uint32_t aret_CreatePatternBrush(uint32_t esp) {
+    int i = gdi_alloc(GDIT_BRUSH); if (!i) return 0;
+    g_gdi[i].pat_bitmap = WU(0);
     return gdi_handle(i);
 }
 uint32_t aret_CreatePen(uint32_t esp) {
