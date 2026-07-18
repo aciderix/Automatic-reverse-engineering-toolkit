@@ -835,6 +835,44 @@ pub fn merge_modules(
     Ok(loaded)
 }
 
+/// Assemble a multi-module program (doc 80 §1.2 brick 2.3c — the loader
+/// capstone of DLL lifting): load `primary_data` as the app, load each
+/// `(name, dll_data)` DLL, merge them into one rebased address space
+/// (`merge_modules`), resolve the app's imports against the DLLs' exports
+/// (`resolve_module_imports`), and **route** each resolved IAT slot to the
+/// lifted export — by writing the export's virtual address into the slot's bytes
+/// and dropping the slot from `imports`. So emission dispatches the app's
+/// `call [slot]` to the lifted `sub_<export_va>` (a recovered internal function)
+/// instead of an HLE shim. Imports **not** satisfied by a loaded DLL stay
+/// shim-bound. Errors (never silently) if a routed slot lies outside every
+/// loaded section (can't patch it → would leave a stale IAT pointer).
+pub fn load_with_modules(primary_data: &[u8], dlls: &[(String, Vec<u8>)]) -> Result<Program> {
+    let mut primary = Program::load(primary_data)?;
+    let mut dll_progs = Vec::with_capacity(dlls.len());
+    for (name, data) in dlls {
+        dll_progs.push((name.clone(), Program::load(data)?));
+    }
+    let modules = merge_modules(&mut primary, dll_progs)?;
+    let resolved = resolve_module_imports(&primary.pe_imports, &modules);
+    let ptr = primary.bitness.bits() as u64 / 8;
+    for (&slot, &export_va) in &resolved {
+        // Write the export VA into the IAT slot so `call [slot]` dispatches to
+        // the lifted function (content-based), then unbind it from the shim map.
+        let sec = primary
+            .sections
+            .iter_mut()
+            .find(|s| slot >= s.address && slot + ptr <= s.address + s.data.len() as u64);
+        let Some(sec) = sec else {
+            bail!("routed IAT slot {slot:#x} lies outside every loaded section");
+        };
+        let off = (slot - sec.address) as usize;
+        let bytes = (export_va as u32).to_le_bytes();
+        sec.data[off..off + 4].copy_from_slice(&bytes);
+        primary.imports.remove(&slot);
+    }
+    Ok(primary)
+}
+
 /// Parse a PE's import table keeping the **source DLL** of each import: IAT slot
 /// virtual address → `PeImport{dll, name, ordinal}`. Parallel to
 /// `parse_pe_imports` (which resolves to a shim name and drops the module) —
@@ -1478,6 +1516,47 @@ mod tests {
         ranges.sort();
         for w in ranges.windows(2) {
             assert!(w[0].1 <= w[1].0, "merged sections must not overlap");
+        }
+    }
+
+    /// End-to-end loader assembly: treat Wine's comctl32 as the "app" and fold
+    /// in gdi32; comctl32's imports of gdi32 exports must be *routed* — dropped
+    /// from the shim map, with the IAT slot patched to the lifted export VA, and
+    /// that VA present as a recovered function symbol. Imports from DLLs we did
+    /// not load (advapi32, kernel32, …) stay shim-bound.
+    #[test]
+    fn load_with_modules_routes_resolved_imports() {
+        let (Some(comctl), Some(gdi)) = (wine_dll("comctl32.dll"), wine_dll("gdi32.dll")) else {
+            return;
+        };
+        // Ground truth: comctl32's IAT slot + resolved gdi32 export VA.
+        let plain = Program::load(&comctl).unwrap();
+        let bitblt_slot = *plain
+            .pe_imports
+            .iter()
+            .find(|(_, i)| i.dll.eq_ignore_ascii_case("gdi32.dll") && i.name.as_deref() == Some("BitBlt"))
+            .expect("comctl32 imports gdi32.BitBlt")
+            .0;
+        assert!(plain.imports.contains_key(&bitblt_slot)); // shim-bound before routing
+
+        let prog = load_with_modules(&comctl, &[("gdi32.dll".into(), gdi)]).unwrap();
+
+        // The gdi32.BitBlt slot is routed: dropped from imports, and its IAT
+        // bytes now hold a VA that is a recovered function symbol.
+        assert!(!prog.imports.contains_key(&bitblt_slot), "routed slot leaves the shim map");
+        let sec = prog.section_at(bitblt_slot).expect("slot in a section");
+        let off = (bitblt_slot - sec.address) as usize;
+        let va = u32::from_le_bytes(sec.data[off..off + 4].try_into().unwrap()) as u64;
+        assert!(matches!(prog.symbols.get(&va), Some(s) if s.name == "BitBlt" && s.is_function));
+
+        // An import from a DLL we did not load stays a shim (advapi32.RegCloseKey).
+        let reg_slot = plain
+            .pe_imports
+            .iter()
+            .find(|(_, i)| i.dll.eq_ignore_ascii_case("advapi32.dll") && i.name.as_deref() == Some("RegCloseKey"))
+            .map(|(s, _)| *s);
+        if let Some(reg_slot) = reg_slot {
+            assert!(prog.imports.contains_key(&reg_slot), "unloaded-DLL import stays shim-bound");
         }
     }
 }

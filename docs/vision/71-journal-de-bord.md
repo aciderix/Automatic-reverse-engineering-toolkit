@@ -3150,4 +3150,23 @@ Détail : **70 §6** (roadmap). Résumé :
   slot IAT résolu (map 2.2) → le `call [slot]` de l'app émet un appel vers le `sub_<va>` lifté du DLL au lieu du shim HLE
   — la 1ʳᵉ marche end-to-end du lifting DLL. Zone porteuse (analysis/emit) → garde dure hash + régression complète.
 
+### 2026-07-18 — [LOADER] Levier 1 incrément 2, brique 2.3c : **`load_with_modules`** — assemblage + routage (capstone loader)
+- **Le capstone côté loader.** `load_with_modules(primary_data, dlls: &[(nom, bytes)]) -> Program` compose toute la
+  chaîne : charge l'app + chaque DLL, les fusionne dans un espace rebasé (`merge_modules`), résout les imports de l'app
+  contre les exports des DLL (`resolve_module_imports`), et **route** chaque slot IAT résolu → écrit la **VA d'export**
+  dans les octets du slot + **retire le slot de `imports`**. Résultat : l'émission dispatchera le `call [slot]` de l'app
+  vers le `sub_<export_va>` lifté (fonction interne récupérée) au lieu d'un shim HLE. Imports **non** satisfaits par un
+  DLL chargé → restent shim. **Sound** : slot routé hors de toute section = erreur bruyante (jamais un pointeur IAT périmé).
+- **Testabilité (2 vraies DLL Wine, end-to-end loader).** `load_with_modules_routes_resolved_imports` (gated) : comctl32
+  comme « app » + gdi32 → l'import `gdi32.BitBlt` est **routé** (retiré de `imports`, slot patché vers une VA qui est un
+  **symbole-fonction récupéré** `BitBlt`), tandis que `advapi32.RegCloseKey` (DLL non chargée) **reste shim**. Toute la
+  chaîne Inc.1→2.1→2.2→2.3a→2.3b→2.3c prouvée sur DLL système.
+- **Portes** : build OK, bin unit tests **72/72**, hash transpile `19acad982194bf07` **inchangé** (fonction standalone,
+  non câblée à la CLI par défaut → aucun binaire existant ne change).
+- **⇒ Toute la couche LOADER du lifting DLL multi-modules est FAITE et prouvée sur vraies DLL Wine.** **Reste (la vraie
+  1ʳᵉ marche end-to-end, chantier ciblé à part)** : (1) flag CLI (`--with-dll nom=chemin`) appelant `load_with_modules` ;
+  (2) **vérifier que l'emit dispatche réellement** le `call [slot]` patché vers le `sub_<va>` lifté (dispatch indirect
+  content-based dans le modèle shared-stack) via un **run end-to-end vs Wine** (une app minimale important d'un DLL
+  minimal, les deux liftés). C'est la zone emit porteuse → garde dure hash + régression + fixture runnable.
+
 <!-- NOUVELLES ENTRÉES ICI (garder l'ordre chronologique, plus récent en bas) -->

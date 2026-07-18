@@ -649,11 +649,15 @@ résidu qui abort restera l'**obfusqué/fait-main/VM-packé** (indécidable, §9
   Directory + router le fond `win32k` vers le HLE) couvre **toute** la traîne **et** les runtimes tiers (VB/MFC) « gratis ».
   C'est LE multiplicateur qui évite d'écrire 2000 shims. Décision licence (ReactOS=GPL). *Le shim-main reste la voie
   rapide pour la tête à fort levier ; le lifting DLL pour la traîne + les runtimes.*
-  **🚧 ENGAGÉ (2026-07-18, par petits incréments)** : la tête shim-main est épuisée et le plateau restant EST le domaine
-  du lifting DLL → on démarre. **Incrément 1 FAIT** : `parse_pe_exports` (`src/loader/mod.rs`) lit l'**Export Directory**
-  d'un PE DLL → `Vec<PeExport>{ordinal, name, target=Address(base+RVA) | Forward(dll,name/ord)}` ; trous EAT sautés,
-  forwards enregistrés verbatim (jamais devinés). Testé (PE forgé déterministe + **bit-exact vs objdump** sur vraie DLL
-  mingw). **Reste** : incrément 2 = loader multi-modules (résoudre imports app → exports DLL liftée), incrément 3 =
+  **🚧 ENGAGÉ (2026-07-18, par petits incréments) — couche LOADER FAITE, prouvée sur vraies DLL Wine** (`src/loader/mod.rs`,
+  tout testé bit-exact vs objdump / vs les tables réelles de Wine comctl32/user32/gdi32/comdlg32) :
+  **Inc.1** `parse_pe_exports` (Export Directory → `{ordinal, name, target=Address(base+RVA)|Forward}`, trous sautés,
+  forwards verbatim) · **2.1** `parse_pe_imports_detailed` (imports gardant le DLL source) · **2.2** `resolve_module_imports`
+  (imports app → VA d'export liftée) · **2.3a** `apply_base_relocations` (rebaser, sound sur site hors-section) · **2.3b**
+  `merge_modules` (fusion app+DLL rebasés, exports→symboles-fonction, anti-chevauchement) · **2.3c** `load_with_modules`
+  (assemble tout + **route** chaque slot IAT résolu → patch VA + retrait de `imports`). Tout **inerte** pour le pipeline
+  (aucune régression, hash inchangé). **Reste (1ʳᵉ marche end-to-end, chantier emit ciblé)** : flag CLI + **vérifier le
+  dispatch emit** du `call [slot]` patché vers le `sub_<va>` lifté (run vs Wine, app+DLL minimaux). Puis incrément 3 =
   lifter comctl32 (pur user-mode) sur le HLE user32/gdi32, puis routage `win32k` pour user32/gdi32.
 - **Levier 2 — Finir les mécanismes bornés qui débloquent une CLASSE** : EH C++ (`__CxxFrameHandler`), bitmap-fonts,
   runtime VB. Chacun = une session, des milliers de binaires.
