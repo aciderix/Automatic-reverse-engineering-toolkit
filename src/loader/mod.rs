@@ -651,6 +651,75 @@ fn parse_pe_imports(data: &[u8]) -> BTreeMap<u64, String> {
         .unwrap_or_default()
 }
 
+/// A DLL loaded alongside the primary module, for inter-module import
+/// resolution: its module name plus its parsed Export Directory. Brick 2.2 of
+/// DLL lifting (doc 80 §1.2).
+#[derive(Debug, Clone)]
+pub struct LoadedModule {
+    /// Module name as it identifies the DLL (e.g. `comctl32.dll`).
+    pub name: String,
+    /// The module's exports (from `parse_pe_exports`).
+    pub exports: Vec<PeExport>,
+}
+
+/// Normalize a DLL name for matching: lowercase, drop a trailing `.dll`. So
+/// `COMCTL32.dll`, `comctl32.dll` and `COMCTL32` all compare equal (importers
+/// and export directories disagree on case and the extension).
+fn norm_dll(name: &str) -> String {
+    let n = name.trim().to_ascii_lowercase();
+    n.strip_suffix(".dll").unwrap_or(&n).to_string()
+}
+
+impl LoadedModule {
+    fn matches(&self, dll: &str) -> bool {
+        norm_dll(&self.name) == norm_dll(dll)
+    }
+    /// Local (non-forwarded) address of the export named `name`, if any.
+    fn addr_by_name(&self, name: &str) -> Option<u64> {
+        self.exports.iter().find_map(|e| match (&e.name, &e.target) {
+            (Some(n), PeExportTarget::Address(va)) if n == name => Some(*va),
+            _ => None,
+        })
+    }
+    /// Local (non-forwarded) address of the export at `ordinal`, if any.
+    fn addr_by_ordinal(&self, ordinal: u32) -> Option<u64> {
+        self.exports.iter().find_map(|e| match e.target {
+            PeExportTarget::Address(va) if e.ordinal == ordinal => Some(va),
+            _ => None,
+        })
+    }
+}
+
+/// Resolve a primary module's imports against a set of loaded DLL modules: for
+/// each IAT slot the app imports, if it comes from one of the loaded DLLs and
+/// that DLL exports the requested name/ordinal to a **local** address, map the
+/// slot to that export's virtual address (the lifted `sub_<va>`). Returns
+/// `IAT slot VA → export VA`. Imports from an unloaded DLL, unknown symbols, and
+/// **forwarded** exports are left unresolved — the multi-module loader falls
+/// back to the HLE shim, or aborts soundly, never guesses. Brick 2.2 of DLL
+/// lifting (doc 80 §1.2).
+pub fn resolve_module_imports(
+    app_imports: &BTreeMap<u64, PeImport>,
+    modules: &[LoadedModule],
+) -> BTreeMap<u64, u64> {
+    let mut out = BTreeMap::new();
+    for (&slot, imp) in app_imports {
+        let Some(module) = modules.iter().find(|m| m.matches(&imp.dll)) else {
+            continue; // DLL not loaded here → keep the shim / sound abort
+        };
+        // Prefer the name (stable across versions); fall back to the ordinal.
+        let target = match (&imp.name, imp.ordinal) {
+            (Some(n), _) => module.addr_by_name(n),
+            (None, Some(o)) => module.addr_by_ordinal(o),
+            (None, None) => None,
+        };
+        if let Some(va) = target {
+            out.insert(slot, va);
+        }
+    }
+    out
+}
+
 /// Parse a PE's import table keeping the **source DLL** of each import: IAT slot
 /// virtual address → `PeImport{dll, name, ordinal}`. Parallel to
 /// `parse_pe_imports` (which resolves to a shim name and drops the module) —
@@ -930,6 +999,21 @@ fn add_elf_imports(
 mod tests {
     use super::*;
 
+    /// Read a Wine PE builtin DLL by name, if the i386-windows builtin dir is
+    /// present here (gates real-DLL tests, like winediff needs Wine).
+    fn wine_dll(name: &str) -> Option<Vec<u8>> {
+        for dir in [
+            "/usr/lib/i386-linux-gnu/wine/i386-windows",
+            "/usr/lib/wine/i386-windows",
+            "/opt/wine-stable/lib/wine/i386-windows",
+        ] {
+            if let Ok(b) = std::fs::read(format!("{dir}/{name}")) {
+                return Some(b);
+            }
+        }
+        None
+    }
+
     /// Hand-craft a minimal but valid PE32 DLL whose Export Directory has:
     ///   - ordinal base 5;
     ///   - ord 5 "Alpha"  -> local RVA 0x2000 (named);
@@ -1076,15 +1160,9 @@ mod tests {
     /// brittle version-specific magic counts.
     #[test]
     fn parse_pe_exports_matches_wine_comctl32() {
-        let candidates = [
-            "/usr/lib/i386-linux-gnu/wine/i386-windows/comctl32.dll",
-            "/usr/lib/wine/i386-windows/comctl32.dll",
-            "/opt/wine-stable/lib/wine/i386-windows/comctl32.dll",
-        ];
-        let Some(path) = candidates.iter().find(|p| std::path::Path::new(p).exists()) else {
+        let Some(data) = wine_dll("comctl32.dll") else {
             return; // no Wine PE builtin here — skip (measurement-only test)
         };
-        let data = std::fs::read(path).unwrap();
         let exports = parse_pe_exports(&data);
         assert!(!exports.is_empty(), "comctl32 should export symbols");
 
@@ -1123,15 +1201,9 @@ mod tests {
     /// imports asserted, not version-specific counts.
     #[test]
     fn parse_pe_imports_detailed_keeps_source_dll() {
-        let candidates = [
-            "/usr/lib/i386-linux-gnu/wine/i386-windows/comctl32.dll",
-            "/usr/lib/wine/i386-windows/comctl32.dll",
-            "/opt/wine-stable/lib/wine/i386-windows/comctl32.dll",
-        ];
-        let Some(path) = candidates.iter().find(|p| std::path::Path::new(p).exists()) else {
+        let Some(data) = wine_dll("comctl32.dll") else {
             return;
         };
-        let data = std::fs::read(path).unwrap();
         let imports = parse_pe_imports_detailed(&data);
         assert!(!imports.is_empty());
         // Every import carries a non-empty source DLL and at least a name or ordinal.
@@ -1147,5 +1219,72 @@ mod tests {
         };
         assert!(has("gdi32.dll", "BitBlt"), "comctl32 imports gdi32.BitBlt");
         assert!(has("advapi32.dll", "RegCloseKey"), "comctl32 imports advapi32.RegCloseKey");
+    }
+
+    #[test]
+    fn resolve_module_imports_binds_by_name_and_ordinal() {
+        let module = LoadedModule {
+            name: "mydll.dll".into(),
+            exports: vec![
+                PeExport { ordinal: 5, name: Some("Alpha".into()), target: PeExportTarget::Address(0x2000) },
+                PeExport { ordinal: 6, name: None, target: PeExportTarget::Address(0x2100) },
+                PeExport {
+                    ordinal: 8,
+                    name: Some("Gamma".into()),
+                    target: PeExportTarget::ForwardByName("OTHER".into(), "Delta".into()),
+                },
+            ],
+        };
+        let imp = |dll: &str, name: Option<&str>, ord: Option<u32>| PeImport {
+            dll: dll.into(),
+            name: name.map(str::to_string),
+            ordinal: ord,
+        };
+        let mut app = BTreeMap::new();
+        app.insert(0x1000u64, imp("COMCTL32.dll", None, None)); // no name/ordinal (won't hit)
+        app.insert(0x1004u64, imp("MYDLL.dll", Some("Alpha"), None)); // by name, case/ext-insensitive
+        app.insert(0x1008u64, imp("mydll", None, Some(6))); // by ordinal
+        app.insert(0x100cu64, imp("mydll", Some("Gamma"), None)); // forwarded -> unresolved
+        app.insert(0x1010u64, imp("other.dll", Some("Alpha"), None)); // DLL not loaded -> unresolved
+        app.insert(0x1014u64, imp("mydll", Some("Missing"), None)); // unknown name -> unresolved
+        let r = resolve_module_imports(&app, std::slice::from_ref(&module));
+        assert_eq!(r.len(), 2);
+        assert_eq!(r[&0x1004], 0x2000);
+        assert_eq!(r[&0x1008], 0x2100);
+    }
+
+    /// Real cross-module resolution: Wine's comctl32 imports gdi32.BitBlt;
+    /// resolving comctl32's imports against Wine's real gdi32 export table must
+    /// bind that IAT slot to gdi32's own BitBlt export VA (the lifted sub).
+    #[test]
+    fn resolve_module_imports_cross_module_wine() {
+        let (Some(comctl), Some(gdi)) = (wine_dll("comctl32.dll"), wine_dll("gdi32.dll")) else {
+            return;
+        };
+        let app_imports = parse_pe_imports_detailed(&comctl);
+        let gdi_mod = LoadedModule { name: "gdi32.dll".into(), exports: parse_pe_exports(&gdi) };
+        let resolved = resolve_module_imports(&app_imports, std::slice::from_ref(&gdi_mod));
+        assert!(!resolved.is_empty(), "comctl32 imports from gdi32 should resolve");
+
+        // The slot comctl32 uses for gdi32.BitBlt binds to gdi32's BitBlt export.
+        let bitblt_slot = *app_imports
+            .iter()
+            .find(|(_, i)| i.dll.eq_ignore_ascii_case("gdi32.dll") && i.name.as_deref() == Some("BitBlt"))
+            .expect("comctl32 imports gdi32.BitBlt")
+            .0;
+        assert_eq!(resolved.get(&bitblt_slot).copied(), gdi_mod.addr_by_name("BitBlt"));
+
+        // Every resolved target is a real gdi32 export address (never invented).
+        let gdi_addrs: std::collections::BTreeSet<u64> = gdi_mod
+            .exports
+            .iter()
+            .filter_map(|e| match e.target {
+                PeExportTarget::Address(va) => Some(va),
+                _ => None,
+            })
+            .collect();
+        for va in resolved.values() {
+            assert!(gdi_addrs.contains(va));
+        }
     }
 }

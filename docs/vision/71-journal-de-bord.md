@@ -3093,4 +3093,22 @@ Détail : **70 §6** (roadmap). Résumé :
   **PASS**. **Suite** : brique 2.2 = le **résolveur** (imports app + tables d'exports des DLL chargées → slot IAT app →
   VA de l'export lifté), puis 2.3 = fusion d'espace d'adressage + alimentation du pipeline.
 
+### 2026-07-18 — [LOADER] Levier 1 incrément 2, brique 2.2 : **résolveur inter-modules** (imports app → exports DLL liftés)
+- **Le cœur de l'Incrément 2.** `resolve_module_imports(app_imports, modules) -> BTreeMap<slot_IAT, VA_export>` : pour
+  chaque slot IAT importé par l'app, si l'import vient d'un DLL chargé (`LoadedModule{name, exports}`, brique 2.1 + Inc.1)
+  et que ce DLL exporte le nom/ordinal demandé vers une adresse **locale**, lie le slot à la **VA de l'export** (= le
+  `sub_<va>` lifté). Match DLL **insensible casse/`.dll`** (`norm_dll`), préférence au **nom** (stable) sinon l'ordinal.
+  **Non résolu (→ shim HLE / abort sound, jamais deviné)** : DLL non chargé, symbole inconnu, export **forwardé** (pointe
+  vers un autre module — chaîne à résoudre plus tard).
+- **Testabilité (synthétique + cross-module RÉEL).** (1) `resolve_module_imports_binds_by_name_and_ordinal` : module
+  synthétique (Alpha@0x2000/ord5, ord6@0x2100, Gamma→forward) × imports variés → lie par nom (casse/ext-insensible) et
+  par ordinal, **laisse non résolu** forward / DLL non chargé / nom inconnu. (2) **`resolve_module_imports_cross_module_wine`**
+  (gated Wine) : la vraie **comctl32** importe `gdi32.BitBlt` → résolue contre la table d'exports de la vraie **gdi32**,
+  le slot est lié à la **VA d'export BitBlt réelle de gdi32** (`addr_by_name`), et **chaque** cible résolue est une
+  adresse d'export gdi32 réelle (jamais inventée). La chaîne Inc.1→2.1→2.2 est ainsi prouvée bout-en-bout sur DLL système.
+- **Portes** : build OK, bin unit tests **68/68**, hash transpile `19acad982194bf07` **inchangé** (fonction standalone,
+  non câblée au pipeline). **Suite** : brique 2.3 = fusion d'espace d'adressage (app + DLL liftés dans un binaire) +
+  alimentation du pipeline (le slot IAT résolu émet un appel vers le `sub_<va>` lifté au lieu du shim) — la 1ʳᵉ marche
+  end-to-end du lifting DLL.
+
 <!-- NOUVELLES ENTRÉES ICI (garder l'ordre chronologique, plus récent en bas) -->
