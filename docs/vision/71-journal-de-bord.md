@@ -3008,4 +3008,16 @@ Détail : **70 §6** (roadmap). Résumé :
   unifiée **PASS**. Prochaines têtes mesurées : `CreateProcessA` (échec sound, 27 binaires — non bit-testable, Wine
   réussit), `FormatMessageA` (11, testable), puis la famille GDI mapping-mode.
 
+### 2026-07-18 — [HLE-WIN32] `CreateProcessA/W` = échec sound (tête mesurée #2, 27/37)
+- **Tête de liste mesurée #2.** `CreateProcessA` importé par 27/37 du corpus Win95, absent → abort. Lancer un `.exe`
+  enfant Windows n'a **pas de modèle natif fidèle** (pas de Windows pour l'exécuter) → **échec sound** (doctrine 70
+  §4.5/§8.3), jamais simulé, jamais abort : retourne `0` (FALSE) + `g_last_error=ERROR_FILE_NOT_FOUND(2)`. Un appelant
+  teste le BOOL, voit l'échec, prend son chemin d'erreur → les 27 binaires **continuent** au lieu d'aborter.
+- **Testabilité.** Wine tente réellement le lancement ; pour un chemin dont le répertoire n'existe pas, les deux
+  échouent identiquement (FALSE). Fixture `winecorpus/win32_createprocess.c` (chemin `Z:\…\nope.exe`) n'imprime que le
+  BOOL (code d'erreur + succès d'un vrai lancement = dépendants chemin/env, hors check bit-exact). Wine **et** ARET →
+  `r=0`. `stdcall_pops` : +CreateProcessW@40.
+- **Portes** : winediff **124→125/125**, hash transpile `19acad982194bf07` **inchangé** (runtime-only), régression
+  unifiée **PASS**. Reste tête : `FormatMessageA` (11, table de messages système), puis famille GDI mapping-mode.
+
 <!-- NOUVELLES ENTRÉES ICI (garder l'ordre chronologique, plus récent en bas) -->

@@ -1355,6 +1355,18 @@ uint32_t aret_ExitThread(uint32_t esp) {
     swapcontext(&g_fiber[g_cur].ctx, &g_sched_ctx);        /* never resumed */
     return 0;
 }
+/* CreateProcess(A/W): launching a Windows child .exe has no faithful native model
+ * (there is no Windows to run it), so this is a SOUND FAILURE, never a simulation and
+ * never an abort — return 0 (FALSE) and set a plausible last error, exactly the shape
+ * a real CreateProcess gives when it cannot start the image. A caller checks the
+ * BOOL, sees failure, and takes its error path (doctrine: doc 70 §4.5/§8.3). The 27/37
+ * Win95 binaries importing it thus continue gracefully instead of aborting. */
+uint32_t aret_CreateProcessA(uint32_t esp) {
+    (void)esp; g_last_error = 2u /* ERROR_FILE_NOT_FOUND */; return 0;
+}
+uint32_t aret_CreateProcessW(uint32_t esp) {
+    (void)esp; g_last_error = 2u; return 0;
+}
 uint32_t aret_GetExitCodeThread(uint32_t esp) {
     int fi = u32_thread_idx(WU(0));
     uint32_t *out = (uint32_t *)WP(1);

@@ -88,6 +88,7 @@ static TABLE: &[(&str, u32)] = &[
     ("CreatePen", 12),
     ("CreatePipe", 16),
     ("CreateProcessA", 40),
+    ("CreateProcessW", 40),
     ("CreateRemoteThread", 28),
     ("CreateSemaphoreA", 16),
     ("CreateSemaphoreW", 16),
