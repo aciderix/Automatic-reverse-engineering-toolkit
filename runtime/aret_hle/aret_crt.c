@@ -124,6 +124,27 @@ uint32_t aret_labs(uint32_t esp)   { return (uint32_t)labs(AI(0)); }
 static uint32_t aret_rand_seed = 1;
 uint32_t aret_rand(uint32_t esp)   { (void)esp; aret_rand_seed = aret_rand_seed * 214013u + 2531011u; return (aret_rand_seed >> 16) & 0x7fff; }
 uint32_t aret_srand(uint32_t esp)  { aret_rand_seed = AU(0); return 0; }
+/* _controlfp(new, mask) -> the (new) control word. The msvcrt FP control word in its
+ * platform-independent encoding; the process default is 0x0008001f (all exceptions
+ * masked, 53-bit precision, round-to-nearest) — measured from Wine. Stateful: set
+ * updates (cur & ~mask)|(new & mask) and returns it; a query (mask 0) returns the
+ * current word. Matches Wine's observable values. (The actual FP rounding ARET uses
+ * is the host default; a program that SETS a non-default rounding and relies on it is
+ * the same bounded x87 limitation as a custom fldcw — rare.) */
+static uint32_t aret_fp_cw = 0x0008001fu;
+uint32_t aret_controlfp(uint32_t esp) {
+    uint32_t neu = AU(0), mask = AU(1);
+    aret_fp_cw = (aret_fp_cw & ~mask) | (neu & mask);
+    return aret_fp_cw;
+}
+/* _controlfp_s(&cur, new, mask): the secure form — writes the control word through
+ * the first arg (if non-NULL) and returns 0 (success). */
+uint32_t aret_controlfp_s(uint32_t esp) {
+    uint32_t out = AU(0), neu = AU(1), mask = AU(2);
+    aret_fp_cw = (aret_fp_cw & ~mask) | (neu & mask);
+    if (out) *(uint32_t *)(uintptr_t)out = aret_fp_cw;
+    return 0;
+}
 uint32_t aret_getenv(uint32_t esp) { return RP(getenv(ACS(0))); }
 /* Windows `_putenv` copies the "NAME=value" string; libc `putenv` stores the
  * pointer, so strdup to match (and avoid a dangling guest-stack pointer). */

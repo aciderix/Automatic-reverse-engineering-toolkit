@@ -2975,4 +2975,19 @@ Détail : **70 §6** (roadmap). Résumé :
   au sas CRT et tournent avec les vraies bornes (plus correct que le placeholder). **Bug général corrigé** (soundness :
   `fs:[4]` déréférençable = valeurs valides au lieu d'un crash).
 
+### 2026-07-17 — [HLE-STDIO][CRT] `_controlfp`/`_controlfp_s` — mot de contrôle FP msvcrt stateful (sweep Win95)
+- **Sweep Win95 (suite du StackBase).** Après le fix StackBase, re-run large des PE32 : `v.exe` et `mpegplayer.exe`
+  butaient sur `_controlfp` non implémenté (import msvcrt commun).
+- **Fix.** `aret_controlfp(new, mask)` (aret_crt.c, cdecl) : mot de contrôle FP msvcrt en encodage plateforme-indépendant,
+  **défaut 0x0008001f** (mesuré Wine : toutes exceptions masquées, précision 53-bit, arrondi au plus proche). **Stateful** :
+  set = `(cur & ~mask)|(new & mask)`, retourne le nouveau ; query (mask 0) retourne le courant. `_controlfp_s(&cur,new,mask)`
+  = forme sécurisée (écrit via arg0, retourne 0). **Vérifié bit-identique Wine** : query `0008001f`, setRC `0008021f`,
+  restore `0009001f`, setPC `000a001f`. (Limite : l'arrondi FP réel reste le défaut hôte ; un programme qui SET un arrondi
+  non-défaut et s'y fie = même limite x87 bornée que fldcw custom — rare.)
+- **Piège fixture.** mingw **inline** `_controlfp_s` avec sa propre validation stricte (retourne 22, ne set pas) ≠ le
+  msvcrt de Wine (retourne 0, set) → `_controlfp_s` ne passe jamais par le shim en mingw → retiré du fixture (quirk
+  toolchain, pas mon code). Le shim reste pour les vrais imports `_controlfp_s`.
+- **Mesuré.** `v.exe` franchit `_controlfp` → tourne (endpoint). **Portes** : winediff **122→123/123** (`crt_controlfp`),
+  hash transpile `19acad982194bf07` **inchangé** (runtime-only), régression unifiée **PASS**.
+
 <!-- NOUVELLES ENTRÉES ICI (garder l'ordre chronologique, plus récent en bas) -->
