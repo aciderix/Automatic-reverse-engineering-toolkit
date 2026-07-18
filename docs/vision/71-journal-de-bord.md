@@ -3388,4 +3388,22 @@ Détail : **70 §6** (roadmap). Résumé :
   stateless) **et** progress bar (contrôle stateful, messages, état, theming). Les autres contrôles (trackbar, toolbar,
   listview…) suivent la **même** machinerie — au fil des workloads réels, data-driven.
 
+### 2026-07-18 — [STRATÉGIE] Re-mesure Levier 0 post-lifting-DLL (corpus Win95, 37 PE32) → tête = **GDI mapping-mode**
+- **Étape 0 du plan ordonné** (§5.0) : re-lancer `--mode walls` sur les 37 vrais PE32 i386 du corpus Win95, agréger les
+  causes d'abort par **#binaires** (largeur). Ré-ancre sur la donnée après le travail Levier 1 (comctl32).
+- **Instructions non-liftées = BRUIT confirmé** (`int3`/`arpl`/`les`/`aaa`/`aas`/`in`/`insb`/`bound`/`into`/`popad` = data
+  décodée-en-code + privilégié/BCD obsolète → abort correct). **Le lift par-instruction est complet.**
+- **Imports manquants — distribution PLATE** (plateau, la tête ayant été traitée : UnhandledExceptionFilter/CreateProcess/
+  FormatMessage). Tête : `TerminateThread` (5 binaires), puis traîne à 3. **MAIS une famille COHÉRENTE domine nettement** :
+  le **GDI mapping-mode** (transformation coordonnées logique→device) — `SetViewportOrgEx`/`SetViewportExtEx`/
+  `SetWindowExtEx`/`ScaleViewportExtEx`/`ScaleWindowExtEx`/`OffsetViewportOrgEx`/`DPtoLP`/`LPtoDP`/`GetViewportOrgEx`
+  (+`PtVisible`/`RectVisible`/`Escape` = clipping/escape voisins), **~12 fonctions, 3 binaires chacune**. Autres familles :
+  imprimante (`OpenPrinterA`/`ClosePrinter`/`DocumentPropertiesA`), menu (`ModifyMenuA`/`SetMenuItemBitmaps`), thread
+  (`TerminateThread`/`SetThreadPriority`/`OpenProcess`), divers (`WinHelpA`/`WaitForInputIdle`/`TabbedTextOutA`/`GrayStringA`).
+- **Conclusion (la donnée redirige le plan).** La **prochaine cible mesurée = la famille GDI mapping-mode** (la plus large
+  ET la plus cohérente), **pas** les familles kernel32/CRT génériques supposées à l'étape 1. ⚠️ **Zone correctness-critique**
+  (le mode de mapping transforme les coordonnées de **tout** le dessin ultérieur → chaque primitive GDI doit appliquer la
+  transforme viewport/window) → chantier ciblé, vérifié **DIB-hash vs Wine**, pas un batch de shims triviaux. C'est le
+  vrai « step 1/2 » de la vague, dicté par la mesure.
+
 <!-- NOUVELLES ENTRÉES ICI (garder l'ordre chronologique, plus récent en bas) -->

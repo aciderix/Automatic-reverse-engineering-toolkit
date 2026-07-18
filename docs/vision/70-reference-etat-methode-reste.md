@@ -683,11 +683,13 @@ résidu qui abort restera l'**obfusqué/fait-main/VM-packé** (indécidable, §9
 - **PLAN ORDONNÉ ACTUEL (2026-07-18, post-lifting-DLL — validé utilisateur)** : le Levier 1 (lifting DLL) est démontré
   (contrôle comctl32 stateful bit-identique Wine, §5.0 supra). Ordre de la **prochaine vague**, du plus rendement/moins
   risque au plus gros :
-  1. **RE-MESURER (Levier 0)** — relancer le vrai corpus (Win95 PE32 + Chip 1997) end-to-end, classer les causes d'abort
-     **maintenant** (après tout le travail Levier 1). Ré-ancre sur la donnée (le travail comctl32 récent était en partie
-     auto-dirigé). **Étape en cours.**
-  2. **Familles socle** (les 106 shims kernel32/CRT mesurés : locale, version-info, char-class, `CompareFileTime`… ;
-     atoms **déjà fait**) — le plus **général** (aide tout binaire), borné, batch vérifié vs Wine.
+  1. ✅ **RE-MESURÉ (Levier 0, 2026-07-18)** — 37 PE32 Win95 : instructions = bruit (lift complet) ; imports **plats**
+     (tête traitée) **sauf une famille cohérente dominante : le GDI mapping-mode** (~12 fn, 3 binaires chacune). Détail
+     journal 71.
+  2. **Famille GDI mapping-mode** (la tête mesurée) : `SetViewportOrgEx`/`SetViewportExtEx`/`SetWindowExtEx`/`Scale*ExtEx`/
+     `OffsetViewportOrgEx`/`SetMapMode`/`DPtoLP`/`LPtoDP` — transforme logique→device pour **tout** le dessin ⚠️
+     correctness-critique (chaque primitive GDI applique la transforme), vérifié **DIB-hash vs Wine**. *Puis* les familles
+     kernel32/CRT restantes (locale, version-info, char-class… ; atoms **fait**) — générales, batch vérifié.
   3. **Un vrai binaire GUI du corpus utilisant comctl32** — prouve la machinerie contrôles sur du réel shippé ; tire les
      contrôles manquants (trackbar/toolbar/listview) dans l'ordre **mesuré**.
   4. **MFC / VB40032** (le gros multiplicateur) — **gated sur l'EH C++** (`__CxxFrameHandler`, Levier 2, qu'on n'a pas) ;
