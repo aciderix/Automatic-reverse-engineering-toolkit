@@ -3046,4 +3046,29 @@ Détail : **70 §6** (roadmap). Résumé :
 - **Portes** : winediff **126→127/127** (`user32_getwindow`, `gwchild=1 next=2 last=3 first=1 topwin=1` = Wine), hash
   transpile `19acad982194bf07` **inchangé**, `table_is_sorted_by_name` ok, régression unifiée **PASS**.
 
+### 2026-07-18 — [LOADER] Levier 1 (lifting DLL) incrément 1 : parser l'**Export Directory** d'un PE DLL
+- **Bascule stratégique actée.** La tête mesurée est épuisée (UnhandledExceptionFilter/CreateProcess/FormatMessage) et
+  la re-mesure montre un **plateau plat** (fenêtre-nav/thread/imprimante/GDI mapping-mode/menu). Le plateau EST le domaine
+  du **Levier 1 (lifting DLL, doc 80 §1.2)** — pas un shim de plus à la main. On **arrête la passe shim** et on démarre le
+  Levier 1 **par petits incréments committables** (pas big-bang). Incrément 1 = brique isolée, testable sur une vraie DLL.
+- **Ce que c'est.** Pour lifter une DLL (comctl32/user32/…) et exposer sa surface d'API, le loader multi-modules doit
+  savoir **quelle fonction liftée** chaque export (nom/ordinal) désigne. Première brique : lire l'**Export Directory**.
+  `parse_pe_exports(data) -> Vec<PeExport>` (`src/loader/mod.rs`, via le crate `object` `ExportTable::exports()`) :
+  chaque export → `{ordinal (base incluse), name: Option, target}`. `target` = `Address(image_base+RVA)` (= l'adresse du
+  `sub_<va>` lifté) pour une cible **locale**, ou `ForwardByName(dll,name)`/`ForwardByOrdinal(dll,ord)` pour un **forward**
+  (enregistré verbatim, résolu plus tard par le loader — **jamais deviné**, sinon abort sound). Les trous de l'EAT
+  (adresse 0, gaps d'une plage d'ordinaux creuse) sont **sautés** (RVA 0 = en-tête DOS, jamais un export valide).
+- **Testabilité (double : forgé déterministe + vraie DLL).** (1) Unit test `parse_pe_exports_reads_the_export_directory` :
+  PE32 DLL **forgé octet par octet** (ordinal base 5 ; ord5 "Alpha"→local, ord6 sans nom→ordinal-only, ord7→trou EAT
+  sauté, ord8 "Gamma"→forward "OTHER.Delta") — vérité terrain **que je contrôle exactement** → couvre base d'ordinaux,
+  named local, ordinal-only, saut de trou, forward-by-name. + `parse_pe_exports_empty_on_non_pe`. (2) **Mesuré vs objdump**
+  (règle « mesurer, pas affirmer ») : vraie DLL mingw (`__declspec(dllexport) Add/Sub/gCounter`), parseur **bit-exact vs
+  `i686-w64-mingw32-objdump -p`** (Add→base+0x14d0, Sub→+0x14dd, gCounter→+0x602c ; ordinaux 1/2/3) — test jetable, retiré.
+- **Portes (additif, hors chemin actif — `parse_pe_exports` pas encore appelée hors test).** Build OK (warning dead_code
+  attendu, levé à l'incrément 2), unit tests bin **64/64**, hash transpile `19acad982194bf07` **inchangé**, régression
+  unifiée **PASS** (difftest 272/272, funcdiff 20558 / 0 div, SMT 11/11, recompilabilité 100 %), winediff **127/127**.
+- **Suite (incrément 2).** Loader multi-modules minimal : charger app + 1 DLL dans un espace, résoudre les imports de
+  l'app vers les exports de la DLL (nom → `sub_<va>` lifté), le compilateur hôte les linke. Puis incrément 3 = lifter
+  comctl32 (pur user-mode) sur le HLE user32/gdi32 existant.
+
 <!-- NOUVELLES ENTRÉES ICI (garder l'ordre chronologique, plus récent en bas) -->

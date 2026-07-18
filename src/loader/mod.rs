@@ -49,6 +49,33 @@ pub struct KnownSymbol {
     pub is_function: bool,
 }
 
+/// Where a PE export points. Either a target inside this module (an address =
+/// image_base + RVA, i.e. the lifted `sub_<va>`), or a forward to another DLL
+/// (the multi-module loader must resolve it, or abort soundly — never guessed).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PeExportTarget {
+    /// Virtual address in this module (image_base + RVA) — a lifted function.
+    Address(u64),
+    /// Forwarded to `dll`.`name` (e.g. `NTDLL.RtlAllocateHeap`).
+    ForwardByName(String, String),
+    /// Forwarded to `dll` #`ordinal`.
+    ForwardByOrdinal(String, u32),
+}
+
+/// One entry of a PE DLL's Export Directory: what a caller of this DLL binds to.
+/// This is the first brick of DLL lifting (doc 80 §1.2): to lift a DLL
+/// (`comctl32`, `user32`, …) and expose its API surface, the multi-module
+/// loader must know which lifted function each exported name/ordinal maps to.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PeExport {
+    /// Export ordinal (already includes the DLL's ordinal base).
+    pub ordinal: u32,
+    /// Export name, if named (name-less exports are reachable by ordinal only).
+    pub name: Option<String>,
+    /// Where the export points.
+    pub target: PeExportTarget,
+}
+
 /// C-runtime functions ARET provides natively (aret_hle/aret_crt). A
 /// statically-linked call to one of these (recognized by symbol, see
 /// `Program::crt_symbol`) is bound to the native shim instead of being lifted —
@@ -603,6 +630,58 @@ fn parse_pe_imports(data: &[u8]) -> BTreeMap<u64, String> {
         .unwrap_or_default()
 }
 
+/// Parse a PE DLL's Export Directory: the ordered list of exports (name and/or
+/// ordinal → target). A local target is resolved to a virtual address
+/// (`image_base + RVA`), i.e. the address of the lifted `sub_<va>`; a forwarded
+/// export is recorded verbatim (`kernel32.HeapAlloc` etc.) for the multi-module
+/// loader to resolve later — never guessed. Empty EAT slots (address 0, the
+/// gaps in a sparse ordinal range) are skipped: RVA 0 is the DOS header, never
+/// a valid export. Brick 1 of DLL lifting (doc 80 §1.2).
+pub fn parse_pe_exports(data: &[u8]) -> Vec<PeExport> {
+    use object::read::pe::{ExportTarget, ImageNtHeaders, ImageOptionalHeader};
+    use object::pe;
+
+    fn collect<Nt: ImageNtHeaders>(data: &[u8]) -> Option<Vec<PeExport>> {
+        let dos = pe::ImageDosHeader::parse(data).ok()?;
+        let mut offset = dos.nt_headers_offset() as u64;
+        let (nt, dirs) = Nt::parse(data, &mut offset).ok()?;
+        let sections = nt.sections(data, offset).ok()?;
+        let base = nt.optional_header().image_base();
+        let table = match dirs.export_table(data, &sections) {
+            Ok(Some(t)) => t,
+            _ => return Some(Vec::new()),
+        };
+        let exports = table.exports().ok()?;
+        let mut out = Vec::with_capacity(exports.len());
+        for e in exports {
+            let target = match e.target {
+                // An EAT entry of RVA 0 is a hole in the sparse ordinal range,
+                // not an export — skip it (RVA 0 = DOS header, never valid).
+                ExportTarget::Address(0) => continue,
+                ExportTarget::Address(rva) => PeExportTarget::Address(base + rva as u64),
+                ExportTarget::ForwardByName(dll, name) => PeExportTarget::ForwardByName(
+                    String::from_utf8_lossy(dll).into_owned(),
+                    String::from_utf8_lossy(name).into_owned(),
+                ),
+                ExportTarget::ForwardByOrdinal(dll, ord) => {
+                    PeExportTarget::ForwardByOrdinal(String::from_utf8_lossy(dll).into_owned(), ord)
+                }
+            };
+            out.push(PeExport {
+                ordinal: e.ordinal,
+                name: e.name.map(|n| String::from_utf8_lossy(n).into_owned()),
+                target,
+            });
+        }
+        Some(out)
+    }
+
+    collect::<pe::ImageNtHeaders32>(data)
+        .filter(|v| !v.is_empty())
+        .or_else(|| collect::<pe::ImageNtHeaders64>(data))
+        .unwrap_or_default()
+}
+
 /// Parse static relocations (object-file `.rela.text` etc.). For each
 /// relocation, resolve the referenced symbol to its address (when defined in
 /// this object) and name. PC-relative 4-byte relocations (the `call`/`jmp`/
@@ -757,5 +836,148 @@ fn add_elf_imports(
                 imports.insert(stub, name.clone());
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Hand-craft a minimal but valid PE32 DLL whose Export Directory has:
+    ///   - ordinal base 5;
+    ///   - ord 5 "Alpha"  -> local RVA 0x2000 (named);
+    ///   - ord 6 (no name) -> local RVA 0x2100 (ordinal-only);
+    ///   - ord 7          -> EAT hole (address 0, must be skipped);
+    ///   - ord 8 "Gamma"  -> forward "OTHER.Delta".
+    /// Every RVA referenced (dir, tables, strings) lives inside the export data
+    /// directory range, so `object` slices the whole blob self-containedly.
+    fn craft_export_dll() -> Vec<u8> {
+        const IMAGE_BASE: u32 = 0x1000_0000;
+        const SEC_VA: u32 = 0x1000; // export blob RVA
+        const RAW_PTR: u32 = 0x200; // export blob file offset
+
+        // --- Export blob (based at RVA SEC_VA) ------------------------------
+        // Fixed inner offsets:
+        let eat_rva = SEC_VA + 0x28; // after the 40-byte directory
+        let ent_rva = SEC_VA + 0x38; // after 4 EAT entries (16 bytes)
+        let ord_rva = SEC_VA + 0x40; // after 2 ENT entries (8 bytes)
+        let str_rva = SEC_VA + 0x44; // after 2 ordinal entries (4 bytes)
+        // String RVAs (packed from str_rva):
+        let dll_rva = str_rva; // "MYDLL.dll\0"  (10)
+        let alpha_rva = dll_rva + 10; // "Alpha\0"      (6)
+        let gamma_rva = alpha_rva + 6; // "Gamma\0"      (6)
+        let fwd_rva = gamma_rva + 6; // "OTHER.Delta\0" (12)
+        let blob_end = fwd_rva + 12;
+        let blob_len = (blob_end - SEC_VA) as usize;
+
+        let mut blob = vec![0u8; blob_len];
+        let put32 = |b: &mut [u8], rva: u32, v: u32| {
+            let o = (rva - SEC_VA) as usize;
+            b[o..o + 4].copy_from_slice(&v.to_le_bytes());
+        };
+        let put16 = |b: &mut [u8], rva: u32, v: u16| {
+            let o = (rva - SEC_VA) as usize;
+            b[o..o + 2].copy_from_slice(&v.to_le_bytes());
+        };
+        let puts = |b: &mut [u8], rva: u32, s: &[u8]| {
+            let o = (rva - SEC_VA) as usize;
+            b[o..o + s.len()].copy_from_slice(s);
+        };
+        // IMAGE_EXPORT_DIRECTORY (40 bytes) at SEC_VA.
+        put32(&mut blob, SEC_VA + 0x0c, dll_rva); // Name
+        put32(&mut blob, SEC_VA + 0x10, 5); // Base (ordinal base)
+        put32(&mut blob, SEC_VA + 0x14, 4); // NumberOfFunctions
+        put32(&mut blob, SEC_VA + 0x18, 2); // NumberOfNames
+        put32(&mut blob, SEC_VA + 0x1c, eat_rva); // AddressOfFunctions
+        put32(&mut blob, SEC_VA + 0x20, ent_rva); // AddressOfNames
+        put32(&mut blob, SEC_VA + 0x24, ord_rva); // AddressOfNameOrdinals
+        // EAT: idx0 local, idx1 local(no name), idx2 hole, idx3 forward.
+        put32(&mut blob, eat_rva, 0x2000);
+        put32(&mut blob, eat_rva + 4, 0x2100);
+        put32(&mut blob, eat_rva + 8, 0);
+        put32(&mut blob, eat_rva + 12, fwd_rva);
+        // ENT (name pointers) + ordinal table (0-based EAT indices).
+        put32(&mut blob, ent_rva, alpha_rva);
+        put32(&mut blob, ent_rva + 4, gamma_rva);
+        put16(&mut blob, ord_rva, 0); // "Alpha" -> EAT idx0
+        put16(&mut blob, ord_rva + 2, 3); // "Gamma" -> EAT idx3
+        // Strings.
+        puts(&mut blob, dll_rva, b"MYDLL.dll\0");
+        puts(&mut blob, alpha_rva, b"Alpha\0");
+        puts(&mut blob, gamma_rva, b"Gamma\0");
+        puts(&mut blob, fwd_rva, b"OTHER.Delta\0");
+
+        // --- Headers --------------------------------------------------------
+        let mut f = vec![0u8; RAW_PTR as usize];
+        f[0] = b'M';
+        f[1] = b'Z';
+        f[0x3c..0x40].copy_from_slice(&0x40u32.to_le_bytes()); // e_lfanew
+        let pe = 0x40usize;
+        f[pe..pe + 4].copy_from_slice(b"PE\0\0");
+        // FileHeader @ 0x44
+        let fh = pe + 4;
+        f[fh..fh + 2].copy_from_slice(&0x014cu16.to_le_bytes()); // Machine i386
+        f[fh + 2..fh + 4].copy_from_slice(&1u16.to_le_bytes()); // NumberOfSections
+        f[fh + 16..fh + 18].copy_from_slice(&0xE0u16.to_le_bytes()); // SizeOfOptionalHeader
+        f[fh + 18..fh + 20].copy_from_slice(&0x2102u16.to_le_bytes()); // DLL | 32-bit
+        // OptionalHeader32 @ 0x58
+        let oh = fh + 20;
+        f[oh..oh + 2].copy_from_slice(&0x010bu16.to_le_bytes()); // PE32 magic
+        f[oh + 28..oh + 32].copy_from_slice(&IMAGE_BASE.to_le_bytes()); // ImageBase
+        f[oh + 32..oh + 36].copy_from_slice(&0x1000u32.to_le_bytes()); // SectionAlignment
+        f[oh + 36..oh + 40].copy_from_slice(&0x200u32.to_le_bytes()); // FileAlignment
+        f[oh + 56..oh + 60].copy_from_slice(&0x3000u32.to_le_bytes()); // SizeOfImage
+        f[oh + 60..oh + 64].copy_from_slice(&RAW_PTR.to_le_bytes()); // SizeOfHeaders
+        f[oh + 68..oh + 70].copy_from_slice(&2u16.to_le_bytes()); // Subsystem GUI
+        f[oh + 92..oh + 96].copy_from_slice(&16u32.to_le_bytes()); // NumberOfRvaAndSizes
+        // DataDirectory[0] = export table @ oh+96
+        let dd = oh + 96;
+        f[dd..dd + 4].copy_from_slice(&SEC_VA.to_le_bytes());
+        f[dd + 4..dd + 8].copy_from_slice(&(blob_len as u32).to_le_bytes());
+        // Section header @ oh+224
+        let sh = oh + 224;
+        f[sh..sh + 6].copy_from_slice(b".rdata");
+        f[sh + 8..sh + 12].copy_from_slice(&(blob_len as u32).to_le_bytes()); // VirtualSize
+        f[sh + 12..sh + 16].copy_from_slice(&SEC_VA.to_le_bytes()); // VirtualAddress
+        f[sh + 16..sh + 20].copy_from_slice(&0x200u32.to_le_bytes()); // SizeOfRawData
+        f[sh + 20..sh + 24].copy_from_slice(&RAW_PTR.to_le_bytes()); // PointerToRawData
+        f[sh + 36..sh + 40].copy_from_slice(&0x4000_0040u32.to_le_bytes()); // init data, read
+
+        // Append the export blob padded to FileAlignment.
+        f.resize(RAW_PTR as usize + 0x200, 0);
+        f[RAW_PTR as usize..RAW_PTR as usize + blob.len()].copy_from_slice(&blob);
+        f
+    }
+
+    #[test]
+    fn parse_pe_exports_reads_the_export_directory() {
+        let dll = craft_export_dll();
+        let exports = parse_pe_exports(&dll);
+        // The EAT hole (ordinal 7) is skipped; the rest come back in EAT order.
+        assert_eq!(
+            exports,
+            vec![
+                PeExport {
+                    ordinal: 5,
+                    name: Some("Alpha".into()),
+                    target: PeExportTarget::Address(0x1000_2000),
+                },
+                PeExport {
+                    ordinal: 6,
+                    name: None,
+                    target: PeExportTarget::Address(0x1000_2100),
+                },
+                PeExport {
+                    ordinal: 8,
+                    name: Some("Gamma".into()),
+                    target: PeExportTarget::ForwardByName("OTHER".into(), "Delta".into()),
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn parse_pe_exports_empty_on_non_pe() {
+        assert!(parse_pe_exports(b"not a pe file at all").is_empty());
     }
 }
