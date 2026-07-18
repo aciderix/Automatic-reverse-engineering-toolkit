@@ -3206,4 +3206,31 @@ Détail : **70 §6** (roadmap). Résumé :
 - **Portes** : bin unit tests **72/72**, hash transpile `19acad982194bf07` **inchangé**, fixture end-to-end OK. Prochaine
   étape réelle : tenter de lifter **comctl32** (pur user-mode) sur le HLE user32/gdi32 — mesurer ce qui lift / abort sound.
 
+### 2026-07-18 — [LOADER][STRATÉGIE] Levier 1 : **carte mesurée** du lifting de comctl32/gdi32/user32 → le mur = win32k (NtGdi*/NtUser*)
+- **Levier 0 appliqué à la frontière DLL** (`--mode walls` + `--with-dll`, sur les vraies DLL Wine). But : borner par la
+  donnée ce qui sépare ARET de **faire tourner de vraies DLL GUI**.
+- **comctl32 seule.** Récupère **2577 fonctions (2489 liftées, 96 %+)** — le lift structurel est quasi complet. Gaps
+  d'instructions = **bruit** (ud2/`in`/`push es` = data-en-code/privilégié → abort correct). Vrai mur = **144 imports**
+  non implémentés (gdi32/user32/kernel32 dans lesquels comctl32 appelle) — c.-à-d. le **socle HLE**, pas comctl32.
+- **comctl32 + gdi32 + user32 liftées ensemble** (`--with-dll gdi32 --with-dll user32`) : **7839 fonctions récupérées,
+  7150 liftées**. Le tail d'API user-mode nommé **s'effondre** (routé vers le code lifté) → il reste **356 imports**, qui
+  se scindent **NETTEMENT en deux** :
+  - **250 syscalls `Nt*`** = **le mur win32k** : **117 `NtGdi*`** (BitBlt/AlphaBlend/BeginPath/CombineRgn…) + **131
+    `NtUser*`** (BeginPaint/CallHwnd*/CheckMenuItem/ClipCursor…) + 2 ntdll. C'est la **frontière noyau du NT moderne** :
+    gdi32/user32 user-mode liftent, mais leur fond appelle les stubs syscall `win32u`. **Exactement la prédiction doc 80
+    §1.2** (« le fond win32k à router vers le HLE, FLIRT chirurgical »).
+  - **106 non-`Nt*`** = kernel32/CRT **ordinaire** (Atoms `GlobalAddAtom*`, locale `GetLocaleInfoW`/`GetDateFormatW`,
+    version-info, IME `Imm*`, classification de char `IsCharAlpha*`) — de simples shims HLE, même famille que d'habitude.
+- **La carte stratégique (borne le reste du Levier 1 vers les DLL réelles).** Le lifting du **code user-mode marche**
+  (mécanisme prouvé end-to-end + 7150 fns liftées). Faire **tourner** comctl32 réelle demande deux chantiers **bornés et
+  mesurés** : (1) **router les ~250 `NtGdi*`/`NtUser*` vers le HLE existant** (qui rend déjà des DIB, BitBlt, modèle
+  fenêtre/paint bit-identiques à Wine — donc `NtGdiBitBlt`→notre blit DIB, `NtUserBeginPaint`→notre paint, etc. ; « FLIRT
+  chirurgical » de la frontière win32k) ; (2) les **106 shims kernel32/CRT ordinaires** (data-driven, faciles). Aucun
+  n'est de la recherche : c'est de la **couverture bornée mesurée**. Reste aussi ~17 unresolved-direct + `jl 0x100afcd4`
+  ×16 (gaps de récup mineurs, à regarder). *Note : les DLL Win9x monolithiques faisaient le dessin en user-mode (pas de
+  split `NtGdi*`) — les éviterait, mais proprio ; ReactOS/Wine miment le split NT.*
+- **Portes** : mesure seule (aucun code changé). Prochaine brique concrète : router une 1ʳᵉ famille `NtGdi*`/`NtUser*`
+  vers le HLE (ex. `NtGdiBitBlt`→`aret` blit) et **mesurer** qu'une vraie fonction comctl32 traverse — piloté par un vrai
+  chemin, une famille à la fois, garde winediff.
+
 <!-- NOUVELLES ENTRÉES ICI (garder l'ordre chronologique, plus récent en bas) -->

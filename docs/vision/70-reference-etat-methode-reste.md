@@ -660,8 +660,12 @@ résidu qui abort restera l'**obfusqué/fait-main/VM-packé** (indécidable, §9
   est liftée **avec** lui, ses appels d'import dispatchent vers le **code DLL lifté** (le dispatch indirect existant
   suffit — **0 changement emit**), **bit-identique à Wine** (`bench/winecorpus/dll_lifting`, winediff 128/128 ; contrôle :
   sans le flag, imports non résolus → la sortie `42` ne peut venir que du code lifté). Défaut inchangé (sans flag,
-  `Program::load`). **Reste** : incrément 3 = lifter comctl32 (pur user-mode) sur le HLE user32/gdi32 — replier aussi les
-  **imports du DLL** dans `merge_modules` (comctl32 importe gdi32/user32) ; puis routage `win32k` pour user32/gdi32.
+  `Program::load`). **Carte mesurée (2026-07-18, `--mode walls --with-dll` sur vraies DLL Wine)** : comctl32+gdi32+user32
+  liftées ensemble = **7150 fonctions liftées**, le tail user-mode nommé **s'effondre**, il reste **356 imports** =
+  **250 syscalls `NtGdi*`/`NtUser*` (LE MUR WIN32K, à router vers le HLE qui rend déjà DIB/BitBlt/paint)** + **106 shims
+  kernel32/CRT ordinaires** (atoms/locale/version/IME/char-class, data-driven). **Reste (incrément 3, bornés/mesurés,
+  pas de recherche)** : (1) FLIRT chirurgical `NtGdi*`/`NtUser*`→HLE ; (2) les 106 shims ; (3) ~17 unresolved-direct +
+  `jl 0x100afcd4`×16 (récup mineure).
 - **Levier 2 — Finir les mécanismes bornés qui débloquent une CLASSE** : EH C++ (`__CxxFrameHandler`), bitmap-fonts,
   runtime VB. Chacun = une session, des milliers de binaires.
 - **Levier 3 — Mop-up data-driven** du résidu, trié par le Levier 0.
