@@ -2938,4 +2938,21 @@ Détail : **70 §6** (roadmap). Résumé :
   `19acad982194bf07` **inchangé**, `table_is_sorted_by_name` ok, régression unifiée **PASS**. `user32_dialog` (ressource)
   toujours vert = la factorisation est propre.
 
+### 2026-07-17 — [GUI] ARTLANT stock-font : SYSTEM_FONT = **bitmap** Wine (mesuré, borné — pas un quick win TrueType)
+- **Hypothèse testée.** ARTLANT bute sur `TextOut`(SYSTEM_FONT) = abort sound « stock font (no face name) ». La DC
+  sélectionne SYSTEM_FONT (13) par défaut, qui n'avait pas de face. Wine `GetTextFace`(SYSTEM_FONT) = **'Liberation
+  Sans'**, LOGFONT {'System', height 16, weight 700}, tm {h16 asc13 desc3} → hypothèse : rendable comme les autres sans
+  stocks via FreeType (bold → Liberation Sans Bold).
+- **Mesure décisive (réfute l'hypothèse).** Fixture DIB-hash SYSTEM_FONT, Wine vs ARET (face='System'→Liberation Sans
+  Bold, même fichier `LiberationSans-Bold.ttf` que Wine, ppem de height 16) : **vertical identique** (tm h16/asc13/desc3/
+  weight700) mais **largeurs différentes** — Wine extent 'System Fn' = **60px** (ave 7), ARET **72px** (ave 9). Même
+  fichier + même ppem ⇒ mêmes avances… sauf que Wine ne rend PAS Liberation Sans : il rend le **vrai bitmap System.fon**
+  (compact), `GetTextFace` ne reporte 'Liberation Sans' que comme *plus proche match*. Le commentaire d'origine (« bitmap,
+  abort soundly ») était **correct**.
+- **Verdict (borné, soundness préservée).** Rendre SYSTEM_FONT comme Liberation Sans Bold produirait un texte **plus
+  large que Wine** = faux silencieux → **révoqué** (règle « pas de changement sans bénéfice mesuré », « jamais faux
+  présenté comme correct »). SYSTEM_FONT reste **abort sound**. Le mur ARTLANT est donc du vrai **M7 bitmap-font**
+  (embarquer/répliquer le System.fon de Wine au pixel), pas un resolve TrueType — session dédiée. Commentaire du code mis
+  à jour avec la mesure (60 vs 72px) pour éviter de re-tenter. Aucune régression (hash inchangé, gdi_textout MATCH).
+
 <!-- NOUVELLES ENTRÉES ICI (garder l'ordre chronologique, plus récent en bas) -->

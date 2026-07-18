@@ -3606,9 +3606,12 @@ static uint32_t u32_stock(int id) {
          * DEFAULT (0) → subpixel. Fixed-pitch/OEM stocks keep no face (sound abort). */
         case 12: /* ANSI_VAR_FONT   */ strcpy(g_gdi[i].lf_face, "MS Sans Serif"); g_gdi[i].lf_height = 12; g_gdi[i].lf_weight = 400; break;
         case 17: /* DEFAULT_GUI_FONT*/ strcpy(g_gdi[i].lf_face, "MS Shell Dlg");  g_gdi[i].lf_height = -11; g_gdi[i].lf_weight = 400; break;
-        /* SYSTEM_FONT/SYSTEM_FIXED/OEM/ANSI_FIXED: legacy 'System'/'Courier' bitmap
-         * fonts render specially in Wine (not a plain Liberation resolve) → no face,
-         * abort soundly rather than mis-render. */
+        /* SYSTEM_FONT/SYSTEM_FIXED/OEM/ANSI_FIXED render as real Windows BITMAP fonts in
+         * Wine — measured: SYSTEM_FONT reports LOGFONT {'System', height 16, weight 700}
+         * and GetTextFace 'Liberation Sans', but its glyphs are the compact System.fon
+         * bitmap (extent 'System Fn' = 60px), NOT Liberation Sans Bold (which the same
+         * FreeType path renders 72px wide). Matching them needs Wine's bitmap font, not
+         * a TrueType resolve → keep no face, abort soundly rather than mis-render. */
         default: break;
         }
         g_gdi_stock[id] = gdi_handle(i);
