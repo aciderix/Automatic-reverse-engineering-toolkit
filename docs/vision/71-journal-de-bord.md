@@ -3131,4 +3131,23 @@ Détail : **70 §6** (roadmap). Résumé :
   delta), seeder les exports liftés, router chaque slot IAT résolu (map 2.2) vers le `sub_<va>` lifté — la 1ʳᵉ marche
   end-to-end. Garde dure : mono-module **byte-identique** (hash `19acad982194bf07`).
 
+### 2026-07-18 — [LOADER] Levier 1 incrément 2, brique 2.3b : **fusion multi-modules** (app + DLL rebasés dans un `Program`)
+- **Le besoin.** Après le rebaser (2.3a), fondre plusieurs modules dans **un seul espace d'adressage** : placer chaque
+  DLL à une base libre, rebaser, replier ses sections + symboles, et exposer ses **exports comme fonctions à récupérer**.
+- **Fix.** `Program` gagne `image_base` (base préférée PE, via `relative_address_base`) et `exports` (sa propre Export
+  Directory, vide pour un exe) — calculés au load, **additifs** (non consommés par le pipeline actuel). `merge_modules(
+  primary, dlls: Vec<(nom, Program)>) -> Vec<LoadedModule>` : chaque DLL est placée à une base **64K-alignée au-dessus de
+  tout ce qui est déjà mappé** (la préférence commune 0x10000000 de user32/gdi32/comctl32 ne collisionne donc jamais),
+  rebasée via `apply_base_relocations`, ses sections/symboles décalés du delta et repliés dans `primary` ; ses **exports
+  locaux nommés deviennent des symboles-fonction** à leur VA rebasée (points d'entrée de récupération). **Sound** : une
+  section rebasée qui **chevaucherait** l'image existante = erreur bruyante (jamais silencieuse).
+- **Testabilité (2 vraies DLL Wine).** `merge_modules_rebases_and_folds_exports` (gated) : fusionne la vraie **comctl32**
+  (primary) + **gdi32** (toutes deux préférant 0x10000000) → gdi32 rebasée au-dessus, **sans chevauchement** ; son export
+  **BitBlt** atterrit comme **symbole-fonction** à la VA rebasée, **dans** une section fusionnée ; aucune paire de sections
+  ne se chevauche (vérifié sur tout l'espace fusionné).
+- **Portes** : build OK, bin unit tests **71/71**, hash transpile `19acad982194bf07` **inchangé**, régression unifiée
+  **PASS** (le champ ajouté au load est inerte pour tous les binaires réels). **Suite (2.3c, dernière)** : router chaque
+  slot IAT résolu (map 2.2) → le `call [slot]` de l'app émet un appel vers le `sub_<va>` lifté du DLL au lieu du shim HLE
+  — la 1ʳᵉ marche end-to-end du lifting DLL. Zone porteuse (analysis/emit) → garde dure hash + régression complète.
+
 <!-- NOUVELLES ENTRÉES ICI (garder l'ordre chronologique, plus récent en bas) -->

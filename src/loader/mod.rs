@@ -143,6 +143,11 @@ pub struct Program {
     pub format: String,
     pub bitness: Bitness,
     pub entry: u64,
+    /// Preferred image base (PE) — needed to compute the rebase delta when this
+    /// module is merged into another's address space.
+    pub image_base: u64,
+    /// This module's own exports (PE Export Directory); empty for a plain exe.
+    pub exports: Vec<PeExport>,
     pub sections: Vec<Section>,
     /// address -> symbol, sorted, used to name functions and resolve call targets.
     pub symbols: BTreeMap<u64, KnownSymbol>,
@@ -273,6 +278,10 @@ impl Program {
         let mut imports = parse_pe_imports(data);
         add_elf_imports(&obj, &sections, bitness, &mut imports);
         let pe_imports = parse_pe_imports_detailed(data);
+        let exports = parse_pe_exports(data);
+        // Image base: for a PE this is the preferred load address (relative
+        // address base); 0 for object files with no base.
+        let image_base = obj.relative_address_base();
 
         let relocs = parse_static_relocs(&obj);
         let base_relocs = parse_pe_base_relocs(data);
@@ -281,6 +290,8 @@ impl Program {
             format: format!("{:?}", obj.format()),
             bitness,
             entry: obj.entry(),
+            image_base,
+            exports,
             sections,
             symbols,
             imports,
@@ -756,6 +767,72 @@ pub fn apply_base_relocations(
         patched += 1;
     }
     Ok(patched)
+}
+
+/// Merge one or more DLL modules into the primary program's address space
+/// (doc 80 §1.2 brick 2.3b). Each DLL is placed at a fresh, page-aligned base
+/// **above everything currently mapped** (so the shared 0x10000000 preference of
+/// user32/gdi32/comctl32 never collides), rebased there via
+/// `apply_base_relocations`, and its sections + symbols folded into `primary`;
+/// its named local exports become **function symbols** at their rebased VAs so
+/// function recovery seeds and lifts them. Returns each module's rebased
+/// `LoadedModule` (name + shifted exports) for import routing (brick 2.3c).
+/// Errors (never silently) if a rebased section would overlap an existing one.
+pub fn merge_modules(
+    primary: &mut Program,
+    dlls: Vec<(String, Program)>,
+) -> Result<Vec<LoadedModule>> {
+    let mut loaded = Vec::new();
+    for (name, mut dll) in dlls {
+        // Next free base: above the current max mapped end, 64K-aligned.
+        let cur_end = primary
+            .sections
+            .iter()
+            .map(|s| s.address + s.data.len() as u64)
+            .max()
+            .unwrap_or(0);
+        let new_base = (cur_end + 0xffff) & !0xffff; // round up to 64K
+        let delta = new_base as i64 - dll.image_base as i64;
+
+        apply_base_relocations(&mut dll.sections, &dll.base_relocs, delta)?;
+        for s in &mut dll.sections {
+            s.address = (s.address as i64 + delta) as u64;
+        }
+        // A rebased section must not overlap anything already placed.
+        for s in &dll.sections {
+            let (a0, a1) = (s.address, s.address + s.data.len() as u64);
+            if primary.sections.iter().any(|p| {
+                let (b0, b1) = (p.address, p.address + p.data.len() as u64);
+                a0 < b1 && b0 < a1
+            }) {
+                bail!("merged module {name} section {} overlaps the primary image", s.name);
+            }
+        }
+        // Shift the module's exports to their rebased VAs.
+        let mut exports = std::mem::take(&mut dll.exports);
+        for e in &mut exports {
+            if let PeExportTarget::Address(va) = &mut e.target {
+                *va = (*va as i64 + delta) as u64;
+            }
+        }
+        // Named local exports become function symbols (recovery entry points).
+        for e in &exports {
+            if let (Some(n), PeExportTarget::Address(va)) = (&e.name, &e.target) {
+                primary
+                    .symbols
+                    .entry(*va)
+                    .or_insert_with(|| KnownSymbol { address: *va, name: n.clone(), is_function: true });
+            }
+        }
+        // Fold the module's own symbols (shifted) in too, without clobbering.
+        for (addr, sym) in std::mem::take(&mut dll.symbols) {
+            let a = (addr as i64 + delta) as u64;
+            primary.symbols.entry(a).or_insert(KnownSymbol { address: a, ..sym });
+        }
+        primary.sections.append(&mut dll.sections);
+        loaded.push(LoadedModule { name, exports });
+    }
+    Ok(loaded)
 }
 
 /// Parse a PE's import table keeping the **source DLL** of each import: IAT slot
@@ -1368,5 +1445,39 @@ mod tests {
         assert!(!sites.is_empty(), "gdi32 has base relocations");
         let n = apply_base_relocations(&mut prog.sections, &sites, 0x0010_0000).unwrap();
         assert_eq!(n, sites.len(), "every gdi32 reloc site is inside a loaded section");
+    }
+
+    /// Merge two real DLLs that both prefer base 0x10000000 (Wine's comctl32 as
+    /// primary, gdi32 folded in): gdi32 must be rebased above comctl32 with no
+    /// overlap, and its BitBlt export must land as a function symbol at the
+    /// module's rebased VA, inside a merged section.
+    #[test]
+    fn merge_modules_rebases_and_folds_exports() {
+        let (Some(comctl), Some(gdi)) = (wine_dll("comctl32.dll"), wine_dll("gdi32.dll")) else {
+            return;
+        };
+        let mut primary = Program::load(&comctl).unwrap();
+        let gdi_prog = Program::load(&gdi).unwrap();
+        let primary_secs_before = primary.sections.len();
+
+        let loaded = merge_modules(&mut primary, vec![("gdi32.dll".into(), gdi_prog)]).unwrap();
+        assert_eq!(loaded.len(), 1);
+        let gdi_mod = &loaded[0];
+
+        // BitBlt is now exported at a rebased VA that is a function symbol and
+        // lives inside one of the merged sections.
+        let bitblt = gdi_mod.addr_by_name("BitBlt").expect("gdi32 exports BitBlt");
+        assert!(bitblt >= 0x1000_0000); // rebased above comctl32, not at 0
+        assert!(matches!(primary.symbols.get(&bitblt), Some(s) if s.name == "BitBlt" && s.is_function));
+        assert!(primary.sections.iter().any(|s| s.contains(bitblt)));
+        assert!(primary.sections.len() > primary_secs_before);
+
+        // No two sections in the merged image overlap.
+        let mut ranges: Vec<(u64, u64)> =
+            primary.sections.iter().map(|s| (s.address, s.address + s.data.len() as u64)).collect();
+        ranges.sort();
+        for w in ranges.windows(2) {
+            assert!(w[0].1 <= w[1].0, "merged sections must not overlap");
+        }
     }
 }
