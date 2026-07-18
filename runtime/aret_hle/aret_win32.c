@@ -5449,6 +5449,132 @@ uint32_t aret_CharLowerBuffA(uint32_t esp) {
     return n;
 }
 
+/* ---- Atom tables (kernel32/user32) — string<->ATOM interning, refcounted.
+ * Two separate per-process tables (Global* vs local Add/Find/Delete/GetAtomName):
+ * a local atom is invisible to the global table (measured vs Wine). String atoms
+ * are case-INsensitive (ASCII), keep the first-added case, and number from 0xC000
+ * up. The ATOM is an OPAQUE handle by spec, so the absolute value is not
+ * contractual (Wine pre-seeds a few global atoms, shifting its global base — no
+ * correct program depends on it); we start both at 0xC000. Integer atoms
+ * (MAKEINTATOM, pointer < 0x10000) pass their 16-bit value through and format as
+ * "#N". Refcount: Add ++ an existing name, Delete --, freed at 0. All returns
+ * measured vs Wine (winecorpus/win32_atom): Delete returns 0 on success (!),
+ * Find-miss sets ERROR_FILE_NOT_FOUND(2), a bad atom sets ERROR_INVALID_HANDLE(6),
+ * and GetAtomName returns 0 (not the length) when the buffer is too small. */
+#define U32_ATOM_BASE 0xC000u
+#define U32_ATOM_MAX  1024
+struct u32_atom { char name[256]; uint32_t refs; };
+static struct u32_atom g_atom_local[U32_ATOM_MAX];
+static struct u32_atom g_atom_global[U32_ATOM_MAX];
+
+static int u32_atom_ieq(const char *a, const char *b) {
+    for (;; a++, b++) {
+        int ca = (unsigned char)*a, cb = (unsigned char)*b;
+        if (ca >= 'A' && ca <= 'Z') ca += 32;
+        if (cb >= 'A' && cb <= 'Z') cb += 32;
+        if (ca != cb) return 0;
+        if (!ca) return 1;
+    }
+}
+/* MAKEINTATOM: an integer atom is a pointer whose high word is 0. */
+static int u32_atom_is_int(const void *s) { return (uintptr_t)s < 0x10000u; }
+
+static uint32_t u32_atom_add(struct u32_atom *t, const char *name) {
+    if (u32_atom_is_int(name)) {
+        uint32_t v = (uint32_t)(uintptr_t)name & 0xFFFFu;
+        if (v == 0) { g_last_error = 87u /*INVALID_PARAMETER*/; return 0; }
+        return v; /* integer atom: value passes through, never interned */
+    }
+    if (!name[0]) { g_last_error = 87u; return 0; }
+    for (int i = 0; i < U32_ATOM_MAX; i++)
+        if (t[i].refs && u32_atom_ieq(t[i].name, name)) { t[i].refs++; return U32_ATOM_BASE + (uint32_t)i; }
+    for (int i = 0; i < U32_ATOM_MAX; i++)
+        if (!t[i].refs) {
+            uint32_t k = 0;
+            for (; name[k] && k < sizeof t[i].name - 1; k++) t[i].name[k] = name[k];
+            t[i].name[k] = 0;
+            t[i].refs = 1;
+            return U32_ATOM_BASE + (uint32_t)i;
+        }
+    g_last_error = 8u /*NOT_ENOUGH_MEMORY*/; return 0;
+}
+static uint32_t u32_atom_find(struct u32_atom *t, const char *name) {
+    if (u32_atom_is_int(name)) { return (uint32_t)(uintptr_t)name & 0xFFFFu; }
+    if (name[0])
+        for (int i = 0; i < U32_ATOM_MAX; i++)
+            if (t[i].refs && u32_atom_ieq(t[i].name, name)) return U32_ATOM_BASE + (uint32_t)i;
+    g_last_error = 2u /*ERROR_FILE_NOT_FOUND*/; return 0;
+}
+static uint32_t u32_atom_del(struct u32_atom *t, uint32_t atom) {
+    if (atom < U32_ATOM_BASE) return 0; /* integer atom (or 0): no-op success */
+    uint32_t i = atom - U32_ATOM_BASE;
+    if (i >= U32_ATOM_MAX || !t[i].refs) { g_last_error = 6u /*INVALID_HANDLE*/; return atom; }
+    if (--t[i].refs == 0) t[i].name[0] = 0;
+    return 0; /* success == 0 (measured) */
+}
+/* Full narrow name of `atom` into out[256]; returns its length, 0 on a bad atom. */
+static uint32_t u32_atom_name_of(struct u32_atom *t, uint32_t atom, char out[256]) {
+    if (atom >= 1 && atom < U32_ATOM_BASE)
+        return (uint32_t)snprintf(out, 256, "#%u", atom); /* integer atom */
+    uint32_t i = atom - U32_ATOM_BASE;
+    if (atom < U32_ATOM_BASE || i >= U32_ATOM_MAX || !t[i].refs) {
+        g_last_error = 6u; out[0] = 0; return 0;
+    }
+    uint32_t k = 0;
+    for (; t[i].name[k]; k++) out[k] = t[i].name[k];
+    out[k] = 0;
+    return k;
+}
+/* Copy the atom name into a narrow buffer: full length if it fits, else fill the
+ * buffer (bounded), set ERROR_MORE_DATA, and return the copied count for the
+ * LOCAL table but 0 for the GLOBAL table — a measured Wine quirk (`global`). */
+static uint32_t u32_atom_name_a(struct u32_atom *t, uint32_t atom, char *buf, uint32_t cch, int global) {
+    char tmp[256];
+    uint32_t n = u32_atom_name_of(t, atom, tmp);
+    if (n == 0) { if (buf && cch) buf[0] = 0; return 0; }
+    if (!buf || cch == 0) return 0;
+    if (n <= cch - 1) { for (uint32_t k = 0; k <= n; k++) buf[k] = tmp[k]; return n; }
+    uint32_t k = 0; for (; k < cch - 1; k++) buf[k] = tmp[k]; buf[k] = 0;
+    g_last_error = 234u /*ERROR_MORE_DATA*/; return global ? 0 : k;
+}
+static uint32_t u32_atom_name_w(struct u32_atom *t, uint32_t atom, uint16_t *buf, uint32_t cch, int global) {
+    char tmp[256];
+    uint32_t n = u32_atom_name_of(t, atom, tmp);
+    if (n == 0) { if (buf && cch) buf[0] = 0; return 0; }
+    if (!buf || cch == 0) return 0;
+    if (n <= cch - 1) {
+        for (uint32_t k = 0; k < n; k++) buf[k] = (uint16_t)(unsigned char)tmp[k];
+        buf[n] = 0; return n;
+    }
+    uint32_t k = 0; for (; k < cch - 1; k++) buf[k] = (uint16_t)(unsigned char)tmp[k]; buf[k] = 0;
+    g_last_error = 234u; return global ? 0 : k;
+}
+/* Read a W atom argument: an integer atom keeps its pointer (checked before deref),
+ * a string atom is narrowed to ASCII (exact for the measured range). */
+static uint32_t u32_atom_add_w(struct u32_atom *t, const void *w) {
+    if (u32_atom_is_int(w)) return u32_atom_add(t, (const char *)w);
+    char n[256]; u32_w2n((const uint16_t *)w, n, sizeof n); return u32_atom_add(t, n);
+}
+static uint32_t u32_atom_find_w(struct u32_atom *t, const void *w) {
+    if (u32_atom_is_int(w)) return u32_atom_find(t, (const char *)w);
+    char n[256]; u32_w2n((const uint16_t *)w, n, sizeof n); return u32_atom_find(t, n);
+}
+
+uint32_t aret_GlobalAddAtomA(uint32_t esp)     { return u32_atom_add(g_atom_global, WS(0)); }
+uint32_t aret_AddAtomA(uint32_t esp)           { return u32_atom_add(g_atom_local, WS(0)); }
+uint32_t aret_GlobalAddAtomW(uint32_t esp)     { return u32_atom_add_w(g_atom_global, WP(0)); }
+uint32_t aret_AddAtomW(uint32_t esp)           { return u32_atom_add_w(g_atom_local, WP(0)); }
+uint32_t aret_GlobalFindAtomA(uint32_t esp)    { return u32_atom_find(g_atom_global, WS(0)); }
+uint32_t aret_FindAtomA(uint32_t esp)          { return u32_atom_find(g_atom_local, WS(0)); }
+uint32_t aret_GlobalFindAtomW(uint32_t esp)    { return u32_atom_find_w(g_atom_global, WP(0)); }
+uint32_t aret_FindAtomW(uint32_t esp)          { return u32_atom_find_w(g_atom_local, WP(0)); }
+uint32_t aret_GlobalDeleteAtom(uint32_t esp)   { return u32_atom_del(g_atom_global, WU(0)); }
+uint32_t aret_DeleteAtom(uint32_t esp)         { return u32_atom_del(g_atom_local, WU(0)); }
+uint32_t aret_GlobalGetAtomNameA(uint32_t esp) { return u32_atom_name_a(g_atom_global, WU(0), WS(1), WU(2), 1); }
+uint32_t aret_GetAtomNameA(uint32_t esp)       { return u32_atom_name_a(g_atom_local, WU(0), WS(1), WU(2), 0); }
+uint32_t aret_GlobalGetAtomNameW(uint32_t esp) { return u32_atom_name_w(g_atom_global, WU(0), (uint16_t *)WP(1), WU(2), 1); }
+uint32_t aret_GetAtomNameW(uint32_t esp)       { return u32_atom_name_w(g_atom_local, WU(0), (uint16_t *)WP(1), WU(2), 0); }
+
 /* Pointer validation: the guest runs natively with real pointers, so a non-null
  * pointer is valid (0 = "not bad"), like IsBadReadPtr. */
 uint32_t aret_IsBadCodePtr(uint32_t esp)   { return (uint32_t)(WU(0) == 0); }

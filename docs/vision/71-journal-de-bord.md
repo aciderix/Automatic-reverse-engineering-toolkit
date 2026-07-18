@@ -3247,4 +3247,23 @@ Détail : **70 §6** (roadmap). Résumé :
   (même méthode que toute la couche HLE). Borné, mesuré, pas de recherche, pas de win32k. À piloter par un vrai chemin
   (ImageList, puis toolbar/listview…) quand on poursuit l'incrément 3.
 
+### 2026-07-18 — [HLE-WIN32] Famille **Atom** complète (kernel32/user32) — batch mesuré du socle Levier 1
+- **Batch du socle** (les 144 imports mesurés de comctl32 sont surtout du socle borné → on les couvre par **familles
+  complètes vérifiées vs Wine**, pas une par une). 1ʳᵉ famille : les **atoms** (interning chaîne↔ATOM), sous-système
+  autonome, très courant (pas que comctl32), zéro dépendance écran/env → **bit-testable**.
+- **14 shims** (`aret_win32.c`) : `{Global,}AddAtom{A,W}`, `{Global,}FindAtom{A,W}`, `{Global,}DeleteAtom`,
+  `{Global,}GetAtomName{A,W}`. Deux tables **séparées** (locale vs globale — une locale est invisible à la globale,
+  mesuré), string atoms **casse-insensibles** gardant la 1ʳᵉ casse, numérotés depuis 0xC000, **refcountés** (Add++ /
+  Delete--, libéré à 0). Atomes entiers (`MAKEINTATOM`, ptr < 0x10000) : valeur passe-through, nom `#N`. `stdcall_pops` :
+  +14 `@N`.
+- **Tout MESURÉ vs Wine (aucune supposition), y compris les quirks** : `DeleteAtom` retourne **0 en succès** (!),
+  find-miss → `ERROR_FILE_NOT_FOUND(2)`, bad atom → `ERROR_INVALID_HANDLE(6)`, buffer trop petit → `ERROR_MORE_DATA(234)`
+  **et** retourne le **count copié pour la table LOCALE mais 0 pour la GLOBALE** (quirk réel local≠global). Piège de
+  testabilité : la **base absolue de la table globale dépend de l'env** (Wine pré-seed ~3 atoms → base 0xC003 ≠ 0xC000) —
+  l'ATOM est un **handle opaque** par spec → la fixture teste l'**absolu sur la locale** (0xC000, déterministe) et le
+  **relatif** sur la globale (round-trip, séparation, casse).
+- **Portes** : winediff **128→129/129** (`win32_atom`, bit-identique Wine — 9 lignes, tous les codes d'erreur + quirks),
+  hash transpile `19acad982194bf07` **inchangé**, `table_is_sorted_by_name` ok, régression unifiée **PASS**. Prochaines
+  familles socle (même méthode) : char-classification (`IsCharAlpha*`…), locale-getters, version-info.
+
 <!-- NOUVELLES ENTRÉES ICI (garder l'ordre chronologique, plus récent en bas) -->
