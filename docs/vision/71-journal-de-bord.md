@@ -3570,4 +3570,23 @@ Détail : **70 §6** (roadmap). Résumé :
   **`OleInitialize`/`OleUninitialize`** (S_OK, très large). Le cluster **GUI profond** (palette/capture/clip/scroll) = la
   couche suivante (aligne aussi avec le step 3 « vrai binaire GUI »). `CoCreateInstance` = dur (vrais objets COM) → plus tard.
 
+### 2026-07-19 — [HLE-WIN32] Quick-wins de la nouvelle tête : **DDE param** (`Pack/Unpack/FreeDDElParam`) + **OLE init** (`OleInitialize/Uninitialize`)
+- **Deux familles très larges** de la re-mesure (15–17/29 binaires), emballées avant le Registry.
+- **OLE init** : `OleInitialize` initialise COM en interne → partage le compteur de profondeur `aret_co_init_depth`
+  existant → **S_OK** au 1er init du thread, **S_FALSE(1)** imbriqué. Mesuré vs Wine : `OleInitialize=0` puis
+  `CoInitialize=1` (le nested). `OleUninitialize` déroule comme `CoUninitialize`.
+- **DDE param** : les 4 messages `WM_DDE_ADVISE/ACK/DATA/POKE` (0x3E2/4/5/7) ne tiennent pas leurs 2 valeurs dans un LPARAM
+  → `PackDDElParam` **alloue** un holder (malloc, -m32 → pointeur 32-bit) et rend un handle ; `UnpackDDElParam` le relit ;
+  `FreeDDElParam` le libère. Tout autre message = `MAKELONG(lo,hi)` / `LOWORD`/`HIWORD`. Mesuré vs Wine : round-trip
+  **exact** (le handle brut est un pointeur non-déterministe → **non comparé** ; seuls le round-trip + le MAKELONG le sont).
+- **Pops (correction de fond, pas seulement additif)** : `CoInitialize`/`CoInitializeEx`/`CoTaskMem*`/`OleInitialize` étaient
+  **absents** de `stdcall_pops` → ne marchaient que via le repli « drop du `sub esp` compensateur » (modèle accumulate-args
+  **uniquement**). Le corpus Win95 est **push-model** MSVC → le `@N` **doit** être tabulé (sinon esp dérive). Ajoutés :
+  `CoInitialize@4`, `CoInitializeEx@8`, `CoTaskMemAlloc@4`, `CoTaskMemFree@4`, `CoTaskMemRealloc@8`, `OleInitialize@4`,
+  `PackDDElParam@12`, `UnpackDDElParam@16`, `FreeDDElParam@8` (Un/OleUninitialize = @0, omis).
+- **Fixture** `winecorpus/win32_dde_ole.{c,nodisplay}` → **bit-identique Wine** : `ole=0 co=1`, `ack unpack=1 lo=1234
+  hi=abcd`, `data lo=1234 hi=abcd`, `user pack=abcd1234 lo=1234 hi=abcd free=1`.
+- **Portes** : winediff **139→140**, hash transpile `19acad982194bf07` **inchangé**, `table_is_sorted_by_name` ok,
+  régression unifiée **PASS**. Prochain : le **Registry** (tête à 17 binaires).
+
 <!-- NOUVELLES ENTRÉES ICI (garder l'ordre chronologique, plus récent en bas) -->

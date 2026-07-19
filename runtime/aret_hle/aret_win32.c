@@ -1878,9 +1878,49 @@ static int aret_co_init_depth = 0;
 uint32_t aret_CoInitialize(uint32_t esp)   { (void)esp; return aret_co_init_depth++ ? 1u : 0u; }
 uint32_t aret_CoInitializeEx(uint32_t esp) { (void)esp; return aret_co_init_depth++ ? 1u : 0u; }
 uint32_t aret_CoUninitialize(uint32_t esp) { (void)esp; if (aret_co_init_depth) aret_co_init_depth--; return 0; }
+/* OleInitialize calls CoInitialize internally, so it shares the same depth: S_OK on
+ * the first COM init of the thread, S_FALSE (1) nested (measured vs Wine — Ole then
+ * Co returns 0 then 1). OleUninitialize unwinds like CoUninitialize. */
+uint32_t aret_OleInitialize(uint32_t esp)   { (void)esp; return aret_co_init_depth++ ? 1u : 0u; }
+uint32_t aret_OleUninitialize(uint32_t esp) { (void)esp; if (aret_co_init_depth) aret_co_init_depth--; return 0; }
 uint32_t aret_CoTaskMemAlloc(uint32_t esp)   { return (uint32_t)(uintptr_t)malloc((size_t)WU(0)); }
 uint32_t aret_CoTaskMemRealloc(uint32_t esp) { return (uint32_t)(uintptr_t)realloc((void *)(uintptr_t)WU(0), (size_t)WU(1)); }
 uint32_t aret_CoTaskMemFree(uint32_t esp)    { free((void *)(uintptr_t)WU(0)); return 0; }
+
+/* ---- DDE param packing (user32) -------------------------------------------
+ * The two values a DDE message carries fit a LPARAM directly for most messages
+ * (MAKELONG), but WM_DDE_ADVISE/ACK/DATA/POKE need both a handle and a status/flags,
+ * so PackDDElParam ALLOCATES a holder and returns a handle; UnpackDDElParam reads it
+ * back; FreeDDElParam frees it. Measured vs Wine: the round-trip is exact (the raw
+ * handle is a pointer, non-deterministic, so only the round-trip + the MAKELONG form
+ * are oracle-compared). Runtime is -m32, so a malloc pointer fits a uint32_t. */
+static int u32_dde_alloc_msg(uint32_t msg) {
+    return msg == 0x3E2u || msg == 0x3E4u || msg == 0x3E5u || msg == 0x3E7u; /* ADVISE/ACK/DATA/POKE */
+}
+uint32_t aret_PackDDElParam(uint32_t esp) {
+    uint32_t msg = WU(0), lo = WU(1), hi = WU(2);
+    if (u32_dde_alloc_msg(msg)) {
+        uint32_t *p = (uint32_t *)malloc(2 * sizeof(uint32_t));
+        if (!p) return 0;
+        p[0] = lo; p[1] = hi;
+        return (uint32_t)(uintptr_t)p;
+    }
+    return (lo & 0xFFFFu) | (hi << 16);                 /* MAKELONG(lo, hi) */
+}
+uint32_t aret_UnpackDDElParam(uint32_t esp) {
+    uint32_t msg = WU(0), lp = WU(1);
+    uint32_t *plo = (uint32_t *)WP(2), *phi = (uint32_t *)WP(3);
+    uint32_t lo, hi;
+    if (u32_dde_alloc_msg(msg) && lp) { const uint32_t *p = (const uint32_t *)(uintptr_t)lp; lo = p[0]; hi = p[1]; }
+    else { lo = lp & 0xFFFFu; hi = (lp >> 16) & 0xFFFFu; }
+    if (plo) *plo = lo;
+    if (phi) *phi = hi;
+    return 1;
+}
+uint32_t aret_FreeDDElParam(uint32_t esp) {
+    if (u32_dde_alloc_msg(WU(0)) && WU(1)) free((void *)(uintptr_t)WU(1));
+    return 1;
+}
 
 /* ---- advapi32 minimal: the legacy CryptoAPI RNG path -----------------------
  * BusyBox-w32 (and much MSVC/mingw code) seeds its PRNG at startup via the
