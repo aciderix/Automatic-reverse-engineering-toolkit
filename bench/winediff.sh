@@ -129,7 +129,7 @@ for src in "$CORPUS"/*.c; do
     done < "$CORPUS/$name.withdll"
     [ -n "$miss" ] && { echo "SKIP  $name ($miss not in $WINE_PE_DIR)"; continue; }
   fi
-  if ! "$MINGW" -O1 -w $xcflags "$src" $imp_lib $res_obj -lversion -lole32 -loleaut32 -luser32 -lgdi32 -lcomctl32 -llz32 -o "$TMP/$name.exe" 2>"$TMP/err"; then
+  if ! "$MINGW" -O1 -w $xcflags "$src" $imp_lib $res_obj -lversion -lole32 -loleaut32 -luser32 -lgdi32 -lcomctl32 -lwinspool -llz32 -o "$TMP/$name.exe" 2>"$TMP/err"; then
     echo "FAIL  $name (PE build: $(head -1 "$TMP/err"))"; continue
   fi
   # Optional per-program arguments: one per line in winecorpus/NAME.args. Passed

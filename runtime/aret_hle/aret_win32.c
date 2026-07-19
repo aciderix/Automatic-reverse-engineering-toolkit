@@ -225,29 +225,224 @@ uint32_t aret_GetEnvironmentStrings(uint32_t esp) { return aret_GetEnvironmentSt
 uint32_t aret_FreeEnvironmentStringsW(uint32_t esp) { free(WP(0)); return 1; }
 uint32_t aret_FreeEnvironmentStringsA(uint32_t esp) { free(WP(0)); return 1; }
 
-/* ---- Registry: a sound, EMPTY, read-only hive ----------------------------
- * We do not emulate the Windows registry. Rather than lie that a key opened (the
- * old stub returned ERROR_SUCCESS with an uninitialised HKEY, which callers then
- * query/close), model an empty read-only hive: opens and value queries report
- * "not found", key enumeration is empty, and writes fail honestly instead of
- * silently dropping data. A program probing the registry for optional config
- * (PuTTY/plink at startup: jump-list, saved sessions) takes its default path; one
- * that truly needs a value fails loud, never silently wrong. LSTATUS codes:
- * SUCCESS=0, FILE_NOT_FOUND=2, ACCESS_DENIED=5, NO_MORE_ITEMS=259. */
-uint32_t aret_RegOpenKeyExA(uint32_t esp) {
-    uint32_t *phk = (uint32_t *)WP(4); /* phkResult */
-    if (phk) *phk = 0;
-    return 2; /* ERROR_FILE_NOT_FOUND — no such key */
+static void u32_w2n(const uint16_t *s, char *d, int cap);   /* fwd: UTF-16 -> ANSI */
+/* ---- In-memory registry (advapi32) ----------------------------------------
+ * A real, process-local registry tree so a program that WRITES its settings and READS
+ * them back round-trips exactly — the dominant pattern (RegCreateKey was the measured
+ * head, 17/29 Win95 binaries). It starts EMPTY: a value never written this run (a
+ * system key, or one a prior run / installer would have set) is honestly
+ * ERROR_FILE_NOT_FOUND, never a guessed value (sound; the program takes its default
+ * path). Verified bit-exact vs Wine on the create/set/query/enum/delete round-trip.
+ * Predefined roots exist from the start; keys/values live in bounded arrays. LSTATUS:
+ * SUCCESS=0, FILE_NOT_FOUND=2, ACCESS_DENIED=5, INVALID_HANDLE=6, MORE_DATA=234,
+ * NO_MORE_ITEMS=259. Disposition: REG_CREATED_NEW_KEY=1, REG_OPENED_EXISTING_KEY=2. */
+#define U32_REG_BASE   0x75000000u
+#define U32_MAX_REGKEY 512
+#define U32_MAX_REGVAL 24
+#define U32_REGNAME    80
+#define U32_REGDATA    512
+#define U32_REG_ROOTS  7
+struct u32_regval { int used; char name[U32_REGNAME]; uint32_t type, len; uint8_t data[U32_REGDATA]; };
+struct u32_regkey { int used, parent; uint32_t root; char name[U32_REGNAME]; struct u32_regval val[U32_MAX_REGVAL]; };
+static struct u32_regkey g_reg[U32_MAX_REGKEY];
+static int g_reg_ready = 0;
+static void u32_reg_init(void) {
+    if (g_reg_ready) return;
+    g_reg_ready = 1;
+    static const uint32_t roots[U32_REG_ROOTS] = {
+        0x80000000u,0x80000001u,0x80000002u,0x80000003u,0x80000004u,0x80000005u,0x80000006u };
+    for (int i = 0; i < U32_REG_ROOTS; i++) { g_reg[i].used = 1; g_reg[i].parent = -1; g_reg[i].root = roots[i]; }
 }
-uint32_t aret_RegCreateKeyExA(uint32_t esp) {
-    uint32_t *phk = (uint32_t *)WP(7); /* phkResult (8th arg) */
-    if (phk) *phk = 0;
-    return 5; /* ERROR_ACCESS_DENIED — read-only hive, cannot create */
+static int u32_reg_idx(uint32_t h) {
+    u32_reg_init();
+    for (int i = 0; i < U32_REG_ROOTS; i++) if (g_reg[i].root == h) return i;
+    if ((h & 0xFF000000u) == U32_REG_BASE) { uint32_t i = h & 0x00FFFFFFu; return (i < U32_MAX_REGKEY && g_reg[i].used) ? (int)i : -1; }
+    return -1;
 }
-uint32_t aret_RegQueryValueExA(uint32_t esp) { (void)esp; return 2; }   /* not found */
-uint32_t aret_RegSetValueExA(uint32_t esp) { (void)esp; return 5; }     /* denied */
-uint32_t aret_RegEnumKeyA(uint32_t esp) { (void)esp; return 259; }      /* no more items */
-uint32_t aret_RegCloseKey(uint32_t esp) { (void)esp; return 0; }        /* always OK */
+static int u32_reg_child(int parent, const char *name) {
+    for (int i = U32_REG_ROOTS; i < U32_MAX_REGKEY; i++)
+        if (g_reg[i].used && g_reg[i].parent == parent && !strcasecmp(g_reg[i].name, name)) return i;
+    return -1;
+}
+static int u32_reg_new(int parent, const char *name) {
+    for (int i = U32_REG_ROOTS; i < U32_MAX_REGKEY; i++)
+        if (!g_reg[i].used) {
+            memset(&g_reg[i], 0, sizeof g_reg[i]);
+            g_reg[i].used = 1; g_reg[i].parent = parent; g_reg[i].root = 0;
+            strncpy(g_reg[i].name, name, U32_REGNAME - 1);
+            return i;
+        }
+    return -1;
+}
+/* Walk hparent\path (backslash- or slash-separated); create missing components if
+ * `create`. *disp = 1 if the FINAL key was newly created, else 2. Returns key index. */
+static int u32_reg_walk(uint32_t hparent, const char *path, int create, uint32_t *disp) {
+    int cur = u32_reg_idx(hparent);
+    if (cur < 0) return -1;
+    int last_created = 0;
+    if (path) {
+        const char *p = path; char comp[U32_REGNAME];
+        while (*p) {
+            int n = 0;
+            while (*p && *p != '\\' && *p != '/' && n < U32_REGNAME - 1) comp[n++] = *p++;
+            comp[n] = 0;
+            while (*p == '\\' || *p == '/') p++;
+            if (n == 0) continue;
+            int nxt = u32_reg_child(cur, comp);
+            if (nxt < 0) { if (!create) return -1; nxt = u32_reg_new(cur, comp); if (nxt < 0) return -1; last_created = 1; }
+            else last_created = 0;
+            cur = nxt;
+        }
+    }
+    if (disp) *disp = last_created ? 1u : 2u;
+    return cur;
+}
+static uint32_t u32_reg_hkey(int k) { return (k >= 0 && k < U32_REG_ROOTS) ? g_reg[k].root : (U32_REG_BASE | (uint32_t)k); }
+static struct u32_regval *u32_reg_findval(int k, const char *name, int create) {
+    if (!name) name = "";
+    struct u32_regkey *K = &g_reg[k];
+    for (int i = 0; i < U32_MAX_REGVAL; i++) if (K->val[i].used && !strcasecmp(K->val[i].name, name)) return &K->val[i];
+    if (!create) return NULL;
+    for (int i = 0; i < U32_MAX_REGVAL; i++) if (!K->val[i].used) {
+        memset(&K->val[i], 0, sizeof K->val[i]); K->val[i].used = 1;
+        strncpy(K->val[i].name, name, U32_REGNAME - 1);
+        return &K->val[i];
+    }
+    return NULL;
+}
+static void u32_reg_del_subtree(int k) {
+    for (int i = U32_REG_ROOTS; i < U32_MAX_REGKEY; i++) if (g_reg[i].used && g_reg[i].parent == k) u32_reg_del_subtree(i);
+    g_reg[k].used = 0;
+}
+/* Narrow cores (A shims pass their string; W shims convert name then call these). */
+static uint32_t u32_reg_create(uint32_t hk, const char *sub, uint32_t phk, uint32_t pdisp) {
+    uint32_t disp = 0; int k = u32_reg_walk(hk, sub, 1, &disp);
+    if (k < 0) { if (phk) *(uint32_t *)(uintptr_t)phk = 0; return 5; }
+    if (phk) *(uint32_t *)(uintptr_t)phk = u32_reg_hkey(k);
+    if (pdisp) *(uint32_t *)(uintptr_t)pdisp = disp;
+    return 0;
+}
+static uint32_t u32_reg_open(uint32_t hk, const char *sub, uint32_t phk) {
+    int k = u32_reg_walk(hk, sub, 0, NULL);
+    if (k < 0) { if (phk) *(uint32_t *)(uintptr_t)phk = 0; return 2; }
+    if (phk) *(uint32_t *)(uintptr_t)phk = u32_reg_hkey(k);
+    return 0;
+}
+static uint32_t u32_reg_setval(uint32_t hk, const char *name, uint32_t type, uint32_t data, uint32_t cb) {
+    int k = u32_reg_idx(hk); if (k < 0) return 6;
+    struct u32_regval *v = u32_reg_findval(k, name, 1); if (!v) return 5;
+    if (cb > U32_REGDATA) cb = U32_REGDATA;
+    v->type = type; v->len = cb;
+    if (data && cb) memcpy(v->data, (const void *)(uintptr_t)data, cb);
+    return 0;
+}
+static uint32_t u32_reg_queryval(uint32_t hk, const char *name, uint32_t ptype, uint32_t data, uint32_t pcb) {
+    int k = u32_reg_idx(hk); if (k < 0) return 6;
+    struct u32_regval *v = u32_reg_findval(k, name, 0); if (!v) return 2;
+    if (ptype) *(uint32_t *)(uintptr_t)ptype = v->type;
+    if (!data) { if (pcb) *(uint32_t *)(uintptr_t)pcb = v->len; return 0; }  /* size query */
+    if (!pcb) return 87;                                                     /* data w/o size */
+    uint32_t *cbp = (uint32_t *)(uintptr_t)pcb;
+    if (*cbp < v->len) { *cbp = v->len; return 234; }
+    memcpy((void *)(uintptr_t)data, v->data, v->len); *cbp = v->len;
+    return 0;
+}
+uint32_t aret_RegCreateKeyExA(uint32_t esp) { return u32_reg_create(WU(0), WCS(1), WU(7), WU(8)); }
+uint32_t aret_RegCreateKeyA(uint32_t esp)   { return u32_reg_create(WU(0), WCS(1), WU(2), 0); }
+uint32_t aret_RegOpenKeyExA(uint32_t esp)   { return u32_reg_open(WU(0), WCS(1), WU(4)); }
+uint32_t aret_RegOpenKeyA(uint32_t esp)     { return u32_reg_open(WU(0), WCS(1), WU(2)); }
+uint32_t aret_RegSetValueExA(uint32_t esp)  { return u32_reg_setval(WU(0), WCS(1), WU(3), WU(4), WU(5)); }
+uint32_t aret_RegQueryValueExA(uint32_t esp){ return u32_reg_queryval(WU(0), WCS(1), WU(3), WU(4), WU(5)); }
+uint32_t aret_RegCloseKey(uint32_t esp) { (void)esp; return 0; }   /* keys persist in the tree; handle close is a no-op */
+uint32_t aret_RegFlushKey(uint32_t esp) { (void)esp; return 0; }
+uint32_t aret_RegDeleteValueA(uint32_t esp) {
+    int k = u32_reg_idx(WU(0)); if (k < 0) return 6;
+    struct u32_regval *v = u32_reg_findval(k, WCS(1), 0); if (!v) return 2;
+    v->used = 0; return 0;
+}
+uint32_t aret_RegDeleteKeyA(uint32_t esp) {
+    int k = u32_reg_walk(WU(0), WCS(1), 0, NULL);
+    if (k < 0 || k < U32_REG_ROOTS) return 2;
+    u32_reg_del_subtree(k); return 0;
+}
+uint32_t aret_RegEnumValueA(uint32_t esp) {
+    int k = u32_reg_idx(WU(0)); if (k < 0) return 6;
+    uint32_t idx = WU(1), seen = 0; struct u32_regkey *K = &g_reg[k]; struct u32_regval *v = NULL;
+    for (int i = 0; i < U32_MAX_REGVAL; i++) if (K->val[i].used) { if (seen == idx) { v = &K->val[i]; break; } seen++; }
+    if (!v) return 259;
+    char *name = (char *)WP(2); uint32_t *pnl = (uint32_t *)WP(3);
+    uint32_t *ptype = (uint32_t *)WP(5); uint8_t *data = (uint8_t *)WP(6); uint32_t *pcb = (uint32_t *)WP(7);
+    uint32_t nlen = (uint32_t)strlen(v->name);
+    if (name && pnl) { if (*pnl < nlen + 1) return 234; memcpy(name, v->name, nlen + 1); *pnl = nlen; }
+    if (ptype) *ptype = v->type;
+    if (data && pcb) { if (*pcb < v->len) { *pcb = v->len; return 234; } memcpy(data, v->data, v->len); *pcb = v->len; }
+    else if (pcb) *pcb = v->len;
+    return 0;
+}
+static uint32_t u32_reg_enumkey(uint32_t hk, uint32_t idx, char *name, uint32_t namecap) {
+    int k = u32_reg_idx(hk); if (k < 0) return 6;
+    uint32_t seen = 0; int child = -1;
+    for (int i = U32_REG_ROOTS; i < U32_MAX_REGKEY; i++) if (g_reg[i].used && g_reg[i].parent == k) { if (seen == idx) { child = i; break; } seen++; }
+    if (child < 0) return 259;
+    uint32_t nlen = (uint32_t)strlen(g_reg[child].name);
+    if (name) { if (namecap < nlen + 1) return 234; memcpy(name, g_reg[child].name, nlen + 1); }
+    return (nlen << 24) | 0u;   /* low byte 0 = success; caller writes namelen separately below */
+}
+uint32_t aret_RegEnumKeyExA(uint32_t esp) {
+    /* (hKey, dwIndex, lpName, lpcchName, Reserved, lpClass, lpcchClass, lpftLastWrite) */
+    char *name = (char *)WP(2); uint32_t *pnl = (uint32_t *)WP(3);
+    uint32_t cap = pnl ? *pnl : 0;
+    uint32_t r = u32_reg_enumkey(WU(0), WU(1), name, cap);
+    if ((r & 0xFFu) != 0) return r & 0xFFu;
+    if (pnl) *pnl = r >> 24;
+    return 0;
+}
+uint32_t aret_RegEnumKeyA(uint32_t esp) {
+    /* (hKey, dwIndex, lpName, cbName) — old form; cbName in bytes */
+    uint32_t r = u32_reg_enumkey(WU(0), WU(1), (char *)WP(2), WU(3));
+    return (r & 0xFFu);
+}
+uint32_t aret_RegQueryInfoKeyA(uint32_t esp) {
+    int k = u32_reg_idx(WU(0)); if (k < 0) return 6;
+    uint32_t nsub = 0, maxsub = 0, nval = 0, maxvn = 0, maxvl = 0;
+    for (int i = U32_REG_ROOTS; i < U32_MAX_REGKEY; i++) if (g_reg[i].used && g_reg[i].parent == k) {
+        nsub++; uint32_t l = (uint32_t)strlen(g_reg[i].name); if (l > maxsub) maxsub = l;
+    }
+    struct u32_regkey *K = &g_reg[k];
+    for (int i = 0; i < U32_MAX_REGVAL; i++) if (K->val[i].used) {
+        nval++; uint32_t l = (uint32_t)strlen(K->val[i].name); if (l > maxvn) maxvn = l; if (K->val[i].len > maxvl) maxvl = K->val[i].len;
+    }
+    uint32_t *p;
+    if ((p = (uint32_t *)WP(2)))  *p = 0;       /* lpcchClass */
+    if ((p = (uint32_t *)WP(4)))  *p = nsub;    /* lpcSubKeys */
+    if ((p = (uint32_t *)WP(5)))  *p = maxsub;  /* lpcbMaxSubKeyLen */
+    if ((p = (uint32_t *)WP(6)))  *p = 0;       /* lpcbMaxClassLen */
+    if ((p = (uint32_t *)WP(7)))  *p = nval;    /* lpcValues */
+    if ((p = (uint32_t *)WP(8)))  *p = maxvn;   /* lpcbMaxValueNameLen */
+    if ((p = (uint32_t *)WP(9)))  *p = maxvl;   /* lpcbMaxValueLen */
+    if ((p = (uint32_t *)WP(10))) *p = 0;       /* lpcbSecurityDescriptor */
+    return 0;
+}
+/* W variants: convert the sub-key / value name to narrow, then share the A cores
+ * (value data is stored/returned verbatim, so REG_SZ set via W and read via W agrees;
+ * mixing A/W on one value is out of the proven subset). */
+uint32_t aret_RegCreateKeyExW(uint32_t esp) { char s[256]; u32_w2n((const uint16_t *)WP(1), s, sizeof s); return u32_reg_create(WU(0), s, WU(7), WU(8)); }
+uint32_t aret_RegCreateKeyW(uint32_t esp)   { char s[256]; u32_w2n((const uint16_t *)WP(1), s, sizeof s); return u32_reg_create(WU(0), s, WU(2), 0); }
+uint32_t aret_RegOpenKeyExW(uint32_t esp)   { char s[256]; u32_w2n((const uint16_t *)WP(1), s, sizeof s); return u32_reg_open(WU(0), s, WU(4)); }
+uint32_t aret_RegOpenKeyW(uint32_t esp)     { char s[256]; u32_w2n((const uint16_t *)WP(1), s, sizeof s); return u32_reg_open(WU(0), s, WU(2)); }
+uint32_t aret_RegSetValueExW(uint32_t esp)  { char s[U32_REGNAME]; u32_w2n((const uint16_t *)WP(1), s, sizeof s); return u32_reg_setval(WU(0), s, WU(3), WU(4), WU(5)); }
+uint32_t aret_RegQueryValueExW(uint32_t esp){ char s[U32_REGNAME]; u32_w2n((const uint16_t *)WP(1), s, sizeof s); return u32_reg_queryval(WU(0), s, WU(3), WU(4), WU(5)); }
+uint32_t aret_RegDeleteValueW(uint32_t esp) {
+    int k = u32_reg_idx(WU(0)); if (k < 0) return 6;
+    char s[U32_REGNAME]; u32_w2n((const uint16_t *)WP(1), s, sizeof s);
+    struct u32_regval *v = u32_reg_findval(k, s, 0); if (!v) return 2; v->used = 0; return 0;
+}
+uint32_t aret_RegDeleteKeyW(uint32_t esp) {
+    char s[256]; u32_w2n((const uint16_t *)WP(1), s, sizeof s);
+    int k = u32_reg_walk(WU(0), s, 0, NULL);
+    if (k < 0 || k < U32_REG_ROOTS) return 2;
+    u32_reg_del_subtree(k); return 0;
+}
 /* ExpandEnvironmentStringsA(src, dst, size): substitute %NAME% with getenv(NAME),
  * copy literals through. Returns the length written including the NUL (or the
  * required size if dst is too small / NULL), matching the Win32 contract. */
@@ -5918,12 +6113,6 @@ uint32_t aret_GetCursor(uint32_t esp)  { (void)esp; return g_u32_cursor; }
 /* GetLastActivePopup(hWnd) -> hWnd (no popup owned -> the window itself). */
 uint32_t aret_GetLastActivePopup(uint32_t esp) { return WU(0); }
 
-/* Registry deletes on the empty read-only hive: the value/key never existed ->
- * ERROR_FILE_NOT_FOUND (2), consistent with RegOpenKeyEx/RegQueryValueEx. */
-uint32_t aret_RegDeleteValueA(uint32_t esp) { (void)esp; return 2; }
-uint32_t aret_RegDeleteValueW(uint32_t esp) { (void)esp; return 2; }
-uint32_t aret_RegDeleteKeyA(uint32_t esp)   { (void)esp; return 2; }
-uint32_t aret_RegDeleteKeyW(uint32_t esp)   { (void)esp; return 2; }
 
 /* ================================================================== */
 /* advapi32 — SID / token model (structural)                          */
@@ -6311,15 +6500,8 @@ uint32_t aret_IsDialogMessageA(uint32_t esp) { (void)esp; return 0; }
 uint32_t aret_IsDialogMessageW(uint32_t esp) { (void)esp; return 0; }
 
 /* ================================================================== */
-/* Registry (older forms) + Windows hooks — sound stubs               */
+/* Windows hooks — sound stubs                                        */
 /* ================================================================== */
-/* RegOpenKeyA(hKey, lpSubKey, phkResult) -> ERROR_FILE_NOT_FOUND (empty hive). */
-uint32_t aret_RegOpenKeyA(uint32_t esp) { uint32_t *r = (uint32_t *)WP(2); if (r) *r = 0; return 2; }
-/* RegQueryInfoKeyA(...) -> ERROR_SUCCESS with an empty key (0 subkeys/values). The
- * count out-params (args 4..) are left as the caller initialised them; we report
- * success so a caller that only checks the return proceeds over an empty key. */
-uint32_t aret_RegQueryInfoKeyA(uint32_t esp) { (void)esp; return 0; }
-
 /* Windows hooks: install accepted (opaque handle), CallNextHookEx passes through
  * (no next hook -> 0), unhook succeeds. No real hook chain in this model. */
 uint32_t aret_SetWindowsHookExA(uint32_t esp)   { (void)esp; return 0x484F4F4Bu; }  /* opaque HHOOK */

@@ -3589,4 +3589,34 @@ Détail : **70 §6** (roadmap). Résumé :
 - **Portes** : winediff **139→140**, hash transpile `19acad982194bf07` **inchangé**, `table_is_sorted_by_name` ok,
   régression unifiée **PASS**. Prochain : le **Registry** (tête à 17 binaires).
 
+### 2026-07-19 — [HLE-WIN32] **Registry en mémoire** (advapi32) — la tête mesurée (RegCreateKey 17/29), round-trip bit-identique Wine
+- **La tête de la re-mesure.** Les stubs registre existants **échouaient toujours** (`RegCreateKeyEx`→ACCESS_DENIED,
+  `RegQueryValueEx`→NOT_FOUND) — sound mais un programme qui **écrit puis relit** ses réglages n'obtenait rien → cassait
+  le pattern dominant (17 binaires). Remplacés par un **vrai registre en mémoire** (arbre de clés + valeurs, bornés).
+- **Principe (sound).** Le registre démarre **VIDE**. Une valeur écrite ce run se relit **exactement** (round-trip) ; une
+  valeur **jamais écrite** (clé système, réglage d'un installeur / d'un run précédent) reste honnêtement
+  **ERROR_FILE_NOT_FOUND**, jamais devinée → le programme prend son chemin par défaut. Roots prédéfinis
+  (HKCR/HKCU/HKLM/HKU/HKPD/HKCC/HKDD) ; handle = `U32_REG_BASE|idx` (les clés vivent dans l'arbre, `RegCloseKey`=no-op).
+- **Livré (A complet + W par conversion de nom, data verbatim)** : `RegCreateKeyEx`/`RegCreateKey`, `RegOpenKeyEx`/
+  `RegOpenKey`, `RegSetValueEx`, `RegQueryValueEx` (size-query data=NULL → *cb=len ; buffer trop petit → MORE_DATA(234) +
+  taille requise ; absent → 2), `RegCloseKey`/`RegFlushKey`, `RegDeleteValue`, `RegDeleteKey` (récursif, refuse un root),
+  `RegEnumValue`, `RegEnumKeyEx`/`RegEnumKey`, `RegQueryInfoKey` (compte sous-clés/valeurs + longueurs max). Disposition
+  `REG_CREATED_NEW_KEY(1)` / `REG_OPENED_EXISTING_KEY(2)` selon que la clé finale a été créée. Piège corrigé : `u32_w2n`
+  utilisé par les shims W **avant** sa définition → **forward-declaration** ajoutée (sinon décl. implicite → conflit static).
+- **stdcall_pops** : +`RegCreateKeyA@12`, `RegCreateKeyExW@36`, `RegCreateKeyW@12`, `RegEnumKeyExA@32`, `RegEnumValueA@32`,
+  `RegFlushKey@4`, `RegOpenKeyExW@20`, `RegOpenKeyW@12`, `RegQueryValueExW@24`, `RegSetValueExW@24` (les A de base y étaient).
+- **Fixture** `winecorpus/win32_registry.{c,nodisplay}` (self-cleaning : delete la clé au début → disposition stable, et à
+  la fin) → **bit-identique à Wine** : `create rc=0 disp=1`, `qnum type=4 cb=4 val=cafe1234`, `qstr type=1 cb=6 [hello]`,
+  `qmiss rc=2 | qsmall rc=234 cb=6`, `enum0 [num] type=4 nlen=3`, `info subkeys=0 values=2`, `reopen disp=2`,
+  `open_missing rc=2`, `delval/delkey rc=0`.
+- **Portes** : winediff **140/141** (141 fixtures, seul rouge = `gdi_uifont` environnemental), hash transpile
+  `19acad982194bf07` **inchangé**, `table_is_sorted_by_name` ok, régression unifiée **PASS** (le remplacement des stubs
+  registre ne casse aucun binaire du corpus — plink/PuTTY qui probaient le registre prennent toujours leur défaut, la clé
+  n'existant pas dans un registre vide).
+- **Correctif harnais (honnêteté) — `win32_printer_tail` ne LINKAIT pas** : la ligne de link de `winediff.sh` n'incluait
+  pas `-lwinspool` (mingw auto-linke advapi32 → le registre passait, mais **pas** winspool → `EnumPrintersA` undefined).
+  Mon commit imprimante antérieur annonçait « winediff 139 » d'après le test **ciblé** (que je linkais `-lwinspool` à la
+  main), **sans** avoir lancé le harnais complet → la fixture ne buildait pas sous le harnais. Corrigé : `-lwinspool`
+  ajouté à `winediff.sh` (comme -lcomctl32/-lversion). `win32_printer_tail` **build et passe** désormais (140/141).
+
 <!-- NOUVELLES ENTRÉES ICI (garder l'ordre chronologique, plus récent en bas) -->
