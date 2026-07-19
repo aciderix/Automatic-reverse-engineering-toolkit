@@ -3514,4 +3514,24 @@ Détail : **70 §6** (roadmap). Résumé :
 - **⇒ Famille « divers » du plateau close** (non-display + texte tabulé). Reste hors-plateau : `GrayStringA` (callback de
   dessin custom — complexe, sur demande) et l'imprimante (`OpenPrinterA`… — dépend d'un spooler → probablement échec sound).
 
+### 2026-07-19 — [HLE-WIN32] Famille **imprimante** (winspool) : Enum/GetDefault/Open/ClosePrinter — état « zéro imprimante » déterministe
+- **Dernière famille du plateau Win95** (§5.0), faite **sans download** (Internet Archive globalement hors-ligne — page
+  « Temporarily Offline » sur tous ses endpoints — donc la re-mesure du corpus est bloquée ; pivot vers un incrément
+  auto-suffisant). Pas du **print** : ce sont les **entry points d'énumération/ouverture** qu'un programme appelle pour
+  découvrir les imprimantes ; headless il n'y en a **aucune** (pas de spooler/CUPS) — état **déterministe** → vérifiable
+  bit-exact comme `WaitForInputIdle`.
+- **Recette mesurée vs Wine headless** : `EnumPrintersA/W` (niveaux 1/2/4) → TRUE, `needed=0`, `count=0` (vide) ;
+  `GetDefaultPrinterA/W` → FALSE + `ERROR_FILE_NOT_FOUND(2)`, `pcchBuffer` **non touché** ; `OpenPrinterA/W(NULL)` →
+  ouvre le **serveur d'impression local** (handle valide, table `U32_PRINTER_BASE`), `OpenPrinter(nom)` → FALSE +
+  `ERROR_INVALID_PRINTER_NAME(1801)` (aucune imprimante n'existe) ; `ClosePrinter(nôtre)` → TRUE, `(bogus)` → FALSE +
+  `ERROR_INVALID_HANDLE(6)`. **Sound** : jamais une fausse imprimante ; le programme prend son chemin « pas d'imprimante ».
+  `DocumentPropertiesA` laissé en **abort sound** (nécessite un handle d'imprimante réelle qu'on n'émet jamais headless → inatteignable).
+- **stdcall_pops** : +`OpenPrinterA/W@12`, +`ClosePrinter@4`, +`EnumPrintersA/W@28`, +`GetDefaultPrinterA/W@8`.
+- **Fixture** `winecorpus/win32_printer_tail.{c,nodisplay}` → **bit-identique à Wine** : `enum2/enum1 ret=1 needed=0
+  count=0`, `getdefault ret=0 err=2 cch=256`, `open_server ret=1 handle=1 close=1`, `open_bogus err=1801`, `close_bogus err=6`.
+- **Portes** : winediff **138→139** (`win32_printer_tail` ok ; seul rouge = `gdi_uifont`, environnemental), hash transpile
+  `19acad982194bf07` **inchangé**, `table_is_sorted_by_name` ok, régression unifiée **PASS**.
+- **⇒ Plateau Win95 entièrement couvert** (menu, thread, divers, texte tabulé, imprimante). Prochaine vague = re-mesure
+  (dès qu'IA revient) OU step 3 (vrai binaire GUI comctl32) / step 4 (MFC/VB + EH C++) — nécessitent un binaire du corpus.
+
 <!-- NOUVELLES ENTRÉES ICI (garder l'ordre chronologique, plus récent en bas) -->

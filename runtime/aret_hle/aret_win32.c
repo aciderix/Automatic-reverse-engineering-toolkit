@@ -1510,6 +1510,49 @@ uint32_t aret_WaitForInputIdle(uint32_t esp) {
  * shown. */
 uint32_t aret_WinHelpA(uint32_t esp) { return (WU(2) == 2u /*HELP_QUIT*/) ? 1u : 0u; }
 uint32_t aret_WinHelpW(uint32_t esp) { return aret_WinHelpA(esp); }
+
+/* Printer spooler (winspool.drv), display-free. Headless there are NO printers (no
+ * spooler / CUPS), and that state is deterministic, so these model the exact "no
+ * printer" results Wine gives — never a fake printer:
+ *   - OpenPrinter(NULL) opens the local print server (a valid handle); a named
+ *     printer/server does not exist -> FALSE + ERROR_INVALID_PRINTER_NAME.
+ *   - ClosePrinter succeeds on a handle we issued, else ERROR_INVALID_HANDLE.
+ *   - EnumPrinters returns TRUE with 0 needed / 0 returned (empty).
+ *   - GetDefaultPrinter -> FALSE + ERROR_FILE_NOT_FOUND (no default), pcchBuffer left
+ *     untouched. All measured bit-exact vs Wine. A program then takes its no-printer
+ *     path gracefully instead of aborting. */
+#define U32_PRINTER_BASE 0x74000000u
+static uint32_t g_printer_next = 1;
+static int u32_printer_h(uint32_t h) { return (h & 0xFF000000u) == U32_PRINTER_BASE && (h & 0x00FFFFFFu) != 0; }
+uint32_t aret_OpenPrinterA(uint32_t esp) {
+    uint32_t *ph = (uint32_t *)WP(1);
+    if (WU(0) == 0) {                               /* NULL name = local print server */
+        uint32_t h = U32_PRINTER_BASE | (g_printer_next & 0x00FFFFFFu);
+        g_printer_next = (g_printer_next & 0x00FFFFFFu) == 0x00FFFFFFu ? 1 : g_printer_next + 1;
+        if (ph) *ph = h;
+        return 1;
+    }
+    if (ph) *ph = 0;
+    g_last_error = 1801u /* ERROR_INVALID_PRINTER_NAME */;
+    return 0;
+}
+uint32_t aret_OpenPrinterW(uint32_t esp) { return aret_OpenPrinterA(esp); }
+uint32_t aret_ClosePrinter(uint32_t esp) {
+    if (u32_printer_h(WU(0))) return 1;
+    g_last_error = 6u /* ERROR_INVALID_HANDLE */;
+    return 0;
+}
+uint32_t aret_EnumPrintersA(uint32_t esp) {
+    uint32_t *needed = (uint32_t *)WP(5), *ret = (uint32_t *)WP(6);
+    if (needed) *needed = 0;
+    if (ret) *ret = 0;
+    return 1;                                       /* empty: 0 bytes, 0 printers */
+}
+uint32_t aret_EnumPrintersW(uint32_t esp) { return aret_EnumPrintersA(esp); }
+uint32_t aret_GetDefaultPrinterA(uint32_t esp) {
+    (void)esp; g_last_error = 2u /* ERROR_FILE_NOT_FOUND */; return 0;
+}
+uint32_t aret_GetDefaultPrinterW(uint32_t esp) { return aret_GetDefaultPrinterA(esp); }
 /* A handle this layer actually waits on (thread or event); others keep the legacy
  * immediate WAIT_OBJECT_0 (sound in the mono-thread model). */
 static int u32_waitable(uint32_t h) {

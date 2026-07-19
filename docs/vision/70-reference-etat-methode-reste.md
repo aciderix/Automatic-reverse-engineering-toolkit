@@ -170,7 +170,7 @@ bash bench/regression.sh    # PORTE unifiée : difftest 271/271, in-place 3/3,
                             # recompilabilité gzip/ls/cat 100%
 bash bench/difftest.sh              # décompile O0→O3
 bash bench/difftest_transpile.sh    # transpile (hash 19acad982194bf07)
-bash bench/winediff.sh              # axe 2 vs Wine (138/138 ; gdi_uifont peut être rouge = env fontconfig i386)
+bash bench/winediff.sh              # axe 2 vs Wine (139/139 ; gdi_uifont peut être rouge = env fontconfig i386)
 bash bench/funcdiff.sh              # lift-closure + opt-diff vs Unicorn (0 div)
 # Sweeps de vrais binaires (téléchargent + comparent à Wine) :
 bash bench/sqlite_sweep.sh   bash bench/busybox_sweep.sh   bash bench/corpus_sweep.sh
@@ -190,7 +190,7 @@ bash bench/wallsweep.sh <dir1> [dir2…]  # AGRÈGE --mode walls sur un corpus :
 
 ### État régression (référence — doit rester vert)
 difftest **272/272** · transpile-diff **4/4** (H=`19acad982194bf07`) · winediff
-**138/138** (le seul rouge possible = `gdi_uifont`, **environnemental** : fontconfig i386, orthogonal au code) · cpudiff vert (per-instruction + séquences génératives) · funcdiff corpus **0 divergence** (lift **~20,6k** scorées /
+**139/139** (le seul rouge possible = `gdi_uifont`, **environnemental** : fontconfig i386, orthogonal au code) · cpudiff vert (per-instruction + séquences génératives) · funcdiff corpus **0 divergence** (lift **~20,6k** scorées /
 **~20k appels** — **imports (stubs `@N` + `@0` scalaires) + appels indirects résolus + intrinsèques mémoire host-backés (memmove/memcpy)** ; scratch sous-esp exclu ; opt ~10k scorées) · SMT **11/11** · in-place **3/3** · magicdiv **2³²** ·
 recompilabilité **100 %** · WASM **7/7**.
 
@@ -706,9 +706,10 @@ résidu qui abort restera l'**obfusqué/fait-main/VM-packé** (indécidable, §9
      (`SetThreadPriority`/`GetThreadPriority`/`OpenProcess`/`TerminateThread`, 2026-07-19, `win32_thread_tail.c`, sur le
      modèle fiber coopératif) ; ✅ **divers non-display** (`WaitForInputIdle` harnais + `WinHelpA/W` hors-harnais —
      WinHelp spawn un winhlp32 qui hangerait le pipe ; 2026-07-19, `win32_misc_tail.c`) ; ✅ **texte tabulé GDI**
-     (`TabbedTextOutA/W`+`GetTabbedTextExtentA/W`, 2026-07-19, `gdi_tabbedtext.c`, FreeType DIB-hash bit-identique Wine).
-     **⇒ Plateau Win95 clos.** Reste hors-plateau (sur demande) : `GrayStringA` (callback de dessin custom) et
-     l'imprimante (`OpenPrinterA`… — dépend d'un spooler → probablement échec sound).
+     (`TabbedTextOutA/W`+`GetTabbedTextExtentA/W`, 2026-07-19, `gdi_tabbedtext.c`, FreeType DIB-hash bit-identique Wine) ;
+     ✅ **imprimante** (`Enum`/`GetDefault`/`Open`/`ClosePrinter`, 2026-07-19, `win32_printer_tail.c` — état « zéro
+     imprimante » déterministe, bit-identique Wine). **⇒ Plateau Win95 ENTIÈREMENT couvert.** Reste hors-plateau (sur
+     demande) : `GrayStringA` (callback de dessin custom, cosmétique) et `DocumentPropertiesA` (inatteignable headless).
   3. **Un vrai binaire GUI du corpus utilisant comctl32** — prouve la machinerie contrôles sur du réel shippé ; tire les
      contrôles manquants (trackbar/toolbar/listview) dans l'ordre **mesuré**.
   4. **MFC / VB40032** (le gros multiplicateur) — **gated sur l'EH C++** (`__CxxFrameHandler`, Levier 2, qu'on n'a pas) ;
