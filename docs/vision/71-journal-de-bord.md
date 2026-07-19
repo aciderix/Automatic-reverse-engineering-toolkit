@@ -3680,4 +3680,24 @@ Détail : **70 §6** (roadmap). Résumé :
   **réel shippé**. Reste (piloté par interaction, au fil des besoins) : le tail statique de FishTank (CreateDIBitmap, clip
   `IntersectClipRect`/`RectVisible`, DrawIcon/DrawFocusRect, drag-drop `DragQueryFileA`, `LoadMenuA`/accélérateurs, GrayString).
 
+### 2026-07-19 — [HLE-WIN32][GUI] Vers « pas display-free » : `DrawFocusRect` (1ʳᵉ primitive de peinture de contrôle) + découverte des **couleurs système**
+- **Objectif** : commencer à sortir du display-free pour les contrôles. Enquête FishTank (écran virtuel Xvfb) : son UI est
+  un **dialogue à contrôles natifs** (BUTTON/EDIT/COMBOBOX, user32) → peinture display-free → écran noir. Le doc 70 §7
+  documente désormais l'**écran virtuel comme oracle GUI** et la **stratégie widgets** (comctl32 par lifting+GDI ; base
+  user32 par HLE-paint ou win32k — le lifting DLL **ne** les couvre **pas** gratis).
+- **Découverte bloquante mesurée** : les primitives de contrôle (DrawEdge, boutons, fonds) tirent leurs couleurs de
+  `GetSysColor`, or **ARET rend le classique Win95** (`3DFACE=c0c0c0`, `BTNSHADOW=808080`) tandis que **Wine 9.0 rend un
+  thème moderne clair** (`3DFACE=f5f5f5`, `BTNSHADOW=a6a6a6`, `3DDKSHADOW=6a6a6a`, `3DLIGHT=e3e3e3`, captions orange
+  `fa9632`). Ce sont les **défauts hardcodés de Wine 9.0** (version-stables, pas per-run) → même classe env-dépendante que
+  `gdi_uifont`. ⇒ toute peinture de contrôle à base de couleurs système ne sera bit-exacte vs **ce** Wine qu'en **alignant
+  `u32_syscolor` sur les valeurs mesurées de Wine** (décision doctrine « Wine=oracle », à trancher — vs garder le look
+  classique authentique). **Prochaine étape** : aligner GetSysColor + `DrawEdge`/`DrawFrameControl`, DIB-hash vs Wine.
+- **Livré (theme-independent, donc faisable NOW)** : **`DrawFocusRect`** — contour pointillé 1px **XOR-inversé** (dot si
+  `(x+y)` impair, parité en coords absolues → pavage sans couture ; passe unique, pas de coin XOR deux fois). Aucune couleur
+  système → bit-exact quel que soit le thème. Sur la liste d'imports de FishTank. `stdcall_pops` : +`DrawFocusRect@8`.
+- **Fixture** `winecorpus/gdi_focusrect.c` (DIB 32bpp + hash, 2 rects à offsets impairs pour tester la parité) →
+  **bit-identique Wine** (`x3=3f3f3f`=c0c0c0^ffffff, `focus_dibhash=4802145c`).
+- **Portes** : winediff **144→145**, hash transpile `19acad982194bf07` **inchangé**, `table_is_sorted_by_name` ok,
+  régression unifiée **PASS**.
+
 <!-- NOUVELLES ENTRÉES ICI (garder l'ordre chronologique, plus récent en bas) -->

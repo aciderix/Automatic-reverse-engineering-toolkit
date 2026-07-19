@@ -4703,6 +4703,23 @@ uint32_t aret_InvertRect(uint32_t esp) {
         }
     return 1;
 }
+/* DrawFocusRect(hdc, rect): a 1px DOTTED outline of the rect, XOR-inverted, where a
+ * border pixel (x,y) is a dot iff (x+y) is odd (absolute-coord parity, so adjacent
+ * focus rects tile seamlessly — measured vs Wine). Single pass over the outline so a
+ * corner is never XOR'd twice. Theme-independent (pure XOR of the existing pixels). */
+uint32_t aret_DrawFocusRect(uint32_t esp) {
+    GDI_MAP_GUARD(WU(0), 0);
+    struct gdi_obj *bm = gdi_dc_surface(WU(0));
+    const int32_t *r = (const int32_t *)WP(1);
+    if (!bm || !r) return 0;
+    int l = r[0], t = r[1], rt = r[2], b = r[3];
+    if (rt <= l || b <= t) return 1;
+#define FR_DOT(X, Y) do { if ((((X) + (Y)) & 1)) { uint8_t *p = gdi_px(bm, (X), (Y)); if (p) { p[0] = ~p[0]; p[1] = ~p[1]; p[2] = ~p[2]; } } } while (0)
+    for (int x = l; x < rt; x++) { FR_DOT(x, t); FR_DOT(x, b - 1); }   /* top + bottom rows */
+    for (int y = t + 1; y < b - 1; y++) { FR_DOT(l, y); FR_DOT(rt - 1, y); }  /* side cols (corners already done) */
+#undef FR_DOT
+    return 1;
+}
 /* PolylineTo(hdc, const POINT* pts, int count) -> BOOL. Like a run of LineTo: from
  * the current position, a Bresenham segment to each point (endpoint excluded),
  * updating the current position to the last point (measured on Wine). */
