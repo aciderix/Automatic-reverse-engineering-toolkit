@@ -1098,6 +1098,9 @@ struct u32_fiber {
     int        has_timeout;      /* this wait/sleep has a finite deadline           */
     int        timed_out;        /* it was woken by the deadline, not a signal      */
     uint64_t   wake_time;        /* virtual-clock deadline (ms) if has_timeout      */
+    int        priority;         /* SetThreadPriority hint (0 = NORMAL); scheduling  */
+                                 /* is deterministic round-robin so it only round-   */
+                                 /* trips, it does not reorder (see SetThreadPriority)*/
 };
 static struct u32_fiber g_fiber[U32_MAX_FIBER];
 static int g_nfiber = 1;         /* fiber 0 = main, always present */
@@ -1190,6 +1193,12 @@ static int u32_thread_idx(uint32_t h) {
     if ((h & 0xFF000000u) != U32_THREAD_BASE) return -1;
     uint32_t i = h & 0x00FFFFFFu;
     return (i < (uint32_t)g_nfiber) ? (int)i : -1;
+}
+/* Resolve a thread handle to a fiber index, honouring the GetCurrentThread()
+ * pseudo-handle (-2 = 0xFFFFFFFE, which means "the calling thread"). */
+static int u32_thread_resolve(uint32_t h) {
+    if (h == 0xFFFFFFFEu) return g_cur;
+    return u32_thread_idx(h);
 }
 /* Is a wait handle signaled *for fiber fi*? Thread → its fiber is DONE; event →
  * signaled flag; mutex → free, held by fi (recursive), or abandoned (owner DONE);
@@ -1437,6 +1446,53 @@ uint32_t aret_GetExitCodeThread(uint32_t esp) {
     uint32_t *out = (uint32_t *)WP(1);
     if (fi < 0) { if (out) *out = 0; return 0; }
     if (out) *out = (g_fiber[fi].state == FST_DONE) ? g_fiber[fi].exit_code : 259u /*STILL_ACTIVE*/;
+    return 1;
+}
+/* SetThreadPriority / GetThreadPriority. Priority is a *scheduling hint*: our
+ * cooperative scheduler is deterministic round-robin (a program that relied on
+ * priority to order threads would be racy under real Windows too), so we only
+ * round-trip the value — store it, hand it back — without reordering. Verified vs
+ * Wine: default = 0 (THREAD_PRIORITY_NORMAL), Set returns TRUE, Get returns the set
+ * value. Unknown handle -> GetThreadPriority returns THREAD_PRIORITY_ERROR_RETURN. */
+uint32_t aret_SetThreadPriority(uint32_t esp) {
+    int fi = u32_thread_resolve(WU(0)); if (fi < 0) return 0;
+    g_fiber[fi].priority = (int)WU(1);
+    return 1;
+}
+uint32_t aret_GetThreadPriority(uint32_t esp) {
+    int fi = u32_thread_resolve(WU(0));
+    if (fi < 0) return 0x7FFFFFFFu;                     /* THREAD_PRIORITY_ERROR_RETURN */
+    return (uint32_t)g_fiber[fi].priority;
+}
+/* OpenProcess: the only process that exists here is our own (CreateProcess is a
+ * sound failure, doc 70 §4.5), so opening our own pid succeeds (own-process handle)
+ * and any other pid fails with ERROR_INVALID_PARAMETER — exactly Wine's shape (own
+ * ok, bogus -> 0 / err 87). */
+uint32_t aret_OpenProcess(uint32_t esp) {
+    if (WU(2) == (uint32_t)getpid()) return 0xFFFFFFFFu;   /* own process pseudo-handle */
+    g_last_error = 87u /* ERROR_INVALID_PARAMETER */;
+    return 0;
+}
+/* TerminateThread(hThread, exitCode): forcibly end a thread. Cooperative model: the
+ * target fiber is marked DONE with the given exit code and is never scheduled again
+ * (its stacks leak, exactly as Windows leaks the terminated thread's resources — the
+ * documented danger). Waiters see it signaled; GetExitCodeThread returns exitCode.
+ * Terminating the calling thread degenerates to ExitThread / process-exit. If the
+ * victim still held a lock, no other fiber can ever acquire it -> the scheduler's
+ * deadlock detector aborts loudly (a Windows program would hang identically). */
+uint32_t aret_TerminateThread(uint32_t esp) {
+    int fi = u32_thread_resolve(WU(0)); if (fi < 0) return 0;
+    uint32_t code = WU(1);
+    if (fi == g_cur) {                                  /* terminating self */
+        if (g_cur == 0) { exit((int)code); }            /* main thread -> process exit */
+        g_fiber[g_cur].exit_code = code;
+        g_fiber[g_cur].last_error = g_last_error;
+        g_fiber[g_cur].state = FST_DONE;
+        swapcontext(&g_fiber[g_cur].ctx, &g_sched_ctx); /* never resumed */
+        return 1;                                       /* unreachable */
+    }
+    g_fiber[fi].exit_code = code;
+    g_fiber[fi].state = FST_DONE;
     return 1;
 }
 /* A handle this layer actually waits on (thread or event); others keep the legacy

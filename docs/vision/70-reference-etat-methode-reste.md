@@ -170,7 +170,7 @@ bash bench/regression.sh    # PORTE unifiée : difftest 271/271, in-place 3/3,
                             # recompilabilité gzip/ls/cat 100%
 bash bench/difftest.sh              # décompile O0→O3
 bash bench/difftest_transpile.sh    # transpile (hash 19acad982194bf07)
-bash bench/winediff.sh              # axe 2 vs Wine (135/135 ; gdi_uifont peut être rouge = env fontconfig i386)
+bash bench/winediff.sh              # axe 2 vs Wine (136/136 ; gdi_uifont peut être rouge = env fontconfig i386)
 bash bench/funcdiff.sh              # lift-closure + opt-diff vs Unicorn (0 div)
 # Sweeps de vrais binaires (téléchargent + comparent à Wine) :
 bash bench/sqlite_sweep.sh   bash bench/busybox_sweep.sh   bash bench/corpus_sweep.sh
@@ -190,7 +190,7 @@ bash bench/wallsweep.sh <dir1> [dir2…]  # AGRÈGE --mode walls sur un corpus :
 
 ### État régression (référence — doit rester vert)
 difftest **272/272** · transpile-diff **4/4** (H=`19acad982194bf07`) · winediff
-**135/135** (le seul rouge possible = `gdi_uifont`, **environnemental** : fontconfig i386, orthogonal au code) · cpudiff vert (per-instruction + séquences génératives) · funcdiff corpus **0 divergence** (lift **~20,6k** scorées /
+**136/136** (le seul rouge possible = `gdi_uifont`, **environnemental** : fontconfig i386, orthogonal au code) · cpudiff vert (per-instruction + séquences génératives) · funcdiff corpus **0 divergence** (lift **~20,6k** scorées /
 **~20k appels** — **imports (stubs `@N` + `@0` scalaires) + appels indirects résolus + intrinsèques mémoire host-backés (memmove/memcpy)** ; scratch sous-esp exclu ; opt ~10k scorées) · SMT **11/11** · in-place **3/3** · magicdiv **2³²** ·
 recompilabilité **100 %** · WASM **7/7**.
 
@@ -619,6 +619,10 @@ recompilabilité **100 %** · WASM **7/7**.
 - **Chantier fibers = complet** (doc 80 §2, incréments 1-5). Reste hors-scope (abort sound) : préemption d'un thread
   CPU-bound qui ne yield jamais (hang→abort), WAIT_ABANDONED distinct, `SuspendThread` d'un thread courant, WASM
   (Asyncify).
+- **Contrôle de thread (traîne, 2026-07-19)** : `SetThreadPriority`/`GetThreadPriority` (round-trip d'un hint ; le
+  scheduler round-robin déterministe ne réordonne pas), `OpenProcess` (own pid → handle, autre → err 87), et
+  `TerminateThread` (fiber cible → FST_DONE + exit code, jamais réordonnancé, piles fuient comme Windows ; lock tenu →
+  deadlock→abort). Bit-identique Wine (`win32_thread_tail.c`).
 - **Test « vrai binaire » honnête (2026-07-16)** : `kernel32_test.exe` (conformance WineHQ, extrait de `winetest`,
   3 Mo). **Mur franchi** : la table de dispatch `{nom, func}` (fonction de test atteinte via `0x446680`, prologue
   de réalignement) est désormais récupérée (cf. §4.4) → le sous-test `thread` **exécute du vrai code de test réel**
@@ -693,9 +697,10 @@ résidu qui abort restera l'**obfusqué/fait-main/VM-packé** (indécidable, §9
   2. ✅ **Famille GDI mapping-mode FAITE** (la tête mesurée) : `SetViewportOrgEx`/`SetViewportExtEx`/`SetWindowExtEx`/
      `Scale*ExtEx`/`OffsetViewportOrgEx`/`SetMapMode`/`DPtoLP`/`LPtoDP` — transforme logique→device ⚠️ correctness-critique,
      vérifié **DIB-hash vs Wine**. **Seconde moitié = familles socle du plateau** : ✅ **menu** (`ModifyMenuA/W`/
-     `SetMenuItemBitmaps`/`GetMenuCheckMarkDimensions`, 2026-07-19, `user32_menu2.c` bit-identique Wine) ; **reste** :
-     imprimante (`OpenPrinterA`/`ClosePrinter`/`DocumentPropertiesA`), thread (`TerminateThread`/`SetThreadPriority`/
-     `OpenProcess`), divers (`WinHelpA`/`WaitForInputIdle`/`TabbedTextOutA`/`GrayStringA`) — générales, batch vérifié.
+     `SetMenuItemBitmaps`/`GetMenuCheckMarkDimensions`, 2026-07-19, `user32_menu2.c`) ; ✅ **thread**
+     (`SetThreadPriority`/`GetThreadPriority`/`OpenProcess`/`TerminateThread`, 2026-07-19, `win32_thread_tail.c`, sur le
+     modèle fiber coopératif) ; **reste** : imprimante (`OpenPrinterA`/`ClosePrinter`/`DocumentPropertiesA`), divers
+     (`WinHelpA`/`WaitForInputIdle`/`TabbedTextOutA`/`GrayStringA`) — générales, batch vérifié.
   3. **Un vrai binaire GUI du corpus utilisant comctl32** — prouve la machinerie contrôles sur du réel shippé ; tire les
      contrôles manquants (trackbar/toolbar/listview) dans l'ordre **mesuré**.
   4. **MFC / VB40032** (le gros multiplicateur) — **gated sur l'EH C++** (`__CxxFrameHandler`, Levier 2, qu'on n'a pas) ;

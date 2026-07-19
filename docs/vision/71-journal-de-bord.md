@@ -3446,4 +3446,29 @@ Détail : **70 §6** (roadmap). Résumé :
 - **Portes** : winediff **134→135** (`user32_menu2` ok ; le seul rouge = `gdi_uifont`, **environnemental** fontconfig i386,
   orthogonal), hash transpile `19acad982194bf07` **inchangé**, `table_is_sorted_by_name` ok, régression unifiée **PASS**.
 
+### 2026-07-19 — [HLE-WIN32][THREAD] Famille **thread (traîne)** : `SetThreadPriority`/`GetThreadPriority` + `OpenProcess` + `TerminateThread`
+- **Suite du step 2** du plan ordonné (§5.0) : après menu, la famille **thread** (tête mesurée du plateau Win95 —
+  `TerminateThread` dans 5 binaires). Chaque fonction mesurée bit-exact vs Wine (prefix propre), puis modélisée
+  **soundement sur le modèle fiber coopératif** (doc 80 §2).
+- **`SetThreadPriority`/`GetThreadPriority`** : la priorité est un **hint d'ordonnancement**. Notre scheduler est
+  **round-robin déterministe** (un programme qui *dépendrait* de la priorité pour ordonner ses threads serait racy sous
+  vrai Windows aussi) ⇒ on ne fait que **round-tripper** la valeur (champ `priority` par-fiber, défaut 0 = NORMAL), on ne
+  réordonne pas. Résout le pseudo-handle `GetCurrentThread()` (-2) → fiber courant (`u32_thread_resolve`). Mesuré :
+  `default=0`, `Set→1`, `Get→1` (ABOVE_NORMAL round-trip). Handle invalide → `THREAD_PRIORITY_ERROR_RETURN`.
+- **`OpenProcess`** : le seul process qui existe = le nôtre (`CreateProcess` = échec sound). Own pid → handle (pseudo
+  `0xFFFFFFFF`), autre pid → 0 + `ERROR_INVALID_PARAMETER(87)`. Mesuré `self=1 bogus=0 err=87`. (`OpenProcess@12` était
+  déjà dans `stdcall_pops` mais sans shim → abort ; désormais implémenté.)
+- **`TerminateThread(h, code)`** : termine de force. Modèle coopératif : le fiber cible est marqué **FST_DONE** avec le
+  code, **plus jamais ordonnancé** (ses piles fuient — exactement comme Windows fuit les ressources d'un thread terminé,
+  le danger documenté) ; les waiters le voient signalé, `GetExitCodeThread`→code. Se terminer soi-même dégénère en
+  ExitThread / exit process (main). Si la victime tenait un lock, aucun fiber ne peut plus l'acquérir → **le détecteur de
+  deadlock du scheduler abort bruyamment** (un vrai programme Windows hangerait pareil). Mesuré : `ret=1 ran=1 exit=55
+  wait=0` (le worker a atteint `g_ran=1` puis parké dans `Sleep`, **jamais** `g_ran=2`).
+- **Fixture** `winecorpus/win32_thread_tail.{c,nodisplay}` : priorité + OpenProcess own/bogus + TerminateThread d'un worker
+  parké + GetExitCodeThread + WaitForSingleObject → **bit-identique à Wine** (`prio default=0 set=1 after=1`,
+  `openproc self=1 bogus=0 bogus_err=87`, `terminate ret=1 ran=1 exit=55 wait=0`).
+- **stdcall_pops** : +`GetThreadPriority@4`, +`SetThreadPriority@8`, +`TerminateThread@8` (`OpenProcess@12` déjà présent).
+- **Portes** : winediff **135→136** (`win32_thread_tail` ok ; seul rouge = `gdi_uifont`, environnemental), hash transpile
+  `19acad982194bf07` **inchangé**, `table_is_sorted_by_name` ok, régression unifiée **PASS**.
+
 <!-- NOUVELLES ENTRÉES ICI (garder l'ordre chronologique, plus récent en bas) -->
