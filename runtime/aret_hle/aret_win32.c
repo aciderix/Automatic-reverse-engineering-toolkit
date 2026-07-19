@@ -2382,6 +2382,7 @@ static struct {
     int extra_len;           /* cbWndExtra bytes (from the class) */
     uint8_t extra[64];       /* cbWndExtra storage: SetWindowLong at offset >=0 (control state ptr) */
     struct { int min, max, page, pos; } scroll[3];  /* SB_HORZ=0 / SB_VERT=1 / SB_CTL=2 */
+    int du_x, du_y;          /* dialog base units (per-dialog, from its font); 0 = not a mapped dialog */
 #ifdef ARET_HAVE_SDL
     void *sdl_win, *sdl_ren, *sdl_tex;  /* SDL window/renderer/streaming texture */
     uint32_t client_bmp;     /* HBITMAP of the client-area framebuffer (GDI draws here) */
@@ -3659,6 +3660,9 @@ static uint32_t u32_new_control(uint32_t parent, int ctrl_id, uint32_t style, co
     }
     return 0;
 }
+/* Compute+store a dialog's base units from its font (defined after the FreeType
+ * helpers). */
+static void u32_dlg_base_units(int wi, int has_font, int point_size, int weight, int italic, const char *face);
 /* Parse a DLGTEMPLATE(EX) -> create the dialog window (wndproc = dlgproc) and its
  * child controls. Returns the dialog HWND (0 on failure). Handles both templates. */
 static uint32_t u32_dialog_create(const uint8_t *tpl, uint32_t dlgproc, uint32_t parent) {
@@ -3679,12 +3683,17 @@ static uint32_t u32_dialog_create(const uint8_t *tpl, uint32_t dlgproc, uint32_t
     p = u32_dt_szord(p, NULL, 0);                        /* menu */
     p = u32_dt_szord(p, NULL, 0);                        /* window class */
     p = u32_dt_szord(p, dtitle, sizeof dtitle);         /* caption */
+    int has_font = 0, f_pt = 0, f_weight = 0, f_ital = 0; char f_face[64]; f_face[0] = 0;
     if (style & 0x40u /* DS_SETFONT */) {
-        p += ex ? 6 : 2;                                /* EX: size,weight,italic,charset ; classic: size */
-        p = u32_dt_szord(p, NULL, 0);                   /* typeface */
+        has_font = 1;
+        f_pt = *(const uint16_t *)p;
+        if (ex) { f_weight = *(const uint16_t *)(p + 2); f_ital = *(const uint8_t *)(p + 4); p += 6; }
+        else p += 2;                                    /* classic: point size only */
+        p = u32_dt_szord(p, f_face, sizeof f_face);     /* typeface */
     }
     uint32_t hDlg = u32_window_create(dlgproc, 0, style, 0, 0, 0, 0, parent, dtitle, 0);
     if (!hDlg) return 0;
+    u32_dlg_base_units((int)hDlg - 1, has_font, f_pt, f_weight, f_ital, f_face);
     for (int c = 0; c < cdit; c++) {
         p = u32_dt_align(tpl, p);
         uint32_t cstyle, cid;
@@ -6710,6 +6719,61 @@ uint32_t aret_CreateFontIndirectW(uint32_t esp) {
     return font_make(height, weight, lf[20], lf[21], lf[22], lf[26], face);
 }
 
+/* Compute+store a dialog's base units (du_x,du_y) from its font — the pixels-per-
+ * dialog-unit scale. Reproduces Wine's GdiGetCharDimensions EXACTLY (autonomous, no
+ * Wine at runtime; the recipe is read from Wine's source, doctrine §1): select the
+ * dialog font into a scratch DC, then
+ *   du_x = (GetTextExtentPoint(52-letter alphabet).cx / 26 + 1) / 2   [avg char width]
+ *   du_y = tmHeight.
+ * Font from the template point size like Wine: lfHeight = -MulDiv(pt, LOGPIXELSY=96, 72);
+ * point size 0x7FFF ("use shell/system font") or no DS_SETFONT -> DEFAULT_GUI_FONT
+ * (MS Shell Dlg, -11). Requires FreeType metrics; without them a mapped dialog aborts
+ * soundly (never a guessed scale). These base units drive MapDialogRect and control
+ * placement, so they are as bit-exact vs Wine as the font resolves identically (same
+ * fontconfig recipe -> same TTF -> same FreeType metrics; the gdi_uifont env caveat). */
+static void u32_dlg_base_units(int wi, int has_font, int point_size, int weight, int italic, const char *face) {
+#ifdef ARET_HAVE_FREETYPE
+    int height, wt, it; const char *fc;
+    if (has_font && point_size != 0x7FFF && face && face[0]) {
+        height = -gdi_muldiv(point_size, 96, 72);       /* -MulDiv(pt, LOGPIXELSY, 72) */
+        fc = face; wt = weight ? weight : 400; it = italic ? 1 : 0;
+    } else {
+        height = -11; fc = "MS Shell Dlg"; wt = 400; it = 0;   /* DEFAULT_GUI_FONT */
+    }
+    uint32_t hf = font_make(height, wt, it, 0, 0, 0, fc);
+    int fi = gdi_idx(hf); if (fi < 0) return;
+    int d = gdi_alloc(GDIT_DC);
+    if (!d) { g_gdi[fi].used = 0; return; }
+    u32_dc_defaults(d);
+    g_gdi[d].sel_font = hf;
+    int asc, desc;
+    FT_Face f = u32_dc_font(d, &asc, &desc);
+    if (f) {
+        uint32_t alpha[52]; int k = 0;
+        for (int c = 'A'; c <= 'Z'; c++) alpha[k++] = (uint32_t)c;
+        for (int c = 'a'; c <= 'z'; c++) alpha[k++] = (uint32_t)c;
+        int ext = u32_text_width(f, alpha, 52);
+        g_u32_win[wi].du_x = (ext / 26 + 1) / 2;
+        g_u32_win[wi].du_y = asc + desc;                /* tmHeight */
+    }
+    g_gdi[d].used = 0; g_gdi[fi].used = 0;
+#else
+    (void)wi; (void)has_font; (void)point_size; (void)weight; (void)italic; (void)face;
+#endif
+}
+/* MapDialogRect(hDlg, LPRECT) -> BOOL. Convert a rect from dialog units to pixels
+ * with the dialog's stored base units, exactly like Wine (MulDiv, GDI rounding):
+ * x by du_x/4, y by du_y/8. No base units (font unresolved) -> sound abort. */
+uint32_t aret_MapDialogRect(uint32_t esp) {
+    int i = u32_win_idx(WU(0));
+    int32_t *r = (int32_t *)(uintptr_t)WU(1);
+    if (i < 0 || !r) return 0;
+    int bx = g_u32_win[i].du_x, by = g_u32_win[i].du_y;
+    if (bx <= 0 || by <= 0) { aret_unimpl("MapDialogRect: dialog has no base units (font unresolved)"); return 0; }
+    r[0] = gdi_muldiv(r[0], bx, 4); r[2] = gdi_muldiv(r[2], bx, 4);
+    r[1] = gdi_muldiv(r[1], by, 8); r[3] = gdi_muldiv(r[3], by, 8);
+    return 1;
+}
 /* IsDialogMessageA/W(hDlg, lpMsg) -> BOOL. Headless keyboard navigation has no
  * input to translate, so no message is consumed as a dialog message. */
 uint32_t aret_IsDialogMessageA(uint32_t esp) { (void)esp; return 0; }

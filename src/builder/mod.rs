@@ -1278,7 +1278,10 @@ pub fn transpile(
             | "GetTabbedTextExtentA" | "GetTabbedTextExtentW"
             // A program that creates fonts renders text — its native controls (BUTTON…)
             // paint their captions internally even if it never calls DrawText directly.
-            | "CreateFontA" | "CreateFontW" | "CreateFontIndirectA" | "CreateFontIndirectW"))
+            | "CreateFontA" | "CreateFontW" | "CreateFontIndirectA" | "CreateFontIndirectW"
+            // A dialog maps dialog-units to pixels via its font's metrics (base units,
+            // Wine's GdiGetCharDimensions) — needs FreeType to measure that font.
+            | "MapDialogRect"))
     {
         freetype_flags()
     } else {

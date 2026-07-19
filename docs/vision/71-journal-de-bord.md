@@ -3753,4 +3753,30 @@ Détail : **70 §6** (roadmap). Résumé :
   régression unifiée **PASS**. **⇒ 1ᵉʳ contrôle natif réellement peint.** Suite : les autres contrôles (STATIC/EDIT/
   group-box) même machinerie, puis rendre le **dialogue visible** (fenêtre SDL) et composer les enfants → FishTank affiché.
 
+### 2026-07-19 — [HLE-WIN32][GUI] Unités de dialogue → pixels : `MapDialogRect` + **base-units par-dialogue calculées façon Wine** (bit-exact)
+- **Objectif / fondation « dialogue visible »** : les positions des contrôles d'un dialogue sont en **unités de dialogue**
+  (grille calée sur la police : 1 DU horizontale = ¼ largeur-moyenne-caractère, 1 DU verticale = ⅛ hauteur-caractère), donc
+  la géométrie **pixel dépend de la police résolue**. C'est le maillon manquant pour composer un dialogue à l'écran.
+- **Fausse alerte « seulement visuel » levée** : la conversion **EST bit-vérifiable**. On reproduit **exactement et en
+  autonomie** l'algorithme de Wine (`GdiGetCharDimensions`, lu dans sa source — doctrine §1 « Wine = livre de recettes ») :
+  sélectionner la police du dialogue dans un DC scratch, puis `du_x = (extent(alphabet 52 lettres).cx / 26 + 1) / 2`,
+  `du_y = tmHeight`. Police depuis le point-size du template comme Wine : `lfHeight = -MulDiv(pt, LOGPIXELSY=96, 72)`. On
+  **réutilise nos métriques FreeType existantes** (`u32_dc_font`/`u32_text_width`, déjà bit-identiques Wine cf. gdi_textout)
+  → mêmes base-units que Wine. **Pas de FreeType ⇒ abort sound** (jamais un facteur d'échelle deviné).
+- **Preuve bit-exacte** : fixture nommant **« DejaVu Sans »** (police que **les deux moteurs résolvent identiquement**, comme
+  gdi_textout) → même TTF → mêmes métriques → mêmes unités. Le trace `WINEDEBUG=+dialog` de Wine imprime lui-même
+  `DIALOG_CreateIndirect units = 7,13` = **exactement** les `base 7 13` d'ARET ; `MapDialogRect({2,3,160,100})` = `{4,5,280,163}`
+  des deux côtés (MulDiv + arrondi GDI identiques). Le caveat résiduel = **le seul et même que gdi_uifont** (une police type
+  « MS Sans Serif » se substitue de façon env-dépendante) — pas une nouvelle source de flou.
+- **Livré** : champ `du_x/du_y` par-fenêtre ; `u32_dlg_base_units` (calcul+stockage à la création du dialogue, sous
+  `ARET_HAVE_FREETYPE`) ; `MapDialogRect` (MulDiv façon Wine, arrondi `gdi_muldiv`). `u32_dialog_create` capture désormais
+  point-size/weight/italic/typeface (au lieu de les jeter). Builder : `MapDialogRect` ajouté au gate `-DARET_HAVE_FREETYPE`.
+  `stdcall_pops` : +`MapDialogRect@8`.
+- **Fixture** `winecorpus/user32_dlgunits.c` (template DS_SETFONT en mémoire, DejaVu Sans 8pt, modeless, MapDialogRect) →
+  **bit-identique Wine** (`base 7 13`, `rect 4 5 280 163`). ⚠️ fenêtrée : Wine crée un vrai window (Xvfb requis) ; ARET headless.
+- **Portes** : winediff **148→149 fixtures** (nouvelle passe ; le seul rouge = `gdi_uifont`, env fontconfig i386), hash transpile
+  `19acad982194bf07` **inchangé**, `table_is_sorted_by_name` ok. **⇒ Fondation posée** pour la géométrie des contrôles :
+  suite = parser x/y/cx/cy + classname des contrôles dans le template → placer/dimensionner chaque enfant via ces base-units →
+  composer leur peinture dans le framebuffer du dialogue → dialogue FishTank visible.
+
 <!-- NOUVELLES ENTRÉES ICI (garder l'ordre chronologique, plus récent en bas) -->

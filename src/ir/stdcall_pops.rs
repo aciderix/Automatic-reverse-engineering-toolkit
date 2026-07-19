@@ -440,6 +440,7 @@ static TABLE: &[(&str, u32)] = &[
     ("LockResource", 4),
     ("LookupPrivilegeValueA", 12),
     ("LookupPrivilegeValueW", 12),
+    ("MapDialogRect", 8),
     ("MapViewOfFile", 20),
     ("MapWindowPoints", 16),
     ("MessageBeep", 4),
