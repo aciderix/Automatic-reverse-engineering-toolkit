@@ -4876,17 +4876,78 @@ static void u32_button_paint(uint32_t hdc, int wi) {
         g_gdi[d].sel_font = sf; g_gdi[d].text_color = tc; g_gdi[d].bk_mode = bk;
     }
 }
-/* Built-in proc for a predefined control with no app WNDPROC. BUTTON: WM_SETFONT stores
- * the font, WM_GETFONT returns it, WM_PRINTCLIENT paints the control into the given DC.
- * Everything else stays unhandled (the caller falls back to 0, as before). */
+/* Draw a control's text with the control font, into `rect`, in COLOR `idx`, transparent,
+ * `fmt` = DrawText flags. Shared by STATIC/EDIT/BUTTON caption painting. */
+static void u32_ctrl_text(uint32_t hdc, int d, int wi, const int32_t *rect, uint32_t fmt, int idx) {
+    const char *cap = g_u32_win[wi].title;
+    if (!cap || !cap[0] || !g_u32_win[wi].ctrl_font) return;
+    uint32_t sf = g_gdi[d].sel_font, tc = g_gdi[d].text_color; int bk = g_gdi[d].bk_mode;
+    g_gdi[d].sel_font = g_u32_win[wi].ctrl_font;
+    g_gdi[d].text_color = u32_syscolor(idx);
+    g_gdi[d].bk_mode = 1 /*TRANSPARENT*/;
+    uint32_t cps[256]; int m = 0; for (; cap[m] && m < 255; m++) cps[m] = u32_ansi_cp((unsigned char)cap[m]);
+    u32_drawtext(hdc, cps, m, (uint32_t)(uintptr_t)rect, fmt);
+    g_gdi[d].sel_font = sf; g_gdi[d].text_color = tc; g_gdi[d].bk_mode = bk;
+}
+/* Fill a control's whole client with a system colour. */
+static void u32_ctrl_fill(struct gdi_obj *bm, int w, int h, uint32_t c) {
+    for (int y = 0; y < h; y++) for (int x = 0; x < w; x++) gdi_put(bm, x, y, c);
+}
+/* STATIC (SS_LEFT text label): fill COLOR_3DFACE (the dialog bg, measured vs Wine) then
+ * the text left/top in COLOR_WINDOWTEXT (matches Wine's WM_PRINTCLIENT). */
+static void u32_static_paint(uint32_t hdc, int wi) {
+    struct gdi_obj *bm = gdi_dc_surface(hdc); int d = gdi_idx(hdc);
+    if (!bm || d < 0) return;
+    int w = g_u32_win[wi].w, h = g_u32_win[wi].h;
+    u32_ctrl_fill(bm, w, h, u32_syscolor(15 /*COLOR_3DFACE*/));
+    int32_t r2[4] = { 0, 0, w, h };
+    u32_ctrl_text(hdc, d, wi, r2, 0x20u /*DT_SINGLELINE (left/top)*/, 8 /*COLOR_WINDOWTEXT*/);
+}
+/* EDIT client (matches WM_PRINTCLIENT — the 3D border is non-client, added by the
+ * composite): fill COLOR_WINDOW then the text left/vcentre in COLOR_WINDOWTEXT.
+ * `inset` shifts the text in from a composited border. */
+static void u32_edit_paint(uint32_t hdc, int wi, int inset) {
+    struct gdi_obj *bm = gdi_dc_surface(hdc); int d = gdi_idx(hdc);
+    if (!bm || d < 0) return;
+    int w = g_u32_win[wi].w, h = g_u32_win[wi].h;
+    u32_ctrl_fill(bm, w, h, u32_syscolor(5 /*COLOR_WINDOW*/));
+    int32_t r2[4] = { inset, 0, w - inset, h };
+    u32_ctrl_text(hdc, d, wi, r2, 0x4u | 0x20u /*DT_VCENTER|DT_SINGLELINE*/, 8 /*COLOR_WINDOWTEXT*/);
+}
+/* Which predefined classes have a built-in paint. */
+static int u32_ctrl_paintable(const char *cls) {
+    return !strcasecmp(cls, "button") || !strcasecmp(cls, "static") || !strcasecmp(cls, "edit");
+}
+/* Full on-screen appearance of a control (for the dialog composite): the client paint
+ * plus any non-client 3D border (EDIT gets a sunken edge). */
+static void u32_control_paint_full(uint32_t hdc, int wi) {
+    const char *cls = g_u32_win[wi].classname;
+    if (!strcasecmp(cls, "button")) { u32_button_paint(hdc, wi); return; }
+    if (!strcasecmp(cls, "static")) { u32_static_paint(hdc, wi); return; }
+    if (!strcasecmp(cls, "edit")) {
+        u32_edit_paint(hdc, wi, 2);
+        struct gdi_obj *bm = gdi_dc_surface(hdc);
+        int32_t rc[4] = { 0, 0, g_u32_win[wi].w, g_u32_win[wi].h };
+        if (bm) u32_drawedge(bm, rc, 0x0Au /*EDGE_SUNKEN*/, 0xFu /*BF_RECT*/);
+    }
+}
+/* Built-in proc for a predefined control with no app WNDPROC. BUTTON/STATIC/EDIT:
+ * WM_SETFONT stores the font, WM_GETFONT returns it, WM_PRINTCLIENT paints the control's
+ * client into the given DC. Everything else stays unhandled (caller falls back to 0). */
 static int u32_control_proc(uint32_t esp, uint32_t hwnd, uint32_t msg, uint32_t wp, uint32_t lp, uint32_t *out) {
     (void)esp; (void)lp;
     int i = (hwnd >= 1 && hwnd <= U32_MAX_WIN && g_u32_win[hwnd - 1].used) ? (int)hwnd - 1 : -1;
     if (i < 0) return 0;
-    if (strcasecmp(g_u32_win[i].classname, "button") != 0) return 0;
+    const char *cls = g_u32_win[i].classname;
+    if (!u32_ctrl_paintable(cls)) return 0;
     if (msg == 0x0030u /*WM_SETFONT*/)  { g_u32_win[i].ctrl_font = wp; *out = 0; return 1; }
     if (msg == 0x0031u /*WM_GETFONT*/)  { *out = g_u32_win[i].ctrl_font; return 1; }
-    if (msg == 0x0318u /*WM_PRINTCLIENT*/) { u32_button_paint(wp, i); *out = 0; return 1; }
+    if (msg == 0x0318u /*WM_PRINTCLIENT*/) {
+        if (!strcasecmp(cls, "button"))      u32_button_paint(wp, i);
+        else if (!strcasecmp(cls, "static")) u32_static_paint(wp, i);
+        else                                 u32_edit_paint(wp, i, 0);   /* client only */
+        *out = 0; return 1;
+    }
     return 0;
 }
 /* Composite a dialog's client framebuffer for display: fill the background with
@@ -4912,7 +4973,7 @@ static void u32_dialog_composite(int di) {
         if (!g_u32_win[c].visible) continue;
         int cw = g_u32_win[c].w, ch = g_u32_win[c].h, ox = g_u32_win[c].x, oy = g_u32_win[c].y;
         if (cw <= 0 || ch <= 0) continue;
-        if (strcasecmp(g_u32_win[c].classname, "button") != 0) continue;   /* paintable class */
+        if (!u32_ctrl_paintable(g_u32_win[c].classname)) continue;   /* paintable class */
         int td = gdi_alloc(GDIT_DC); if (!td) continue;
         u32_dc_defaults(td);
         int tb = gdi_alloc(GDIT_BITMAP); if (!tb) { g_gdi[td].used = 0; continue; }
@@ -4920,7 +4981,7 @@ static void u32_dialog_composite(int di) {
         g_gdi[tb].bits = (uint8_t *)calloc((size_t)cw * ch, 4); g_gdi[tb].owns_bits = 1;
         if (!g_gdi[tb].bits) { g_gdi[tb].used = 0; g_gdi[td].used = 0; continue; }
         g_gdi[td].sel_bitmap = gdi_handle(tb);
-        u32_button_paint(gdi_handle(td), c);
+        u32_control_paint_full(gdi_handle(td), c);
         uint32_t *src = (uint32_t *)g_gdi[tb].bits;
         for (int yy = 0; yy < ch; yy++) { int dy = oy + yy; if (dy < 0 || dy >= H) continue;
             for (int xx = 0; xx < cw; xx++) { int dx = ox + xx; if (dx < 0 || dx >= W) continue;

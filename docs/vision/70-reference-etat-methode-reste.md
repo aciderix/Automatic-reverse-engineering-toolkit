@@ -170,7 +170,7 @@ bash bench/regression.sh    # PORTE unifiée : difftest 271/271, in-place 3/3,
                             # recompilabilité gzip/ls/cat 100%
 bash bench/difftest.sh              # décompile O0→O3
 bash bench/difftest_transpile.sh    # transpile (hash 19acad982194bf07)
-bash bench/winediff.sh              # axe 2 vs Wine (151/151 ; gdi_uifont peut être rouge = env fontconfig i386)
+bash bench/winediff.sh              # axe 2 vs Wine (153/153 ; gdi_uifont peut être rouge = env fontconfig i386)
 bash bench/funcdiff.sh              # lift-closure + opt-diff vs Unicorn (0 div)
 # Sweeps de vrais binaires (téléchargent + comparent à Wine) :
 bash bench/sqlite_sweep.sh   bash bench/busybox_sweep.sh   bash bench/corpus_sweep.sh
@@ -190,7 +190,7 @@ bash bench/wallsweep.sh <dir1> [dir2…]  # AGRÈGE --mode walls sur un corpus :
 
 ### État régression (référence — doit rester vert)
 difftest **272/272** · transpile-diff **4/4** (H=`19acad982194bf07`) · winediff
-**151/151** (le seul rouge possible = `gdi_uifont`, **environnemental** : fontconfig i386, orthogonal au code) · cpudiff vert (per-instruction + séquences génératives) · funcdiff corpus **0 divergence** (lift **~20,6k** scorées /
+**153/153** (le seul rouge possible = `gdi_uifont`, **environnemental** : fontconfig i386, orthogonal au code) · cpudiff vert (per-instruction + séquences génératives) · funcdiff corpus **0 divergence** (lift **~20,6k** scorées /
 **~20k appels** — **imports (stubs `@N` + `@0` scalaires) + appels indirects résolus + intrinsèques mémoire host-backés (memmove/memcpy)** ; scratch sous-esp exclu ; opt ~10k scorées) · SMT **11/11** · in-place **3/3** · magicdiv **2³²** ·
 recompilabilité **100 %** · WASM **7/7**.
 
@@ -469,8 +469,12 @@ recompilabilité **100 %** · WASM **7/7**.
   contrôles natifs s'affiche en ELF autonome (SDL)**. Fenêtre créée à la bonne taille (base-units avant `u32_window_create`) ;
   créateurs de dialogue ajoutés au gate SDL. **Vérif qualitative écran virtuel** (Wine ne compose pas dans un DIB —
   `WM_PRINT PRF_CHILDREN` ne peint pas les enfants — donc pas de DIB-hash ; layout identique Xvfb, briques bit-exactes ⇒ correct
-  par composition). Garde non-crash `winecorpus/user32_dlgpaint.c`. **Reste** : STATIC/EDIT/checkbox/radio (même machinerie),
-  repaint sur invalidation, focus/interaction.
+  par composition). Garde non-crash `winecorpus/user32_dlgpaint.c`. **✅ STATIC + EDIT ajoutés (2026-07-19)** : `u32_static_paint`
+  (fond COLOR_3DFACE + texte gauche/haut COLOR_WINDOWTEXT) et `u32_edit_paint` (client COLOR_WINDOW + texte ; bordure creusée
+  `EDGE_SUNKEN` non-cliente ajoutée par le composite) — **bit-exact WM_PRINTCLIENT** (`user32_static_paint.c`/`user32_edit_paint.c`,
+  structurel index-based). `u32_control_proc` dispatch par classe (button/static/edit) ; composite via `u32_control_paint_full`.
+  Rendu du formulaire (labels + champs + bouton) identique à Wine (capture Xvfb). **Reste** : checkbox/radio (styles BUTTON),
+  repaint sur invalidation, focus/interaction (clic → WM_COMMAND).
 - **GDI de base** (M7 G6, doc 72) : table d'objets GDI (DC/bitmap/brush/pen/font, handles opaques) + **dessin
   DIB mémoire bit-exact** — `CreateDIBSection`(32bpp)/`CreateCompatibleDC`/`SelectObject`/`DeleteObject`,
   `SetPixel`/`GetPixel`/`FillRect`/`PatBlt`/`BitBlt`(SRCCOPY), `CreateSolidBrush`/`Pen`, `GetStockObject`/

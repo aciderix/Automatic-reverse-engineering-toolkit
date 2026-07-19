@@ -3827,4 +3827,22 @@ Détail : **70 §6** (roadmap). Résumé :
   en ELF natif** — le display-free du dialogue est franchi. C'est exactement ce qui manquait à FishTank (dialogue noir). Reste :
   peinture STATIC/EDIT/checkbox/radio (même machinerie `u32_control_proc`+composite), repaint sur invalidation, focus/interaction.
 
+### 2026-07-19 — [HLE-WIN32][GUI] Contrôles **STATIC + EDIT** peints (labels + champs texte) — bit-exact WM_PRINTCLIENT
+- Suite des contrôles natifs (après BUTTON). **STATIC** (`u32_static_paint`) : remplit **COLOR_3DFACE** (fond dialogue, mesuré vs
+  Wine) + texte **gauche/haut** en **COLOR_WINDOWTEXT**, transparent, font du contrôle. **EDIT** (`u32_edit_paint`) : client
+  **COLOR_WINDOW** (blanc) + texte gauche/vcentré ; la **bordure 3D creusée est non-cliente** (mesuré : WM_PRINTCLIENT ne peint
+  que le client blanc+texte, le `WS_EX_CLIENTEDGE` est hors-client) → ajoutée par le **composite** (`EDGE_SUNKEN` autour du rect,
+  texte inséré de 2px). Helpers factorisés : `u32_ctrl_text`/`u32_ctrl_fill`/`u32_ctrl_paintable`/`u32_control_paint_full`.
+- `u32_control_proc` **dispatch par classe** (button/static/edit) pour WM_SETFONT/GETFONT/**PRINTCLIENT** ; le composite du
+  dialogue peint tout contrôle `u32_ctrl_paintable` via `u32_control_paint_full` (client + bordure éventuelle).
+- **Vérif bit-exact (structurel, index-based, theme-independent)** : `winecorpus/user32_static_paint.c` (`bg=1`[3DFACE]
+  `magenta=0` `text_drawn=1`) et `user32_edit_paint.c` (`bg=1`[COLOR_WINDOW] `magenta=0` `text_drawn=1`), **bit-identiques Wine**.
+  Le fond (index de couleur) est prouvé exact des deux côtés (ARET classique / Wine moderne impriment le même 1) ; le texte est
+  font-dépendant → seule son existence est assertée (caveat gdi_uifont).
+- **Rendu** : un **formulaire complet** (3 labels + 3 champs EDIT avec valeurs + bouton, type calculateur de volume d'aquarium)
+  s'affiche en ELF natif, **layout identique à Wine** (capture Xvfb ; ARET couleurs Win95 classiques, Wine thème moderne).
+- **Portes** : winediff **151→153 fixtures** (static/edit paint vertes ; seul rouge = `gdi_uifont` env), hash transpile
+  `19acad982194bf07` **inchangé**, `table_is_sorted_by_name` ok. **Reste contrôles** : checkbox/radio (styles BUTTON — cadre +
+  glyphe coché), repaint sur invalidation, focus + interaction (clic → `WM_COMMAND` au DLGPROC).
+
 <!-- NOUVELLES ENTRÉES ICI (garder l'ordre chronologique, plus récent en bas) -->
