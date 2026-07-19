@@ -4720,6 +4720,43 @@ uint32_t aret_DrawFocusRect(uint32_t esp) {
 #undef FR_DOT
     return 1;
 }
+/* DrawEdge(hdc, rect, edge, flags): the 3D bevel every button/group-box/edit-border
+ * uses. Two rings; a pixel takes the "bottom-right" colour when it is on the right col
+ * or bottom row of its ring, else the "top-left" colour (measured vs Wine — the dark
+ * bottom/right lines win at the TR/BL corners). Colour INDICES (not raw RGB) match
+ * Wine; the values come from GetSysColor, so ARET's classic scheme and Wine's theme
+ * both render the same *structure* (verified index-wise, theme-independent). Only the
+ * measured EDGE_RAISED/EDGE_SUNKEN with BF_RECT (+optional BF_MIDDLE fill) are modelled;
+ * other edge/flag combos abort soundly. */
+uint32_t aret_DrawEdge(uint32_t esp) {
+    GDI_MAP_GUARD(WU(0), 0);
+    struct gdi_obj *bm = gdi_dc_surface(WU(0));
+    const int32_t *r = (const int32_t *)WP(1);
+    uint32_t edge = WU(2), flags = WU(3);
+    if (!bm || !r) return 0;
+    if ((flags & ~0x80Fu) || (flags & 0xFu) != 0xFu) { aret_unimpl("DrawEdge: only BF_RECT(+BF_MIDDLE) modelled"); return 0; }
+    int lo, bo, li, bi;                        /* sys-colour indices: outer LT/BR, inner LT/BR */
+    if (edge == 0x5)      { lo = 22; bo = 21; li = 20; bi = 16; }   /* EDGE_RAISED */
+    else if (edge == 0xA) { lo = 16; bo = 20; li = 21; bi = 22; }   /* EDGE_SUNKEN */
+    else { aret_unimpl("DrawEdge: only EDGE_RAISED/EDGE_SUNKEN modelled"); return 0; }
+    int l = r[0], t = r[1], rt = r[2], b = r[3];
+    if (rt - l < 2 || b - t < 2) return 1;
+    uint32_t clo = u32_syscolor(lo), cbo = u32_syscolor(bo), cli = u32_syscolor(li), cbi = u32_syscolor(bi);
+    for (int y = t; y < b; y++)
+        for (int x = l; x < rt; x++) {
+            int ring;
+            if (x == l || x == rt - 1 || y == t || y == b - 1) ring = 0;
+            else if (x == l + 1 || x == rt - 2 || y == t + 1 || y == b - 2) ring = 1;
+            else continue;
+            int br = ring == 0 ? (x == rt - 1 || y == b - 1) : (x == rt - 2 || y == b - 2);
+            gdi_put(bm, x, y, ring == 0 ? (br ? cbo : clo) : (br ? cbi : cli));
+        }
+    if (flags & 0x800u) {                      /* BF_MIDDLE: fill the interior with 3DFACE */
+        uint32_t face = u32_syscolor(15);
+        for (int y = t + 2; y < b - 2; y++) for (int x = l + 2; x < rt - 2; x++) gdi_put(bm, x, y, face);
+    }
+    return 1;
+}
 /* PolylineTo(hdc, const POINT* pts, int count) -> BOOL. Like a run of LineTo: from
  * the current position, a Bresenham segment to each point (endpoint excluded),
  * updating the current position to the last point (measured on Wine). */
@@ -5750,6 +5787,10 @@ static uint32_t u32_syscolor(int i) {
     case 18: return 0x000000;   /* COLOR_BTNTEXT */
     case 19: return 0xC0C0C0;   /* COLOR_INACTIVECAPTIONTEXT */
     case 20: return 0xFFFFFF;   /* COLOR_BTNHIGHLIGHT */
+    case 21: return 0x000000;   /* COLOR_3DDKSHADOW (classic Win95 black) */
+    case 22: return 0xE0E0E0;   /* COLOR_3DLIGHT (classic light gray, lighter than face) */
+    case 23: return 0x000000;   /* COLOR_INFOTEXT */
+    case 24: return 0xE1FFFF;   /* COLOR_INFOBK (classic tooltip yellow-ish) */
     default: return 0x000000;
     }
 }

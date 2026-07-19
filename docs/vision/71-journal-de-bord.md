@@ -3700,4 +3700,25 @@ Détail : **70 §6** (roadmap). Résumé :
 - **Portes** : winediff **144→145**, hash transpile `19acad982194bf07` **inchangé**, `table_is_sorted_by_name` ok,
   régression unifiée **PASS**.
 
+### 2026-07-19 — [HLE-WIN32][GUI] `DrawEdge` (le biseau 3D des contrôles) + **décision couleurs = classique Win95 authentique**
+- **Décision (prise, modal utilisateur ayant échoué 2×)** : garder les **couleurs système classiques Win95**
+  (`3DFACE=c0c0c0`, `BTNSHADOW=808080`, +ajout `3DDKSHADOW=000000`/`3DLIGHT=e0e0e0`) — le look pour lequel ces apps ont
+  été conçues. Le thème moderne clair de Wine 9.0 est un **artefact env** (même classe que `gdi_uifont`) ; on ne l'aligne
+  pas. **Réversible** (l'utilisateur peut préférer Wine-match plus tard).
+- **Conséquence de vérification (clé)** : les couleurs absolues diffèrent (ARET classique vs Wine moderne) → **pas de
+  DIB-hash** vs Wine pour la peinture de contrôle. On vérifie la **STRUCTURE, index par index, theme-independent** : pour
+  chaque pixel de bord, la fixture teste `pixel == GetSysColor(INDEX attendu)`. ARET (classique) et Wine (moderne)
+  impriment alors **les mêmes 1** (chacun contre sa propre palette) → layout + mapping d'index **prouvés bit-à-bit** sans
+  dépendre de la palette. Nouvelle technique d'oracle, réutilisable pour tous les contrôles.
+- **Livré : `DrawEdge`** (le biseau 3D de tout bouton/group-box/bord d'edit). Deux anneaux ; un pixel prend la couleur
+  « bas-droite » s'il est sur la colonne droite/ligne basse de son anneau, sinon « haut-gauche » (mesuré vs Wine : les
+  lignes sombres bas/droite gagnent aux coins TR/BL). Indices mesurés : RAISED outer `3DLIGHT/3DDKSHADOW` inner
+  `BTNHIGHLIGHT/BTNSHADOW` ; SUNKEN inverse. `BF_MIDDLE` remplit l'intérieur en `3DFACE`. Sous-ensemble **EDGE_RAISED/
+  EDGE_SUNKEN + BF_RECT** (mesurés) ; autres combos edge/flags → **abort sound**. `stdcall_pops` : +`DrawEdge@16`.
+- **Fixture** `winecorpus/gdi_drawedge.c` (structural, index-based) → **bit-identique Wine** (raised/sunken outer+inner+
+  corners + BF_MIDDLE, tous `=1`).
+- **Portes** : winediff **145→146**, hash transpile `19acad982194bf07` **inchangé**, `table_is_sorted_by_name` ok,
+  régression unifiée **PASS**. **Fondation posée** : DrawFocusRect + DrawEdge = les primitives que tout contrôle utilise.
+  Suite : `DrawFrameControl` (bouton/checkbox complet), puis câbler au WM_PAINT des contrôles → composer à l'écran (SDL).
+
 <!-- NOUVELLES ENTRÉES ICI (garder l'ordre chronologique, plus récent en bas) -->

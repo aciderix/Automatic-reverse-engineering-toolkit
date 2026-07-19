@@ -132,6 +132,7 @@ static TABLE: &[(&str, u32)] = &[
     ("DispatchMessageA", 4),
     ("DispatchMessageW", 4),
     ("DosDateTimeToFileTime", 12),
+    ("DrawEdge", 16),
     ("DrawFocusRect", 8),
     ("DrawTextA", 20),
     ("DrawTextW", 20),
