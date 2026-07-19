@@ -3491,4 +3491,27 @@ Détail : **70 §6** (roadmap). Résumé :
   `GetTabbedTextExtentA` (extent mesuré : no-tab = extent texte simple ; tab expanse au tab-stop, ex. `(75,17)`),
   `GrayStringA` — sous-famille **FreeType** (gate `-DARET_HAVE_FREETYPE`, DIB-hash vs Wine), prochain incrément ciblé.
 
+### 2026-07-19 — [HLE-WIN32][GUI] Sous-famille **texte tabulé GDI** : `TabbedTextOutA/W` + `GetTabbedTextExtentA/W` (FreeType, DIB-hash vs Wine)
+- **Dernier morceau valeur du step 2** (§5.0) : étend la famille texte **FreeType** prouvée (G3-text) avec l'expansion des
+  tabulations. Rendu **pixel-identique à Wine** (même rasterizer FreeType) + valeurs d'extent/retour bit-exactes.
+- **Recette du tab-stop MESURÉE bit-exact vs Wine** (grille de sondes, pas devinée) : largeur de segment = avances par
+  défaut (`GetTextExtentPoint32`) ; le crayon saute au **prochain tab-stop STRICTEMENT supérieur** à sa position ;
+  stops : **>1 positions** → absolu `org+lpTabPos[j]` (depuis `nTabOrigin`) ; **≤1 ou au-delà** du tableau → multiples de
+  `defWidth`, où `defWidth = lpTabPos[0]` (exactement 1 stop) sinon **`8*tmAveCharWidth`** (défaut Wine mesuré) ;
+  retour = `MAKELONG(largeurTotale, tmHeight)`. **Piège de mesure attrapé** : `n2_ABCD` sortait 140 vs 139 prédit — cause
+  = `GetTextExtentPoint32("D")=12` (D plus large que A/B/C=11), pas un +1 mystère → algo confirmé. Boundary exact
+  (segment == stop) → avance au **suivant** (strictement supérieur, mesuré `uni11_A_t`=22).
+- **Livré.** `u32_tabbed_core` (partage `u32_textout_core`/`u32_text_width`/`u32_dc_font`, `tmAveCharWidth =
+  round(MulFix(OS/2.xAvgCharWidth, x_scale))`) + `u32_next_tab`. Shims A/W pour draw et extent. **Négatifs**
+  (tab-stops right-align, rares) et largeur uniforme ≤0 → **abort sound** (jamais deviné). Builder : `GetTabbedTextExtentA/W`
+  ajoutés au gate `-DARET_HAVE_FREETYPE` (TabbedTextOut y était déjà). `stdcall_pops` : +`TabbedTextOutA/W@32`,
+  +`GetTabbedTextExtentA/W@20`.
+- **Fixture** `winecorpus/gdi_tabbedtext.c` (DIB 32bpp mono + hash, display comme les autres GDI) : extents uniforme/
+  tableau/au-delà/défaut + 2 draws → **bit-identique Wine** : `ext uni=0013004b arr=0013008c def=0013004b`,
+  `tto r1=0013008a r2=0013006d`, **`dibhash=ca64e7d7`** (rendu pixel-exact), `bbox=2 5 138 23`.
+- **Portes** : winediff **137→138** (`gdi_tabbedtext` ok ; seul rouge = `gdi_uifont`, environnemental), hash transpile
+  `19acad982194bf07` **inchangé**, `table_is_sorted_by_name` ok, régression unifiée **PASS**.
+- **⇒ Famille « divers » du plateau close** (non-display + texte tabulé). Reste hors-plateau : `GrayStringA` (callback de
+  dessin custom — complexe, sur demande) et l'imprimante (`OpenPrinterA`… — dépend d'un spooler → probablement échec sound).
+
 <!-- NOUVELLES ENTRÉES ICI (garder l'ordre chronologique, plus récent en bas) -->

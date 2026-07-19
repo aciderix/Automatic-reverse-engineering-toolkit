@@ -1274,7 +1274,8 @@ pub fn transpile(
             "TextOutA" | "TextOutW" | "ExtTextOutA" | "ExtTextOutW"
             | "DrawTextA" | "DrawTextW" | "TabbedTextOutA" | "TabbedTextOutW"
             | "GetTextExtentPoint32A" | "GetTextExtentPoint32W"
-            | "GetTextExtentPointA" | "GetTextExtentPointW" | "GetTextMetricsA" | "GetTextMetricsW"))
+            | "GetTextExtentPointA" | "GetTextExtentPointW" | "GetTextMetricsA" | "GetTextMetricsW"
+            | "GetTabbedTextExtentA" | "GetTabbedTextExtentW"))
     {
         freetype_flags()
     } else {

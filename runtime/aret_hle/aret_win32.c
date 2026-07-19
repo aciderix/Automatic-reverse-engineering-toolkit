@@ -5205,6 +5205,82 @@ uint32_t aret_GetTextExtentPoint32W(uint32_t esp) {
 }
 uint32_t aret_GetTextExtentPointW(uint32_t esp) { return aret_GetTextExtentPoint32W(esp); }
 
+/* Tabbed text (TabbedTextOut / GetTabbedTextExtent). Expands '\t' to tab stops and
+ * lays out the runs, sharing the proven FreeType text core (u32_textout_core / extent
+ * regime). Tab-stop recipe MEASURED bit-exact vs Wine:
+ *   - segment width = GetTextExtentPoint32 (default advances);
+ *   - the pen jumps to the next tab stop STRICTLY greater than the current pen;
+ *   - stops: >1 positions -> org+lpTabPos[j] (absolute, from nTabOrigin); with <=1
+ *     position or beyond the array -> multiples of defWidth, where defWidth =
+ *     lpTabPos[0] (exactly one stop) else 8*tmAveCharWidth (measured Wine default);
+ *   - return value = MAKELONG(totalWidth, tmHeight).
+ * Negative (right-aligned) tab stops and non-positive uniform widths abort soundly. */
+#ifdef ARET_HAVE_FREETYPE
+static int u32_next_tab(int pen, int org, int nTabs, const int32_t *tabs, int defWidth) {
+    if (nTabs > 1)
+        for (int j = 0; j < nTabs; j++) { int tp = org + tabs[j]; if (tp > pen) return tp; }
+    int rel = pen - org; if (rel < 0) rel = 0;
+    return org + ((rel / defWidth) + 1) * defWidth;
+}
+#endif
+static uint32_t u32_tabbed_core(uint32_t hdc, int x, int y, const uint32_t *cps, int len,
+                                int nTabs, const int32_t *tabs, int org, int draw) {
+#ifdef ARET_HAVE_FREETYPE
+    int d = gdi_idx(hdc);
+    if (d < 0 || g_gdi[d].type != GDIT_DC) return 0;
+    if (!tabs) nTabs = 0;
+    for (int j = 0; j < nTabs; j++)
+        if (tabs[j] < 0) { aret_unimpl("TabbedTextOut: negative (right-aligned) tab stops pending"); return 0; }
+    int ascent, descent;
+    FT_Face ftf = u32_dc_font(d, &ascent, &descent);
+    if (!ftf) return 0;
+    TT_OS2 *os2 = (TT_OS2 *)FT_Get_Sfnt_Table(ftf, FT_SFNT_OS2);
+    int ave = os2 ? (int)((FT_MulFix(os2->xAvgCharWidth, ftf->size->metrics.x_scale) + 32) >> 6) : 0;
+    int defWidth = (nTabs == 1) ? tabs[0] : (8 * ave);
+    if (defWidth <= 0) { aret_unimpl("TabbedTextOut: non-positive tab width"); return 0; }
+    int pen = x, i = 0;
+    while (i < len) {
+        int seg = i; while (seg < len && cps[seg] != '\t') seg++;
+        if (draw && seg > i) u32_textout_core(hdc, pen, y, cps + i, seg - i);
+        pen += u32_text_width(ftf, cps + i, seg - i);
+        if (seg < len) { pen = u32_next_tab(pen, org, nTabs, tabs, defWidth); i = seg + 1; }
+        else i = seg;
+    }
+    return ((uint32_t)(ascent + descent) << 16) | ((uint32_t)(pen - x) & 0xFFFFu);
+#else
+    (void)hdc; (void)x; (void)y; (void)cps; (void)len; (void)nTabs; (void)tabs; (void)org; (void)draw;
+    aret_unimpl("TabbedTextOut: FreeType not linked"); return 0;
+#endif
+}
+uint32_t aret_TabbedTextOutA(uint32_t esp) {
+    GDI_MAP_GUARD(WU(0), 0);
+    const char *s = WCS(3); int n = WI(4); if (n < 0) n = s ? (int)strlen(s) : 0;
+    uint32_t cps[1024]; int m = n < 1024 ? n : 1024; if (m < 0) m = 0;
+    for (int i = 0; i < m; i++) cps[i] = s ? u32_ansi_cp((unsigned char)s[i]) : 0;
+    return u32_tabbed_core(WU(0), WI(1), WI(2), cps, s ? m : 0, WI(5), (const int32_t *)WP(6), WI(7), 1);
+}
+uint32_t aret_TabbedTextOutW(uint32_t esp) {
+    GDI_MAP_GUARD(WU(0), 0);
+    const uint16_t *ws = (const uint16_t *)(uintptr_t)WU(3);
+    int n = WI(4); if (n < 0) { n = 0; if (ws) while (ws[n]) n++; }
+    uint32_t cps[1024]; int m = n < 1024 ? n : 1024;
+    for (int i = 0; i < m; i++) cps[i] = ws ? ws[i] : 0;
+    return u32_tabbed_core(WU(0), WI(1), WI(2), cps, ws ? m : 0, WI(5), (const int32_t *)WP(6), WI(7), 1);
+}
+uint32_t aret_GetTabbedTextExtentA(uint32_t esp) {
+    const char *s = WCS(1); int n = WI(2); if (n < 0) n = s ? (int)strlen(s) : 0;
+    uint32_t cps[1024]; int m = n < 1024 ? n : 1024; if (m < 0) m = 0;
+    for (int i = 0; i < m; i++) cps[i] = s ? u32_ansi_cp((unsigned char)s[i]) : 0;
+    return u32_tabbed_core(WU(0), 0, 0, cps, s ? m : 0, WI(3), (const int32_t *)WP(4), 0, 0);
+}
+uint32_t aret_GetTabbedTextExtentW(uint32_t esp) {
+    const uint16_t *ws = (const uint16_t *)(uintptr_t)WU(1);
+    int n = WI(2); if (n < 0) { n = 0; if (ws) while (ws[n]) n++; }
+    uint32_t cps[1024]; int m = n < 1024 ? n : 1024;
+    for (int i = 0; i < m; i++) cps[i] = ws ? ws[i] : 0;
+    return u32_tabbed_core(WU(0), 0, 0, cps, ws ? m : 0, WI(3), (const int32_t *)WP(4), 0, 0);
+}
+
 /* Fill a TEXTMETRIC{A,W} for the DC's selected font, every field matching Wine
  * (formulas mined + verified against GetTextMetrics across DejaVu/Liberation at
  * several sizes). `wide` selects the W layout (WCHAR char fields at +44). */
