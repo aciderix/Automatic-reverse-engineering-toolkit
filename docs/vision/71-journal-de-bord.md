@@ -3619,4 +3619,22 @@ Détail : **70 §6** (roadmap). Résumé :
   main), **sans** avoir lancé le harnais complet → la fixture ne buildait pas sous le harnais. Corrigé : `-lwinspool`
   ajouté à `winediff.sh` (comme -lcomctl32/-lversion). `win32_printer_tail` **build et passe** désormais (140/141).
 
+### 2026-07-19 — [HLE-WIN32] Batch **misc k32/u32** : `IsDBCSLeadByte` + `wvsprintfA/W` + `OpenFile` + `GetLogicalDrives`
+- Suite de la vague mesurée (chaque ~16/29 binaires). Mesuré vs Wine, implémenté selon la fidélité atteignable.
+- **`IsDBCSLeadByte`** : l'ACP modélisée = CP1252 (single-byte) → **toujours 0** (mesuré). (`IsDBCSLeadByteEx` existait déjà.)
+- **`wvsprintfA/W`** (le trou mesuré — forme **va_list** de `wsprintfA/W`) : l'arglist est un **pointeur** vers les args
+  packés → `aret_vformat`/`aret_wvformat` lit directement dessus. Bit-identique Wine (`n=-7 s=hi x=00ab u=42 c=Q`).
+- **`OpenFile`** (API fichier Win16-legacy) : HFILE=fd, même modèle que `_lopen` (translate_path). OF_READ/WRITE/READWRITE/
+  OF_CREATE(crée+tronque)/OF_DELETE(unlink)/OF_EXIST(open-test), OFSTRUCT rempli (nErrCode, szPathName). **Non fixturé
+  (honnêteté) : le OpenFile de Wine 9.0 est peu fiable ici** — `OF_CREATE` **échoue et ne crée pas** (`nErr=13`), `OF_EXIST`
+  est flaky ; matcher ce bug serait **unsound** (l'OpenFile d'ARET est **correct** per contrat Win32 / équivalence POSIX à
+  `_lopen` prouvé). Shim gardé, vérifié par cette équivalence, pas par l'oracle Wine cassé.
+- **`GetLogicalDrives`** : expose **C:** (bit 2) — le disque système conventionnel. (Wine expose aussi **Z:** = racine Unix,
+  artefact Wine env-dépendant → on modélise le minimum portable ; la fixture teste le **bit C: dérivé**, pas le masque brut.)
+- **stdcall_pops** : +`IsDBCSLeadByte@4`, `OpenFile@12`, `wvsprintfA@12`, `wvsprintfW@12` (`GetLogicalDrives`=@0 déjà listé).
+- **Fixture** `winecorpus/win32_misc_k32.{c,nodisplay}` (DBCS + wvsprintf + driveC) → **bit-identique Wine**.
+- **Portes** : winediff **141→142** (fixtures ; seul rouge = `gdi_uifont` env), hash transpile `19acad982194bf07`
+  **inchangé**, `table_is_sorted_by_name` ok, régression unifiée **PASS**. **Reste de la vague** : `VerInstallFileA`
+  (install-file, complexe) et le cluster **GUI profond** (palette/capture/clip/scroll — converge avec le step 3).
+
 <!-- NOUVELLES ENTRÉES ICI (garder l'ordre chronologique, plus récent en bas) -->

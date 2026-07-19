@@ -1031,6 +1031,43 @@ uint32_t aret_llseek(uint32_t esp) {
                     origin == 1 ? SEEK_CUR : (origin == 2 ? SEEK_END : SEEK_SET));
     return r < 0 ? ARET_HFILE_ERROR : (uint32_t)r;
 }
+/* OpenFile(lpFileName, lpReOpenBuff, uStyle) — the Win16-legacy file API (still
+ * imported by old apps). HFILE = fd (same model as _lopen). uStyle low bits pick
+ * OF_READ/WRITE/READWRITE; OF_CREATE(0x1000) creates+truncates; OF_DELETE(0x200)
+ * unlinks; OF_EXIST(0x4000) is a read-open used as an existence test. On failure ->
+ * HFILE_ERROR with OFSTRUCT.nErrCode set. OFSTRUCT: cBytes@0, fFixedDisk@1,
+ * nErrCode@2 (WORD), szPathName@8[128]. The canonical path Wine writes to szPathName
+ * is environment-dependent (drive mapping) and not oracle-compared; we fill the input
+ * name and report ret/data honestly. */
+uint32_t aret_OpenFile(uint32_t esp) {
+    const char *name = (const char *)(uintptr_t)arg(esp, 0);
+    uint8_t *ofs = (uint8_t *)(uintptr_t)arg(esp, 1);
+    uint32_t style = arg(esp, 2);
+    char path[1024];
+    translate_path(name ? name : "", path, sizeof path);
+    if (ofs) { int i = 0; if (name) for (; name[i] && i < 127; i++) ofs[8 + i] = (uint8_t)name[i]; ofs[8 + i] = 0; }
+    uint32_t ret, err = 0;
+    if (style & 0x200u) {                        /* OF_DELETE */
+        ret = (unlink(path) == 0) ? 0u : ARET_HFILE_ERROR;
+        if (ret == ARET_HFILE_ERROR) err = 2;
+    } else if (style & 0x1000u) {                /* OF_CREATE */
+        make_parents(path);
+        int fd = open(path, O_RDWR | O_CREAT | O_TRUNC, 0666);
+        if (fd < 0) { ret = ARET_HFILE_ERROR; err = 2; } else ret = (uint32_t)fd;
+    } else {                                     /* OF_READ / WRITE / READWRITE / EXIST */
+        uint32_t rw = style & 3u;
+        int flags = rw == 1 ? O_WRONLY : (rw == 2 ? O_RDWR : O_RDONLY);
+        int fd = open(path, flags);
+        if (fd < 0) { ret = ARET_HFILE_ERROR; err = 2; } else ret = (uint32_t)fd;
+    }
+    if (ofs) { uint32_t e = (ret == ARET_HFILE_ERROR) ? err : 0; ofs[2] = (uint8_t)(e & 0xFF); ofs[3] = (uint8_t)(e >> 8); }
+    return ret;
+}
+/* GetLogicalDrives: bitmask of present drives. The model exposes one drive, C: (bit 2)
+ * — the conventional Windows system drive apps run from. (Wine also exposes Z: for the
+ * Unix root, but that is a Wine artifact and environment-dependent, so we model the
+ * portable minimum: C: present.) */
+uint32_t aret_GetLogicalDrives(uint32_t esp) { (void)esp; return 1u << 2; }
 /* ---- LZ decompression (lzexpand.dll: SZDD / LZSS) --------------------------
  * Microsoft COMPRESS.EXE format: an 8-byte magic, mode + missing-char, a 4-byte
  * uncompressed size, then LZSS data over a 4 KB ring buffer (init 0x20, position
@@ -2568,6 +2605,10 @@ uint32_t aret_VerQueryValueA(uint32_t esp) {
     return 1;
 }
 uint32_t aret_IsDBCSLeadByteEx(uint32_t esp) { (void)esp; return 0; }
+/* IsDBCSLeadByte(byte): true iff `byte` starts a double-byte char in the ANSI code
+ * page. The modelled ACP is CP1252 (Western, GetACP()=1252), a single-byte codepage,
+ * so no byte is ever a lead byte -> always 0 (measured vs Wine). */
+uint32_t aret_IsDBCSLeadByte(uint32_t esp) { (void)esp; return 0; }
 /* CP_ACP narrow<->wide: model the code page as Latin-1 (each byte is one WCHAR).
  * Enough for ASCII text — the common case — and a faithful identity round-trip.
  * srclen < 0 means a NUL-terminated string (the terminator is included); a zero

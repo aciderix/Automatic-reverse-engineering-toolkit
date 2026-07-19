@@ -382,6 +382,7 @@ static TABLE: &[(&str, u32)] = &[
     ("IsBadStringPtrA", 8),
     ("IsBadStringPtrW", 8),
     ("IsBadWritePtr", 8),
+    ("IsDBCSLeadByte", 4),
     ("IsDBCSLeadByteEx", 8),
     ("IsDialogMessageA", 8),
     ("IsDialogMessageW", 8),
@@ -456,6 +457,7 @@ static TABLE: &[(&str, u32)] = &[
     ("OffsetWindowOrgEx", 16),
     ("OleInitialize", 4),
     ("OpenEventA", 12),
+    ("OpenFile", 12),
     ("OpenFileMappingA", 12),
     ("OpenMutexA", 12),
     ("OpenMutexW", 12),
@@ -690,6 +692,8 @@ static TABLE: &[(&str, u32)] = &[
     ("select", 20),
     ("setsockopt", 20),
     ("shutdown", 8),
+    ("wvsprintfA", 12),
+    ("wvsprintfW", 12),
 ];
 
 /// Win32 imports with a **proven `@0`** decoration (zero arguments → nothing to

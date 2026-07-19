@@ -253,6 +253,14 @@ uint32_t aret_wsprintfA(uint32_t esp) {
     const uint32_t *va = &((const uint32_t *)(uintptr_t)esp)[2];
     return (uint32_t)aret_vformat(dst, (size_t)1 << 30, fmt, va);
 }
+/* wvsprintfA(buf, fmt, arglist) — the va_list form of wsprintfA (the measured gap):
+ * arglist is a pointer to the packed arguments, so aret_vformat reads from there. */
+uint32_t aret_wvsprintfA(uint32_t esp) {
+    char *dst = AS(0);
+    const char *fmt = ACS(1);
+    const uint32_t *va = (const uint32_t *)(uintptr_t)AU(2);
+    return (uint32_t)aret_vformat(dst, (size_t)1 << 30, fmt, va);
+}
 /* snprintf / _snprintf: (dst, n, fmt, ...). cap of 0 means "measure".
  * C99 returns the number of chars that *would* have been written (the full
  * formatted length), not the truncated count — so format into a measuring
@@ -540,6 +548,13 @@ uint32_t aret_wsprintfW(uint32_t esp) {
     uint16_t *dst = (uint16_t *)AP(0);
     const uint16_t *fmt = (const uint16_t *)AP(1);
     const uint32_t *va = &((const uint32_t *)(uintptr_t)esp)[2];
+    return (uint32_t)aret_wvformat(dst, 1024, fmt, va);
+}
+/* wvsprintfW(dst, fmt, arglist) — va_list form; arglist points at the packed args. */
+uint32_t aret_wvsprintfW(uint32_t esp) {
+    uint16_t *dst = (uint16_t *)AP(0);
+    const uint16_t *fmt = (const uint16_t *)AP(1);
+    const uint32_t *va = (const uint32_t *)(uintptr_t)AU(2);
     return (uint32_t)aret_wvformat(dst, 1024, fmt, va);
 }
 /* _snwprintf(dst, count, fmt, ...) — msvcrt: returns the count written, or -1 if
