@@ -710,8 +710,15 @@ résidu qui abort restera l'**obfusqué/fait-main/VM-packé** (indécidable, §9
      ✅ **imprimante** (`Enum`/`GetDefault`/`Open`/`ClosePrinter`, 2026-07-19, `win32_printer_tail.c` — état « zéro
      imprimante » déterministe, bit-identique Wine). **⇒ Plateau Win95 ENTIÈREMENT couvert.** Reste hors-plateau (sur
      demande) : `GrayStringA` (callback de dessin custom, cosmétique) et `DocumentPropertiesA` (inatteignable headless).
+  2bis. ✅ **RE-MESURÉ (Levier 0, 2026-07-19, IA revenu)** — 29 PE32 Win95 (+34 NE 16-bit) : instructions = bruit ; **la tête
+     a changé** (l'ancien plateau est traité). Nouvelle tête par #binaires /29 : **Registry** (`RegCreateKeyA` 17 + Reg*),
+     **DDE** (`Unpack/PackDDElParam` 17/15), **OLE init** (`OleInitialize/Uninitialize` 16/15, `CoCreateInstance` 16),
+     **misc k32/u32** (`IsDBCSLeadByte`/`OpenFile`/`wvsprintfA` 16, `GetLogicalDrives`/`VerInstallFileA` 15), puis un cluster
+     **GUI profond** à 5–7 (palette/capture/clip/scroll/SetROP2/SetStretchBltMode/WindowFromPoint…). Détail journal 71.
+     **Prochaine vague dictée par la donnée** : Registry (stateful déterministe) + DDE-param (trivial) + Ole init (S_OK) ;
+     puis le cluster GUI profond (converge avec le step 3). `CoCreateInstance` = dur (vrais objets COM) → plus tard.
   3. **Un vrai binaire GUI du corpus utilisant comctl32** — prouve la machinerie contrôles sur du réel shippé ; tire les
-     contrôles manquants (trackbar/toolbar/listview) dans l'ordre **mesuré**.
+     contrôles manquants (trackbar/toolbar/listview) dans l'ordre **mesuré** ; converge avec le cluster GUI profond (2bis).
   4. **MFC / VB40032** (le gros multiplicateur) — **gated sur l'EH C++** (`__CxxFrameHandler`, Levier 2, qu'on n'a pas) ;
      un vrai binaire MFC = le **driver** qui force cette brique. Chantier dédié multi-sessions.
   5. **win32k `NtGdi*`/`NtUser*`** — **différé** (inutile tant qu'on ne lifte pas gdi32/user32 eux-mêmes ; notre HLE les

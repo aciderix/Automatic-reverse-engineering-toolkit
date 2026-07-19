@@ -3550,4 +3550,24 @@ Détail : **70 §6** (roadmap). Résumé :
   (backend PE = petit incrément prouvant le concept ; frontend 16-bit = grand prix planifié). **Aucun code** dans cette
   entrée — orientation seulement.
 
+### 2026-07-19 — [STRATÉGIE] Re-mesure Levier 0 post-plateau (IA revenu) : **29 PE32 Win95** → nouvelle tête = Registry / DDE / OLE-init / misc
+- **Étape « reprendre mesure »** (après avoir comblé le plateau : menu/thread/divers/texte-tabulé/imprimante). Internet
+  Archive **revenu** → re-téléchargé `BestOfWindows95DotCom/WIN95_09964.iso` (593 Mo), extrait les `apps/*.zip` (2 niveaux),
+  classé : **29 PE32 i386** (+ **34 NE 16-bit** — data qui appuie l'orientation rétro-cible 16-bit, doc 80 §1.6). `wallsweep.sh`
+  sur les 29 (ISO supprimée après capture, pool gardé en scratchpad).
+- **Instructions non-liftées = BRUIT** confirmé (outsd/insb/popad/in/hlt/arpl/les/aaa/daa/bound = data-en-code + privilégié/
+  BCD → abort correct). **Le lift est complet.**
+- **Nouvelle tête d'imports (par #binaires /29), l'ancien plateau a disparu** (menu/thread/mapping-mode traités) :
+  | #bins | famille | imports |
+  |---|---|---|
+  | 15–17 | **Registry** | `RegCreateKeyA` 17 (+ Reg* : Open/Query/Set/Close/Delete attendus) |
+  | 15–17 | **DDE param** | `UnpackDDElParam` 17 / `PackDDElParam` 15 (bit-packing LPARAM↔atom, facile) |
+  | 15–16 | **OLE init** | `OleInitialize` 16 / `OleUninitialize` 15 / `CoCreateInstance` 16 |
+  | 15–16 | **misc k32/u32** | `IsDBCSLeadByte` 16, `OpenFile` 16, `wvsprintfA` 16, `GetLogicalDrives` 15, `VerInstallFileA` 15 |
+  | 5–7 | **GUI profond** | palette (Create/Realize/Select/GetSystemPaletteEntries), capture (Get/Set/Release), clip (Intersect/Exclude/RectVisible), scroll (Get/SetScrollPos/Info, ScrollWindow), cursor/icon, SetROP2, SetStretchBltMode, WindowFromPoint, CreateDIBitmap, CreateRectRgn, GetLocaleInfoA, DrawMenuBar, DefFrameProcA, GetDCEx |
+- **Conclusion (la donnée redirige la vague)** : prochaine cible mesurée = **Registry** (tête large, cohérente, stateful
+  déterministe → vérifiable vs Wine comme le reste), + le **couple DDE `Pack/UnpackDDElParam`** (trivial, très large) et
+  **`OleInitialize`/`OleUninitialize`** (S_OK, très large). Le cluster **GUI profond** (palette/capture/clip/scroll) = la
+  couche suivante (aligne aussi avec le step 3 « vrai binaire GUI »). `CoCreateInstance` = dur (vrais objets COM) → plus tard.
+
 <!-- NOUVELLES ENTRÉES ICI (garder l'ordre chronologique, plus récent en bas) -->
