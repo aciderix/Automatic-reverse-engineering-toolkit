@@ -2378,6 +2378,7 @@ static struct {
     uint32_t bg_brush;       /* class hbrBackground (HBRUSH) for the default erase */
     int unicode;             /* created via a W API (IsWindowUnicode) */
     int check_state;         /* dialog button check state (BM_GETCHECK/CheckDlgButton) */
+    uint32_t ctrl_font;      /* control font (WM_SETFONT) for a predefined control's paint */
     int extra_len;           /* cbWndExtra bytes (from the class) */
     uint8_t extra[64];       /* cbWndExtra storage: SetWindowLong at offset >=0 (control state ptr) */
     struct { int min, max, page, pos; } scroll[3];  /* SB_HORZ=0 / SB_VERT=1 / SB_CTL=2 */
@@ -2522,6 +2523,7 @@ static uint32_t u32_window_create(uint32_t wndproc, uint32_t exstyle, uint32_t s
         if (!g_u32_win[i].used) {
             g_u32_win[i].used = 1;
             memset(g_u32_win[i].scroll, 0, sizeof g_u32_win[i].scroll);   /* fresh scroll state */
+            g_u32_win[i].ctrl_font = 0;                                   /* fresh control font */
             g_u32_win[i].wndproc = wndproc;
             g_u32_win[i].parent = parent;
             g_u32_win[i].exstyle = exstyle;
@@ -2927,10 +2929,14 @@ uint32_t aret_DefWindowProcW(uint32_t esp) {
 }
 /* PostMessageW(HWND,UINT,WPARAM,LPARAM) -> BOOL. Enqueue. */
 uint32_t aret_PostMessageW(uint32_t esp) { return (uint32_t)u32_q_push(WU(0), WU(1), WU(2), WU(3)); }
+/* A predefined control (BUTTON/…) has no app WNDPROC; its messages route to the
+ * built-in control proc (paint, font). Fwd-declared here, defined after the GDI
+ * primitives it uses (u32_drawedge/u32_drawtext). */
+static int u32_control_proc(uint32_t esp, uint32_t hwnd, uint32_t msg, uint32_t wp, uint32_t lp, uint32_t *out);
 /* SendMessageW(HWND,UINT,WPARAM,LPARAM) -> LRESULT. Synchronous: call the WNDPROC now. */
 uint32_t aret_SendMessageW(uint32_t esp) {
     uint32_t wndproc = u32_win_wndproc(WU(0));
-    if (!wndproc) return 0;
+    if (!wndproc) { uint32_t r = 0; if (u32_control_proc(esp, WU(0), WU(1), WU(2), WU(3), &r)) return r; return 0; }
     return u32_call_wndproc(esp, wndproc, WU(0), WU(1), WU(2), WU(3));
 }
 /* DispatchMessageW(const MSG*) -> LRESULT. Route to the window's WNDPROC (or the
@@ -4778,6 +4784,46 @@ uint32_t aret_DrawFrameControl(uint32_t esp) {
     if (type == 4 /*DFC_BUTTON*/ && (state & 0xFFu) == 0x10u /*DFCS_BUTTONPUSH*/ && !(state & 0x200u /*DFCS_PUSHED*/))
         return (uint32_t)u32_drawedge(bm, r, 0x5 /*EDGE_RAISED*/, 0xF | 0x800u | 0x1000u /*BF_RECT|BF_MIDDLE|BF_SOFT*/);
     aret_unimpl("DrawFrameControl: only DFC_BUTTON/DFCS_BUTTONPUSH (normal) modelled");
+    return 0;
+}
+
+static uint32_t u32_ansi_cp(unsigned char b);   /* fwd: ANSI byte -> codepoint (CP1252) */
+static uint32_t u32_drawtext(uint32_t hdc, const uint32_t *cps, int len, uint32_t prc, uint32_t fmt); /* fwd */
+/* Paint a predefined BUTTON control into `hdc` (its own client area, origin 0,0): the
+ * soft-raised push-button frame + its caption centred in the control's font (COLOR_BTNTEXT,
+ * transparent). Measured vs Wine (WM_PRINTCLIENT). The exact caption pixels depend on the
+ * resolved font face (same env caveat as gdi_uifont), so a fixture verifies the frame
+ * structurally + that caption pixels exist. */
+static void u32_button_paint(uint32_t hdc, int wi) {
+    struct gdi_obj *bm = gdi_dc_surface(hdc);
+    int d = gdi_idx(hdc);
+    if (!bm || d < 0) return;
+    int w = g_u32_win[wi].w, h = g_u32_win[wi].h;
+    int32_t rc[4] = { 0, 0, w, h };
+    u32_drawedge(bm, rc, 0x5 /*EDGE_RAISED*/, 0xF | 0x800u | 0x1000u);   /* frame + 3DFACE fill */
+    const char *cap = g_u32_win[wi].title;
+    if (cap && cap[0] && g_u32_win[wi].ctrl_font) {
+        uint32_t sf = g_gdi[d].sel_font, tc = g_gdi[d].text_color; int bk = g_gdi[d].bk_mode;
+        g_gdi[d].sel_font = g_u32_win[wi].ctrl_font;
+        g_gdi[d].text_color = u32_syscolor(18) /*COLOR_BTNTEXT*/;
+        g_gdi[d].bk_mode = 1 /*TRANSPARENT*/;
+        uint32_t cps[256]; int m = 0; for (; cap[m] && m < 255; m++) cps[m] = u32_ansi_cp((unsigned char)cap[m]);
+        int32_t r2[4] = { 0, 0, w, h };
+        u32_drawtext(hdc, cps, m, (uint32_t)(uintptr_t)r2, 0x1u | 0x4u | 0x20u /*DT_CENTER|DT_VCENTER|DT_SINGLELINE*/);
+        g_gdi[d].sel_font = sf; g_gdi[d].text_color = tc; g_gdi[d].bk_mode = bk;
+    }
+}
+/* Built-in proc for a predefined control with no app WNDPROC. BUTTON: WM_SETFONT stores
+ * the font, WM_GETFONT returns it, WM_PRINTCLIENT paints the control into the given DC.
+ * Everything else stays unhandled (the caller falls back to 0, as before). */
+static int u32_control_proc(uint32_t esp, uint32_t hwnd, uint32_t msg, uint32_t wp, uint32_t lp, uint32_t *out) {
+    (void)esp; (void)lp;
+    int i = (hwnd >= 1 && hwnd <= U32_MAX_WIN && g_u32_win[hwnd - 1].used) ? (int)hwnd - 1 : -1;
+    if (i < 0) return 0;
+    if (strcasecmp(g_u32_win[i].classname, "button") != 0) return 0;
+    if (msg == 0x0030u /*WM_SETFONT*/)  { g_u32_win[i].ctrl_font = wp; *out = 0; return 1; }
+    if (msg == 0x0031u /*WM_GETFONT*/)  { *out = g_u32_win[i].ctrl_font; return 1; }
+    if (msg == 0x0318u /*WM_PRINTCLIENT*/) { u32_button_paint(wp, i); *out = 0; return 1; }
     return 0;
 }
 /* PolylineTo(hdc, const POINT* pts, int count) -> BOOL. Like a run of LineTo: from

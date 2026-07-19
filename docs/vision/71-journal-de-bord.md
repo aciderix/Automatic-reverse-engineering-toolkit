@@ -3734,4 +3734,23 @@ Détail : **70 §6** (roadmap). Résumé :
   régression unifiée **PASS**. **Primitives de contrôle** : DrawFocusRect + DrawEdge + DrawFrameControl(push). Suite :
   câbler au WM_PAINT des contrôles BUTTON (peindre le cadre + le texte) → dialogue visible via SDL.
 
+### 2026-07-19 — [HLE-WIN32][GUI] **1er contrôle natif qui PEINT** : le BUTTON (cadre + texte) — sortie du display-free
+- **Le vrai franchissement du display-free** : jusqu'ici les contrôles prédéfinis étaient des fenêtres logiques
+  **sans wndproc** (data-only, aucune peinture). Désormais un **BUTTON peint son apparence**.
+- **Architecture** : `SendMessage` à un contrôle (wndproc==0) route vers un **proc de contrôle intégré** `u32_control_proc`
+  (avant : retournait 0). Le BUTTON y gère `WM_SETFONT` (stocke le font, champ `ctrl_font`), `WM_GETFONT`, et
+  **`WM_PRINTCLIENT`** (peint dans le DC fourni). `u32_button_paint` = `DrawFrameControl` (cadre soft-raised + face) +
+  **caption centrée** (`u32_drawtext` DT_CENTER|DT_VCENTER|DT_SINGLELINE, `COLOR_BTNTEXT`, transparent, dans le font du
+  contrôle). Mesuré vs Wine (`WM_PRINTCLIENT`). Builder : `CreateFontA/W`/`CreateFontIndirectA/W` ajoutés au gate
+  `-DARET_HAVE_FREETYPE` (une appli qui crée des fonts peint du texte via ses contrôles même sans `DrawText` direct).
+- **Vérif** : le cadre **structurel** (index-based, theme-independent) ; le texte dépend du font résolu (caveat gdi_uifont)
+  → on assert seulement que des pixels de caption existent (`caption_drawn=1`). `stdcall_pops` : aucun nouveau (WM_* sont
+  des messages). Piège corrigé : `WM_PRINTCLIENT` = **0x0318** (pas 0x0317 = WM_PRINT) ; forward-decl `u32_ansi_cp`/
+  `u32_drawtext` (utilisés avant leur définition) ; `ctrl_font` remis à 0 à la création (réutilisation de slot).
+- **Fixture** `winecorpus/user32_button_paint.c` (crée un BUTTON, WM_SETFONT, WM_PRINTCLIENT dans un DIB) →
+  **bit-identique Wine** (`frame oTL=1 oBR=1 iTL=1 face=1 | caption_drawn=1`).
+- **Portes** : winediff **147→148**, hash transpile `19acad982194bf07` **inchangé**, `table_is_sorted_by_name` ok,
+  régression unifiée **PASS**. **⇒ 1ᵉʳ contrôle natif réellement peint.** Suite : les autres contrôles (STATIC/EDIT/
+  group-box) même machinerie, puis rendre le **dialogue visible** (fenêtre SDL) et composer les enfants → FishTank affiché.
+
 <!-- NOUVELLES ENTRÉES ICI (garder l'ordre chronologique, plus récent en bas) -->

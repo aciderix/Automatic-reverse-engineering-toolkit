@@ -1275,7 +1275,10 @@ pub fn transpile(
             | "DrawTextA" | "DrawTextW" | "TabbedTextOutA" | "TabbedTextOutW"
             | "GetTextExtentPoint32A" | "GetTextExtentPoint32W"
             | "GetTextExtentPointA" | "GetTextExtentPointW" | "GetTextMetricsA" | "GetTextMetricsW"
-            | "GetTabbedTextExtentA" | "GetTabbedTextExtentW"))
+            | "GetTabbedTextExtentA" | "GetTabbedTextExtentW"
+            // A program that creates fonts renders text — its native controls (BUTTON…)
+            // paint their captions internally even if it never calls DrawText directly.
+            | "CreateFontA" | "CreateFontW" | "CreateFontIndirectA" | "CreateFontIndirectW"))
     {
         freetype_flags()
     } else {
