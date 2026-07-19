@@ -3657,4 +3657,27 @@ Détail : **70 §6** (roadmap). Résumé :
   no-op sound), clip (`IntersectClipRect`/`RectVisible` — correction-dessin), `SetROP2`/`SetStretchBltMode` (correction-
   dessin, à gater), `WindowFromPoint`, `CreateDIBitmap`/`CreateRectRgn` — au fil du step 3 (vrai binaire GUI).
 
+### 2026-07-19 — [DEMO][GUI] Step 3 : **un vrai binaire GUI Win32 shippé (`FishTank.exe`) atteint sa message loop sous ARET**
+- **Step 3 du plan** (§5.0) : lancer un vrai binaire GUI du corpus pour que la donnée dicte les shims. Corpus 29 PE32 :
+  trié par DLL importées → écarté **VB** (Octobre = VB40032, Wine ne l'a pas → pas d'oracle), **jeux** (GlidePath = WinG+
+  MFC30), **OpenGL** (NBODY20). Retenu **`FishTank.exe`** (aquarium Win95) = **pur Win32** (kernel32/user32/gdi32/comdlg32/
+  comctl32), que **Wine exécute** (message loop, tué au timeout).
+- **Résultat.** FishTank **transpile** (1380 fn, **0 unresolved direct call**, 3 partial-asm = data-en-code), et à
+  l'exécution **atteint sa message loop comme Wine**. Les instructions non-liftées sont du **bruit data-en-code** (out/in/
+  arpl/popad/aam/into/salc = privilégié/segment/BCD). Sur son **chemin de démarrage réel**, il n'appelait que **3 imports
+  non implémentés** (les 25 autres du listing statique sont derrière l'interaction — drag-drop/menu/impression — non
+  atteints headless).
+- **Les 3 imports du chemin réel, implémentés + mesurés vs Wine** : `GetProcessVersion(0)`=**0x00040000** (subsystem Win4.0,
+  ère Win95), `SetMessageQueue`=**1** (no-op Win16 obsolète), `GetCursorPos`=**1** (remplit le POINT à l'invariant écran
+  (0,0) — la vraie position souris est env-dépendante → seul le retour est comparé, jamais un POINT non-écrit = pas de faux
+  silencieux). Avant : stubs faibles « warn + return 0 » (GetCursorPos laissait le POINT non écrit — faux silencieux
+  potentiel). Après : **FishTank n'a plus AUCUN import non implémenté sur son chemin d'exécution**.
+- **stdcall_pops** : +`GetCursorPos@4`, `GetProcessVersion@4`, `SetMessageQueue@4`.
+- **Fixture** `winecorpus/win32_procver_cursor.{c,nodisplay}` → **bit-identique Wine** (`procver=00040000`, `setmsgqueue=1`,
+  `getcursorpos ret=1`).
+- **Portes** : winediff **143→144**, hash transpile `19acad982194bf07` **inchangé**, `table_is_sorted_by_name` ok,
+  régression unifiée **PASS**. **⇒ Step 3 démontré** : la machinerie contrôles + le chemin de démarrage tiennent sur du
+  **réel shippé**. Reste (piloté par interaction, au fil des besoins) : le tail statique de FishTank (CreateDIBitmap, clip
+  `IntersectClipRect`/`RectVisible`, DrawIcon/DrawFocusRect, drag-drop `DragQueryFileA`, `LoadMenuA`/accélérateurs, GrayString).
+
 <!-- NOUVELLES ENTRÉES ICI (garder l'ordre chronologique, plus récent en bas) -->

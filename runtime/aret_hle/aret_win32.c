@@ -3161,6 +3161,22 @@ static uint32_t g_u32_capture = 0;
 uint32_t aret_SetCapture(uint32_t esp) { uint32_t p = g_u32_capture; g_u32_capture = WU(0); return p; }
 uint32_t aret_GetCapture(uint32_t esp) { (void)esp; return g_u32_capture; }
 uint32_t aret_ReleaseCapture(uint32_t esp) { (void)esp; g_u32_capture = 0; return 1; }
+/* GetCursorPos(POINT*): the mouse position. Headless there is no mouse, so this is the
+ * screen-origin invariant (0,0) — like the screen-size metrics, an env-independent
+ * model value, not a guess (returns TRUE, fills the POINT so the caller never reads
+ * uninitialised memory). */
+uint32_t aret_GetCursorPos(uint32_t esp) {
+    int32_t *p = (int32_t *)WP(0);
+    if (p) { p[0] = 0; p[1] = 0; }
+    return 1;
+}
+/* GetProcessVersion(pid): the Windows version a process expects (major<<16|minor).
+ * The modelled era is Windows 4.0 (Win95/NT4 subsystem) = 0x00040000, measured vs Wine
+ * for the Win95-era corpus. */
+uint32_t aret_GetProcessVersion(uint32_t esp) { (void)esp; return 0x00040000u; }
+/* SetMessageQueue(cMessagesMax): obsolete Win16 API; on Win32 it is a no-op that
+ * returns TRUE (measured vs Wine). */
+uint32_t aret_SetMessageQueue(uint32_t esp) { (void)esp; return 1; }
 
 /* ---- Scroll bars (per-window, per-bar state) -----------------------------
  * Each window keeps {min,max,page,pos} for SB_HORZ(0)/SB_VERT(1)/SB_CTL(2). SetScrollPos
