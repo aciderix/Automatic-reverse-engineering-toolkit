@@ -1110,6 +1110,28 @@ la **vitesse** change.
 - **Un vrai binaire lancé bout-en-bout vs Wine** est le meilleur révélateur de « où
   on en est » — il sort des bugs généraux qu'aucun test synthétique ni sweep
   statique ne révèle (printf %I64, cluster stdin busybox…). Systématisé en sweeps.
+- **ÉCRAN VIRTUEL = ORACLE GUI PIXEL (Xvfb + SDL + capture, outillé 2026-07-19).** Pour un binaire **fenêtré**, la preuve
+  ultime = les **pixels**. Recette : `Xvfb :99 -screen 0 WxHx24 &` puis `DISPLAY=:99` ; lancer **l'app ARET** (`./app`, SDL
+  lié dès qu'un import `CreateWindowExA` + `pkg-config sdl2` → vraie `SDL_Window` sur le X virtuel) **et** le PE sous **Wine**
+  sur le même display ; **capturer** avec `import -window root out.png` (ImageMagick ; `apt-get install imagemagick x11-apps
+  xdotool`). Comparer les deux captures (visuel, ou hash/pixel-diff). **Distinction clé** : ce capteur d'écran inclut le
+  compositing (bordures WM, position) ⇒ **oracle qualitatif/visuel**, pas bit-exact ; pour du **bit-exact** on garde le
+  **DIB-hash** (dessiner dans un DIB mémoire qu'on possède, hasher — cf. `gdi_textout`/`gdi_tabbedtext`). Les deux se
+  complètent : DIB-hash prouve la primitive GDI exacte, l'écran virtuel prouve que le **pipeline fenêtre→GDI→SDL** compose
+  et affiche sur du réel. **Découverte 2026-07-19** : `FishTank.exe` (calculateur d'aquarium) tourne sound sous ARET
+  (message loop, 0 mur) mais s'affiche **noir** — son UI est un **dialogue à contrôles natifs** (BUTTON/EDIT/COMBOBOX,
+  user32) dont la **peinture est display-free** aujourd'hui. C'est le prochain grand chantier visuel (widgets natifs, ci-dessous).
+- **Widgets natifs (BUTTON/EDIT/COMBOBOX/LISTBOX) — où ça se place (stratégie 2026-07-19).** ⚠️ **Le lifting DLL (Levier 1)
+  ne les couvre PAS gratuitement** : les contrôles **de base** vivent dans **user32.dll**, qui descend aux syscalls
+  **win32k** (`NtUser*`/`NtGdi*`) pour dessiner → lifter user32 = heurter le **mur win32k** (doc 80 §1.2). En revanche les
+  contrôles **comctl32** (progress/trackbar/toolbar/listview) sont **user-mode** et peignent en **GDI** qu'on a → **ceux-là**
+  le lifting comctl32 les couvre (logique prouvée sur la progress bar ; les faire **peindre** = router leur WM_PAINT→GDI→
+  framebuffer SDL, chantier suivant). Donc **deux voies** : (a) contrôles **de base user32** → **réimplémenter leur peinture
+  dans le HLE** (`aret_win32.c`, dessin via notre GDI, vérifié DIB-hash vs Wine — comme Wine le fait dans user32) **ou**
+  lifter user32+router win32k ; (b) contrôles **comctl32** → **lifting DLL** + peinture GDI→SDL. **Calendrier** : non
+  planifié comme jalon dédié à ce jour ; listé « reste » (§4.5/§8.5). Fondation à poser d'abord = les **primitives de
+  peinture de contrôle** (`DrawEdge`/`DrawFrameControl`/`DrawFocusRect`, ce que TOUT contrôle et Wine utilisent), vérifiées
+  **DIB-hash** — puis câblées au WM_PAINT des contrôles, puis composées à l'écran (oracle Xvfb).
 - **Carte des murs statique AVANT de dérouler au runtime** (`--mode walls`) : le runtime
   ne frappe qu'un mur à la fois (un seul chemin) ; l'analyse statique voit **tout le code
   récupéré** en une passe → énumère **d'un coup** les murs de couverture (instructions non
@@ -1142,6 +1164,8 @@ la **vitesse** change.
 | **difftest** (natif, décompile O0→O3) | pipeline A | `bench/difftest.sh` |
 | **difftest_transpile** (natif -m32) | pipeline B = **produit** (hash) | `bench/difftest_transpile.sh` |
 | **winediff** (Wine) | couverture **OS-API** bit-à-bit | `bench/winediff.sh` |
+| **DIB-hash** (Wine) | primitive **GDI** exacte (DIB mémoire hashé) | fixtures `gdi_*` dans winediff |
+| **écran virtuel** (Xvfb+SDL vs Wine) | **pipeline fenêtre→GDI→SDL** compose/affiche (qualitatif, cf. §7) | `import -window root` sur `:99` |
 | **sweeps** (Wine, vrais binaires) | fonctionnel bout-en-bout | `sqlite_sweep`/`busybox_sweep`/`gauntlet/score` |
 | **Z3/SMT** | équivalence de réécritures | `bench/smt_rewrites.sh` |
 
