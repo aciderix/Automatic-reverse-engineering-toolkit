@@ -3803,4 +3803,28 @@ Détail : **70 §6** (roadmap). Résumé :
   chaque enfant (BUTTON fait ; +STATIC/EDIT) dans le framebuffer du dialogue à son offset → DIB-hash structurel → puis fenêtre
   SDL dimensionnée → dialogue FishTank visible (oracle Xvfb).
 
+### 2026-07-19 — [HLE-WIN32][GUI][DEMO] **Dialogue à contrôles natifs VISIBLE** : compositing des enfants → fenêtre SDL (sortie du display-free dialogue)
+- **Incrément 3 = la marche visible** (sur base-units + géométrie) : un dialogue Win32 à contrôles natifs **s'affiche réellement**
+  comme ELF autonome (SDL, sans Wine). `u32_dialog_composite(di)` : remplit le framebuffer client avec **COLOR_3DFACE** (couleur
+  d'effacement du dialogue, mesurée vs Wine) puis peint chaque **enfant visible à son offset** (chaque BUTTON via
+  `u32_button_paint` dans un DIB temporaire, blitté à `(x,y)`). Câblé dans `sdl_window_show` (+ recompose en fin de
+  `u32_dialog_create` pour le cas WS_VISIBLE où l'auto-show précède la création des contrôles). Font du dialogue **persistée** et
+  appliquée aux contrôles (Windows envoie WM_SETFONT(font dialogue) à chaque contrôle à l'init — reproduit) → **les captions se
+  peignent** ("OK"/"Cancel"/… centrées, FreeType).
+- **Fenêtre créée à la bonne taille** : base-units calculées **avant** `u32_window_create` (refactor out-params) → le dialogue
+  visible reçoit d'emblée une SDL_Window à sa taille pixel. Builder : les **créateurs de dialogue** ajoutés au gate **SDL**
+  (`CreateWindowExA/W` seul ne suffisait pas — un dialogue n'appelle pas CreateWindowEx directement) ; `u32_dialog_composite`
+  gardé `#ifdef ARET_HAVE_SDL` (utilise le framebuffer client).
+- **Vérif = qualitative (écran virtuel), ASSUMÉE** : Wine n'offre **aucune API pour capturer son propre dialogue composé** dans
+  un DIB (`WM_PRINT PRF_CHILDREN` **ne peint pas** les enfants — mesuré : 0 pixel enfant) → pas de DIB-hash possible pour la
+  composition. Preuve : **capture Xvfb** de l'app ARET vs Wine (doc 70 §7) → **layout identique** (dialogue + 3 boutons aux mêmes
+  positions/tailles), ARET en couleurs Win95 classiques (décision assumée §7), Wine en thème moderne. Les **briques** sont, elles,
+  bit-exactes (base-units, géométrie, peinture d'un bouton) → la composition est **correcte par composition**.
+- **Fixture non-crash** `winecorpus/user32_dlgpaint.c` (dialogue visible + bouton → composite → `done`, bit-identique Wine) : garde
+  déterministe contre un crash/abort du chemin composite (les pixels composés, eux, ne sont pas diffables vs Wine).
+- **Portes** : winediff **150→151 fixtures** (`user32_dlgpaint` verte ; seul rouge = `gdi_uifont` env), hash transpile
+  `19acad982194bf07` **inchangé**, difftest 272/272, `table_is_sorted_by_name` ok. **⇒ Un dialogue à contrôles natifs s'affiche
+  en ELF natif** — le display-free du dialogue est franchi. C'est exactement ce qui manquait à FishTank (dialogue noir). Reste :
+  peinture STATIC/EDIT/checkbox/radio (même machinerie `u32_control_proc`+composite), repaint sur invalidation, focus/interaction.
+
 <!-- NOUVELLES ENTRÉES ICI (garder l'ordre chronologique, plus récent en bas) -->

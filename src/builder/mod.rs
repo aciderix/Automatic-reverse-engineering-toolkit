@@ -1247,7 +1247,15 @@ pub fn transpile(
     // or a host without SDL2 gets the exact same compile/link as before (the
     // window layer stays display-free), so this is byte-identical for them.
     let sdl = if !wasm && bits == 32
-        && prog.imports.values().any(|n| n == "CreateWindowExA" || n == "CreateWindowExW")
+        && prog.imports.values().any(|n| matches!(n.as_str(),
+            "CreateWindowExA" | "CreateWindowExW"
+            // A visible dialog needs a real window too (its controls are composited
+            // into the dialog framebuffer and presented), even if the app never calls
+            // CreateWindowEx directly.
+            | "DialogBoxParamA" | "DialogBoxParamW"
+            | "DialogBoxIndirectParamA" | "DialogBoxIndirectParamW"
+            | "CreateDialogParamA" | "CreateDialogParamW"
+            | "CreateDialogIndirectParamA" | "CreateDialogIndirectParamW"))
     {
         sdl2_flags()
     } else {

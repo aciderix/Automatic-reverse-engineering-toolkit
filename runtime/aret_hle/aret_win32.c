@@ -2383,6 +2383,8 @@ static struct {
     uint8_t extra[64];       /* cbWndExtra storage: SetWindowLong at offset >=0 (control state ptr) */
     struct { int min, max, page, pos; } scroll[3];  /* SB_HORZ=0 / SB_VERT=1 / SB_CTL=2 */
     int du_x, du_y;          /* dialog base units (per-dialog, from its font); 0 = not a mapped dialog */
+    int is_dialog;           /* created by u32_dialog_create -> composite its child controls for display */
+    uint32_t dlg_font;       /* HFONT of the dialog font (DS_SETFONT), applied to its controls */
 #ifdef ARET_HAVE_SDL
     void *sdl_win, *sdl_ren, *sdl_tex;  /* SDL window/renderer/streaming texture */
     uint32_t client_bmp;     /* HBITMAP of the client-area framebuffer (GDI draws here) */
@@ -2397,6 +2399,7 @@ static struct {
  * into WM_* messages. All are no-ops when there is no usable display. */
 static void sdl_window_show(int i);
 static void sdl_window_present(int i);
+static void u32_dialog_composite(int di);   /* fwd: compose a dialog's controls into its framebuffer */
 static void sdl_window_destroy(int i);
 static void sdl_pump(void);
 static int  sdl_win_idx_from_id(uint32_t winid);
@@ -3668,7 +3671,7 @@ static uint32_t u32_new_control(uint32_t parent, int ctrl_id, uint32_t style, co
 }
 /* Compute+store a dialog's base units from its font (defined after the FreeType
  * helpers). */
-static void u32_dlg_base_units(int wi, int has_font, int point_size, int weight, int italic, const char *face);
+static void u32_dlg_base_units(int has_font, int point_size, int weight, int italic, const char *face, int *out_bx, int *out_by, uint32_t *out_font);
 static int gdi_muldiv(long long a, long long b, long long c);   /* fwd: GDI round-to-nearest MulDiv */
 /* Parse a DLGTEMPLATE(EX) -> create the dialog window (wndproc = dlgproc) and its
  * child controls. Returns the dialog HWND (0 on failure). Handles both templates. */
@@ -3700,14 +3703,18 @@ static uint32_t u32_dialog_create(const uint8_t *tpl, uint32_t dlgproc, uint32_t
         else p += 2;                                    /* classic: point size only */
         p = u32_dt_szord(p, f_face, sizeof f_face);     /* typeface */
     }
-    uint32_t hDlg = u32_window_create(dlgproc, 0, style, 0, 0, 0, 0, parent, dtitle, 0);
+    /* Base units first (from the font), so the dialog window is created at its real
+     * pixel size — a visible dialog then gets a correctly-sized SDL window at once. */
+    int bx = 0, by = 0; uint32_t dfont = 0;
+    u32_dlg_base_units(has_font, f_pt, f_weight, f_ital, f_face, &bx, &by, &dfont);
+    int dw = bx > 0 ? gdi_muldiv(d_cx, bx, 4) : 0;
+    int dh = by > 0 ? gdi_muldiv(d_cy, by, 8) : 0;
+    uint32_t hDlg = u32_window_create(dlgproc, 0, style, 0, 0, dw, dh, parent, dtitle, 0);
     if (!hDlg) return 0;
     int hi = (int)hDlg - 1;
-    u32_dlg_base_units(hi, has_font, f_pt, f_weight, f_ital, f_face);
-    int bx = g_u32_win[hi].du_x, by = g_u32_win[hi].du_y;    /* pixels per dialog unit */
-    /* Dialog client size in pixels (dialog units -> pixels via base units). */
-    if (bx > 0) g_u32_win[hi].w = gdi_muldiv(d_cx, bx, 4);
-    if (by > 0) g_u32_win[hi].h = gdi_muldiv(d_cy, by, 8);
+    g_u32_win[hi].du_x = bx; g_u32_win[hi].du_y = by;   /* pixels per dialog unit */
+    g_u32_win[hi].is_dialog = 1;                        /* composite its controls when shown */
+    g_u32_win[hi].dlg_font = dfont;                     /* dialog font, applied to controls below */
     for (int c = 0; c < cdit; c++) {
         p = u32_dt_align(tpl, p);
         uint32_t cstyle, cid;
@@ -3742,8 +3749,21 @@ static uint32_t u32_dialog_create(const uint8_t *tpl, uint32_t dlgproc, uint32_t
         /* Dialog units -> parent-relative pixels via the dialog's base units. */
         int px = bx > 0 ? gdi_muldiv(ix, bx, 4) : 0, py = by > 0 ? gdi_muldiv(iy, by, 8) : 0;
         int pw = bx > 0 ? gdi_muldiv(icx, bx, 4) : 0, ph = by > 0 ? gdi_muldiv(icy, by, 8) : 0;
-        u32_new_control(hDlg, (int)cid, cstyle, ctitle, px, py, pw, ph, cclass);
+        uint32_t hc = u32_new_control(hDlg, (int)cid, cstyle, ctitle, px, py, pw, ph, cclass);
+        /* Windows sends WM_SETFONT(dialog font) to each control at dialog init; mirror
+         * it so a control paints its caption in the dialog font (the app may override). */
+        if (hc && dfont) g_u32_win[hc - 1].ctrl_font = dfont;
     }
+#ifdef ARET_HAVE_SDL
+    /* If the template is WS_VISIBLE, the window auto-showed during u32_window_create —
+     * before is_dialog was set and before the controls existed. Re-compose now that the
+     * children are in place, and present. (A dialog shown later via ShowWindow composes
+     * through sdl_window_show, which sees is_dialog set.) */
+    if (g_u32_win[hi].visible && g_u32_win[hi].client_bmp) {
+        u32_dialog_composite(hi);
+        sdl_window_present(hi);
+    }
+#endif
     return hDlg;
 }
 /* Destroy a dialog and all its child controls. */
@@ -4051,6 +4071,7 @@ static void sdl_window_show(int i) {
     }
     g_u32_win[i].client_bmp = b ? gdi_handle(b) : 0;
     g_u32_win[i].cw = w; g_u32_win[i].ch = h;
+    if (g_u32_win[i].is_dialog) u32_dialog_composite(i);   /* fill 3DFACE + paint child controls */
     if (!sdl_ensure()) return;                       /* no display: framebuffer only */
     int px = g_u32_win[i].x, py = g_u32_win[i].y;
     SDL_Window *win = SDL_CreateWindow(g_u32_win[i].title[0] ? g_u32_win[i].title : "",
@@ -4868,6 +4889,46 @@ static int u32_control_proc(uint32_t esp, uint32_t hwnd, uint32_t msg, uint32_t 
     if (msg == 0x0318u /*WM_PRINTCLIENT*/) { u32_button_paint(wp, i); *out = 0; return 1; }
     return 0;
 }
+/* Composite a dialog's client framebuffer for display: fill the background with
+ * COLOR_3DFACE (the dialog erase colour, measured vs Wine) then paint each visible
+ * child control at its parent-relative offset. Only classes we can paint bit-exact
+ * (BUTTON today) are drawn; others are left as background (a sound, visible gap rather
+ * than a guessed rendering). This is the on-screen path (SDL); its geometry+per-control
+ * paint are each already verified bit-exact, so the composite is correct by
+ * composition. Wine offers no API to capture its own composited dialog into a DIB
+ * (WM_PRINT PRF_CHILDREN does not paint children), so the composed window is compared
+ * qualitatively (Xvfb screenshot), per doc 70 §7. */
+#ifdef ARET_HAVE_SDL
+static void u32_dialog_composite(int di) {
+    if (di < 0 || di >= U32_MAX_WIN || !g_u32_win[di].used) return;
+    int b = gdi_idx(g_u32_win[di].client_bmp);
+    if (b < 0 || !g_gdi[b].bits) return;
+    int W = g_u32_win[di].cw, H = g_u32_win[di].ch;
+    uint32_t *dst = (uint32_t *)g_gdi[b].bits;
+    uint32_t face = u32_syscolor(15 /*COLOR_3DFACE*/);
+    for (int i = 0; i < W * H; i++) dst[i] = face;
+    for (int c = 0; c < U32_MAX_WIN; c++) {
+        if (!g_u32_win[c].used || g_u32_win[c].parent != (uint32_t)(di + 1)) continue;
+        if (!g_u32_win[c].visible) continue;
+        int cw = g_u32_win[c].w, ch = g_u32_win[c].h, ox = g_u32_win[c].x, oy = g_u32_win[c].y;
+        if (cw <= 0 || ch <= 0) continue;
+        if (strcasecmp(g_u32_win[c].classname, "button") != 0) continue;   /* paintable class */
+        int td = gdi_alloc(GDIT_DC); if (!td) continue;
+        u32_dc_defaults(td);
+        int tb = gdi_alloc(GDIT_BITMAP); if (!tb) { g_gdi[td].used = 0; continue; }
+        g_gdi[tb].w = cw; g_gdi[tb].h = ch; g_gdi[tb].topdown = 1; g_gdi[tb].bpp = 32;
+        g_gdi[tb].bits = (uint8_t *)calloc((size_t)cw * ch, 4); g_gdi[tb].owns_bits = 1;
+        if (!g_gdi[tb].bits) { g_gdi[tb].used = 0; g_gdi[td].used = 0; continue; }
+        g_gdi[td].sel_bitmap = gdi_handle(tb);
+        u32_button_paint(gdi_handle(td), c);
+        uint32_t *src = (uint32_t *)g_gdi[tb].bits;
+        for (int yy = 0; yy < ch; yy++) { int dy = oy + yy; if (dy < 0 || dy >= H) continue;
+            for (int xx = 0; xx < cw; xx++) { int dx = ox + xx; if (dx < 0 || dx >= W) continue;
+                dst[dy * W + dx] = src[yy * cw + xx]; } }
+        free(g_gdi[tb].bits); g_gdi[tb].used = 0; g_gdi[td].used = 0;
+    }
+}
+#endif /* ARET_HAVE_SDL */
 /* PolylineTo(hdc, const POINT* pts, int count) -> BOOL. Like a run of LineTo: from
  * the current position, a Bresenham segment to each point (endpoint excluded),
  * updating the current position to the last point (measured on Wine). */
@@ -6769,7 +6830,8 @@ uint32_t aret_CreateFontIndirectW(uint32_t esp) {
  * soundly (never a guessed scale). These base units drive MapDialogRect and control
  * placement, so they are as bit-exact vs Wine as the font resolves identically (same
  * fontconfig recipe -> same TTF -> same FreeType metrics; the gdi_uifont env caveat). */
-static void u32_dlg_base_units(int wi, int has_font, int point_size, int weight, int italic, const char *face) {
+static void u32_dlg_base_units(int has_font, int point_size, int weight, int italic, const char *face, int *out_bx, int *out_by, uint32_t *out_font) {
+    *out_bx = 0; *out_by = 0; if (out_font) *out_font = 0;
 #ifdef ARET_HAVE_FREETYPE
     int height, wt, it; const char *fc;
     if (has_font && point_size != 0x7FFF && face && face[0]) {
@@ -6793,12 +6855,15 @@ static void u32_dlg_base_units(int wi, int has_font, int point_size, int weight,
         for (int c = 'A'; c <= 'Z'; c++) alpha[k++] = (uint32_t)c;
         for (int c = 'a'; c <= 'z'; c++) alpha[k++] = (uint32_t)c;
         int ext = u32_text_width(f, alpha, 52);
-        g_u32_win[wi].du_x = (ext / 26 + 1) / 2;
-        g_u32_win[wi].du_y = asc + desc;                /* tmHeight */
+        *out_bx = (ext / 26 + 1) / 2;
+        *out_by = asc + desc;                           /* tmHeight */
     }
-    g_gdi[d].used = 0; g_gdi[fi].used = 0;
+    g_gdi[d].used = 0;
+    /* Keep the font alive for the caller (applied to the dialog's controls); free it
+     * only if the caller does not want it or metrics failed. */
+    if (out_font && f) *out_font = hf; else g_gdi[fi].used = 0;
 #else
-    (void)wi; (void)has_font; (void)point_size; (void)weight; (void)italic; (void)face;
+    (void)has_font; (void)point_size; (void)weight; (void)italic; (void)face;
 #endif
 }
 /* MapDialogRect(hDlg, LPRECT) -> BOOL. Convert a rect from dialog units to pixels

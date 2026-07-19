@@ -170,7 +170,7 @@ bash bench/regression.sh    # PORTE unifiée : difftest 271/271, in-place 3/3,
                             # recompilabilité gzip/ls/cat 100%
 bash bench/difftest.sh              # décompile O0→O3
 bash bench/difftest_transpile.sh    # transpile (hash 19acad982194bf07)
-bash bench/winediff.sh              # axe 2 vs Wine (150/150 ; gdi_uifont peut être rouge = env fontconfig i386)
+bash bench/winediff.sh              # axe 2 vs Wine (151/151 ; gdi_uifont peut être rouge = env fontconfig i386)
 bash bench/funcdiff.sh              # lift-closure + opt-diff vs Unicorn (0 div)
 # Sweeps de vrais binaires (téléchargent + comparent à Wine) :
 bash bench/sqlite_sweep.sh   bash bench/busybox_sweep.sh   bash bench/corpus_sweep.sh
@@ -190,7 +190,7 @@ bash bench/wallsweep.sh <dir1> [dir2…]  # AGRÈGE --mode walls sur un corpus :
 
 ### État régression (référence — doit rester vert)
 difftest **272/272** · transpile-diff **4/4** (H=`19acad982194bf07`) · winediff
-**150/150** (le seul rouge possible = `gdi_uifont`, **environnemental** : fontconfig i386, orthogonal au code) · cpudiff vert (per-instruction + séquences génératives) · funcdiff corpus **0 divergence** (lift **~20,6k** scorées /
+**151/151** (le seul rouge possible = `gdi_uifont`, **environnemental** : fontconfig i386, orthogonal au code) · cpudiff vert (per-instruction + séquences génératives) · funcdiff corpus **0 divergence** (lift **~20,6k** scorées /
 **~20k appels** — **imports (stubs `@N` + `@0` scalaires) + appels indirects résolus + intrinsèques mémoire host-backés (memmove/memcpy)** ; scratch sous-esp exclu ; opt ~10k scorées) · SMT **11/11** · in-place **3/3** · magicdiv **2³²** ·
 recompilabilité **100 %** · WASM **7/7**.
 
@@ -464,7 +464,13 @@ recompilabilité **100 %** · WASM **7/7**.
   (atome prédéfini ou nom) + la taille client du dialogue ; base-units en **best-effort** (`g_dc_font_quiet` : police non
   résolue ⇒ pas d'abort). Vérifié bit-exact **relatif au client** (`GetWindowRect`+`MapWindowPoints(NULL,hDlg)` annule le
   placement WM), `winecorpus/user32_dlgcontrols.c` (Button `18,33,88,23` / Edit `18,65,105,20`, client `350×195`).
-  **Reste** : compositing de la peinture des enfants (BUTTON fait ; +STATIC/EDIT) → fenêtre SDL dimensionnée → FishTank visible.
+  **✅ DIALOGUE VISIBLE (2026-07-19)** : `u32_dialog_composite` remplit le fond (COLOR_3DFACE) + peint chaque enfant à son offset
+  (BUTTON via `u32_button_paint` blitté), font du dialogue appliquée aux contrôles (captions FreeType) → **un dialogue à
+  contrôles natifs s'affiche en ELF autonome (SDL)**. Fenêtre créée à la bonne taille (base-units avant `u32_window_create`) ;
+  créateurs de dialogue ajoutés au gate SDL. **Vérif qualitative écran virtuel** (Wine ne compose pas dans un DIB —
+  `WM_PRINT PRF_CHILDREN` ne peint pas les enfants — donc pas de DIB-hash ; layout identique Xvfb, briques bit-exactes ⇒ correct
+  par composition). Garde non-crash `winecorpus/user32_dlgpaint.c`. **Reste** : STATIC/EDIT/checkbox/radio (même machinerie),
+  repaint sur invalidation, focus/interaction.
 - **GDI de base** (M7 G6, doc 72) : table d'objets GDI (DC/bitmap/brush/pen/font, handles opaques) + **dessin
   DIB mémoire bit-exact** — `CreateDIBSection`(32bpp)/`CreateCompatibleDC`/`SelectObject`/`DeleteObject`,
   `SetPixel`/`GetPixel`/`FillRect`/`PatBlt`/`BitBlt`(SRCCOPY), `CreateSolidBrush`/`Pen`, `GetStockObject`/
