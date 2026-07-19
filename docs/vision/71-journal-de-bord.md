@@ -3425,4 +3425,25 @@ Détail : **70 §6** (roadmap). Résumé :
   `table_is_sorted_by_name` ok, régression unifiée **PASS**. ⚠️ Piège corrigé : le macro `GDI_MAP_GUARD` doit être défini
   **avant** la 1re primitive gardée (StretchDIBits) — sinon lien échoue (macro vu comme fonction).
 
+### 2026-07-19 — [HLE-WIN32][GUI] Famille **menu (traîne)** : `ModifyMenuA/W` + `SetMenuItemBitmaps` + `GetMenuCheckMarkDimensions`
+- **Seconde moitié du step 2** du plan ordonné (§5.0) : après la tête mesurée (GDI mapping-mode), les familles socle du
+  plateau Win95. Le **menu** (`ModifyMenuA`/`SetMenuItemBitmaps`, mesuré sur le corpus) étend un sous-système qu'on
+  possède déjà (`g_u32_menu`), display-free, entièrement vérifiable vs Wine headless.
+- **Recette (mesurée bit-exact vs Wine, prefix propre)** : `ModifyMenu(hMnu, uPos, uFlags, uIDNew, lpNew)` **remplace
+  l'item en place** — l'item trouvé par `uPos` (MF_BYCOMMAND/MF_BYPOSITION) reçoit de **nouveaux** flags (moins le bit de
+  lookup), id/submenu et texte = exactement `u32_menu_setitem` au slot trouvé ; item absent → **FALSE**. Mesuré :
+  by-command r1=1, by-position r2=1, absent r3=0 ; `GetMenuState(200)=1` (MF_GRAYED conservé) ; variante W convertit le
+  texte large. `SetMenuItemBitmaps(hMenu, uPos, uFlags, hbmpU, hbmpC)` : effet **display-only** (pas de getter headless)
+  → on stocke les 2 handles (champs `bmp_unchecked`/`bmp_checked` ajoutés à l'item) et retourne **TRUE** sur item trouvé /
+  **FALSE** sinon (mesuré ok=1/miss=0). `GetMenuCheckMarkDimensions()` = `MAKELONG(SM_CXMENUCHECK, SM_CYMENUCHECK)` =
+  **13×13** = `0x000d000d` (mesuré) ; +`GetSystemMetrics` **SM_CXMENUCHECK(71)/SM_CYMENUCHECK(72)=13**.
+- **Soundness.** ModifyMenu réutilise la machinerie de find/setitem existante (aucun nouveau chemin deviné). Les 3
+  fonctions sont **stateful/déterministes** ou pures ; aucun n'a de repli silencieux. `stdcall_pops` : +`ModifyMenuA/W@20`,
+  +`SetMenuItemBitmaps@20`, +`GetMenuCheckMarkDimensions@0`.
+- **Fixture** `winecorpus/user32_menu2.{c,nodisplay}` : cxcheck/cycheck + checkdim + ModifyMenu (by-cmd/by-pos/absent/W) +
+  round-trip GetMenuString/GetMenuItemID/GetMenuState + SetMenuItemBitmaps → **bit-identique à Wine** (`checkdim=000d000d`,
+  `s0=[Gamma](id=200) s1=[Delta](id=201) st200=1 cnt=2`, `modifyW=1 s0w=[Wide](id=300)`, `bitmaps ok=1 miss=0`).
+- **Portes** : winediff **134→135** (`user32_menu2` ok ; le seul rouge = `gdi_uifont`, **environnemental** fontconfig i386,
+  orthogonal), hash transpile `19acad982194bf07` **inchangé**, `table_is_sorted_by_name` ok, régression unifiée **PASS**.
+
 <!-- NOUVELLES ENTRÉES ICI (garder l'ordre chronologique, plus récent en bas) -->

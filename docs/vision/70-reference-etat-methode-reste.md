@@ -170,7 +170,7 @@ bash bench/regression.sh    # PORTE unifiée : difftest 271/271, in-place 3/3,
                             # recompilabilité gzip/ls/cat 100%
 bash bench/difftest.sh              # décompile O0→O3
 bash bench/difftest_transpile.sh    # transpile (hash 19acad982194bf07)
-bash bench/winediff.sh              # axe 2 vs Wine (134/134)
+bash bench/winediff.sh              # axe 2 vs Wine (135/135 ; gdi_uifont peut être rouge = env fontconfig i386)
 bash bench/funcdiff.sh              # lift-closure + opt-diff vs Unicorn (0 div)
 # Sweeps de vrais binaires (téléchargent + comparent à Wine) :
 bash bench/sqlite_sweep.sh   bash bench/busybox_sweep.sh   bash bench/corpus_sweep.sh
@@ -190,7 +190,7 @@ bash bench/wallsweep.sh <dir1> [dir2…]  # AGRÈGE --mode walls sur un corpus :
 
 ### État régression (référence — doit rester vert)
 difftest **272/272** · transpile-diff **4/4** (H=`19acad982194bf07`) · winediff
-**134/134** · cpudiff vert (per-instruction + séquences génératives) · funcdiff corpus **0 divergence** (lift **~20,6k** scorées /
+**135/135** (le seul rouge possible = `gdi_uifont`, **environnemental** : fontconfig i386, orthogonal au code) · cpudiff vert (per-instruction + séquences génératives) · funcdiff corpus **0 divergence** (lift **~20,6k** scorées /
 **~20k appels** — **imports (stubs `@N` + `@0` scalaires) + appels indirects résolus + intrinsèques mémoire host-backés (memmove/memcpy)** ; scratch sous-esp exclu ; opt ~10k scorées) · SMT **11/11** · in-place **3/3** · magicdiv **2³²** ·
 recompilabilité **100 %** · WASM **7/7**.
 
@@ -479,6 +479,10 @@ recompilabilité **100 %** · WASM **7/7**.
   `CreateMenu`/`CreatePopupMenu`/`AppendMenuA/W`/`InsertMenuA`/`Delete`/`Remove`, `EnableMenuItem`/`CheckMenuItem`
   (renvoient l'ancien état), `GetMenuState`/`GetMenuStringA/W`/`GetMenuItemCount`/`GetSubMenu`, `GetMenu`/`SetMenu`/
   `GetSystemMenu` (SC_* par fenêtre), `TrackPopupMenu`→0 sound. Gardé `user32_menu.c`.
+  **Traîne menu** (2026-07-19, famille mesurée du plateau Win95) : `ModifyMenuA/W` (remplace l'item trouvé en place —
+  nouveaux flags/id/texte, absent→FALSE), `SetMenuItemBitmaps` (stocke les 2 handles check-mark, TRUE/FALSE selon item),
+  `GetMenuCheckMarkDimensions` = `MAKELONG(SM_CXMENUCHECK, SM_CYMENUCHECK)` = **13×13** (mesuré ; +GetSystemMetrics 71/72).
+  Gardé `user32_menu2.c` (bit-identique Wine).
 - **USER32 helpers fenêtre** (M7 G7, doc 72) : `GetClientRect`/`AdjustWindowRect(Ex)` (modèle no-NC),
   focus/activation (`Set`/`GetFocus`/`ActiveWindow`/`ForegroundWindow`/`BringWindowToTop`), `InvalidateRect`/
   `ValidateRect`/… (no-op sound), `MessageBeep`, `CallWindowProcA/W` (appelle un wndproc lifté), `LoadCursorA/W`/
@@ -686,10 +690,12 @@ résidu qui abort restera l'**obfusqué/fait-main/VM-packé** (indécidable, §9
   1. ✅ **RE-MESURÉ (Levier 0, 2026-07-18)** — 37 PE32 Win95 : instructions = bruit (lift complet) ; imports **plats**
      (tête traitée) **sauf une famille cohérente dominante : le GDI mapping-mode** (~12 fn, 3 binaires chacune). Détail
      journal 71.
-  2. **Famille GDI mapping-mode** (la tête mesurée) : `SetViewportOrgEx`/`SetViewportExtEx`/`SetWindowExtEx`/`Scale*ExtEx`/
-     `OffsetViewportOrgEx`/`SetMapMode`/`DPtoLP`/`LPtoDP` — transforme logique→device pour **tout** le dessin ⚠️
-     correctness-critique (chaque primitive GDI applique la transforme), vérifié **DIB-hash vs Wine**. *Puis* les familles
-     kernel32/CRT restantes (locale, version-info, char-class… ; atoms **fait**) — générales, batch vérifié.
+  2. ✅ **Famille GDI mapping-mode FAITE** (la tête mesurée) : `SetViewportOrgEx`/`SetViewportExtEx`/`SetWindowExtEx`/
+     `Scale*ExtEx`/`OffsetViewportOrgEx`/`SetMapMode`/`DPtoLP`/`LPtoDP` — transforme logique→device ⚠️ correctness-critique,
+     vérifié **DIB-hash vs Wine**. **Seconde moitié = familles socle du plateau** : ✅ **menu** (`ModifyMenuA/W`/
+     `SetMenuItemBitmaps`/`GetMenuCheckMarkDimensions`, 2026-07-19, `user32_menu2.c` bit-identique Wine) ; **reste** :
+     imprimante (`OpenPrinterA`/`ClosePrinter`/`DocumentPropertiesA`), thread (`TerminateThread`/`SetThreadPriority`/
+     `OpenProcess`), divers (`WinHelpA`/`WaitForInputIdle`/`TabbedTextOutA`/`GrayStringA`) — générales, batch vérifié.
   3. **Un vrai binaire GUI du corpus utilisant comctl32** — prouve la machinerie contrôles sur du réel shippé ; tire les
      contrôles manquants (trackbar/toolbar/listview) dans l'ordre **mesuré**.
   4. **MFC / VB40032** (le gros multiplicateur) — **gated sur l'EH C++** (`__CxxFrameHandler`, Levier 2, qu'on n'a pas) ;

@@ -3151,6 +3151,7 @@ uint32_t aret_GetSystemMetrics(uint32_t esp) {
     case 46: return 2;    /* SM_CYEDGE */
     case 49: return 16;   /* SM_CXSMICON */
     case 50: return 16;   /* SM_CYSMICON */
+    case 71: case 72: return 13; /* SM_CXMENUCHECK / SM_CYMENUCHECK (measured vs Wine) */
     default: return 0;
     }
 }
@@ -5346,7 +5347,7 @@ uint32_t aret_MsgWaitForMultipleObjects(uint32_t esp) {
 #define U32_MAX_MITEMS 64
 static struct u32_menu {
     int used, count;
-    struct { uint32_t id, flags, submenu; char text[128]; } it[U32_MAX_MITEMS];
+    struct { uint32_t id, flags, submenu, bmp_unchecked, bmp_checked; char text[128]; } it[U32_MAX_MITEMS];
 } g_u32_menu[U32_MAX_MENUS];
 static uint32_t g_u32_wmenu[U32_MAX_WIN], g_u32_wsysmenu[U32_MAX_WIN];
 
@@ -5473,6 +5474,38 @@ uint32_t aret_GetMenuItemID(uint32_t esp) {
     int p = WI(1); if (p < 0 || p >= g_u32_menu[i].count) return 0xFFFFFFFFu;
     if (g_u32_menu[i].it[p].flags & 0x10u) return 0xFFFFFFFFu;  /* popup -> -1 */
     return g_u32_menu[i].it[p].id;
+}
+/* ModifyMenu replaces an existing item in place: the item found by uPosition
+ * (MF_BYCOMMAND / MF_BYPOSITION) gets new flags (minus the lookup bit), id/submenu
+ * and text — exactly u32_menu_setitem, at the found slot. Missing item -> FALSE. */
+uint32_t aret_ModifyMenuA(uint32_t esp) {
+    int i = u32_menu_idx(WU(0)); if (i < 0) return 0;
+    int s = u32_menu_find(&g_u32_menu[i], WU(1), WU(2)); if (s < 0) return 0;
+    u32_menu_setitem(i, s, WU(2), WU(3), WCS(4));
+    return 1;
+}
+uint32_t aret_ModifyMenuW(uint32_t esp) {
+    int i = u32_menu_idx(WU(0)); if (i < 0) return 0;
+    int s = u32_menu_find(&g_u32_menu[i], WU(1), WU(2)); if (s < 0) return 0;
+    char t[128]; t[0] = 0;
+    if (!(WU(2) & (0x800u | 0x4u | 0x100u))) u32_w2n((const uint16_t *)WP(4), t, sizeof t);
+    u32_menu_setitem(i, s, WU(2), WU(3), t);
+    return 1;
+}
+/* SetMenuItemBitmaps: associate check-mark bitmaps with an item. Display-only in
+ * effect (no headless getter), so we store the handles and return TRUE on the found
+ * item / FALSE when the item does not exist (measured vs Wine). */
+uint32_t aret_SetMenuItemBitmaps(uint32_t esp) {
+    int i = u32_menu_idx(WU(0)); if (i < 0) return 0;
+    int s = u32_menu_find(&g_u32_menu[i], WU(1), WU(2)); if (s < 0) return 0;
+    g_u32_menu[i].it[s].bmp_unchecked = WU(3);
+    g_u32_menu[i].it[s].bmp_checked   = WU(4);
+    return 1;
+}
+/* GetMenuCheckMarkDimensions = MAKELONG(SM_CXMENUCHECK, SM_CYMENUCHECK); the default
+ * check-mark bitmap is 13x13 (measured vs Wine). */
+uint32_t aret_GetMenuCheckMarkDimensions(uint32_t esp) {
+    (void)esp; return (13u << 16) | 13u;
 }
 
 /* Window menu bar + system menu. */
