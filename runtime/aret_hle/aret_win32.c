@@ -1495,6 +1495,21 @@ uint32_t aret_TerminateThread(uint32_t esp) {
     g_fiber[fi].state = FST_DONE;
     return 1;
 }
+/* WaitForInputIdle: valid only for a child GUI process one created. We never create
+ * real processes (CreateProcess is a sound failure), so every handle here is our own
+ * or invalid -> WAIT_FAILED + ERROR_INVALID_HANDLE, exactly Wine's headless shape
+ * (0xFFFFFFFF, err 6). Never a fake "idle" success. */
+uint32_t aret_WaitForInputIdle(uint32_t esp) {
+    (void)esp;
+    g_last_error = 6u /* ERROR_INVALID_HANDLE */;
+    return 0xFFFFFFFFu /* WAIT_FAILED */;
+}
+/* WinHelp: HELP_QUIT (close the help window) succeeds with nothing open; any other
+ * command needs a help viewer (winhlp32) that does not exist headless -> FALSE.
+ * Measured vs Wine (HELP_CONTEXT=0, HELP_QUIT=1). Sound: never fakes that help was
+ * shown. */
+uint32_t aret_WinHelpA(uint32_t esp) { return (WU(2) == 2u /*HELP_QUIT*/) ? 1u : 0u; }
+uint32_t aret_WinHelpW(uint32_t esp) { return aret_WinHelpA(esp); }
 /* A handle this layer actually waits on (thread or event); others keep the legacy
  * immediate WAIT_OBJECT_0 (sound in the mono-thread model). */
 static int u32_waitable(uint32_t h) {

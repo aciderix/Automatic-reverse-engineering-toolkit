@@ -3471,4 +3471,24 @@ Détail : **70 §6** (roadmap). Résumé :
 - **Portes** : winediff **135→136** (`win32_thread_tail` ok ; seul rouge = `gdi_uifont`, environnemental), hash transpile
   `19acad982194bf07` **inchangé**, `table_is_sorted_by_name` ok, régression unifiée **PASS**.
 
+### 2026-07-19 — [HLE-WIN32] Famille **divers non-display** : `WaitForInputIdle` (harnais) + `WinHelpA/W` (hors-harnais)
+- **Suite du step 2** (§5.0) : les membres **non-display** de la famille « divers » du plateau Win95. Les deux autres
+  membres mesurés (`TabbedTextOutA`/`GrayStringA`) sont du **rendu texte GDI** (sous-famille FreeType, séparée).
+- **`WaitForInputIdle`** : valide seulement pour un **process GUI enfant** qu'on a créé ; on ne crée jamais de vrai
+  process (`CreateProcess` = échec sound), donc tout handle ici est le nôtre ou invalide → **WAIT_FAILED (0xFFFFFFFF) +
+  ERROR_INVALID_HANDLE(6)**, jamais un faux « idle » réussi. Mesuré vs Wine `self=0xFFFFFFFF bogus=0xFFFFFFFF err=6`.
+  Gardé **dans le harnais** `winecorpus/win32_misc_tail.{c,nodisplay}` (déterministe) — **bit-identique à Wine**.
+- **`WinHelpA/W`** : `HELP_QUIT`(2) ferme la fenêtre d'aide (absente) → **TRUE** ; toute autre commande nécessite un
+  viewer (winhlp32) inexistant headless → **FALSE**. Mesuré vs Wine `ctx=0 quit=1 contents=0 quitW=1`. ARET rend
+  immédiatement (aucun spawn). **Piège mesuré (⇒ hors harnais)** : sous Wine, `WinHelp` **spawn un winhlp32 enfant** qui
+  **traîne sur le pipe stdout** → toute capture par pipe/`$(...)` (dont `winediff.sh`) **hangerait**. Donc `WinHelp`
+  n'entre **pas** dans le corpus winediff ; son shim est vérifié par **mesure directe hors-harnais** (Wine → fichier, pas
+  pipe, + cleanup du child), bit-identique. Sound : ARET ne simule jamais qu'une aide a été affichée.
+- **stdcall_pops** : +`WaitForInputIdle@8`, +`WinHelpA@16`, +`WinHelpW@16`.
+- **Portes** : winediff **136→137** (`win32_misc_tail` ok ; seul rouge = `gdi_uifont`, environnemental), hash transpile
+  `19acad982194bf07` **inchangé**, `table_is_sorted_by_name` ok, régression unifiée **PASS**.
+- **⇒ Non-display du plateau = épuisé.** Reste de la famille « divers » = **rendu texte GDI** : `TabbedTextOutA`/
+  `GetTabbedTextExtentA` (extent mesuré : no-tab = extent texte simple ; tab expanse au tab-stop, ex. `(75,17)`),
+  `GrayStringA` — sous-famille **FreeType** (gate `-DARET_HAVE_FREETYPE`, DIB-hash vs Wine), prochain incrément ciblé.
+
 <!-- NOUVELLES ENTRÉES ICI (garder l'ordre chronologique, plus récent en bas) -->
