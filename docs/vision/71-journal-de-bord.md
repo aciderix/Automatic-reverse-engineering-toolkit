@@ -3637,4 +3637,24 @@ Détail : **70 §6** (roadmap). Résumé :
   **inchangé**, `table_is_sorted_by_name` ok, régression unifiée **PASS**. **Reste de la vague** : `VerInstallFileA`
   (install-file, complexe) et le cluster **GUI profond** (palette/capture/clip/scroll — converge avec le step 3).
 
+### 2026-07-19 — [HLE-WIN32][GUI] Cluster GUI profond (1/n) : **capture souris** + **barres de défilement** (état pur)
+- Première coupe du cluster « GUI profond » de la re-mesure (5-7 binaires chacun). Choisi les APIs d'**état
+  window-manager sans implication de dessin** (les APIs à correction-dessin — ROP2/clip/palette — attendront un vrai
+  binaire GUI, step 3). État pur → déterministe, entièrement vérifiable vs Wine.
+- **Capture** (`SetCapture`/`GetCapture`/`ReleaseCapture`) : une fenêtre détient la capture (global `g_u32_capture`).
+  SetCapture rend le précédent, GetCapture le courant, ReleaseCapture clear (TRUE). Mesuré : `prev=0 cur=h rel=1 after=0`.
+- **Scroll** (`Set/GetScrollRange`, `Set/GetScrollPos`, `Set/GetScrollInfo`) : état `{min,max,page,pos}` **par-fenêtre,
+  par-barre** (SB_HORZ/VERT/CTL, ajouté à `g_u32_win`). `SetScrollPos` clampe à `[min,max]` et rend le pos précédent ;
+  `SetScrollRange` re-clampe le pos ; `SetScrollInfo` applique fMask et clampe le pos à **`[nMin, nMax-nPage+1]`** avec une
+  page (mesuré : 95→**81** pour min0/max100/page20) ; `nTrackPos`=pos courant (pas de drag headless). SCROLLINFO offsets
+  mesurés (nMin@8/nMax@12/nPage@16/nPos@20/nTrackPos@24).
+- **stdcall_pops** : +`SetCapture@4`, `Set/GetScrollRange@20/16`, `Set/GetScrollPos@16/8`, `Set/GetScrollInfo@16/12`
+  (`Get/ReleaseCapture`=@0). Piège : la création de fenêtre remet à zéro le nouveau champ `scroll` (slot réutilisé).
+- **Fixture** `winecorpus/win32_capture_scroll.c` (display, comme les autres GUI) → **bit-identique Wine** (capture
+  round-trip + range/pos/clamp + SCROLLINFO page-clamp 95→81).
+- **Portes** : winediff **142→143** (fixtures ; seul rouge = `gdi_uifont` env), hash transpile `19acad982194bf07`
+  **inchangé**, `table_is_sorted_by_name` ok, régression unifiée **PASS**. **Reste du cluster GUI** : palette (32bpp =
+  no-op sound), clip (`IntersectClipRect`/`RectVisible` — correction-dessin), `SetROP2`/`SetStretchBltMode` (correction-
+  dessin, à gater), `WindowFromPoint`, `CreateDIBitmap`/`CreateRectRgn` — au fil du step 3 (vrai binaire GUI).
+
 <!-- NOUVELLES ENTRÉES ICI (garder l'ordre chronologique, plus récent en bas) -->

@@ -2380,6 +2380,7 @@ static struct {
     int check_state;         /* dialog button check state (BM_GETCHECK/CheckDlgButton) */
     int extra_len;           /* cbWndExtra bytes (from the class) */
     uint8_t extra[64];       /* cbWndExtra storage: SetWindowLong at offset >=0 (control state ptr) */
+    struct { int min, max, page, pos; } scroll[3];  /* SB_HORZ=0 / SB_VERT=1 / SB_CTL=2 */
 #ifdef ARET_HAVE_SDL
     void *sdl_win, *sdl_ren, *sdl_tex;  /* SDL window/renderer/streaming texture */
     uint32_t client_bmp;     /* HBITMAP of the client-area framebuffer (GDI draws here) */
@@ -2520,6 +2521,7 @@ static uint32_t u32_window_create(uint32_t wndproc, uint32_t exstyle, uint32_t s
     for (int i = 0; i < U32_MAX_WIN; i++) {
         if (!g_u32_win[i].used) {
             g_u32_win[i].used = 1;
+            memset(g_u32_win[i].scroll, 0, sizeof g_u32_win[i].scroll);   /* fresh scroll state */
             g_u32_win[i].wndproc = wndproc;
             g_u32_win[i].parent = parent;
             g_u32_win[i].exstyle = exstyle;
@@ -3149,6 +3151,77 @@ uint32_t aret_EnableWindow(uint32_t esp) {
 uint32_t aret_GetParent(uint32_t esp) {
     int i = u32_win_idx(WU(0));
     return i < 0 ? 0 : g_u32_win[i].parent;
+}
+
+/* ---- Mouse capture (window-manager state) --------------------------------
+ * A single window holds the capture. SetCapture returns the previous holder (0 if
+ * none); GetCapture returns the current; ReleaseCapture clears it (TRUE). Measured vs
+ * Wine. Headless there is no real mouse, but the state round-trips exactly. */
+static uint32_t g_u32_capture = 0;
+uint32_t aret_SetCapture(uint32_t esp) { uint32_t p = g_u32_capture; g_u32_capture = WU(0); return p; }
+uint32_t aret_GetCapture(uint32_t esp) { (void)esp; return g_u32_capture; }
+uint32_t aret_ReleaseCapture(uint32_t esp) { (void)esp; g_u32_capture = 0; return 1; }
+
+/* ---- Scroll bars (per-window, per-bar state) -----------------------------
+ * Each window keeps {min,max,page,pos} for SB_HORZ(0)/SB_VERT(1)/SB_CTL(2). SetScrollPos
+ * clamps pos to [min,max] and returns the previous pos; SetScrollRange clamps pos into
+ * the new range; SetScrollInfo applies the fMask fields and clamps pos to [min, max -
+ * (page>0 ? page-1 : 0)] (measured vs Wine: max valid pos = nMax-nPage+1 with a page).
+ * nTrackPos = the current pos (no live drag headless). Deterministic round-trip. */
+static int u32_sb_idx(uint32_t bar) { return bar <= 2 ? (int)bar : -1; }
+static void u32_sb_clamp(int i, int b, int with_page) {
+    int lo = g_u32_win[i].scroll[b].min;
+    int hi = g_u32_win[i].scroll[b].max - (with_page && g_u32_win[i].scroll[b].page > 0 ? g_u32_win[i].scroll[b].page - 1 : 0);
+    if (hi < lo) hi = lo;
+    if (g_u32_win[i].scroll[b].pos < lo) g_u32_win[i].scroll[b].pos = lo;
+    if (g_u32_win[i].scroll[b].pos > hi) g_u32_win[i].scroll[b].pos = hi;
+}
+uint32_t aret_SetScrollRange(uint32_t esp) {
+    int i = u32_win_idx(WU(0)), b = u32_sb_idx(WU(1)); if (i < 0 || b < 0) return 0;
+    g_u32_win[i].scroll[b].min = (int)WU(2); g_u32_win[i].scroll[b].max = (int)WU(3);
+    u32_sb_clamp(i, b, 0);
+    return 1;
+}
+uint32_t aret_GetScrollRange(uint32_t esp) {
+    int i = u32_win_idx(WU(0)), b = u32_sb_idx(WU(1));
+    int *pmn = (int *)WP(2), *pmx = (int *)WP(3);
+    if (i < 0 || b < 0) { if (pmn) *pmn = 0; if (pmx) *pmx = 0; return 0; }
+    if (pmn) *pmn = g_u32_win[i].scroll[b].min;
+    if (pmx) *pmx = g_u32_win[i].scroll[b].max;
+    return 1;
+}
+uint32_t aret_SetScrollPos(uint32_t esp) {
+    int i = u32_win_idx(WU(0)), b = u32_sb_idx(WU(1)); if (i < 0 || b < 0) return 0;
+    int prev = g_u32_win[i].scroll[b].pos;
+    g_u32_win[i].scroll[b].pos = (int)WU(2);
+    u32_sb_clamp(i, b, 0);
+    return (uint32_t)prev;
+}
+uint32_t aret_GetScrollPos(uint32_t esp) {
+    int i = u32_win_idx(WU(0)), b = u32_sb_idx(WU(1));
+    return (i < 0 || b < 0) ? 0 : (uint32_t)g_u32_win[i].scroll[b].pos;
+}
+/* SCROLLINFO: cbSize@0, fMask@4, nMin@8, nMax@12, nPage@16, nPos@20, nTrackPos@24. */
+uint32_t aret_SetScrollInfo(uint32_t esp) {
+    int i = u32_win_idx(WU(0)), b = u32_sb_idx(WU(1)); if (i < 0 || b < 0) return 0;
+    const uint8_t *si = (const uint8_t *)WP(2); if (!si) return 0;
+    uint32_t mask = *(const uint32_t *)(si + 4);
+    if (mask & 0x1u /*SIF_RANGE*/) { g_u32_win[i].scroll[b].min = *(const int *)(si + 8); g_u32_win[i].scroll[b].max = *(const int *)(si + 12); }
+    if (mask & 0x2u /*SIF_PAGE*/)  g_u32_win[i].scroll[b].page = *(const int *)(si + 16);
+    if (mask & 0x4u /*SIF_POS*/)   g_u32_win[i].scroll[b].pos = *(const int *)(si + 20);
+    u32_sb_clamp(i, b, 1);
+    return (uint32_t)g_u32_win[i].scroll[b].pos;
+}
+uint32_t aret_GetScrollInfo(uint32_t esp) {
+    int i = u32_win_idx(WU(0)), b = u32_sb_idx(WU(1));
+    uint8_t *si = (uint8_t *)WP(2); if (!si) return 0;
+    uint32_t mask = *(const uint32_t *)(si + 4);
+    if (i < 0 || b < 0) return 0;
+    if (mask & 0x1u) { *(int *)(si + 8) = g_u32_win[i].scroll[b].min; *(int *)(si + 12) = g_u32_win[i].scroll[b].max; }
+    if (mask & 0x2u) *(int *)(si + 16) = g_u32_win[i].scroll[b].page;
+    if (mask & 0x4u) *(int *)(si + 20) = g_u32_win[i].scroll[b].pos;
+    if (mask & 0x10u /*SIF_TRACKPOS*/) *(int *)(si + 24) = g_u32_win[i].scroll[b].pos;
+    return 1;
 }
 /* GetWindow(hwnd, cmd) -> HWND: navigate the window hierarchy. Children/siblings share
  * a parent and are ordered by creation (the g_u32_win index), which matches Wine's

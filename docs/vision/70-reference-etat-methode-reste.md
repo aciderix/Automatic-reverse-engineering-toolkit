@@ -170,7 +170,7 @@ bash bench/regression.sh    # PORTE unifiée : difftest 271/271, in-place 3/3,
                             # recompilabilité gzip/ls/cat 100%
 bash bench/difftest.sh              # décompile O0→O3
 bash bench/difftest_transpile.sh    # transpile (hash 19acad982194bf07)
-bash bench/winediff.sh              # axe 2 vs Wine (142/142 ; gdi_uifont peut être rouge = env fontconfig i386)
+bash bench/winediff.sh              # axe 2 vs Wine (143/143 ; gdi_uifont peut être rouge = env fontconfig i386)
 bash bench/funcdiff.sh              # lift-closure + opt-diff vs Unicorn (0 div)
 # Sweeps de vrais binaires (téléchargent + comparent à Wine) :
 bash bench/sqlite_sweep.sh   bash bench/busybox_sweep.sh   bash bench/corpus_sweep.sh
@@ -190,7 +190,7 @@ bash bench/wallsweep.sh <dir1> [dir2…]  # AGRÈGE --mode walls sur un corpus :
 
 ### État régression (référence — doit rester vert)
 difftest **272/272** · transpile-diff **4/4** (H=`19acad982194bf07`) · winediff
-**142/142** (le seul rouge possible = `gdi_uifont`, **environnemental** : fontconfig i386, orthogonal au code) · cpudiff vert (per-instruction + séquences génératives) · funcdiff corpus **0 divergence** (lift **~20,6k** scorées /
+**143/143** (le seul rouge possible = `gdi_uifont`, **environnemental** : fontconfig i386, orthogonal au code) · cpudiff vert (per-instruction + séquences génératives) · funcdiff corpus **0 divergence** (lift **~20,6k** scorées /
 **~20k appels** — **imports (stubs `@N` + `@0` scalaires) + appels indirects résolus + intrinsèques mémoire host-backés (memmove/memcpy)** ; scratch sous-esp exclu ; opt ~10k scorées) · SMT **11/11** · in-place **3/3** · magicdiv **2³²** ·
 recompilabilité **100 %** · WASM **7/7**.
 
@@ -725,8 +725,11 @@ résidu qui abort restera l'**obfusqué/fait-main/VM-packé** (indécidable, §9
      Traité (2026-07-19) : ✅ **DDE-param** (`Pack/Unpack/FreeDDElParam`) + ✅ **Ole init** (`OleInitialize/Uninitialize`),
      `win32_dde_ole.c` ; ✅ **Registry en mémoire** (create/open/set/query/enum/delete round-trip bit-identique Wine,
      `win32_registry.c`, la tête à 17 binaires) ; ✅ **misc k32/u32** (`IsDBCSLeadByte`/`wvsprintfA/W`/`OpenFile`/
-     `GetLogicalDrives`, `win32_misc_k32.c`). **Reste de la vague** : `VerInstallFileA` (complexe), puis le cluster **GUI
-     profond** (palette/capture/clip/scroll — converge avec le step 3). `CoCreateInstance` = dur (vrais objets COM) → plus tard.
+     `GetLogicalDrives`, `win32_misc_k32.c`) ; 🚧 **cluster GUI profond ENGAGÉ** : ✅ **capture + scroll** (état pur,
+     `win32_capture_scroll.c`, bit-identique Wine) ; **reste du cluster** : clip (`IntersectClipRect`/`RectVisible`),
+     `SetROP2`/`SetStretchBltMode` (correction-dessin → à gater), palette (32bpp=no-op sound), `WindowFromPoint`,
+     `CreateDIBitmap`/`CreateRectRgn` — **converge avec le step 3** (vrai binaire GUI). `VerInstallFileA` (complexe) +
+     `CoCreateInstance` (vrais objets COM) → plus tard.
   3. **Un vrai binaire GUI du corpus utilisant comctl32** — prouve la machinerie contrôles sur du réel shippé ; tire les
      contrôles manquants (trackbar/toolbar/listview) dans l'ordre **mesuré** ; converge avec le cluster GUI profond (2bis).
   4. **MFC / VB40032** (le gros multiplicateur) — **gated sur l'EH C++** (`__CxxFrameHandler`, Levier 2, qu'on n'a pas) ;
