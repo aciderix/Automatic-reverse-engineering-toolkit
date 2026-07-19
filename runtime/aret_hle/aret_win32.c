@@ -3642,8 +3642,11 @@ static const uint8_t *u32_dt_align(const uint8_t *base, const uint8_t *p) {
     size_t off = (size_t)(p - base);
     return base + ((off + 3) & ~(size_t)3);
 }
-/* Allocate a child-control window (system control: wndproc 0, text stored). */
-static uint32_t u32_new_control(uint32_t parent, int ctrl_id, uint32_t style, const char *title) {
+/* Allocate a child-control window (system control: wndproc 0, text stored). Geometry
+ * (x,y,w,h) is parent-relative pixels (already converted from dialog units); cls is the
+ * control's window class ("Button"/"Edit"/"Static"/… — drives the built-in paint proc). */
+static uint32_t u32_new_control(uint32_t parent, int ctrl_id, uint32_t style, const char *title,
+                                int x, int y, int w, int h, const char *cls) {
     for (int i = 0; i < U32_MAX_WIN; i++) {
         if (!g_u32_win[i].used) {
             memset(&g_u32_win[i], 0, sizeof g_u32_win[i]);
@@ -3653,6 +3656,9 @@ static uint32_t u32_new_control(uint32_t parent, int ctrl_id, uint32_t style, co
             g_u32_win[i].enabled = (style & 0x08000000u) ? 0 : 1;  /* WS_DISABLED */
             g_u32_win[i].visible = (style & 0x10000000u) ? 1 : 0;  /* WS_VISIBLE */
             g_u32_win[i].ctrl_id = ctrl_id;
+            g_u32_win[i].x = x; g_u32_win[i].y = y; g_u32_win[i].w = w; g_u32_win[i].h = h;
+            if (cls) { size_t n = strnlen(cls, sizeof g_u32_win[i].classname - 1);
+                       memcpy(g_u32_win[i].classname, cls, n); g_u32_win[i].classname[n] = 0; }
             int k = 0; if (title) for (; title[k] && k < 255; k++) g_u32_win[i].title[k] = title[k];
             g_u32_win[i].title[k] = 0;
             return (uint32_t)(i + 1);
@@ -3663,20 +3669,23 @@ static uint32_t u32_new_control(uint32_t parent, int ctrl_id, uint32_t style, co
 /* Compute+store a dialog's base units from its font (defined after the FreeType
  * helpers). */
 static void u32_dlg_base_units(int wi, int has_font, int point_size, int weight, int italic, const char *face);
+static int gdi_muldiv(long long a, long long b, long long c);   /* fwd: GDI round-to-nearest MulDiv */
 /* Parse a DLGTEMPLATE(EX) -> create the dialog window (wndproc = dlgproc) and its
  * child controls. Returns the dialog HWND (0 on failure). Handles both templates. */
 static uint32_t u32_dialog_create(const uint8_t *tpl, uint32_t dlgproc, uint32_t parent) {
     const uint8_t *p = tpl;
     int ex = 0;
-    uint32_t style; uint16_t cdit;
+    uint32_t style; uint16_t cdit; int16_t d_cx, d_cy;
     if (*(const uint16_t *)p == 1 && *(const uint16_t *)(p + 2) == 0xFFFF) {  /* DLGTEMPLATEEX */
         ex = 1;
         style = *(const uint32_t *)(p + 12);            /* after dlgVer,sig,helpID,exStyle */
         cdit  = *(const uint16_t *)(p + 16);
+        d_cx  = *(const int16_t *)(p + 22); d_cy = *(const int16_t *)(p + 24);
         p += 26;                                        /* +cDlgItems(2)+x,y,cx,cy(8) -> menu */
     } else {                                            /* classic DLGTEMPLATE */
         style = *(const uint32_t *)p;
         cdit  = *(const uint16_t *)(p + 8);             /* style(4)+exStyle(4) -> cdit */
+        d_cx  = *(const int16_t *)(p + 14); d_cy = *(const int16_t *)(p + 16);
         p += 18;                                        /* +cdit(2)+x,y,cx,cy(8) -> menu */
     }
     char dtitle[256];
@@ -3693,23 +3702,47 @@ static uint32_t u32_dialog_create(const uint8_t *tpl, uint32_t dlgproc, uint32_t
     }
     uint32_t hDlg = u32_window_create(dlgproc, 0, style, 0, 0, 0, 0, parent, dtitle, 0);
     if (!hDlg) return 0;
-    u32_dlg_base_units((int)hDlg - 1, has_font, f_pt, f_weight, f_ital, f_face);
+    int hi = (int)hDlg - 1;
+    u32_dlg_base_units(hi, has_font, f_pt, f_weight, f_ital, f_face);
+    int bx = g_u32_win[hi].du_x, by = g_u32_win[hi].du_y;    /* pixels per dialog unit */
+    /* Dialog client size in pixels (dialog units -> pixels via base units). */
+    if (bx > 0) g_u32_win[hi].w = gdi_muldiv(d_cx, bx, 4);
+    if (by > 0) g_u32_win[hi].h = gdi_muldiv(d_cy, by, 8);
     for (int c = 0; c < cdit; c++) {
         p = u32_dt_align(tpl, p);
         uint32_t cstyle, cid;
+        int16_t ix, iy, icx, icy;
         if (ex) {
             cstyle = *(const uint32_t *)(p + 8);        /* helpID(4)+exStyle(4) -> style */
+            ix = *(const int16_t *)(p + 12); iy = *(const int16_t *)(p + 14);
+            icx = *(const int16_t *)(p + 16); icy = *(const int16_t *)(p + 18);
             p += 20; cid = *(const uint32_t *)p; p += 4; /* +x,y,cx,cy(8) -> id(DWORD) */
         } else {
             cstyle = *(const uint32_t *)p;
+            ix = *(const int16_t *)(p + 8); iy = *(const int16_t *)(p + 10);
+            icx = *(const int16_t *)(p + 12); icy = *(const int16_t *)(p + 14);
             p += 16; cid = *(const uint16_t *)p; p += 2; /* +exStyle(4)+x,y,cx,cy(8) -> id(WORD) */
         }
+        /* Control class: predefined atom (0xFFFF + ordinal) or a name string. */
+        char cclass[64]; cclass[0] = 0;
+        if (*(const uint16_t *)p == 0xFFFF) {
+            uint16_t ord = *(const uint16_t *)(p + 2);
+            const char *nm = (ord == 0x80) ? "Button" : (ord == 0x81) ? "Edit" :
+                             (ord == 0x82) ? "Static" : (ord == 0x83) ? "ListBox" :
+                             (ord == 0x84) ? "ScrollBar" : (ord == 0x85) ? "ComboBox" : NULL;
+            if (nm) { size_t L = strlen(nm); memcpy(cclass, nm, L); cclass[L] = 0; }
+            p += 4;
+        } else {
+            p = u32_dt_szord(p, cclass, sizeof cclass);  /* class name string */
+        }
         char ctitle[256];
-        p = u32_dt_szord(p, NULL, 0);                   /* control class (atom or name) */
         p = u32_dt_szord(p, ctitle, sizeof ctitle);     /* control caption */
         uint16_t extra = *(const uint16_t *)p; p += 2;  /* creation-data byte count */
         p += extra;
-        u32_new_control(hDlg, (int)cid, cstyle, ctitle);
+        /* Dialog units -> parent-relative pixels via the dialog's base units. */
+        int px = bx > 0 ? gdi_muldiv(ix, bx, 4) : 0, py = by > 0 ? gdi_muldiv(iy, by, 8) : 0;
+        int pw = bx > 0 ? gdi_muldiv(icx, bx, 4) : 0, ph = by > 0 ? gdi_muldiv(icy, by, 8) : 0;
+        u32_new_control(hDlg, (int)cid, cstyle, ctitle, px, py, pw, ph, cclass);
     }
     return hDlg;
 }
@@ -5263,6 +5296,11 @@ static FT_Face ft_get_face(const char *path) {
 #endif /* ARET_HAVE_FREETYPE */
 
 #ifdef ARET_HAVE_FREETYPE
+/* When set, u32_dc_font returns NULL *quietly* on an unresolvable/unmodelled font
+ * instead of aborting — used by best-effort callers (dialog base units) where a
+ * missing font just leaves the metric unavailable rather than being a hard error. */
+static int g_dc_font_quiet;
+static FT_Face u32_dc_font_fail(const char *msg) { if (!g_dc_font_quiet) aret_unimpl(msg); return NULL; }
 /* Resolve the DC's selected font to an FT_Face sized to its LOGFONT, plus Wine's
  * tmAscent/tmDescent (from OS/2 usWinAscent/usWinDescent scaled). Returns the face
  * (NULL ⇒ a sound abort, `aret_unimpl` already called). Shared by TextOut and the
@@ -5276,22 +5314,22 @@ static FT_Face u32_dc_font(int d, int *ascent, int *descent) {
     int italic = (fi >= 0) ? g_gdi[fi].lf_italic : 0;
     const char *face = (fi >= 0) ? g_gdi[fi].lf_face : "";
     int bold = weight >= 700;   /* FW_BOLD; fontconfig picks the bold/italic face */
-    if (!face[0]) { aret_unimpl("GDI text: stock font (no face name) pending"); return NULL; }
-    if (!ft_ensure()) { aret_unimpl("GDI text: FreeType/fontconfig init failed"); return NULL; }
+    if (!face[0]) return u32_dc_font_fail("GDI text: stock font (no face name) pending");
+    if (!ft_ensure()) return u32_dc_font_fail("GDI text: FreeType/fontconfig init failed");
     char path[256];
-    if (!ft_resolve_face(face, bold, italic ? 1 : 0, path, sizeof path)) { aret_unimpl("GDI text: face not resolvable by fontconfig"); return NULL; }
+    if (!ft_resolve_face(face, bold, italic ? 1 : 0, path, sizeof path)) return u32_dc_font_fail("GDI text: face not resolvable by fontconfig");
     FT_Face ftf = ft_get_face(path);
-    if (!ftf) { aret_unimpl("GDI text: font file load failed"); return NULL; }
+    if (!ftf) return u32_dc_font_fail("GDI text: font file load failed");
     /* Real bold/italic faces render bit-exactly. When no real face exists, Wine
      * *synthesizes* the style (embolden / oblique shear with a specific matrix);
      * replicating that exactly is a follow-up, so abort soundly rather than render
      * an upright/unemboldened glyph (which would be silently wrong). */
     if (bold && !(ftf->style_flags & FT_STYLE_FLAG_BOLD))
-        { aret_unimpl("GDI text: synthesized bold (no real bold face) pending"); return NULL; }
+        return u32_dc_font_fail("GDI text: synthesized bold (no real bold face) pending");
     if (italic && !(ftf->style_flags & FT_STYLE_FLAG_ITALIC))
-        { aret_unimpl("GDI text: synthesized italic (no real italic face) pending"); return NULL; }
+        return u32_dc_font_fail("GDI text: synthesized italic (no real italic face) pending");
     TT_OS2 *os2 = (TT_OS2 *)FT_Get_Sfnt_Table(ftf, FT_SFNT_OS2);
-    if (!os2 || os2->version == 0xFFFF) { aret_unimpl("GDI text: font has no OS/2 table (metrics undefined)"); return NULL; }
+    if (!os2 || os2->version == 0xFFFF) return u32_dc_font_fail("GDI text: font has no OS/2 table (metrics undefined)");
     /* ppem from LOGFONT height: negative = em/character height (ppem = |height|);
      * positive = cell height → Wine maps ppem = round(height·upm/(winAsc+winDesc))
      * so the resulting tmHeight equals the requested cell height (measured: for
@@ -5304,7 +5342,7 @@ static FT_Face u32_dc_font(int d, int *ascent, int *descent) {
         ppem = cell ? (height * upm + cell / 2) / cell : height;
     } else ppem = 16;
     if (ppem <= 0) ppem = 1;
-    if (FT_Set_Pixel_Sizes(ftf, 0, (FT_UInt)ppem) != 0) { aret_unimpl("GDI text: set pixel size failed"); return NULL; }
+    if (FT_Set_Pixel_Sizes(ftf, 0, (FT_UInt)ppem) != 0) return u32_dc_font_fail("GDI text: set pixel size failed");
     FT_Fixed ys = ftf->size->metrics.y_scale;
     if (ascent)  *ascent  = (int)((FT_MulFix(os2->usWinAscent,  ys) + 32) >> 6);
     if (descent) *descent = (int)((FT_MulFix(os2->usWinDescent, ys) + 32) >> 6);
@@ -6747,7 +6785,9 @@ static void u32_dlg_base_units(int wi, int has_font, int point_size, int weight,
     u32_dc_defaults(d);
     g_gdi[d].sel_font = hf;
     int asc, desc;
+    g_dc_font_quiet = 1;                 /* best-effort: unresolved font -> no units, not abort */
     FT_Face f = u32_dc_font(d, &asc, &desc);
+    g_dc_font_quiet = 0;
     if (f) {
         uint32_t alpha[52]; int k = 0;
         for (int c = 'A'; c <= 'Z'; c++) alpha[k++] = (uint32_t)c;

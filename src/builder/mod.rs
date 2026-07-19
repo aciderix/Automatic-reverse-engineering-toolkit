@@ -1280,8 +1280,15 @@ pub fn transpile(
             // paint their captions internally even if it never calls DrawText directly.
             | "CreateFontA" | "CreateFontW" | "CreateFontIndirectA" | "CreateFontIndirectW"
             // A dialog maps dialog-units to pixels via its font's metrics (base units,
-            // Wine's GdiGetCharDimensions) — needs FreeType to measure that font.
-            | "MapDialogRect"))
+            // Wine's GdiGetCharDimensions) — needs FreeType to measure that font. This
+            // covers both MapDialogRect and the dialog creators (a DS_SETFONT dialog
+            // places its controls via those base units); base-unit computation is
+            // best-effort (an unresolved font just leaves geometry unscaled, no abort).
+            | "MapDialogRect"
+            | "DialogBoxParamA" | "DialogBoxParamW"
+            | "DialogBoxIndirectParamA" | "DialogBoxIndirectParamW"
+            | "CreateDialogParamA" | "CreateDialogParamW"
+            | "CreateDialogIndirectParamA" | "CreateDialogIndirectParamW"))
     {
         freetype_flags()
     } else {

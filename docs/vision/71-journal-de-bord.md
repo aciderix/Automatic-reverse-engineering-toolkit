@@ -3779,4 +3779,28 @@ Détail : **70 §6** (roadmap). Résumé :
   suite = parser x/y/cx/cy + classname des contrôles dans le template → placer/dimensionner chaque enfant via ces base-units →
   composer leur peinture dans le framebuffer du dialogue → dialogue FishTank visible.
 
+### 2026-07-19 — [HLE-WIN32][GUI] **Géométrie des contrôles de dialogue** (x/y/cx/cy → pixels + classname), bit-exact vs Wine
+- **Incrément 2 vers « dialogue visible »** (sur la fondation base-units) : `u32_dialog_create` parsait les contrôles mais
+  **jetait leur géométrie et leur classe** (tous à 0,0,0,0, classname vide). Désormais il extrait `x,y,cx,cy` (unités de
+  dialogue) + la **classe** (atome prédéfini `0xFFFF`+ordinal → "Button"/"Edit"/"Static"/"ListBox"/"ScrollBar"/"ComboBox", ou
+  nom-chaîne) de chaque contrôle, **et** la taille client du dialogue lui-même. Conversion unités→pixels via les base-units du
+  dialogue (`gdi_muldiv` = MulDiv arrondi GDI). `u32_new_control` élargi (x,y,w,h + classname stockés). La classe pilotera le
+  proc de peinture intégré (`u32_control_proc` : BUTTON peint déjà).
+- **Base-units en best-effort** : la peinture de texte abortait dur (`u32_dc_font`) si une police ne résolvait pas — correct
+  pour `TextOut`, mais un dialogue **display-free qui ne lit jamais sa géométrie** ne doit pas en dépendre. Ajout d'un flag
+  `g_dc_font_quiet` : le calcul des base-units tolère une police non résolue (géométrie non mise à l'échelle, **pas d'abort**).
+  Builder : les **créateurs de dialogue** (`DialogBoxParam`/`CreateDialogParam`/…Indirect…) ajoutés au gate FreeType (un
+  dialogue DS_SETFONT place ses contrôles via ces métriques).
+- **Vérif bit-exacte independent-du-WM** : lire chaque contrôle **relatif au client du dialogue** — `GetWindowRect` puis
+  `MapWindowPoints(NULL, hDlg, …)` (ARET modélise l'origine client = position fenêtre ; Wine soustrait son cadre non-client) →
+  la position écran du dialogue **s'annule** des deux côtés → comparaison bit-exacte indépendante du window manager.
+- **Fixture** `winecorpus/user32_dlgcontrols.c` (dialogue DejaVu Sans, BUTTON + EDIT à positions DLU connues, template
+  construit octet-par-octet avec alignement DWORD) → **bit-identique Wine** : `dlg client w=350 h=195`, `ctl 100 Button
+  x=18 y=33 w=88 h=23`, `ctl 101 Edit x=18 y=65 w=105 h=20`.
+- **Portes** : winediff **149→150 fixtures** (les 4 fixtures dialogue vertes ; seul rouge = `gdi_uifont` env), hash transpile
+  `19acad982194bf07` **inchangé** (le refactor `u32_dc_font` est comportement-identique quand `g_dc_font_quiet=0`),
+  `table_is_sorted_by_name` ok. **⇒ Géométrie + classes des contrôles prêtes.** Suite (incrément 3) : composer la peinture de
+  chaque enfant (BUTTON fait ; +STATIC/EDIT) dans le framebuffer du dialogue à son offset → DIB-hash structurel → puis fenêtre
+  SDL dimensionnée → dialogue FishTank visible (oracle Xvfb).
+
 <!-- NOUVELLES ENTRÉES ICI (garder l'ordre chronologique, plus récent en bas) -->

@@ -170,7 +170,7 @@ bash bench/regression.sh    # PORTE unifiée : difftest 271/271, in-place 3/3,
                             # recompilabilité gzip/ls/cat 100%
 bash bench/difftest.sh              # décompile O0→O3
 bash bench/difftest_transpile.sh    # transpile (hash 19acad982194bf07)
-bash bench/winediff.sh              # axe 2 vs Wine (149/149 ; gdi_uifont peut être rouge = env fontconfig i386)
+bash bench/winediff.sh              # axe 2 vs Wine (150/150 ; gdi_uifont peut être rouge = env fontconfig i386)
 bash bench/funcdiff.sh              # lift-closure + opt-diff vs Unicorn (0 div)
 # Sweeps de vrais binaires (téléchargent + comparent à Wine) :
 bash bench/sqlite_sweep.sh   bash bench/busybox_sweep.sh   bash bench/corpus_sweep.sh
@@ -190,7 +190,7 @@ bash bench/wallsweep.sh <dir1> [dir2…]  # AGRÈGE --mode walls sur un corpus :
 
 ### État régression (référence — doit rester vert)
 difftest **272/272** · transpile-diff **4/4** (H=`19acad982194bf07`) · winediff
-**149/149** (le seul rouge possible = `gdi_uifont`, **environnemental** : fontconfig i386, orthogonal au code) · cpudiff vert (per-instruction + séquences génératives) · funcdiff corpus **0 divergence** (lift **~20,6k** scorées /
+**150/150** (le seul rouge possible = `gdi_uifont`, **environnemental** : fontconfig i386, orthogonal au code) · cpudiff vert (per-instruction + séquences génératives) · funcdiff corpus **0 divergence** (lift **~20,6k** scorées /
 **~20k appels** — **imports (stubs `@N` + `@0` scalaires) + appels indirects résolus + intrinsèques mémoire host-backés (memmove/memcpy)** ; scratch sous-esp exclu ; opt ~10k scorées) · SMT **11/11** · in-place **3/3** · magicdiv **2³²** ·
 recompilabilité **100 %** · WASM **7/7**.
 
@@ -459,8 +459,12 @@ recompilabilité **100 %** · WASM **7/7**.
   calculées façon Wine** (`GdiGetCharDimensions` réimplémenté en autonome : `du_x=(extent(alphabet 52)/26+1)/2`, `du_y=tmHeight`,
   police du template `lfHeight=-MulDiv(pt,96,72)`), sur nos métriques FreeType existantes → **bit-exact vs Wine** (son propre
   trace imprime `units = 7,13` = les nôtres ; même caveat unique que gdi_uifont). Sans FreeType ⇒ abort sound. Gardé
-  `winecorpus/user32_dlgunits.c` (DejaVu Sans, `base 7 13`/`rect 4 5 280 163`). **Reste** : géométrie x/y/cx/cy + classname des
-  contrôles → placement → compositing dans le framebuffer du dialogue → dialogue FishTank visible.
+  `winecorpus/user32_dlgunits.c` (DejaVu Sans, `base 7 13`/`rect 4 5 280 163`). **Géométrie + classes des contrôles**
+  (2026-07-19) : `u32_dialog_create` extrait désormais `x/y/cx/cy` (→ pixels via base-units) + la **classe** de chaque contrôle
+  (atome prédéfini ou nom) + la taille client du dialogue ; base-units en **best-effort** (`g_dc_font_quiet` : police non
+  résolue ⇒ pas d'abort). Vérifié bit-exact **relatif au client** (`GetWindowRect`+`MapWindowPoints(NULL,hDlg)` annule le
+  placement WM), `winecorpus/user32_dlgcontrols.c` (Button `18,33,88,23` / Edit `18,65,105,20`, client `350×195`).
+  **Reste** : compositing de la peinture des enfants (BUTTON fait ; +STATIC/EDIT) → fenêtre SDL dimensionnée → FishTank visible.
 - **GDI de base** (M7 G6, doc 72) : table d'objets GDI (DC/bitmap/brush/pen/font, handles opaques) + **dessin
   DIB mémoire bit-exact** — `CreateDIBSection`(32bpp)/`CreateCompatibleDC`/`SelectObject`/`DeleteObject`,
   `SetPixel`/`GetPixel`/`FillRect`/`PatBlt`/`BitBlt`(SRCCOPY), `CreateSolidBrush`/`Pen`, `GetStockObject`/
