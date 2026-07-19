@@ -13,7 +13,7 @@
 | **71-journal-de-bord** | **Journal structuré & cherchable** : fiches par sous-système + entrées datées, détail technique complet de chaque fix | Pour **retrouver une info précise** (grep par tag/sous-système) |
 | **50-plan-execution** | **Archive** : journal chronologique append-only historique (3500 l.) | Uniquement pour le récit détaillé d'un vieux fix non encore migré en 71 |
 | **00 / 01 / 30** | **Vision stratégique** : roadmap UBT, design, intégration briques (Wine/DXVK/LLVM) | Résumé intégré ici §6 ; ouvrir pour la vision d'origine |
-| **80-orientations-architecturales** | **Design des grands chantiers à venir** : fibers (threads), lifting DLL binaire, SEH in-HLE, PGL, SoftFloat — verdicts + conformité au principe sacré | Avant d'engager threads/DLL/SEH/indirects/x87-universel |
+| **80-orientations-architecturales** | **Design des grands chantiers à venir** : fibers (threads), lifting DLL binaire, SEH in-HLE, PGL, SoftFloat, **rétro-cible Windows** (§1.6) — verdicts + conformité au principe sacré | Avant d'engager threads/DLL/SEH/indirects/x87-universel/**rétro-cible-Windows** |
 | **HANDOFF / 40** | Architecture détaillée, pièges, état des lieux | Complément |
 
 **Comment un agent trouve une info** : `grep` le tag de sous-système dans **71**
@@ -918,6 +918,16 @@ binaires 64-bit **et** l'émission d'ELF **ARM** (le backend LLVM est déjà mul
 Rattaché : le contrôle de **débordement de quotient `div`/`idiv` 64-bit** (chemin
 software `-m32` aujourd'hui non vérifié — noté en commentaire dans `emit`). *Gros
 chantier* ; le socle 32-bit (axe 1 blindé) est le prérequis prouvé.
+
+### 8.4bis Rétro-cible **Windows moderne** (doc 80 §1.6, orientation enregistrée 2026-07-19)
+Troisième famille de cibles (après ELF et WASM) : **vieux binaire Windows → tourne sur Windows 11**. Deux cas
+disjoints. **Cas 1 (bon marché)** : vieux **32-bit → PE moderne autonome** — backend émet un PE, le HLE *forwarde au vrai
+Win32* pour ce qui existe encore et **embarque** sa réimplé des API **retirées** (`WinHelp`/`.hlp`, vieux DirectDraw…) ;
+bénéfice = **bundling** (zéro « runtime VB6/MFC42 manquant ») + ressusciter les apps cassées par les suppressions d'API.
+**Cas 2 (le grand prix)** : vieux **16-bit NE → PE 64-bit** — seul moyen **natif** de faire tourner du 16-bit sur Windows
+64-bit (NTVDM retiré) ; le **volume** du vieux logiciel est là (Chip CD : majorité NE 16-bit). Nécessite un **nouveau
+frontend lifter** (segmentation, real/protected-mode, Win16, loader NE), jalon dédié, **prérequis lifter partagé avec la
+Phase 8**. Conformité totale (autonomie redéfinie : « zéro dépendance au runtime **supprimé** » ; oracle = vrai Win32).
 
 ### 8.5 Phase 7 / M7 — Couche OS élargie : Winelib / USER32 (vers la GUI)
 Deux voies (cf. doctrine §1, arbitrage indépendance de la preuve) :

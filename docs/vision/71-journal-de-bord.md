@@ -3534,4 +3534,20 @@ Détail : **70 §6** (roadmap). Résumé :
 - **⇒ Plateau Win95 entièrement couvert** (menu, thread, divers, texte tabulé, imprimante). Prochaine vague = re-mesure
   (dès qu'IA revient) OU step 3 (vrai binaire GUI comctl32) / step 4 (MFC/VB + EH C++) — nécessitent un binaire du corpus.
 
+### 2026-07-19 — [STRATÉGIE] Orientation enregistrée : **rétro-cible Windows moderne** (vieux binaire → tourne sur Win11)
+- **Réflexion utilisateur** : ARET fait PE32 → ELF/WASM (autre OS) ; ajouter une **cible PE Windows récent** vaudrait-il le
+  coup ? Verdict d'ingénierie honnête écrit dans **doc 80 §1.6** (+ pointeurs doc 70 §8.4bis / table doc-80 / ligne priorité).
+- **L'archi rend ça presque gratuit pour une moitié, cher pour l'autre** — le **lifter (x86→C) est OS-agnostique** ; seuls le
+  **backend** (émettre un PE, mingw/MSVC compile déjà) et le **HLE** (forwarder au vrai Win32 pour l'existant, embarquer la
+  réimplé des API retirées) changent. Deux cas **disjoints** :
+  - **Cas 1 — vieux 32-bit → PE moderne** : faisabilité HAUTE, utilité MOYENNE (WoW64 les fait déjà tourner ; le gain =
+    **bundling autonome** + ressusciter `WinHelp`/DirectDraw retirés).
+  - **Cas 2 — vieux 16-bit NE → PE 64-bit** : utilité **UNIQUE** (Win64 ne peut PAS exécuter du 16-bit ; le **volume** du
+    vieux logiciel est là — Chip CD majoritairement NE), mais **nouveau frontend lifter** (segmentation/real-mode/Win16/NE),
+    jalon dédié, prérequis partagé avec la Phase 8 (multi-arch).
+- **Conformité totale** : autonomie **redéfinie** (« zéro dépendance au runtime *supprimé* », qu'ARET embarque) ; **bonus
+  oracle** = la cible EST Windows → vrai Win32 = vérité terrain. Décision : documenter maintenant, exécuter plus tard
+  (backend PE = petit incrément prouvant le concept ; frontend 16-bit = grand prix planifié). **Aucun code** dans cette
+  entrée — orientation seulement.
+
 <!-- NOUVELLES ENTRÉES ICI (garder l'ordre chronologique, plus récent en bas) -->

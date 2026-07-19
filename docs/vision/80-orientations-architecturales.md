@@ -119,6 +119,36 @@ Tracer les cibles d'appels indirects (`call eax`, `jmp [edx]`) via Unicorn, gén
   transcendantales.
 - **Statut** : basse priorité, pour l'ère ARM/WASM. Ne pas croire au titre.
 
+### 1.6 Rétro-cible **Windows moderne** (vieux binaire → tourne sur Windows 11) — ✅ compatible, deux cas très distincts
+**Idée (utilisateur, 2026-07-19)** : aujourd'hui ARET fait PE32 → **ELF/WASM** (autre OS). Ajouter une **cible PE Windows
+récent** : prendre un **vieux** binaire Windows et le rendre **fonctionnel sur Windows 11**. L'archi rend ça **presque
+gratuit pour une moitié, très cher pour l'autre** — il faut séparer nettement.
+
+**Ce qui est déjà là (le lifter est OS-agnostique).** `frontend (PE→IR)` → `lifter (x86→C, indépendant de l'OS cible)` →
+`HLE (réimplémente Win32)` → `backend (C→binaire)`. Pour cibler Windows, **deux maillons** seulement changent : (a) le
+**backend émet un PE** (mingw/MSVC compile déjà du C → PE) ; (b) le **HLE** *forwarde vers le vrai Win32* pour toute API qui
+**existe encore** sur Win11 (plus fidèle que l'ému POSIX), et **garde/embarque** sa réimplémentation pour les API
+**supprimées/changées**.
+
+- **Cas 1 — vieux 32-bit → Windows moderne : ⚠️ faisabilité HAUTE, utilité MOYENNE.** La plupart des .exe 32-bit tournent
+  déjà via **WoW64**, donc le gain n'est pas « les faire tourner » mais : **autonomie/bundling** (un seul PE, zéro « VB6
+  runtime / MFC42.dll / MSVCRT manquant » — douleur d'archivage réelle) et **ressusciter les API retirées** (`WinHelp`/`.hlp`
+  absent depuis Vista, vieux DirectDraw, composants dépréciés) qu'ARET réimplémente et embarque. Petit incrément (surtout le
+  backend PE), bénéfice **ciblé** (les apps qui *cassent*).
+- **Cas 2 — vieux 16-bit (NE) → Windows 64-bit : ✅ faisabilité MOYENNE-BASSE, utilité UNIQUE.** Windows 64-bit **ne peut PAS**
+  exécuter du 16-bit (NTVDM retiré) → aujourd'hui il faut un émulateur (winevdm/otvdm). **Le volume de vieux logiciel est
+  LÀ** (mesure Chip CD : ~424 PE dont 49 PE32, **le reste = NE 16-bit**). ARET lifterait le 16-bit → **PE 64-bit natif** —
+  ce que *rien* ne fait nativement. Mais **nouveau frontend lifter** : mémoire **segmentée**, real/protected-mode 16-bit,
+  surface **Win16** (USER/GDI/KERNEL 16), loader **NE**. Chantier **multi-sessions**, du même ordre que le 64-bit (Phase 8).
+- **Conformité** : ✅ **totale**. Le glissement « traduire factuellement » est intact. Nuance sur l'**autonomie** : cibler
+  Windows *dépend* du Win32 de Win11 — mais c'est **le but** (tourner *sur* Windows), donc utiliser ses API est **correct**,
+  pas un compromis. L'autonomie se **redéfinit** : « **zéro dépendance au runtime supprimé** » (sous-système 16-bit, runtime
+  VB6, winhlp32), qu'ARET compile dedans. **Bonus oracle** : la cible EST Windows → le **vrai Win32 = vérité terrain**
+  (winediff devient natif, encore plus fidèle). Non-modélisé ⇒ abort sound, comme toujours.
+- **Statut** : orientation **enregistrée** (non engagée). Ordre de valeur : (1) **backend PE** (cas 1) = petit incrément
+  prouvant le concept + bundling/WinHelp immédiat ; (2) **frontend 16-bit** (cas 2) = **le grand prix**, jalon dédié
+  planifié (comme le 64-bit). Prérequis partagé avec Phase 8 (élargir le lifter au-delà du i386 32-bit).
+
 ---
 
 ## 2. Architecture retenue — threads coopératifs (fibers)
@@ -215,3 +245,8 @@ Le glissement « traduire factuellement » **réduit** le devinement. La conditi
 
 **Priorité** : (1) **fibers** ✅ **COMPLET** (incr. 1-4) → (2) **lifting comctl32** ✅ **DÉMONTRÉ** (contrôle stateful réel bit-identique Wine, 2026-07-18) → (3) PGL
 opt-in → (4) SEH in-HLE → (5) SoftFloat floatx80 [ère ARM/WASM].
+
+**Orientation transverse enregistrée (2026-07-19, §1.6)** : **rétro-cible Windows moderne**. Bon marché = **backend PE**
+(cas 1, vieux 32-bit → PE autonome : bundling + API retirées type WinHelp). Grand prix = **frontend 16-bit NE→Win16** (cas
+2, seul moyen natif de faire tourner du 16-bit sur Windows 64-bit ; le volume du vieux logiciel est là), jalon dédié,
+prérequis lifter partagé avec la Phase 8 (multi-arch/64-bit).
