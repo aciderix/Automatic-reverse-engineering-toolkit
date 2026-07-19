@@ -134,6 +134,7 @@ static TABLE: &[(&str, u32)] = &[
     ("DosDateTimeToFileTime", 12),
     ("DrawEdge", 16),
     ("DrawFocusRect", 8),
+    ("DrawFrameControl", 16),
     ("DrawTextA", 20),
     ("DrawTextW", 20),
     ("DuplicateHandle", 28),

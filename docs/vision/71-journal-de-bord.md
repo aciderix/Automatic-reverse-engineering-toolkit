@@ -3721,4 +3721,17 @@ Détail : **70 §6** (roadmap). Résumé :
   régression unifiée **PASS**. **Fondation posée** : DrawFocusRect + DrawEdge = les primitives que tout contrôle utilise.
   Suite : `DrawFrameControl` (bouton/checkbox complet), puis câbler au WM_PAINT des contrôles → composer à l'écran (SDL).
 
+### 2026-07-19 — [HLE-WIN32][GUI] `DrawFrameControl` (bouton poussoir) — bâti sur DrawEdge (BF_SOFT ajouté)
+- Suite des primitives de peinture de contrôle. **Découpe DrawEdge en helper** `u32_drawedge(bm, rect, edge, flags)`
+  (partagé par `DrawEdge` et `DrawFrameControl`) + ajout **`BF_SOFT`** : sur un bord RAISED, échange les indices du côté
+  clair (`3DLIGHT`↔`BTNHIGHLIGHT`) — le biseau « soft » du bouton (mesuré).
+- **`DrawFrameControl(DFC_BUTTON, DFCS_BUTTONPUSH)` normal = bouton poussoir** = `DrawEdge(EDGE_RAISED, BF_SOFT|BF_RECT|
+  BF_MIDDLE)` (mesuré vs Wine : outer `BTNHIGHLIGHT/3DDKSHADOW`, inner `3DLIGHT/BTNSHADOW`, face `3DFACE`). Pushed +
+  check/radio + caption/menu/scroll → **abort sound** (chacun un suivant mesuré, jamais un cadre faux). `stdcall_pops` :
+  +`DrawFrameControl@16`.
+- **Fixture** `winecorpus/gdi_framecontrol.c` (structural, index-based) → **bit-identique Wine** (`oTL/oBR/iTL/iBR/face` tous `=1`).
+- **Portes** : winediff **146→147**, hash transpile `19acad982194bf07` **inchangé**, `table_is_sorted_by_name` ok,
+  régression unifiée **PASS**. **Primitives de contrôle** : DrawFocusRect + DrawEdge + DrawFrameControl(push). Suite :
+  câbler au WM_PAINT des contrôles BUTTON (peindre le cadre + le texte) → dialogue visible via SDL.
+
 <!-- NOUVELLES ENTRÉES ICI (garder l'ordre chronologique, plus récent en bas) -->

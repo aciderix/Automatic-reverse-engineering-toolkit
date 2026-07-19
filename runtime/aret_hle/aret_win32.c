@@ -4728,17 +4728,17 @@ uint32_t aret_DrawFocusRect(uint32_t esp) {
  * both render the same *structure* (verified index-wise, theme-independent). Only the
  * measured EDGE_RAISED/EDGE_SUNKEN with BF_RECT (+optional BF_MIDDLE fill) are modelled;
  * other edge/flag combos abort soundly. */
-uint32_t aret_DrawEdge(uint32_t esp) {
-    GDI_MAP_GUARD(WU(0), 0);
-    struct gdi_obj *bm = gdi_dc_surface(WU(0));
-    const int32_t *r = (const int32_t *)WP(1);
-    uint32_t edge = WU(2), flags = WU(3);
-    if (!bm || !r) return 0;
-    if ((flags & ~0x80Fu) || (flags & 0xFu) != 0xFu) { aret_unimpl("DrawEdge: only BF_RECT(+BF_MIDDLE) modelled"); return 0; }
+/* Shared 3D-edge painter. `edge` = EDGE_RAISED(0x5)/EDGE_SUNKEN(0xA); `flags` = BF_RECT
+ * (+BF_MIDDLE fill, +BF_SOFT). BF_SOFT swaps the light-side indices (3DLIGHT<->BTNHIGHLIGHT)
+ * — the "soft" bevel a push button uses. Returns 0 (with a sound abort) outside the
+ * modelled subset. */
+static int u32_drawedge(struct gdi_obj *bm, const int32_t *r, uint32_t edge, uint32_t flags) {
+    if ((flags & ~0x180Fu) || (flags & 0xFu) != 0xFu) { aret_unimpl("DrawEdge: only BF_RECT(+BF_MIDDLE/BF_SOFT) modelled"); return 0; }
     int lo, bo, li, bi;                        /* sys-colour indices: outer LT/BR, inner LT/BR */
     if (edge == 0x5)      { lo = 22; bo = 21; li = 20; bi = 16; }   /* EDGE_RAISED */
     else if (edge == 0xA) { lo = 16; bo = 20; li = 21; bi = 22; }   /* EDGE_SUNKEN */
     else { aret_unimpl("DrawEdge: only EDGE_RAISED/EDGE_SUNKEN modelled"); return 0; }
+    if ((flags & 0x1000u) && edge == 0x5) { int tmp = lo; lo = li; li = tmp; }   /* BF_SOFT (raised) */
     int l = r[0], t = r[1], rt = r[2], b = r[3];
     if (rt - l < 2 || b - t < 2) return 1;
     uint32_t clo = u32_syscolor(lo), cbo = u32_syscolor(bo), cli = u32_syscolor(li), cbi = u32_syscolor(bi);
@@ -4756,6 +4756,29 @@ uint32_t aret_DrawEdge(uint32_t esp) {
         for (int y = t + 2; y < b - 2; y++) for (int x = l + 2; x < rt - 2; x++) gdi_put(bm, x, y, face);
     }
     return 1;
+}
+uint32_t aret_DrawEdge(uint32_t esp) {
+    GDI_MAP_GUARD(WU(0), 0);
+    struct gdi_obj *bm = gdi_dc_surface(WU(0));
+    const int32_t *r = (const int32_t *)WP(1);
+    if (!bm || !r) return 0;
+    return (uint32_t)u32_drawedge(bm, r, WU(2), WU(3));
+}
+/* DrawFrameControl(hdc, rect, type, state): the composite control frames. Modelled:
+ * DFC_BUTTON + DFCS_BUTTONPUSH (a normal push button = a soft-raised bevel filled with
+ * 3DFACE, measured vs Wine = DrawEdge(EDGE_RAISED, BF_SOFT|BF_RECT|BF_MIDDLE)). Pushed
+ * buttons, check/radio boxes, caption/menu/scroll glyphs abort soundly (each a measured
+ * follow-up — never a wrong frame). */
+uint32_t aret_DrawFrameControl(uint32_t esp) {
+    GDI_MAP_GUARD(WU(0), 0);
+    struct gdi_obj *bm = gdi_dc_surface(WU(0));
+    const int32_t *r = (const int32_t *)WP(1);
+    uint32_t type = WU(2), state = WU(3);
+    if (!bm || !r) return 0;
+    if (type == 4 /*DFC_BUTTON*/ && (state & 0xFFu) == 0x10u /*DFCS_BUTTONPUSH*/ && !(state & 0x200u /*DFCS_PUSHED*/))
+        return (uint32_t)u32_drawedge(bm, r, 0x5 /*EDGE_RAISED*/, 0xF | 0x800u | 0x1000u /*BF_RECT|BF_MIDDLE|BF_SOFT*/);
+    aret_unimpl("DrawFrameControl: only DFC_BUTTON/DFCS_BUTTONPUSH (normal) modelled");
+    return 0;
 }
 /* PolylineTo(hdc, const POINT* pts, int count) -> BOOL. Like a run of LineTo: from
  * the current position, a Bresenham segment to each point (endpoint excluded),
