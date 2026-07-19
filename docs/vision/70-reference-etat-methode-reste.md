@@ -944,6 +944,19 @@ la **vitesse** change.
   `git reset --hard origin/<branche>`. Le hook `.claude/hooks/session-start.sh`
   resynchronise un arbre **propre** ancêtre d'origin, mais **pas** le non-committé.
   ⇒ **commit + push après chaque incrément.**
+- **RESTAURATION TOOLCHAIN après un reset conteneur (2026-07-18, recette vérifiée)** : le reset peut effacer les outils
+  **installés à la main** (mingw, wine 32-bit, gcc-multilib, SDL2:i386, polices) — le hook n'installe que z3/SDL2/Xvfb.
+  Le **git reste intact** (tout est sur origin). Recette :
+  1. `sudo apt-get install -y gcc-mingw-w64-i686 gcc-multilib g++-multilib` (build fixtures + portes natives `-m32`).
+  2. **Wine 32-bit** (bloqué par un skew `libgd3` PPA-sury(amd64) vs Ubuntu(i386)) : d'abord **downgrade** l'amd64 pour
+     aligner les arches — `sudo apt-get install -y --allow-downgrades libgd3=2.3.3-9ubuntu5 libgd3:i386=2.3.3-9ubuntu5` —
+     puis `sudo apt-get install -y --no-install-recommends wine wine32:i386 wine64`. (Sans le downgrade, `wine32:i386` est
+     bloqué et le wine WoW64 seul **ne lance pas** les PE 32-bit.) Vérif : `wine hello32.exe` doit sortir.
+  3. `sudo apt-get install -y --no-install-recommends libsdl2-dev:i386 fonts-liberation fonts-wine fontconfig xvfb`
+     puis `sudo ln -sfn /usr/share/wine/fonts /usr/share/fonts/wine && sudo fc-cache -f` (les fixtures peinture/police).
+  Portes **natives** (difftest/funcdiff/cpudiff/SMT/recompile) ne dépendent que de `cc`+`-m32` ; **winediff** dépend de
+  wine 32-bit. *(Fixture `gdi_uifont` sensible au fontconfig **i386** : peut diverger post-reset tant que le cache i386 ne
+  voit pas les polices Wine — orthogonal au code.)*
 - **Réseau** : `github.com` est **BLOQUÉ** par la policy proxy. Joignables :
   `ftp.gnu.org`, `nasm.us`, `curl.se`, `zlib.net`, `sourceware.org`, `sqlite.org`,
   `pypi.org`, **`archive.org`** (HTTP/2 200 via proxy, vérifié 2026-07-11). Cross-compile :
