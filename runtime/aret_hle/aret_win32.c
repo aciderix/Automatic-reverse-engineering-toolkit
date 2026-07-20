@@ -3145,7 +3145,10 @@ uint32_t aret_UpdateWindow(uint32_t esp) {
         if (wp) u32_call_wndproc(esp, wp, (uint32_t)(i + 1), U32_WM_PAINT, 0, 0);
     }
 #ifdef ARET_HAVE_SDL
-    if (i >= 0) sdl_window_present(i);   /* flush the client framebuffer to screen */
+    if (i >= 0) {
+        if (g_u32_win[i].is_dialog) u32_dialog_composite(i);   /* reflect current control state */
+        sdl_window_present(i);                                 /* flush the client framebuffer to screen */
+    }
 #endif
     return i >= 0 ? 1u : 0u;
 }
@@ -4838,20 +4841,46 @@ uint32_t aret_DrawEdge(uint32_t esp) {
  * 3DFACE, measured vs Wine = DrawEdge(EDGE_RAISED, BF_SOFT|BF_RECT|BF_MIDDLE)). Pushed
  * buttons, check/radio boxes, caption/menu/scroll glyphs abort soundly (each a measured
  * follow-up — never a wrong frame). */
+static void u32_draw_check_glyph(struct gdi_obj *bm, int x, int y, int checked);   /* fwd */
 uint32_t aret_DrawFrameControl(uint32_t esp) {
     GDI_MAP_GUARD(WU(0), 0);
     struct gdi_obj *bm = gdi_dc_surface(WU(0));
     const int32_t *r = (const int32_t *)WP(1);
     uint32_t type = WU(2), state = WU(3);
     if (!bm || !r) return 0;
-    if (type == 4 /*DFC_BUTTON*/ && (state & 0xFFu) == 0x10u /*DFCS_BUTTONPUSH*/ && !(state & 0x200u /*DFCS_PUSHED*/))
-        return (uint32_t)u32_drawedge(bm, r, 0x5 /*EDGE_RAISED*/, 0xF | 0x800u | 0x1000u /*BF_RECT|BF_MIDDLE|BF_SOFT*/);
-    aret_unimpl("DrawFrameControl: only DFC_BUTTON/DFCS_BUTTONPUSH (normal) modelled");
+    if (type == 4 /*DFC_BUTTON*/) {
+        uint32_t bt = state & 0xFFu;
+        if (bt == 0x10u /*DFCS_BUTTONPUSH*/ && !(state & 0x200u /*DFCS_PUSHED*/))
+            return (uint32_t)u32_drawedge(bm, r, 0x5 /*EDGE_RAISED*/, 0xF | 0x800u | 0x1000u /*BF_RECT|BF_MIDDLE|BF_SOFT*/);
+        if (bt == 0x00u /*DFCS_BUTTONCHECK*/ && (r[2] - r[0]) == 13 && (r[3] - r[1]) == 13) {
+            u32_draw_check_glyph(bm, r[0], r[1], (state & 0x400u /*DFCS_CHECKED*/) ? 1 : 0);
+            return 1;
+        }
+    }
+    aret_unimpl("DrawFrameControl: only DFC_BUTTON push / 13x13 check modelled");
     return 0;
 }
 
 static uint32_t u32_ansi_cp(unsigned char b);   /* fwd: ANSI byte -> codepoint (CP1252) */
 static uint32_t u32_drawtext(uint32_t hdc, const uint32_t *cps, int len, uint32_t prc, uint32_t fmt); /* fwd */
+static int u32_drawedge(struct gdi_obj *bm, const int32_t *r, uint32_t edge, uint32_t flags);   /* fwd */
+/* Draw a 13x13 check box glyph at (x,y): a sunken edge + white field, plus the Marlett
+ * check mark (measured pixel-exact from Wine's DrawFrameControl) when `checked`. The box
+ * itself is EDGE_SUNKEN|BF_RECT (bit-identical to Wine's UITOOLS check). */
+static void u32_draw_check_glyph(struct gdi_obj *bm, int x, int y, int checked) {
+    int32_t r[4] = { x, y, x + 13, y + 13 };
+    u32_drawedge(bm, r, 0x0Au /*EDGE_SUNKEN*/, 0xFu /*BF_RECT*/);
+    uint32_t win = u32_syscolor(5 /*COLOR_WINDOW*/);
+    for (int yy = 2; yy < 11; yy++) for (int xx = 2; xx < 11; xx++) gdi_put(bm, x + xx, y + yy, win);
+    if (checked) {
+        /* Marlett tick (21 px), measured from Wine at 13x13, in COLOR_WINDOWTEXT. */
+        static const signed char pts[][2] = {
+            {9,3},{8,4},{9,4},{7,5},{8,5},{9,5},{3,6},{6,6},{7,6},{8,6},
+            {3,7},{4,7},{5,7},{6,7},{7,7},{3,8},{4,8},{5,8},{6,8},{4,9},{5,9} };
+        uint32_t tx = u32_syscolor(8 /*COLOR_WINDOWTEXT*/);
+        for (unsigned i = 0; i < sizeof pts / sizeof pts[0]; i++) gdi_put(bm, x + pts[i][0], y + pts[i][1], tx);
+    }
+}
 /* Paint a predefined BUTTON control into `hdc` (its own client area, origin 0,0): the
  * soft-raised push-button frame + its caption centred in the control's font (COLOR_BTNTEXT,
  * transparent). Measured vs Wine (WM_PRINTCLIENT). The exact caption pixels depend on the
@@ -4914,15 +4943,38 @@ static void u32_edit_paint(uint32_t hdc, int wi, int inset) {
     int32_t r2[4] = { inset, 0, w - inset, h };
     u32_ctrl_text(hdc, d, wi, r2, 0x4u | 0x20u /*DT_VCENTER|DT_SINGLELINE*/, 8 /*COLOR_WINDOWTEXT*/);
 }
+/* CHECKBOX / 3-STATE control: fill COLOR_3DFACE, the 13x13 check glyph left-vcentred,
+ * then the label text to its right. Whole-control paint is composite-only (Wine paints
+ * nothing for a checkbox via WM_PRINTCLIENT); the glyph is bit-exact (DrawFrameControl). */
+static void u32_check_paint(uint32_t hdc, int wi) {
+    struct gdi_obj *bm = gdi_dc_surface(hdc); int d = gdi_idx(hdc);
+    if (!bm || d < 0) return;
+    int w = g_u32_win[wi].w, h = g_u32_win[wi].h;
+    u32_ctrl_fill(bm, w, h, u32_syscolor(15 /*COLOR_3DFACE*/));
+    int gy = (h - 13) / 2; if (gy < 0) gy = 0;
+    u32_draw_check_glyph(bm, 0, gy, g_u32_win[wi].check_state ? 1 : 0);
+    int32_t r2[4] = { 16, 0, w, h };
+    u32_ctrl_text(hdc, d, wi, r2, 0x4u | 0x20u /*DT_VCENTER|DT_SINGLELINE*/, 8 /*COLOR_WINDOWTEXT*/);
+}
 /* Which predefined classes have a built-in paint. */
 static int u32_ctrl_paintable(const char *cls) {
     return !strcasecmp(cls, "button") || !strcasecmp(cls, "static") || !strcasecmp(cls, "edit");
 }
+/* BUTTON sub-styles (low 4 bits BS_*): push = BS_PUSHBUTTON/BS_DEFPUSHBUTTON; check =
+ * BS_CHECKBOX/BS_AUTOCHECKBOX/BS_3STATE/BS_AUTO3STATE (radio 4/9 + group box 7 = not painted). */
+static int u32_btn_is_push(uint32_t style)  { uint32_t t = style & 0xFu; return t == 0 || t == 1; }
+static int u32_btn_is_check(uint32_t style) { uint32_t t = style & 0xFu; return t == 2 || t == 3 || t == 5 || t == 6; }
 /* Full on-screen appearance of a control (for the dialog composite): the client paint
  * plus any non-client 3D border (EDIT gets a sunken edge). */
 static void u32_control_paint_full(uint32_t hdc, int wi) {
     const char *cls = g_u32_win[wi].classname;
-    if (!strcasecmp(cls, "button")) { u32_button_paint(hdc, wi); return; }
+    if (!strcasecmp(cls, "button")) {
+        uint32_t st = g_u32_win[wi].style;
+        if (u32_btn_is_check(st))     u32_check_paint(hdc, wi);
+        else if (u32_btn_is_push(st)) u32_button_paint(hdc, wi);
+        /* radio (curved) / group box: not painted yet — a sound visible gap, not a guess */
+        return;
+    }
     if (!strcasecmp(cls, "static")) { u32_static_paint(hdc, wi); return; }
     if (!strcasecmp(cls, "edit")) {
         u32_edit_paint(hdc, wi, 2);
@@ -4943,7 +4995,9 @@ static int u32_control_proc(uint32_t esp, uint32_t hwnd, uint32_t msg, uint32_t 
     if (msg == 0x0030u /*WM_SETFONT*/)  { g_u32_win[i].ctrl_font = wp; *out = 0; return 1; }
     if (msg == 0x0031u /*WM_GETFONT*/)  { *out = g_u32_win[i].ctrl_font; return 1; }
     if (msg == 0x0318u /*WM_PRINTCLIENT*/) {
-        if (!strcasecmp(cls, "button"))      u32_button_paint(wp, i);
+        /* Match Wine's observable WM_PRINTCLIENT: only push buttons paint via this
+         * message (checkbox/radio paint nothing here — their glyph is composite-only). */
+        if (!strcasecmp(cls, "button"))    { if (u32_btn_is_push(g_u32_win[i].style)) u32_button_paint(wp, i); }
         else if (!strcasecmp(cls, "static")) u32_static_paint(wp, i);
         else                                 u32_edit_paint(wp, i, 0);   /* client only */
         *out = 0; return 1;

@@ -3845,4 +3845,23 @@ Détail : **70 §6** (roadmap). Résumé :
   `19acad982194bf07` **inchangé**, `table_is_sorted_by_name` ok. **Reste contrôles** : checkbox/radio (styles BUTTON — cadre +
   glyphe coché), repaint sur invalidation, focus + interaction (clic → `WM_COMMAND` au DLGPROC).
 
+### 2026-07-19 — [HLE-WIN32][GUI] **Case à cocher** (checkbox) : glyphe `DrawFrameControl` bit-exact + peinture du contrôle
+- **Découverte de méthode (importante)** : Wine **ne peint RIEN** via `WM_PRINTCLIENT` pour un checkbox/radio (ni aucun BUTTON
+  non-push) — seul **BS_PUSHBUTTON** se peint ainsi (mesuré). ⇒ on **ne peut pas** vérifier bit-exact un checkbox *entier* (pas
+  de référence capturable, comme le composite du dialogue). **Mais** la primitive `DrawFrameControl(DFC_BUTTON, DFCS_BUTTONCHECK)`
+  **est** capturable → on la vérifie bit-exact, et la peinture du contrôle s'appuie dessus (composite = qualitatif Xvfb).
+- **Glyphe 13×13 mesuré pixel-exact** : la case = `DrawEdge(EDGE_SUNKEN, BF_RECT)` (bord creusé, indices déjà bit-exacts) +
+  intérieur **COLOR_WINDOW** + (si `DFCS_CHECKED`) la **coche Marlett** = 21 pixels **COLOR_WINDOWTEXT** au motif mesuré exact
+  (hardcodé). `aret_DrawFrameControl` étendu (case 13×13 ; radio = courbe → abort-sound comme Ellipse ; autres tailles → abort).
+- **Peinture du contrôle** : `u32_check_paint` (fond 3DFACE + glyphe gauche-vcentré selon `check_state` + label à droite).
+  Dispatch BUTTON par sous-style (`u32_btn_is_push`/`u32_btn_is_check` sur les 4 bits BS_*) dans `u32_control_paint_full` **et**
+  `u32_control_proc` (WM_PRINTCLIENT : seul le push peint, comme Wine). Re-composition sur **`UpdateWindow`** → l'état coché posé
+  en `WM_INITDIALOG` (CheckDlgButton) s'affiche (avant : composite one-shot à la création, cases toujours vides).
+- **Vérif** : `winecorpus/gdi_framecontrol_check.c` (structurel index-based) → **bit-identique Wine** (`oTL/iTL/iBR/oBR/field=1`,
+  `tick=0` non coché / `tick=1` coché). Rendu : dialogue d'options (4 cases dont 2 cochées + label + bouton) **identique à Wine**
+  (capture Xvfb, coches Marlett incluses).
+- **Portes** : winediff **153→154 fixtures** (gdi_framecontrol_check verte ; seul rouge = `gdi_uifont` env), hash transpile
+  `19acad982194bf07` **inchangé**, `table_is_sorted_by_name` ok. **Reste contrôles** : radio (cercle, niveau-recherche), group
+  box (DrawEdge ETCHED — faisable), combo/list, repaint général sur invalidation, interaction (clic → WM_COMMAND).
+
 <!-- NOUVELLES ENTRÉES ICI (garder l'ordre chronologique, plus récent en bas) -->
