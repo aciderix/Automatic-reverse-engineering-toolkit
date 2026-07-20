@@ -3945,4 +3945,17 @@ Détail : **70 §6** (roadmap). Résumé :
   **inchangé**, table triée. **⇒ Tous les contrôles de dialogue courants peints** (bouton/label/champ/case/radio/group/list/combo).
   Reste GUI : contrôles **comctl32** peints à l'écran (progress bar liftée → GDI→framebuffer).
 
+### 2026-07-19 — [HLE-WIN32][GUI][LOADER] Contrôles **comctl32 peints** : démontré, mais **gated sur le socle Levier 1** (mesuré)
+- **But** : faire peindre à l'écran les contrôles comctl32 (progress bar…) — leur *logique* est déjà liftée+prouvée (doc 70 §5.0).
+- **Mesure décisive** : une **progress bar comctl32 liftée PEINT bien** via `WM_PRINTCLIENT` sous ARET (style **classique** : fond
+  `000080`=COLOR_HIGHLIGHT + `c0c0c0`=3DFACE, dessiné par le code comctl32 lifté sur notre GDI HLE — preuve que le chemin
+  lift→GDI→pixels marche). **MAIS** le binaire est **INCOMPLETE** : **115 imports non implémentés** (`CharLowerBuffW`/
+  `CharUpperBuffW`/… = les **~106 shims socle** kernel32/CRT du Levier 1, doc 70 §5.0). ⇒ faire peindre les comctl32 **en vrai**
+  (composite écran) = **finir le socle DLL-lifting** (106 shims) + alignement thème (classique vs Wine natif themed) + **intégrer
+  au composite** (appeler le WNDPROC lifté avec un `esp` valide pendant la composition — non threadé aujourd'hui). C'est un
+  **chantier Levier 1 dédié** (multi-sessions), **pas** un incrément de contrôle user32.
+- **Conclusion** : le **chantier GUI *user32* (dialogues + contrôles standard) est COMPLET** (bouton/checkbox/radio/groupbox/
+  static/edit/listbox/combobox peints + interaction clic/focus/clavier + repaint). Les **contrôles comctl32 peints** relèvent du
+  **Levier 1** (lifting DLL) et restent l'item avancé suivant, borné et mesuré (socle 106 shims).
+
 <!-- NOUVELLES ENTRÉES ICI (garder l'ordre chronologique, plus récent en bas) -->
