@@ -3921,4 +3921,13 @@ Détail : **70 §6** (roadmap). Résumé :
 - **Portes** : winediff **157→158 fixtures** (ctrl_focus_text verte ; seul rouge `gdi_uifont` env), hash `19acad982194bf07`
   **inchangé**, table triée. **⇒ EDIT saisissable, focus fonctionnel.** Reste : repaint général, combo/list, comctl32 peints.
 
+### 2026-07-19 — [HLE-WIN32][GUI] **Repaint général** : les API de changement d'état re-composent le dialogue
+- Complète l'interaction : une API standard qui **change un contrôle** met à jour l'écran **immédiatement** (comme Windows
+  invalide+repeint). `u32_ctrl_recomposite` ajouté à `CheckDlgButton`, `SetDlgItemTextA/W`, `SetDlgItemInt` (en plus de
+  `SetWindowText`/`BM_SETCHECK`/clic/frappe déjà couverts + `UpdateWindow`). Un dialogue reflète donc en direct : cases cochées,
+  textes de champs/labels, valeurs numériques — sans attendre un `UpdateWindow` explicite.
+- Purement **display** (re-composition du framebuffer, no-op sans SDL / hors dialogue) → **aucun changement de sortie
+  déterministe**. Portes : winediff **158/158 fixtures inchangé** (seul rouge `gdi_uifont` env), hash `19acad982194bf07`
+  **inchangé**. Vérifié par les démos interactives (toggle case, saisie champ = même mécanisme). **Reste** : combo/list, comctl32 peints.
+
 <!-- NOUVELLES ENTRÉES ICI (garder l'ordre chronologique, plus récent en bas) -->

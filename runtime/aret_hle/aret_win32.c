@@ -3433,6 +3433,7 @@ static int u32_dlg_ctrl(uint32_t hdlg, int id) {
 uint32_t aret_CheckDlgButton(uint32_t esp) {
     int c = u32_dlg_ctrl(WU(0), WI(1)); if (c < 0) return 0;
     g_u32_win[c].check_state = (int)WU(2);   /* BST_UNCHECKED/CHECKED/INDETERMINATE */
+    u32_ctrl_recomposite(c);
     return 1;
 }
 uint32_t aret_IsDlgButtonChecked(uint32_t esp) {
@@ -3889,6 +3890,7 @@ uint32_t aret_SetDlgItemTextA(uint32_t esp) {
     const char *s = WCS(2); int k = 0;
     if (s) for (; s[k] && k < 255; k++) g_u32_win[i].title[k] = s[k];
     g_u32_win[i].title[k] = 0;
+    u32_ctrl_recomposite(i);
     return 1;
 }
 /* GetDlgItemTextA(hDlg, id, lpString, cchMax) -> chars copied (excl NUL). */
@@ -3908,6 +3910,7 @@ uint32_t aret_SetDlgItemTextW(uint32_t esp) {
     int i = u32_win_idx(u32_dlg_item(WU(0), WI(1)));
     if (i < 0) return 0;
     u32_w2n((const uint16_t *)WP(2), g_u32_win[i].title, sizeof g_u32_win[i].title);
+    u32_ctrl_recomposite(i);
     return 1;
 }
 /* GetDlgItemTextW(hDlg, id, lpString, cchMax) — widen the stored ANSI text. */
@@ -3928,6 +3931,7 @@ uint32_t aret_SetDlgItemInt(uint32_t esp) {
     if (i < 0) return 0;
     if (WU(3)) snprintf(g_u32_win[i].title, sizeof g_u32_win[i].title, "%d", WI(2));
     else       snprintf(g_u32_win[i].title, sizeof g_u32_win[i].title, "%u", WU(2));
+    u32_ctrl_recomposite(i);
     return 1;
 }
 /* GetDlgItemInt(hDlg, id, lpTranslated, bSigned) -> UINT. */
