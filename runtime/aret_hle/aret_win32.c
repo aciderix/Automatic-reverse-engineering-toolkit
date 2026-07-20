@@ -2384,6 +2384,7 @@ static struct {
     struct { int min, max, page, pos; } scroll[3];  /* SB_HORZ=0 / SB_VERT=1 / SB_CTL=2 */
     int du_x, du_y;          /* dialog base units (per-dialog, from its font); 0 = not a mapped dialog */
     int is_dialog;           /* created by u32_dialog_create -> composite its child controls for display */
+    char **items; int item_count, item_cap, cur_sel;   /* LISTBOX/COMBOBOX item model */
     uint32_t dlg_font;       /* HFONT of the dialog font (DS_SETFONT), applied to its controls */
 #ifdef ARET_HAVE_SDL
     void *sdl_win, *sdl_ren, *sdl_tex;  /* SDL window/renderer/streaming texture */
@@ -2545,6 +2546,8 @@ static uint32_t u32_window_create(uint32_t wndproc, uint32_t exstyle, uint32_t s
             g_u32_win[i].needs_erase = 0;
             g_u32_win[i].bg_brush = 0;
             g_u32_win[i].extra_len = 0;
+            g_u32_win[i].items = NULL; g_u32_win[i].item_count = 0; g_u32_win[i].item_cap = 0; g_u32_win[i].cur_sel = -1;
+            g_u32_win[i].is_dialog = 0; g_u32_win[i].du_x = 0; g_u32_win[i].du_y = 0; g_u32_win[i].dlg_font = 0;
             memset(g_u32_win[i].extra, 0, sizeof g_u32_win[i].extra);
             int k = 0; if (title) for (; title[k] && k < 255; k++) g_u32_win[i].title[k] = title[k];
             g_u32_win[i].title[k] = 0;
@@ -3681,6 +3684,7 @@ static uint32_t u32_new_control(uint32_t parent, int ctrl_id, uint32_t style, co
             g_u32_win[i].enabled = (style & 0x08000000u) ? 0 : 1;  /* WS_DISABLED */
             g_u32_win[i].visible = (style & 0x10000000u) ? 1 : 0;  /* WS_VISIBLE */
             g_u32_win[i].ctrl_id = ctrl_id;
+            g_u32_win[i].cur_sel = -1;                            /* LB/CB: no selection (LB_ERR) */
             g_u32_win[i].x = x; g_u32_win[i].y = y; g_u32_win[i].w = w; g_u32_win[i].h = h;
             if (cls) { size_t n = strnlen(cls, sizeof g_u32_win[i].classname - 1);
                        memcpy(g_u32_win[i].classname, cls, n); g_u32_win[i].classname[n] = 0; }
@@ -4998,18 +5002,43 @@ static void u32_button_paint(uint32_t hdc, int wi) {
         g_gdi[d].sel_font = sf; g_gdi[d].text_color = tc; g_gdi[d].bk_mode = bk;
     }
 }
-/* Draw a control's text with the control font, into `rect`, in COLOR `idx`, transparent,
- * `fmt` = DrawText flags. Shared by STATIC/EDIT/BUTTON caption painting. */
-static void u32_ctrl_text(uint32_t hdc, int d, int wi, const int32_t *rect, uint32_t fmt, int idx) {
-    const char *cap = g_u32_win[wi].title;
-    if (!cap || !cap[0] || !g_u32_win[wi].ctrl_font) return;
+/* Draw `str` in `font` into `rect`, COLOR `idx`, transparent, `fmt` = DrawText flags. */
+static void u32_paint_text(uint32_t hdc, int d, uint32_t font, const char *str, const int32_t *rect, uint32_t fmt, int idx) {
+    if (!str || !str[0] || !font) return;
     uint32_t sf = g_gdi[d].sel_font, tc = g_gdi[d].text_color; int bk = g_gdi[d].bk_mode;
-    g_gdi[d].sel_font = g_u32_win[wi].ctrl_font;
+    g_gdi[d].sel_font = font;
     g_gdi[d].text_color = u32_syscolor(idx);
     g_gdi[d].bk_mode = 1 /*TRANSPARENT*/;
-    uint32_t cps[256]; int m = 0; for (; cap[m] && m < 255; m++) cps[m] = u32_ansi_cp((unsigned char)cap[m]);
+    uint32_t cps[256]; int m = 0; for (; str[m] && m < 255; m++) cps[m] = u32_ansi_cp((unsigned char)str[m]);
     u32_drawtext(hdc, cps, m, (uint32_t)(uintptr_t)rect, fmt);
     g_gdi[d].sel_font = sf; g_gdi[d].text_color = tc; g_gdi[d].bk_mode = bk;
+}
+/* Draw a control's own caption (the window title) with the control font. Shared by
+ * STATIC/EDIT/BUTTON caption painting. */
+static void u32_ctrl_text(uint32_t hdc, int d, int wi, const int32_t *rect, uint32_t fmt, int idx) {
+    u32_paint_text(hdc, d, g_u32_win[wi].ctrl_font, g_u32_win[wi].title, rect, fmt, idx);
+}
+/* LISTBOX/COMBOBOX item model (heap list of strings). */
+static void u32_items_free(int i) {
+    if (g_u32_win[i].items) { for (int k = 0; k < g_u32_win[i].item_count; k++) free(g_u32_win[i].items[k]); free(g_u32_win[i].items); }
+    g_u32_win[i].items = NULL; g_u32_win[i].item_count = 0; g_u32_win[i].item_cap = 0; g_u32_win[i].cur_sel = -1;
+}
+static int u32_items_insert(int i, int pos, const char *s) {
+    if (g_u32_win[i].item_count >= g_u32_win[i].item_cap) {
+        int nc = g_u32_win[i].item_cap ? g_u32_win[i].item_cap * 2 : 8;
+        char **na = (char **)realloc(g_u32_win[i].items, (size_t)nc * sizeof(char *));
+        if (!na) return -1; g_u32_win[i].items = na; g_u32_win[i].item_cap = nc;
+    }
+    int n = g_u32_win[i].item_count;
+    if (pos < 0 || pos > n) pos = n;
+    for (int k = n; k > pos; k--) g_u32_win[i].items[k] = g_u32_win[i].items[k - 1];
+    size_t L = s ? strlen(s) : 0; char *dup = (char *)malloc(L + 1);
+    if (!dup) return -1; if (s) memcpy(dup, s, L); dup[L] = 0;
+    g_u32_win[i].items[pos] = dup; g_u32_win[i].item_count = n + 1;
+    return pos;
+}
+static const char *u32_items_get(int i, int idx) {
+    return (idx >= 0 && idx < g_u32_win[i].item_count) ? g_u32_win[i].items[idx] : NULL;
 }
 /* Fill a control's whole client with a system colour. */
 static void u32_ctrl_fill(struct gdi_obj *bm, int w, int h, uint32_t c) {
@@ -5085,9 +5114,49 @@ static void u32_group_paint(uint32_t hdc, int wi) {
         g_gdi[d].sel_font = sf; g_gdi[d].text_color = tc; g_gdi[d].bk_color = bc; g_gdi[d].bk_mode = bk;
     }
 }
+/* LISTBOX client (matches WM_PRINTCLIENT): COLOR_WINDOW fill + each item's text; the
+ * selected row is filled COLOR_HIGHLIGHT with COLOR_HIGHLIGHTTEXT. Row height ≈ the
+ * control-font cell (font-metric dependent, like all text); the sunken border is
+ * composite-only. */
+static void u32_listbox_paint(uint32_t hdc, int wi) {
+    struct gdi_obj *bm = gdi_dc_surface(hdc); int d = gdi_idx(hdc);
+    if (!bm || d < 0) return;
+    int w = g_u32_win[wi].w, h = g_u32_win[wi].h;
+    u32_ctrl_fill(bm, w, h, u32_syscolor(5 /*COLOR_WINDOW*/));
+    int ih = 14;   /* item row height (approx) */
+    for (int k = 0; k < g_u32_win[wi].item_count; k++) {
+        int y = k * ih; if (y >= h) break;
+        int sel = (k == g_u32_win[wi].cur_sel);
+        if (sel) for (int yy = y; yy < y + ih && yy < h; yy++) for (int xx = 0; xx < w; xx++)
+            gdi_put(bm, xx, yy, u32_syscolor(13 /*COLOR_HIGHLIGHT*/));
+        int32_t r2[4] = { 2, y, w, y + ih };
+        u32_paint_text(hdc, d, g_u32_win[wi].ctrl_font, u32_items_get(wi, k), r2,
+                       0x4u | 0x20u /*DT_VCENTER|DT_SINGLELINE*/, sel ? 14 /*HIGHLIGHTTEXT*/ : 8 /*WINDOWTEXT*/);
+    }
+}
+/* COMBOBOX (closed state): a top field (≈ one text row) showing the current selection,
+ * with a raised drop-down arrow button on the right; below the field is dialog background
+ * (the drop list only appears when open). Composite-only; field/arrow use bit-exact
+ * primitives. `fh` = field height. */
+static void u32_combobox_paint(uint32_t hdc, int wi) {
+    struct gdi_obj *bm = gdi_dc_surface(hdc); int d = gdi_idx(hdc);
+    if (!bm || d < 0) return;
+    int w = g_u32_win[wi].w, h = g_u32_win[wi].h;
+    int fh = h < 21 ? h : 21;                      /* closed field height */
+    u32_ctrl_fill(bm, w, h, u32_syscolor(15 /*COLOR_3DFACE*/));  /* area below the field */
+    for (int y = 0; y < fh; y++) for (int x = 0; x < w; x++) gdi_put(bm, x, y, u32_syscolor(5 /*COLOR_WINDOW*/));
+    int32_t r2[4] = { 2, 0, w - 18, fh };
+    u32_paint_text(hdc, d, g_u32_win[wi].ctrl_font, u32_items_get(wi, g_u32_win[wi].cur_sel), r2,
+                   0x4u | 0x20u /*DT_VCENTER|DT_SINGLELINE*/, 8 /*COLOR_WINDOWTEXT*/);
+    int32_t br[4] = { w - 17, 0, w, fh };
+    u32_drawedge(bm, br, 0x5 /*EDGE_RAISED*/, 0xFu | 0x800u | 0x1000u);   /* drop button bevel */
+    int ax = w - 9, ay = fh / 2 - 1; uint32_t tx = u32_syscolor(8);       /* down arrow */
+    for (int r = 0; r < 4; r++) for (int c = -3 + r; c <= 3 - r; c++) gdi_put(bm, ax + c, ay + r, tx);
+}
 /* Which predefined classes have a built-in paint. */
 static int u32_ctrl_paintable(const char *cls) {
-    return !strcasecmp(cls, "button") || !strcasecmp(cls, "static") || !strcasecmp(cls, "edit");
+    return !strcasecmp(cls, "button") || !strcasecmp(cls, "static") || !strcasecmp(cls, "edit")
+        || !strcasecmp(cls, "listbox") || !strcasecmp(cls, "combobox");
 }
 /* BUTTON sub-styles (low 4 bits BS_*): push = BS_PUSHBUTTON/BS_DEFPUSHBUTTON; check =
  * BS_CHECKBOX/BS_AUTOCHECKBOX/BS_3STATE/BS_AUTO3STATE; group box = BS_GROUPBOX(7)
@@ -5114,7 +5183,16 @@ static void u32_control_paint_full(uint32_t hdc, int wi) {
         struct gdi_obj *bm = gdi_dc_surface(hdc);
         int32_t rc[4] = { 0, 0, g_u32_win[wi].w, g_u32_win[wi].h };
         if (bm) u32_drawedge(bm, rc, 0x0Au /*EDGE_SUNKEN*/, 0xFu /*BF_RECT*/);
+        return;
     }
+    if (!strcasecmp(cls, "listbox")) {
+        u32_listbox_paint(hdc, wi);
+        struct gdi_obj *bm = gdi_dc_surface(hdc);
+        int32_t rc[4] = { 0, 0, g_u32_win[wi].w, g_u32_win[wi].h };
+        if (bm) u32_drawedge(bm, rc, 0x0Au /*EDGE_SUNKEN*/, 0xFu /*BF_RECT*/);
+        return;
+    }
+    if (!strcasecmp(cls, "combobox")) { u32_combobox_paint(hdc, wi); return; }
 }
 /* Recomposite the parent dialog of control `ci` (reflect a state change on screen). */
 static void u32_ctrl_recomposite(int ci) {
@@ -5157,7 +5235,6 @@ static void u32_ctrl_click(uint32_t esp, int i) {
  * client into the given DC; a BUTTON also handles BM_GETCHECK/BM_SETCHECK/BM_CLICK.
  * Everything else stays unhandled (caller falls back to 0). */
 static int u32_control_proc(uint32_t esp, uint32_t hwnd, uint32_t msg, uint32_t wp, uint32_t lp, uint32_t *out) {
-    (void)lp;
     int i = (hwnd >= 1 && hwnd <= U32_MAX_WIN && g_u32_win[hwnd - 1].used) ? (int)hwnd - 1 : -1;
     if (i < 0) return 0;
     const char *cls = g_u32_win[i].classname;
@@ -5169,14 +5246,39 @@ static int u32_control_proc(uint32_t esp, uint32_t hwnd, uint32_t msg, uint32_t 
         if (msg == 0x00F1u /*BM_SETCHECK*/) { g_u32_win[i].check_state = (int)wp; u32_ctrl_recomposite(i); *out = 0; return 1; }
         if (msg == 0x00F5u /*BM_CLICK*/)    { u32_ctrl_click(esp, i); *out = 0; return 1; }
     }
+    /* LISTBOX (LB_*) / COMBOBOX (CB_*) item model — same operations, different opcodes. */
+    if (!strcasecmp(cls, "listbox") || !strcasecmp(cls, "combobox")) {
+        int lb = !strcasecmp(cls, "listbox");
+        uint32_t A = lb?0x180u:0x143u, IN = lb?0x181u:0x14Au, DE = lb?0x182u:0x144u, RS = lb?0x184u:0x14Bu,
+                 SC = lb?0x186u:0x14Eu, GC = lb?0x188u:0x147u, GT = lb?0x189u:0x148u, GL = lb?0x18Au:0x149u, CN = lb?0x18Bu:0x146u;
+        if (msg == A)  { int p = u32_items_insert(i, -1, (const char *)(uintptr_t)lp); u32_ctrl_recomposite(i); *out = (uint32_t)p; return 1; }
+        if (msg == IN) { int p = u32_items_insert(i, (int)wp, (const char *)(uintptr_t)lp); u32_ctrl_recomposite(i); *out = (uint32_t)p; return 1; }
+        if (msg == RS) { u32_items_free(i); u32_ctrl_recomposite(i); *out = 0; return 1; }
+        if (msg == CN) { *out = (uint32_t)g_u32_win[i].item_count; return 1; }
+        if (msg == SC) { g_u32_win[i].cur_sel = (int)wp; u32_ctrl_recomposite(i); *out = wp; return 1; }
+        if (msg == GC) { *out = (uint32_t)g_u32_win[i].cur_sel; return 1; }
+        if (msg == GT) { const char *s = u32_items_get(i, (int)wp); char *dst = (char *)(uintptr_t)lp;
+                         if (!s) { *out = (uint32_t)-1; return 1; }
+                         int n = 0; if (dst) { for (; s[n]; n++) dst[n] = s[n]; dst[n] = 0; } else n = (int)strlen(s);
+                         *out = (uint32_t)n; return 1; }
+        if (msg == GL) { const char *s = u32_items_get(i, (int)wp); *out = s ? (uint32_t)strlen(s) : (uint32_t)-1; return 1; }
+        if (msg == DE) { int idx = (int)wp;
+                         if (idx >= 0 && idx < g_u32_win[i].item_count) { free(g_u32_win[i].items[idx]);
+                             for (int k = idx; k < g_u32_win[i].item_count - 1; k++) g_u32_win[i].items[k] = g_u32_win[i].items[k + 1];
+                             g_u32_win[i].item_count--; }
+                         u32_ctrl_recomposite(i); *out = (uint32_t)g_u32_win[i].item_count; return 1; }
+    }
     if (msg == 0x0318u /*WM_PRINTCLIENT*/) {
         /* Match Wine's observable WM_PRINTCLIENT: only push buttons paint via this
          * message (checkbox/radio paint nothing here — their glyph is composite-only). */
-        if (!strcasecmp(cls, "button"))    { if (u32_btn_is_push(g_u32_win[i].style)) u32_button_paint(wp, i); }
-        else if (!strcasecmp(cls, "static")) u32_static_paint(wp, i);
-        else                                 u32_edit_paint(wp, i, 0);   /* client only */
+        if (!strcasecmp(cls, "button"))        { if (u32_btn_is_push(g_u32_win[i].style)) u32_button_paint(wp, i); }
+        else if (!strcasecmp(cls, "static"))   u32_static_paint(wp, i);
+        else if (!strcasecmp(cls, "listbox"))  u32_listbox_paint(wp, i);
+        else if (!strcasecmp(cls, "combobox")) u32_combobox_paint(wp, i);
+        else                                   u32_edit_paint(wp, i, 0);   /* client only */
         *out = 0; return 1;
     }
+    (void)esp;
     return 0;
 }
 /* Hit-test a dialog's clickable child controls at client (x,y) and click the topmost

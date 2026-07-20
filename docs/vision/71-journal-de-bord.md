@@ -3930,4 +3930,19 @@ Détail : **70 §6** (roadmap). Résumé :
   déterministe**. Portes : winediff **158/158 fixtures inchangé** (seul rouge `gdi_uifont` env), hash `19acad982194bf07`
   **inchangé**. Vérifié par les démos interactives (toggle case, saisie champ = même mécanisme). **Reste** : combo/list, comctl32 peints.
 
+### 2026-07-19 — [HLE-WIN32][GUI] **LISTBOX + COMBOBOX** : modèle d'items (bit-exact) + peinture
+- **Modèle d'items** (liste de chaînes sur le tas, champs `items/item_count/item_cap/cur_sel` par-fenêtre) partagé LB/CB :
+  `LB_ADDSTRING/INSERTSTRING/DELETESTRING/RESETCONTENT/SETCURSEL/GETCURSEL/GETTEXT/GETTEXTLEN/GETCOUNT` et les jumeaux **CB_***
+  (mêmes opérations, opcodes différents). `cur_sel` init à **-1** (LB_ERR). **Bit-exact vs Wine** :
+  `winecorpus/user32_listbox.c` (`LB count=4 cursel=2 text2=[Banana] len1=7`, afterdel `[Apricot]`, `CB … [Green]`).
+- **Peinture** : LISTBOX (`u32_listbox_paint`) = fond COLOR_WINDOW + items + **ligne sélectionnée COLOR_HIGHLIGHT/HIGHLIGHTTEXT**
+  (index-based ; bord creusé au composite). COMBOBOX fermé (`u32_combobox_paint`) = champ blanc (texte de la sélection) + **bouton
+  flèche déroulante** (DrawEdge RAISED + triangle) ; zone sous le champ = fond dialogue. `u32_paint_text` généralisé (texte
+  arbitraire, pas que le titre). Vérif **qualitative** (capture Xvfb : liste 4 items « Angelfish » surligné + combo « Freshwater »
+  = layout identique Wine ; surlignage bleu classique vs bleu moderne, même index). Piège corrigé au passage : `u32_window_create`
+  ne zérotait pas `is_dialog/du_x/du_y/dlg_font/items` (slot réutilisé → état fantôme) — désormais initialisés.
+- **Portes** : winediff **158→159 fixtures** (user32_listbox verte ; seul rouge `gdi_uifont` env), hash `19acad982194bf07`
+  **inchangé**, table triée. **⇒ Tous les contrôles de dialogue courants peints** (bouton/label/champ/case/radio/group/list/combo).
+  Reste GUI : contrôles **comctl32** peints à l'écran (progress bar liftée → GDI→framebuffer).
+
 <!-- NOUVELLES ENTRÉES ICI (garder l'ordre chronologique, plus récent en bas) -->
