@@ -3972,4 +3972,14 @@ Détail : **70 §6** (roadmap). Résumé :
   `19acad982194bf07` **inchangé**, table triée. Suite : batches 2+ (clipboard, caret, regions GDI, blit, clip, Uniscribe/IMM =
   no-op sound), puis intégration composite (esp threadé) → contrôles comctl32 peints.
 
+### 2026-07-19 — [HLE-WIN32][LOADER] **Socle comctl32 batch 2** : clipboard + caret + IMM/no-op (mesuré 102→82)
+- Batch 2 : **clipboard en mémoire** (table format→handle : Open/Close/Empty/Set/Get/IsClipboardFormatAvailable — round-trip
+  sound, format absent = NULL comme un presse-papier vide), **caret** (position stateful Set/GetCaretPos ; Create/Destroy/Show/
+  Hide = no-op display), **IMM** (`ImmGetContext=0`/`ImmReleaseContext=1`/composition = pas d'IME = état correct sur setup
+  non-CJK), **divers no-op sound** (`NotifyWinEvent`/`TrackMouseEvent`/`KillSystemTimer`/`GetLayout`=LTR). Gardé
+  `winecorpus/win32_socle_comctl2.c` (clipboard round-trip `[Hello]` + caret `7 9`) → **bit-identique Wine**.
+- **Mesure** : comctl32 socle **102 → 82** imports manquants. **Portes** : winediff **160→161**, hash `19acad982194bf07`
+  **inchangé**, table triée. Suite : batch 3 (régions GDI, clip, blit, char-width, window-nav), puis Uniscribe/deep = abort/no-op
+  sound, puis intégration composite (esp) → progress bar peinte à l'écran.
+
 <!-- NOUVELLES ENTRÉES ICI (garder l'ordre chronologique, plus récent en bas) -->

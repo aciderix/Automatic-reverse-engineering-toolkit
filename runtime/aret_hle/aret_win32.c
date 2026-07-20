@@ -7083,6 +7083,50 @@ uint32_t aret_GetMonitorInfoA(uint32_t esp) { return aret_GetMonitorInfoW(esp); 
 /* GetDpiForWindow(hwnd) -> 96 (our fixed logical DPI, matches GetDeviceCaps LOGPIXELS). */
 uint32_t aret_GetDpiForWindow(uint32_t esp) { (void)esp; return 96; }
 
+/* ---- comctl32 socle batch 2 : clipboard (in-memory), caret (state), IMM (no IME) ---- */
+/* In-process clipboard: format -> handle, so Set/GetClipboardData round-trips (sound —
+ * an empty format returns NULL like a real empty clipboard). Bounded table. */
+static struct { uint32_t fmt, handle; } g_u32_clip[32];
+static int g_u32_clip_n;
+uint32_t aret_OpenClipboard(uint32_t esp)  { (void)esp; return 1; }
+uint32_t aret_CloseClipboard(uint32_t esp) { (void)esp; return 1; }
+uint32_t aret_EmptyClipboard(uint32_t esp) { (void)esp; g_u32_clip_n = 0; return 1; }
+uint32_t aret_SetClipboardData(uint32_t esp) {
+    uint32_t fmt = WU(0), h = WU(1);
+    for (int i = 0; i < g_u32_clip_n; i++) if (g_u32_clip[i].fmt == fmt) { g_u32_clip[i].handle = h; return h; }
+    if (g_u32_clip_n < 32) { g_u32_clip[g_u32_clip_n].fmt = fmt; g_u32_clip[g_u32_clip_n].handle = h; g_u32_clip_n++; }
+    return h;
+}
+uint32_t aret_GetClipboardData(uint32_t esp) {
+    uint32_t fmt = WU(0);
+    for (int i = 0; i < g_u32_clip_n; i++) if (g_u32_clip[i].fmt == fmt) return g_u32_clip[i].handle;
+    return 0;
+}
+uint32_t aret_IsClipboardFormatAvailable(uint32_t esp) {
+    uint32_t fmt = WU(0);
+    for (int i = 0; i < g_u32_clip_n; i++) if (g_u32_clip[i].fmt == fmt) return 1;
+    return 0;
+}
+/* Caret: position state (round-trips); show/hide/create/destroy are display no-ops. */
+static int32_t g_u32_caret_x, g_u32_caret_y;
+uint32_t aret_CreateCaret(uint32_t esp)  { (void)esp; return 1; }
+uint32_t aret_DestroyCaret(uint32_t esp) { (void)esp; return 1; }
+uint32_t aret_ShowCaret(uint32_t esp)    { (void)esp; return 1; }
+uint32_t aret_HideCaret(uint32_t esp)    { (void)esp; return 1; }
+uint32_t aret_SetCaretPos(uint32_t esp)  { g_u32_caret_x = WI(0); g_u32_caret_y = WI(1); return 1; }
+uint32_t aret_GetCaretPos(uint32_t esp)  { int32_t *p = (int32_t *)WP(0); if (p) { p[0] = g_u32_caret_x; p[1] = g_u32_caret_y; } return 1; }
+/* IMM (input method): no IME present — the sound, correct state on a non-CJK setup. */
+uint32_t aret_ImmGetContext(uint32_t esp)             { (void)esp; return 0; }
+uint32_t aret_ImmReleaseContext(uint32_t esp)         { (void)esp; return 1; }
+uint32_t aret_ImmGetCompositionStringW(uint32_t esp)  { (void)esp; return 0; }
+uint32_t aret_ImmSetCompositionFontW(uint32_t esp)    { (void)esp; return 1; }
+uint32_t aret_ImmSetCompositionWindow(uint32_t esp)   { (void)esp; return 1; }
+/* Misc display/no-op (sound: no wrong data, only a display effect we don't model). */
+uint32_t aret_NotifyWinEvent(uint32_t esp)  { (void)esp; return 0; }
+uint32_t aret_TrackMouseEvent(uint32_t esp) { (void)esp; return 1; }
+uint32_t aret_KillSystemTimer(uint32_t esp) { (void)esp; return 1; }
+uint32_t aret_GetLayout(uint32_t esp)       { (void)esp; return 0; }   /* LAYOUT_LTR (no RTL mirror) */
+
 /* ---- Atom tables (kernel32/user32) — string<->ATOM interning, refcounted.
  * Two separate per-process tables (Global* vs local Add/Find/Delete/GetAtomName):
  * a local atom is invisible to the global table (measured vs Wine). String atoms
