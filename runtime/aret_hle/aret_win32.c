@@ -2937,6 +2937,11 @@ uint32_t aret_PostMessageW(uint32_t esp) { return (uint32_t)u32_q_push(WU(0), WU
  * built-in control proc (paint, font). Fwd-declared here, defined after the GDI
  * primitives it uses (u32_drawedge/u32_drawtext). */
 static int u32_control_proc(uint32_t esp, uint32_t hwnd, uint32_t msg, uint32_t wp, uint32_t lp, uint32_t *out);
+/* Hit-test a dialog's controls at client (x,y) and deliver a click to the one under the
+ * point (defined with the control paint code). Used by the real-input path (a mouse
+ * release on a dialog) so a click reaches the child control, as Wine's per-window input
+ * would. */
+static void u32_dialog_hittest_click(uint32_t esp, int di, int x, int y);
 /* SendMessageW(HWND,UINT,WPARAM,LPARAM) -> LRESULT. Synchronous: call the WNDPROC now. */
 uint32_t aret_SendMessageW(uint32_t esp) {
     uint32_t wndproc = u32_win_wndproc(WU(0));
@@ -2953,7 +2958,15 @@ uint32_t aret_DispatchMessageW(uint32_t esp) {
         return u32_call_wndproc(esp, lp, hwnd, msg, wp, (uint32_t)(mono_ns() / 1000000ull));
     uint32_t wndproc = u32_win_wndproc(hwnd);
     if (!wndproc) return 0;
-    return u32_call_wndproc(esp, wndproc, hwnd, msg, wp, lp);
+    uint32_t ret = u32_call_wndproc(esp, wndproc, hwnd, msg, wp, lp);
+    /* After the DLGPROC sees a left-button release on a dialog (it usually ignores it),
+     * route the click to the child control under the cursor — our controls are not
+     * separate input windows, so the dialog does the hit-test that Wine's per-window
+     * input would. Works for real SDL clicks and for a posted WM_LBUTTONUP. */
+    int di = (hwnd >= 1 && hwnd <= U32_MAX_WIN && g_u32_win[hwnd - 1].used) ? (int)hwnd - 1 : -1;
+    if (di >= 0 && g_u32_win[di].is_dialog && msg == 0x0202u /*WM_LBUTTONUP*/)
+        u32_dialog_hittest_click(esp, di, (int)(int16_t)(lp & 0xFFFF), (int)(int16_t)((lp >> 16) & 0xFFFF));
+    return ret;
 }
 /* TranslateMessage(const MSG*) -> BOOL. No keyboard input in this model -> no
  * WM_CHAR synthesis; returns 0 (nothing translated), which is correct here. */
@@ -3796,11 +3809,20 @@ static uint32_t u32_dialog_modal(uint32_t esp, const uint8_t *tpl, uint32_t dlgp
     u32_call_wndproc(esp, dlgproc, hDlg, U32_WM_INITDIALOG, 0, param);
     while (!g_u32_modal_ended) {
         u32_pump_timers();
+#ifdef ARET_HAVE_SDL
+        sdl_pump();                       /* drain real mouse/keyboard/close into the queue */
+#endif
         if (!u32_q_empty()) {
             uint32_t m[7]; u32_q_peek_copy(m, 1);
             uint32_t wp = u32_win_wndproc(m[0]);
             if (wp) u32_call_wndproc(esp, wp, m[0], m[1], m[2], m[3]);
+            if (m[0] == hDlg && m[1] == 0x0202u /*WM_LBUTTONUP*/)   /* route click to a child */
+                u32_dialog_hittest_click(esp, (int)hDlg - 1,
+                                         (int)(int16_t)(m[3] & 0xFFFF), (int)(int16_t)((m[3] >> 16) & 0xFFFF));
         } else {
+#ifdef ARET_HAVE_SDL
+            if (g_u32_win[(int)hDlg - 1].sdl_win) { SDL_WaitEventTimeout(NULL, 20); continue; }
+#endif
             aret_unimpl("modal DialogBox: DLGPROC did not EndDialog and no events (headless)");
         }
     }
@@ -5055,17 +5077,59 @@ static void u32_control_paint_full(uint32_t hdc, int wi) {
         if (bm) u32_drawedge(bm, rc, 0x0Au /*EDGE_SUNKEN*/, 0xFu /*BF_RECT*/);
     }
 }
+/* Recomposite the parent dialog of control `ci` (reflect a state change on screen). */
+static void u32_ctrl_recomposite(int ci) {
+#ifdef ARET_HAVE_SDL
+    uint32_t par = g_u32_win[ci].parent;
+    if (par >= 1 && par <= U32_MAX_WIN && g_u32_win[par - 1].used && g_u32_win[par - 1].is_dialog) {
+        u32_dialog_composite((int)par - 1); sdl_window_present((int)par - 1);
+    }
+#else
+    (void)ci;
+#endif
+}
+/* Apply a click to a button control `i`: run the auto behaviour (toggle checkbox, cycle
+ * 3-state, select radio + clear siblings), recomposite, and notify the parent with
+ * WM_COMMAND(BN_CLICKED). The auto-state model follows the Win32 spec (BM_CLICK); Wine
+ * gives no deterministic headless oracle for click behaviour, so this is verified
+ * qualitatively (a real click) + by the documented auto semantics. */
+static void u32_ctrl_click(uint32_t esp, int i) {
+    uint32_t t = g_u32_win[i].style & 0xFu;
+    if (t == 3)      g_u32_win[i].check_state = g_u32_win[i].check_state ? 0 : 1;   /* BS_AUTOCHECKBOX */
+    else if (t == 6) g_u32_win[i].check_state = (g_u32_win[i].check_state + 1) % 3; /* BS_AUTO3STATE */
+    else if (t == 9) {                                                              /* BS_AUTORADIOBUTTON */
+        uint32_t par = g_u32_win[i].parent;
+        for (int k = 0; k < U32_MAX_WIN; k++)
+            if (g_u32_win[k].used && g_u32_win[k].parent == par && (g_u32_win[k].style & 0xFu) == 9)
+                g_u32_win[k].check_state = 0;
+        g_u32_win[i].check_state = 1;
+    }
+    u32_ctrl_recomposite(i);
+    uint32_t par = g_u32_win[i].parent;
+    if (par) {
+        uint32_t pp = u32_win_wndproc(par);
+        if (pp) u32_call_wndproc(esp, pp, par, 0x0111u /*WM_COMMAND*/,
+                                 (uint32_t)(g_u32_win[i].ctrl_id & 0xFFFF) /*BN_CLICKED<<16 = 0*/,
+                                 (uint32_t)(i + 1));
+    }
+}
 /* Built-in proc for a predefined control with no app WNDPROC. BUTTON/STATIC/EDIT:
  * WM_SETFONT stores the font, WM_GETFONT returns it, WM_PRINTCLIENT paints the control's
- * client into the given DC. Everything else stays unhandled (caller falls back to 0). */
+ * client into the given DC; a BUTTON also handles BM_GETCHECK/BM_SETCHECK/BM_CLICK.
+ * Everything else stays unhandled (caller falls back to 0). */
 static int u32_control_proc(uint32_t esp, uint32_t hwnd, uint32_t msg, uint32_t wp, uint32_t lp, uint32_t *out) {
-    (void)esp; (void)lp;
+    (void)lp;
     int i = (hwnd >= 1 && hwnd <= U32_MAX_WIN && g_u32_win[hwnd - 1].used) ? (int)hwnd - 1 : -1;
     if (i < 0) return 0;
     const char *cls = g_u32_win[i].classname;
     if (!u32_ctrl_paintable(cls)) return 0;
     if (msg == 0x0030u /*WM_SETFONT*/)  { g_u32_win[i].ctrl_font = wp; *out = 0; return 1; }
     if (msg == 0x0031u /*WM_GETFONT*/)  { *out = g_u32_win[i].ctrl_font; return 1; }
+    if (!strcasecmp(cls, "button")) {
+        if (msg == 0x00F0u /*BM_GETCHECK*/) { *out = (uint32_t)g_u32_win[i].check_state; return 1; }
+        if (msg == 0x00F1u /*BM_SETCHECK*/) { g_u32_win[i].check_state = (int)wp; u32_ctrl_recomposite(i); *out = 0; return 1; }
+        if (msg == 0x00F5u /*BM_CLICK*/)    { u32_ctrl_click(esp, i); *out = 0; return 1; }
+    }
     if (msg == 0x0318u /*WM_PRINTCLIENT*/) {
         /* Match Wine's observable WM_PRINTCLIENT: only push buttons paint via this
          * message (checkbox/radio paint nothing here — their glyph is composite-only). */
@@ -5075,6 +5139,18 @@ static int u32_control_proc(uint32_t esp, uint32_t hwnd, uint32_t msg, uint32_t 
         *out = 0; return 1;
     }
     return 0;
+}
+/* Hit-test a dialog's clickable child controls at client (x,y) and click the topmost
+ * one under the point (buttons only; a group box is not clickable). */
+static void u32_dialog_hittest_click(uint32_t esp, int di, int x, int y) {
+    for (int c = 0; c < U32_MAX_WIN; c++) {
+        if (!g_u32_win[c].used || g_u32_win[c].parent != (uint32_t)(di + 1)) continue;
+        if (!g_u32_win[c].visible || !g_u32_win[c].enabled) continue;
+        if (strcasecmp(g_u32_win[c].classname, "button") != 0) continue;
+        if (u32_btn_is_group(g_u32_win[c].style)) continue;          /* label frame, not clickable */
+        int cx = g_u32_win[c].x, cy = g_u32_win[c].y, cw = g_u32_win[c].w, ch = g_u32_win[c].h;
+        if (x >= cx && x < cx + cw && y >= cy && y < cy + ch) { u32_ctrl_click(esp, c); return; }
+    }
 }
 /* Composite a dialog's client framebuffer for display: fill the background with
  * COLOR_3DFACE (the dialog erase colour, measured vs Wine) then paint each visible

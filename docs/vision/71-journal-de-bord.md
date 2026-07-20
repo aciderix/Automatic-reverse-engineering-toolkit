@@ -3887,4 +3887,22 @@ Détail : **70 §6** (roadmap). Résumé :
 - **Portes** : winediff **155→156 fixtures**, hash `19acad982194bf07` **inchangé**, table triée. **⇒ TOUS les contrôles-boutons
   peints** (push/checkbox/radio/groupbox) + label/champ. Reste peinture : combo/list. Puis **interaction**.
 
+### 2026-07-19 — [HLE-WIN32][GUI] **Interaction dialogue** : clic → hit-test → toggle + `WM_COMMAND` (BN_CLICKED)
+- Le dialogue devient **cliquable/utilisable** (plus seulement affiché). `u32_ctrl_click(esp,i)` : applique la sémantique
+  **auto** Win32 (BS_AUTOCHECKBOX toggle, BS_AUTO3STATE cycle 0→1→2, BS_AUTORADIOBUTTON sélectionne + décoche les frères du
+  dialogue), **re-compose** l'écran, puis notifie le parent par **`WM_COMMAND(MAKEWPARAM(id, BN_CLICKED), hCtrl)`**.
+  `u32_control_proc` gère **BM_GETCHECK/BM_SETCHECK/BM_CLICK**. Chemin souris réel : un `WM_LBUTTONUP` livré à un dialogue (pompe
+  SDL ou PostMessage) déclenche `u32_dialog_hittest_click` (hit-test des contrôles enfants → clic du bouton sous le curseur) —
+  nos contrôles ne sont pas des fenêtres d'entrée séparées, donc le dialogue fait le hit-test que l'entrée par-fenêtre de Wine
+  ferait. **Modal ET modeless** couverts (la boucle modale draine SDL + attend l'entrée au lieu d'aborter quand une vraie
+  fenêtre existe).
+- **Découverte de vérification** : Wine **n'offre aucun oracle headless déterministe** pour le clic — `WM_LBUTTONUP` synthétique
+  et **`BM_CLICK`** ne font **rien** sous Wine sans état de capture souris réel / pompe (mesuré). Donc le clic est vérifié
+  **qualitativement** (vrai clic **xdotool** sous Xvfb → la case se coche à l'écran, **21 px = la coche Marlett**, +WM_COMMAND
+  déterministe côté ARET conforme au spec Win32) et non par winediff. La partie **déterministe vérifiable** = `BM_SETCHECK/
+  BM_GETCHECK` round-trip → `winecorpus/user32_bmsetcheck.c` **bit-identique Wine** (`init=0 set1=1 set0=0`).
+- **Portes** : winediff **156→157 fixtures** (bmsetcheck verte ; seul rouge `gdi_uifont` env), hash `19acad982194bf07`
+  **inchangé**, table triée. **⇒ Dialogue interactif** (clic → toggle + WM_COMMAND). Reste : focus + saisie clavier EDIT,
+  repaint général, combo/list, comctl32 peints.
+
 <!-- NOUVELLES ENTRÉES ICI (garder l'ordre chronologique, plus récent en bas) -->
