@@ -3864,4 +3864,18 @@ Détail : **70 §6** (roadmap). Résumé :
   `19acad982194bf07` **inchangé**, `table_is_sorted_by_name` ok. **Reste contrôles** : radio (cercle, niveau-recherche), group
   box (DrawEdge ETCHED — faisable), combo/list, repaint général sur invalidation, interaction (clic → WM_COMMAND).
 
+### 2026-07-19 — [HLE-WIN32][GUI] **Group box** (cadre étiqueté) : `DrawEdge EDGE_ETCHED` bit-exact + peinture du contrôle
+- Dernière primitive de peinture statique courante. **`DrawEdge(EDGE_ETCHED, BF_RECT)`** ajouté à `u32_drawedge` (indices
+  **mesurés** : outer TL=BTNSHADOW/BR=BTNHIGHLIGHT, inner TL=BTNHIGHLIGHT/BR=BTNSHADOW = la gravure) — avant, ETCHED
+  warn+no-draw ; désormais **bit-exact**. `u32_group_paint` : fond 3DFACE + cadre gravé dont le **haut traverse la ligne du
+  label**, label en haut-gauche dessiné **OPAQUE** (fond 3DFACE) pour **couper la bordure** (le cadre étiqueté classique).
+  Dispatch BUTTON : +`u32_btn_is_group` (BS_GROUPBOX=7) dans `u32_control_paint_full`.
+- **Vérif** : `winecorpus/gdi_drawedge_etched.c` (structurel index-based) → **bit-identique Wine** (`oTL/iTL/oBR/iBR=1`). Rendu :
+  dialogue « Settings » avec group box « Display » (cadre + label) contenant 2 checkboxes + label + champ EDIT + bouton →
+  **identique à Wine** (capture Xvfb), indiscernable en layout.
+- **Portes** : winediff **154→155 fixtures** (gdi_drawedge_etched verte ; seul rouge = `gdi_uifont` env), hash transpile
+  `19acad982194bf07` **inchangé**, `table_is_sorted_by_name` ok. **⇒ Jeu de contrôles statiques courants COMPLET** (bouton,
+  label, champ, case, group box). **Reste** : radio (cercle, niveau-recherche), combo/list (complexe), **interaction** (clic →
+  hit-test → WM_COMMAND, focus, saisie clavier) = prochain grand chantier.
+
 <!-- NOUVELLES ENTRÉES ICI (garder l'ordre chronologique, plus récent en bas) -->

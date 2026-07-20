@@ -4809,7 +4809,8 @@ static int u32_drawedge(struct gdi_obj *bm, const int32_t *r, uint32_t edge, uin
     int lo, bo, li, bi;                        /* sys-colour indices: outer LT/BR, inner LT/BR */
     if (edge == 0x5)      { lo = 22; bo = 21; li = 20; bi = 16; }   /* EDGE_RAISED */
     else if (edge == 0xA) { lo = 16; bo = 20; li = 21; bi = 22; }   /* EDGE_SUNKEN */
-    else { aret_unimpl("DrawEdge: only EDGE_RAISED/EDGE_SUNKEN modelled"); return 0; }
+    else if (edge == 0x6) { lo = 16; bo = 20; li = 20; bi = 16; }   /* EDGE_ETCHED (group box) — measured */
+    else { aret_unimpl("DrawEdge: only EDGE_RAISED/SUNKEN/ETCHED modelled"); return 0; }
     if ((flags & 0x1000u) && edge == 0x5) { int tmp = lo; lo = li; li = tmp; }   /* BF_SOFT (raised) */
     int l = r[0], t = r[1], rt = r[2], b = r[3];
     if (rt - l < 2 || b - t < 2) return 1;
@@ -4956,14 +4957,40 @@ static void u32_check_paint(uint32_t hdc, int wi) {
     int32_t r2[4] = { 16, 0, w, h };
     u32_ctrl_text(hdc, d, wi, r2, 0x4u | 0x20u /*DT_VCENTER|DT_SINGLELINE*/, 8 /*COLOR_WINDOWTEXT*/);
 }
+/* GROUP BOX (BS_GROUPBOX): fill COLOR_3DFACE, an etched frame whose top runs through the
+ * caption row, and the caption at top-left drawn OPAQUE (COLOR_3DFACE background) so it
+ * breaks the top border line — the classic labelled frame. Whole-control paint is
+ * composite-only; the etched frame primitive is bit-exact (DrawEdge EDGE_ETCHED). */
+static void u32_group_paint(uint32_t hdc, int wi) {
+    struct gdi_obj *bm = gdi_dc_surface(hdc); int d = gdi_idx(hdc);
+    if (!bm || d < 0) return;
+    int w = g_u32_win[wi].w, h = g_u32_win[wi].h;
+    u32_ctrl_fill(bm, w, h, u32_syscolor(15 /*COLOR_3DFACE*/));
+    int32_t fr[4] = { 0, 6, w, h };
+    u32_drawedge(bm, fr, 0x6 /*EDGE_ETCHED*/, 0xFu /*BF_RECT*/);
+    const char *cap = g_u32_win[wi].title;
+    if (cap && cap[0] && g_u32_win[wi].ctrl_font) {
+        uint32_t sf = g_gdi[d].sel_font, tc = g_gdi[d].text_color, bc = g_gdi[d].bk_color; int bk = g_gdi[d].bk_mode;
+        g_gdi[d].sel_font = g_u32_win[wi].ctrl_font;
+        g_gdi[d].text_color = u32_syscolor(8 /*COLOR_WINDOWTEXT*/);
+        g_gdi[d].bk_color = u32_syscolor(15 /*COLOR_3DFACE*/);
+        g_gdi[d].bk_mode = 2 /*OPAQUE — erases the border behind the label*/;
+        uint32_t cps[256]; int m = 0; for (; cap[m] && m < 255; m++) cps[m] = u32_ansi_cp((unsigned char)cap[m]);
+        int32_t r2[4] = { 8, 0, w, 14 };
+        u32_drawtext(hdc, cps, m, (uint32_t)(uintptr_t)r2, 0x20u /*DT_SINGLELINE (left/top)*/);
+        g_gdi[d].sel_font = sf; g_gdi[d].text_color = tc; g_gdi[d].bk_color = bc; g_gdi[d].bk_mode = bk;
+    }
+}
 /* Which predefined classes have a built-in paint. */
 static int u32_ctrl_paintable(const char *cls) {
     return !strcasecmp(cls, "button") || !strcasecmp(cls, "static") || !strcasecmp(cls, "edit");
 }
 /* BUTTON sub-styles (low 4 bits BS_*): push = BS_PUSHBUTTON/BS_DEFPUSHBUTTON; check =
- * BS_CHECKBOX/BS_AUTOCHECKBOX/BS_3STATE/BS_AUTO3STATE (radio 4/9 + group box 7 = not painted). */
+ * BS_CHECKBOX/BS_AUTOCHECKBOX/BS_3STATE/BS_AUTO3STATE; group box = BS_GROUPBOX(7)
+ * (radio 4/9 = curved, not painted). */
 static int u32_btn_is_push(uint32_t style)  { uint32_t t = style & 0xFu; return t == 0 || t == 1; }
 static int u32_btn_is_check(uint32_t style) { uint32_t t = style & 0xFu; return t == 2 || t == 3 || t == 5 || t == 6; }
+static int u32_btn_is_group(uint32_t style) { return (style & 0xFu) == 7; }
 /* Full on-screen appearance of a control (for the dialog composite): the client paint
  * plus any non-client 3D border (EDIT gets a sunken edge). */
 static void u32_control_paint_full(uint32_t hdc, int wi) {
@@ -4971,8 +4998,9 @@ static void u32_control_paint_full(uint32_t hdc, int wi) {
     if (!strcasecmp(cls, "button")) {
         uint32_t st = g_u32_win[wi].style;
         if (u32_btn_is_check(st))     u32_check_paint(hdc, wi);
+        else if (u32_btn_is_group(st)) u32_group_paint(hdc, wi);
         else if (u32_btn_is_push(st)) u32_button_paint(hdc, wi);
-        /* radio (curved) / group box: not painted yet — a sound visible gap, not a guess */
+        /* radio (curved): not painted yet — a sound visible gap, not a guess */
         return;
     }
     if (!strcasecmp(cls, "static")) { u32_static_paint(hdc, wi); return; }

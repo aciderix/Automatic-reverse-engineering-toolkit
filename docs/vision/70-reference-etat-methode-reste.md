@@ -170,7 +170,7 @@ bash bench/regression.sh    # PORTE unifiée : difftest 271/271, in-place 3/3,
                             # recompilabilité gzip/ls/cat 100%
 bash bench/difftest.sh              # décompile O0→O3
 bash bench/difftest_transpile.sh    # transpile (hash 19acad982194bf07)
-bash bench/winediff.sh              # axe 2 vs Wine (154/154 ; gdi_uifont peut être rouge = env fontconfig i386)
+bash bench/winediff.sh              # axe 2 vs Wine (155/155 ; gdi_uifont peut être rouge = env fontconfig i386)
 bash bench/funcdiff.sh              # lift-closure + opt-diff vs Unicorn (0 div)
 # Sweeps de vrais binaires (téléchargent + comparent à Wine) :
 bash bench/sqlite_sweep.sh   bash bench/busybox_sweep.sh   bash bench/corpus_sweep.sh
@@ -190,7 +190,7 @@ bash bench/wallsweep.sh <dir1> [dir2…]  # AGRÈGE --mode walls sur un corpus :
 
 ### État régression (référence — doit rester vert)
 difftest **272/272** · transpile-diff **4/4** (H=`19acad982194bf07`) · winediff
-**154/154** (le seul rouge possible = `gdi_uifont`, **environnemental** : fontconfig i386, orthogonal au code) · cpudiff vert (per-instruction + séquences génératives) · funcdiff corpus **0 divergence** (lift **~20,6k** scorées /
+**155/155** (le seul rouge possible = `gdi_uifont`, **environnemental** : fontconfig i386, orthogonal au code) · cpudiff vert (per-instruction + séquences génératives) · funcdiff corpus **0 divergence** (lift **~20,6k** scorées /
 **~20k appels** — **imports (stubs `@N` + `@0` scalaires) + appels indirects résolus + intrinsèques mémoire host-backés (memmove/memcpy)** ; scratch sous-esp exclu ; opt ~10k scorées) · SMT **11/11** · in-place **3/3** · magicdiv **2³²** ·
 recompilabilité **100 %** · WASM **7/7**.
 
@@ -477,7 +477,10 @@ recompilabilité **100 %** · WASM **7/7**.
   `DrawFrameControl(DFCS_BUTTONCHECK)` = `DrawEdge(SUNKEN)` + intérieur COLOR_WINDOW + coche **Marlett** (21px mesurés) —
   **bit-exact** (`gdi_framecontrol_check.c`) ; `u32_check_paint` (glyphe + label), re-composite sur `UpdateWindow` (état coché
   reflété). ⚠️ Wine ne peint pas checkbox/radio via WM_PRINTCLIENT → contrôle entier vérifié qualitativement, primitive bit-exact.
-  **Reste** : radio (cercle → niveau-recherche), group box (DrawEdge ETCHED), combo/list, repaint général, interaction (clic → WM_COMMAND).
+  **✅ GROUP BOX (2026-07-19)** : `DrawEdge EDGE_ETCHED` (indices mesurés, bit-exact `gdi_drawedge_etched.c`) + `u32_group_paint`
+  (cadre gravé + label opaque coupant la bordure). **⇒ Contrôles statiques courants COMPLETS** (bouton/label/champ/case/group box).
+  **Reste** : radio (cercle → niveau-recherche), combo/list (complexe), repaint général sur invalidation, **interaction** (clic →
+  hit-test → WM_COMMAND, focus, saisie clavier) = prochain grand chantier.
 - **GDI de base** (M7 G6, doc 72) : table d'objets GDI (DC/bitmap/brush/pen/font, handles opaques) + **dessin
   DIB mémoire bit-exact** — `CreateDIBSection`(32bpp)/`CreateCompatibleDC`/`SelectObject`/`DeleteObject`,
   `SetPixel`/`GetPixel`/`FillRect`/`PatBlt`/`BitBlt`(SRCCOPY), `CreateSolidBrush`/`Pen`, `GetStockObject`/
