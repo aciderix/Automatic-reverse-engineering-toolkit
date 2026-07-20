@@ -4843,6 +4843,7 @@ uint32_t aret_DrawEdge(uint32_t esp) {
  * buttons, check/radio boxes, caption/menu/scroll glyphs abort soundly (each a measured
  * follow-up — never a wrong frame). */
 static void u32_draw_check_glyph(struct gdi_obj *bm, int x, int y, int checked);   /* fwd */
+static void u32_draw_radio_glyph(struct gdi_obj *bm, int x, int y, int checked);   /* fwd */
 uint32_t aret_DrawFrameControl(uint32_t esp) {
     GDI_MAP_GUARD(WU(0), 0);
     struct gdi_obj *bm = gdi_dc_surface(WU(0));
@@ -4857,8 +4858,12 @@ uint32_t aret_DrawFrameControl(uint32_t esp) {
             u32_draw_check_glyph(bm, r[0], r[1], (state & 0x400u /*DFCS_CHECKED*/) ? 1 : 0);
             return 1;
         }
+        if (bt == 0x04u /*DFCS_BUTTONRADIO*/ && (r[2] - r[0]) == 13 && (r[3] - r[1]) == 13) {
+            u32_draw_radio_glyph(bm, r[0], r[1], (state & 0x400u /*DFCS_CHECKED*/) ? 1 : 0);
+            return 1;
+        }
     }
-    aret_unimpl("DrawFrameControl: only DFC_BUTTON push / 13x13 check modelled");
+    aret_unimpl("DrawFrameControl: only DFC_BUTTON push / 13x13 check|radio modelled");
     return 0;
 }
 
@@ -4880,6 +4885,32 @@ static void u32_draw_check_glyph(struct gdi_obj *bm, int x, int y, int checked) 
             {3,7},{4,7},{5,7},{6,7},{7,7},{3,8},{4,8},{5,8},{6,8},{4,9},{5,9} };
         uint32_t tx = u32_syscolor(8 /*COLOR_WINDOWTEXT*/);
         for (unsigned i = 0; i < sizeof pts / sizeof pts[0]; i++) gdi_put(bm, x + pts[i][0], y + pts[i][1], tx);
+    }
+}
+/* Draw a 13x13 radio-button glyph at (x,y): a small bevelled circle with a white field,
+ * plus the centre dot when `checked`. The whole glyph is a FIXED bitmap (measured pixel-
+ * exact from Wine's DrawFrameControl), so it is bit-exact despite being "curved". */
+static void u32_draw_radio_glyph(struct gdi_obj *bm, int x, int y, int checked) {
+    /* S=BTNSHADOW K=3DDKSHADOW H=BTNHIGHLIGHT(white field) L=3DLIGHT  .=leave (outside) */
+    static const char *g[13] = {
+        ".............", ".....SSSS....", "...SSKKKKSS..", "..SSKHHHHK.H.",
+        "..SKHHHHHHLH.", ".SKHHHHHHHHLH", ".SKHHHHHHHHLH", ".SKHHHHHHHHLH",
+        ".SKHHHHHHHHLH", "..SKHHHHHHLH.", "..HHLHHHHLHH.", "...HHLLLLHH..",
+        ".....HHHH...." };
+    for (int r = 0; r < 13; r++) for (int c = 0; c < 13; c++) {
+        int idx;
+        switch (g[r][c]) {
+            case 'S': idx = 16; break; case 'K': idx = 21; break;
+            case 'H': idx = 20; break; case 'L': idx = 22; break;
+            default: continue;
+        }
+        gdi_put(bm, x + c, y + r, u32_syscolor(idx));
+    }
+    if (checked) {
+        static const signed char dot[][2] = {
+            {6,5},{7,5},{5,6},{6,6},{7,6},{8,6},{5,7},{6,7},{7,7},{8,7},{6,8},{7,8} };
+        uint32_t tx = u32_syscolor(8 /*COLOR_WINDOWTEXT*/);
+        for (unsigned i = 0; i < sizeof dot / sizeof dot[0]; i++) gdi_put(bm, x + dot[i][0], y + dot[i][1], tx);
     }
 }
 /* Paint a predefined BUTTON control into `hdc` (its own client area, origin 0,0): the
@@ -4957,6 +4988,18 @@ static void u32_check_paint(uint32_t hdc, int wi) {
     int32_t r2[4] = { 16, 0, w, h };
     u32_ctrl_text(hdc, d, wi, r2, 0x4u | 0x20u /*DT_VCENTER|DT_SINGLELINE*/, 8 /*COLOR_WINDOWTEXT*/);
 }
+/* RADIO BUTTON control: like the checkbox but with the round radio glyph. Composite-only
+ * whole-control paint; the glyph primitive is bit-exact (DrawFrameControl). */
+static void u32_radio_paint(uint32_t hdc, int wi) {
+    struct gdi_obj *bm = gdi_dc_surface(hdc); int d = gdi_idx(hdc);
+    if (!bm || d < 0) return;
+    int w = g_u32_win[wi].w, h = g_u32_win[wi].h;
+    u32_ctrl_fill(bm, w, h, u32_syscolor(15 /*COLOR_3DFACE*/));
+    int gy = (h - 13) / 2; if (gy < 0) gy = 0;
+    u32_draw_radio_glyph(bm, 0, gy, g_u32_win[wi].check_state ? 1 : 0);
+    int32_t r2[4] = { 16, 0, w, h };
+    u32_ctrl_text(hdc, d, wi, r2, 0x4u | 0x20u /*DT_VCENTER|DT_SINGLELINE*/, 8 /*COLOR_WINDOWTEXT*/);
+}
 /* GROUP BOX (BS_GROUPBOX): fill COLOR_3DFACE, an etched frame whose top runs through the
  * caption row, and the caption at top-left drawn OPAQUE (COLOR_3DFACE background) so it
  * breaks the top border line — the classic labelled frame. Whole-control paint is
@@ -4990,6 +5033,7 @@ static int u32_ctrl_paintable(const char *cls) {
  * (radio 4/9 = curved, not painted). */
 static int u32_btn_is_push(uint32_t style)  { uint32_t t = style & 0xFu; return t == 0 || t == 1; }
 static int u32_btn_is_check(uint32_t style) { uint32_t t = style & 0xFu; return t == 2 || t == 3 || t == 5 || t == 6; }
+static int u32_btn_is_radio(uint32_t style) { uint32_t t = style & 0xFu; return t == 4 || t == 9; }
 static int u32_btn_is_group(uint32_t style) { return (style & 0xFu) == 7; }
 /* Full on-screen appearance of a control (for the dialog composite): the client paint
  * plus any non-client 3D border (EDIT gets a sunken edge). */
@@ -4997,10 +5041,10 @@ static void u32_control_paint_full(uint32_t hdc, int wi) {
     const char *cls = g_u32_win[wi].classname;
     if (!strcasecmp(cls, "button")) {
         uint32_t st = g_u32_win[wi].style;
-        if (u32_btn_is_check(st))     u32_check_paint(hdc, wi);
+        if (u32_btn_is_check(st))      u32_check_paint(hdc, wi);
+        else if (u32_btn_is_radio(st)) u32_radio_paint(hdc, wi);
         else if (u32_btn_is_group(st)) u32_group_paint(hdc, wi);
-        else if (u32_btn_is_push(st)) u32_button_paint(hdc, wi);
-        /* radio (curved): not painted yet — a sound visible gap, not a guess */
+        else if (u32_btn_is_push(st))  u32_button_paint(hdc, wi);
         return;
     }
     if (!strcasecmp(cls, "static")) { u32_static_paint(hdc, wi); return; }

@@ -3878,4 +3878,13 @@ Détail : **70 §6** (roadmap). Résumé :
   label, champ, case, group box). **Reste** : radio (cercle, niveau-recherche), combo/list (complexe), **interaction** (clic →
   hit-test → WM_COMMAND, focus, saisie clavier) = prochain grand chantier.
 
+### 2026-07-19 — [HLE-WIN32][GUI] **Radio button** : glyphe 13×13 fixe (bitmap mesuré) bit-exact
+- Le radio semblait « niveau-recherche » (cercle) mais c'est un **glyphe 13×13 FIXE** → mesurable et **hardcodable bit-exact**
+  (comme la coche), pas un tracé de courbe paramétrique. `u32_draw_radio_glyph` encode le bitmap exact (cercle biseauté
+  S/K/H/L + point central WINDOWTEXT si coché) mesuré depuis `DrawFrameControl(DFCS_BUTTONRADIO)`. `aret_DrawFrameControl`
+  étendu (radio 13×13) ; `u32_radio_paint` (fond 3DFACE + glyphe + label) ; dispatch `u32_btn_is_radio` (BS_*RADIOBUTTON 4/9).
+- **Vérif** : `winecorpus/gdi_framecontrol_radio.c` (structurel) → **bit-identique Wine** (anneau sombre/clair + point coché).
+- **Portes** : winediff **155→156 fixtures**, hash `19acad982194bf07` **inchangé**, table triée. **⇒ TOUS les contrôles-boutons
+  peints** (push/checkbox/radio/groupbox) + label/champ. Reste peinture : combo/list. Puis **interaction**.
+
 <!-- NOUVELLES ENTRÉES ICI (garder l'ordre chronologique, plus récent en bas) -->
