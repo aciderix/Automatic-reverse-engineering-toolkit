@@ -2942,6 +2942,8 @@ static int u32_control_proc(uint32_t esp, uint32_t hwnd, uint32_t msg, uint32_t 
  * release on a dialog) so a click reaches the child control, as Wine's per-window input
  * would. */
 static void u32_dialog_hittest_click(uint32_t esp, int di, int x, int y);
+static void u32_ctrl_recomposite(int ci);   /* fwd: recompose a control's parent dialog (no-op without SDL) */
+static uint32_t g_u32_focus;   /* fwd: focused window/control (keyboard target); defined below */
 /* SendMessageW(HWND,UINT,WPARAM,LPARAM) -> LRESULT. Synchronous: call the WNDPROC now. */
 uint32_t aret_SendMessageW(uint32_t esp) {
     uint32_t wndproc = u32_win_wndproc(WU(0));
@@ -3534,7 +3536,10 @@ uint32_t aret_EndDeferWindowPos(uint32_t esp) { (void)esp; return 1; }
 /* SetWindowTextA(HWND, lpString) -> BOOL. */
 uint32_t aret_SetWindowTextA(uint32_t esp) {
     uint32_t wndproc = u32_win_wndproc(WU(0));
-    if (!wndproc) return 0;
+    /* A predefined control has no app WNDPROC: store the text directly (DefWindowProc's
+     * job), then repaint its parent dialog so the change shows (SetDlgItemText path). */
+    if (!wndproc) { uint32_t o = 0; u32_defproc_text(WU(0), U32_WM_SETTEXT, 0, WU(1), 0, &o);
+                    u32_ctrl_recomposite((int)WU(0) - 1); return o; }
     u32_call_wndproc(esp, wndproc, WU(0), U32_WM_SETTEXT, 0, WU(1));
     return 1;
 }
@@ -3542,14 +3547,14 @@ uint32_t aret_SetWindowTextW(uint32_t esp) { return aret_SetWindowTextA(esp); }
 /* GetWindowTextA(HWND, lpString, nMaxCount) -> int (chars copied, excl. NUL). */
 uint32_t aret_GetWindowTextA(uint32_t esp) {
     uint32_t wndproc = u32_win_wndproc(WU(0));
-    if (!wndproc) return 0;
+    if (!wndproc) { uint32_t o = 0; u32_defproc_text(WU(0), U32_WM_GETTEXT, WU(2), WU(1), 0, &o); return o; }
     return u32_call_wndproc(esp, wndproc, WU(0), U32_WM_GETTEXT, WU(2), WU(1));
 }
 uint32_t aret_GetWindowTextW(uint32_t esp) { return aret_GetWindowTextA(esp); }
 /* GetWindowTextLengthA(HWND) -> int. */
 uint32_t aret_GetWindowTextLengthA(uint32_t esp) {
     uint32_t wndproc = u32_win_wndproc(WU(0));
-    if (!wndproc) return 0;
+    if (!wndproc) { uint32_t o = 0; u32_defproc_text(WU(0), U32_WM_GETTEXTLENGTH, 0, 0, 0, &o); return o; }
     return u32_call_wndproc(esp, wndproc, WU(0), U32_WM_GETTEXTLENGTH, 0, 0);
 }
 uint32_t aret_GetWindowTextLengthW(uint32_t esp) { return aret_GetWindowTextLengthA(esp); }
@@ -3769,6 +3774,8 @@ static uint32_t u32_dialog_create(const uint8_t *tpl, uint32_t dlgproc, uint32_t
         /* Windows sends WM_SETFONT(dialog font) to each control at dialog init; mirror
          * it so a control paints its caption in the dialog font (the app may override). */
         if (hc && dfont) g_u32_win[hc - 1].ctrl_font = dfont;
+        /* Default keyboard focus = the first EDIT (the app's WM_INITDIALOG may SetFocus). */
+        if (hc && !g_u32_focus && !strcasecmp(cclass, "edit")) g_u32_focus = hc;
     }
 #ifdef ARET_HAVE_SDL
     /* If the template is WS_VISIBLE, the window auto-showed during u32_window_create —
@@ -4076,6 +4083,7 @@ static int sdl_ensure(void) {
      * (no DISPLAY, no dummy driver) is not an error here — we fall back to the
      * display-free path, never abort. */
     g_sdl_ready = (SDL_InitSubSystem(SDL_INIT_VIDEO) == 0) ? 1 : -1;
+    if (g_sdl_ready > 0) SDL_StartTextInput();   /* deliver typed characters as SDL_TEXTINPUT */
     return g_sdl_ready > 0;
 }
 /* Create the client framebuffer + real SDL window for window i (idempotent). */
@@ -4163,6 +4171,27 @@ static uint32_t sdl_vk(SDL_Keycode k) {
  * mouse, keyboard) becomes a message; window-manager noise (expose/focus) does
  * NOT synthesise WM_PAINT/WM_ACTIVATE — those stay driven by the Win32
  * invalidation model, so the deterministic message oracle is untouched. */
+/* The focused control's index if it is an EDIT (else -1) — the target of typed text. */
+static int u32_focused_edit(void) {
+    int fi = (g_u32_focus >= 1 && g_u32_focus <= U32_MAX_WIN && g_u32_win[g_u32_focus - 1].used) ? (int)g_u32_focus - 1 : -1;
+    if (fi < 0 || strcasecmp(g_u32_win[fi].classname, "edit") != 0) return -1;
+    return fi;
+}
+/* Append typed ASCII to the focused EDIT (non-ASCII skipped — a sound subset), recompose. */
+static void u32_edit_key_text(const char *utf8) {
+    int fi = u32_focused_edit(); if (fi < 0) return;
+    int n = (int)strlen(g_u32_win[fi].title);
+    for (const char *p = utf8; *p && n < (int)sizeof g_u32_win[fi].title - 1; p++)
+        if ((unsigned char)*p >= 0x20 && (unsigned char)*p < 0x7F) g_u32_win[fi].title[n++] = *p;
+    g_u32_win[fi].title[n] = 0;
+    u32_ctrl_recomposite(fi);
+}
+/* Backspace in the focused EDIT. */
+static void u32_edit_key_back(void) {
+    int fi = u32_focused_edit(); if (fi < 0) return;
+    int n = (int)strlen(g_u32_win[fi].title);
+    if (n > 0) { g_u32_win[fi].title[n - 1] = 0; u32_ctrl_recomposite(fi); }
+}
 static void sdl_pump(void) {
     if (g_sdl_ready <= 0) return;
     SDL_Event e;
@@ -4196,9 +4225,15 @@ static void sdl_pump(void) {
                          : (down ? 0x0201u : 0x0202u);  /* WM_LBUTTONDOWN/UP */
             u32_q_push((uint32_t)(wi + 1), msg, 0, lp);
             break; }
+        case SDL_TEXTINPUT:
+            /* Typed characters go to the focused EDIT (shown on screen); also delivered
+             * as WM_CHAR to a top-level window's WNDPROC. */
+            u32_edit_key_text(e.text.text);
+            break;
         case SDL_KEYDOWN:
         case SDL_KEYUP:
             wi = sdl_win_idx_from_id(e.key.windowID);
+            if (e.type == SDL_KEYDOWN && e.key.keysym.sym == SDLK_BACKSPACE) u32_edit_key_back();
             if (wi >= 0)
                 u32_q_push((uint32_t)(wi + 1),
                            e.type == SDL_KEYDOWN ? 0x0100u : 0x0101u /* WM_KEYDOWN/UP */,
@@ -5146,10 +5181,14 @@ static void u32_dialog_hittest_click(uint32_t esp, int di, int x, int y) {
     for (int c = 0; c < U32_MAX_WIN; c++) {
         if (!g_u32_win[c].used || g_u32_win[c].parent != (uint32_t)(di + 1)) continue;
         if (!g_u32_win[c].visible || !g_u32_win[c].enabled) continue;
-        if (strcasecmp(g_u32_win[c].classname, "button") != 0) continue;
-        if (u32_btn_is_group(g_u32_win[c].style)) continue;          /* label frame, not clickable */
         int cx = g_u32_win[c].x, cy = g_u32_win[c].y, cw = g_u32_win[c].w, ch = g_u32_win[c].h;
-        if (x >= cx && x < cx + cw && y >= cy && y < cy + ch) { u32_ctrl_click(esp, c); return; }
+        if (!(x >= cx && x < cx + cw && y >= cy && y < cy + ch)) continue;
+        const char *cls = g_u32_win[c].classname;
+        if (!strcasecmp(cls, "edit")) { g_u32_focus = (uint32_t)(c + 1); return; }   /* focus for typing */
+        if (!strcasecmp(cls, "button") && !u32_btn_is_group(g_u32_win[c].style)) {
+            g_u32_focus = (uint32_t)(c + 1);
+            u32_ctrl_click(esp, c); return;
+        }
     }
 }
 /* Composite a dialog's client framebuffer for display: fill the background with

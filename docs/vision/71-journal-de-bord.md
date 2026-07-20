@@ -3905,4 +3905,20 @@ Détail : **70 §6** (roadmap). Résumé :
   **inchangé**, table triée. **⇒ Dialogue interactif** (clic → toggle + WM_COMMAND). Reste : focus + saisie clavier EDIT,
   repaint général, combo/list, comctl32 peints.
 
+### 2026-07-19 — [HLE-WIN32][GUI] **Focus + saisie clavier EDIT** + fix `SetWindowText/GetWindowText` sur contrôle
+- **Saisie clavier** : `SDL_StartTextInput` activé ; la pompe SDL route **`SDL_TEXTINPUT`** vers l'EDIT **focalisé**
+  (`u32_edit_key_text`, sous-ensemble ASCII imprimable, sound) et **Backspace** → `u32_edit_key_back`, avec re-composition à
+  chaque frappe. **Focus** : `g_u32_focus` posé par défaut sur le 1ᵉʳ EDIT du dialogue (l'app peut `SetFocus`), et sur clic
+  (`u32_dialog_hittest_click` focalise l'EDIT/bouton cliqué). Vérif **qualitative** (xdotool tape « Alice » → s'affiche dans le
+  champ **et** `GetDlgItemTextA` le rend).
+- **Bug général corrigé** : `SetWindowText/GetWindowText/GetWindowTextLength` renvoyaient **0 sur un contrôle** (pas de WNDPROC
+  app) → un EDIT créé par `CreateWindowEx` ne stockait/rendait pas son texte (Wine, lui, le fait via DefWindowProc). Fix : repli
+  sur `u32_defproc_text` (lit/écrit le titre) quand pas de wndproc + **re-composition** du dialogue (chemin `SetDlgItemText` →
+  l'écran se met à jour). Trouvé en testant le focus.
+- **Vérif déterministe** : `winecorpus/user32_ctrl_focus_text.c` (SetWindowText/GetWindowText/GetWindowTextLength sur EDIT +
+  SetFocus/GetFocus round-trip) → **bit-identique Wine** (`text=[hi] n=2 len=2 focus_eq=1`). La frappe elle-même = pas d'oracle
+  headless Wine (qualitatif).
+- **Portes** : winediff **157→158 fixtures** (ctrl_focus_text verte ; seul rouge `gdi_uifont` env), hash `19acad982194bf07`
+  **inchangé**, table triée. **⇒ EDIT saisissable, focus fonctionnel.** Reste : repaint général, combo/list, comctl32 peints.
+
 <!-- NOUVELLES ENTRÉES ICI (garder l'ordre chronologique, plus récent en bas) -->
