@@ -7005,6 +7005,83 @@ uint32_t aret_CharLowerBuffA(uint32_t esp) {
     if (s) for (uint32_t i = 0; i < n; i++) s[i] = (char)tolower((unsigned char)s[i]);
     return n;
 }
+/* Wide case-mapping over a buffer (comctl32 socle). ASCII fold in the C locale. */
+uint32_t aret_CharLowerBuffW(uint32_t esp) {
+    uint16_t *s = (uint16_t *)WP(0); uint32_t n = WU(1);
+    if (s) for (uint32_t i = 0; i < n; i++) if (s[i] < 128) s[i] = (uint16_t)tolower(s[i]);
+    return n;
+}
+uint32_t aret_CharUpperBuffW(uint32_t esp) {
+    uint16_t *s = (uint16_t *)WP(0); uint32_t n = WU(1);
+    if (s) for (uint32_t i = 0; i < n; i++) if (s[i] < 128) s[i] = (uint16_t)toupper(s[i]);
+    return n;
+}
+
+/* ---- comctl32 socle shims (batch 1) : simple, high-breadth, Wine-verifiable ---- */
+/* CompareFileTime(a,b) -> -1/0/1 on the 64-bit FILETIME. */
+uint32_t aret_CompareFileTime(uint32_t esp) {
+    const uint32_t *a = (const uint32_t *)WP(0), *b = (const uint32_t *)WP(1);
+    if (!a || !b) return 0;
+    uint64_t va = ((uint64_t)a[1] << 32) | a[0], vb = ((uint64_t)b[1] << 32) | b[0];
+    return (uint32_t)(va < vb ? -1 : va > vb ? 1 : 0);
+}
+/* GetDoubleClickTime() -> ms. The Windows default (measured). */
+uint32_t aret_GetDoubleClickTime(uint32_t esp) { (void)esp; return 500; }
+/* IsChild(hWndParent, hWnd) -> BOOL: is hWnd a descendant of hWndParent (child chain). */
+uint32_t aret_IsChild(uint32_t esp) {
+    uint32_t anc = WU(0), h = WU(1);
+    for (int guard = 0; guard < U32_MAX_WIN; guard++) {
+        int i = (h >= 1 && h <= U32_MAX_WIN && g_u32_win[h - 1].used) ? (int)h - 1 : -1;
+        if (i < 0 || !(g_u32_win[i].style & 0x40000000u /*WS_CHILD*/)) return 0;
+        h = g_u32_win[i].parent;
+        if (h == anc) return 1;
+        if (!h) return 0;
+    }
+    return 0;
+}
+/* GetObjectType(hgdiobj) -> OBJ_* (GDI object class). */
+uint32_t aret_GetObjectType(uint32_t esp) {
+    int i = gdi_idx(WU(0)); if (i < 0) return 0;
+    switch (g_gdi[i].type) {
+        case GDIT_DC:     return 3;   /* OBJ_DC */
+        case GDIT_PEN:    return 1;   /* OBJ_PEN */
+        case GDIT_BRUSH:  return 2;   /* OBJ_BRUSH */
+        case GDIT_FONT:   return 6;   /* OBJ_FONT */
+        case GDIT_BITMAP: return 7;   /* OBJ_BITMAP */
+        case GDIT_RGN:    return 8;   /* OBJ_REGION */
+        default: return 0;
+    }
+}
+/* GetBkMode(hdc) -> TRANSPARENT/OPAQUE. */
+uint32_t aret_GetBkMode(uint32_t esp) { int i = gdi_idx(WU(0)); return i < 0 ? 0 : (uint32_t)g_gdi[i].bk_mode; }
+/* StrCmpIW/StrCmpNIW (shlwapi, case-insensitive ordinal, ASCII fold) -> sign. */
+static int u32_wcsicmp_n(const uint16_t *a, const uint16_t *b, long n) {
+    if (!a || !b) return a == b ? 0 : (a ? 1 : -1);
+    for (long k = 0; n < 0 || k < n; k++) {
+        int ca = a[k], cb = b[k];
+        int la = (ca < 128) ? tolower(ca) : ca, lb = (cb < 128) ? tolower(cb) : cb;
+        if (la != lb) return la < lb ? -1 : 1;
+        if (!ca) break;
+    }
+    return 0;
+}
+uint32_t aret_StrCmpIW(uint32_t esp)  { return (uint32_t)u32_wcsicmp_n((const uint16_t *)WP(0), (const uint16_t *)WP(1), -1); }
+uint32_t aret_StrCmpNIW(uint32_t esp) { return (uint32_t)u32_wcsicmp_n((const uint16_t *)WP(0), (const uint16_t *)WP(1), (long)WI(2)); }
+/* Monitors: a single primary monitor (the virtual-desktop invariant, like GetSystemMetrics). */
+uint32_t aret_MonitorFromWindow(uint32_t esp) { (void)esp; return 0x00010001u; }
+uint32_t aret_MonitorFromRect(uint32_t esp)   { (void)esp; return 0x00010001u; }
+uint32_t aret_MonitorFromPoint(uint32_t esp)  { (void)esp; return 0x00010001u; }
+uint32_t aret_GetMonitorInfoW(uint32_t esp) {
+    uint32_t *mi = (uint32_t *)WP(1);           /* MONITORINFO: cbSize, rcMonitor[4], rcWork[4], dwFlags */
+    if (!mi) return 0;
+    mi[1] = 0; mi[2] = 0; mi[3] = 1024; mi[4] = 768;     /* rcMonitor */
+    mi[5] = 0; mi[6] = 0; mi[7] = 1024; mi[8] = 768;     /* rcWork */
+    mi[9] = 1;                                           /* MONITORINFOF_PRIMARY */
+    return 1;
+}
+uint32_t aret_GetMonitorInfoA(uint32_t esp) { return aret_GetMonitorInfoW(esp); }
+/* GetDpiForWindow(hwnd) -> 96 (our fixed logical DPI, matches GetDeviceCaps LOGPIXELS). */
+uint32_t aret_GetDpiForWindow(uint32_t esp) { (void)esp; return 96; }
 
 /* ---- Atom tables (kernel32/user32) — string<->ATOM interning, refcounted.
  * Two separate per-process tables (Global* vs local Add/Find/Delete/GetAtomName):

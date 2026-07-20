@@ -3958,4 +3958,18 @@ Détail : **70 §6** (roadmap). Résumé :
   static/edit/listbox/combobox peints + interaction clic/focus/clavier + repaint). Les **contrôles comctl32 peints** relèvent du
   **Levier 1** (lifting DLL) et restent l'item avancé suivant, borné et mesuré (socle 106 shims).
 
+### 2026-07-19 — [HLE-WIN32][LOADER] **Socle comctl32 (Levier 1) — batch 1** (mesuré `--mode walls`, 115→102)
+- **Levier 0 appliqué à comctl32** : `--mode walls` sur `comctl32.dll` lifté (+ progress/trackbar/updown) → liste **mesurée**
+  des **115 imports socle** manquants (`CharLowerBuffW`, `CompareFileTime`, `IsChild`, clipboard, caret, regions, Script*, IMM*,
+  monitors…). On les traite **par la donnée**, du plus simple/large au plus lourd.
+- **Batch 1 livré** (simples, larges, vérifiables bit-exact) : `CharLowerBuffW`/`CharUpperBuffW` (fold ASCII), `CompareFileTime`
+  (−1/0/1 sur FILETIME 64-bit), `GetDoubleClickTime` (500, mesuré Wine), `IsChild` (chaîne parent WS_CHILD), `GetObjectType`
+  (GDIT_*→OBJ_*), `GetBkMode`, `StrCmpIW`/`StrCmpNIW` (fold ASCII ordinal, comme notre wcsicmp prouvé), `MonitorFrom*`/
+  `GetMonitorInfoA/W` (moniteur primaire = invariant écran 1024×768), `GetDpiForWindow` (96). Gardé
+  `winecorpus/win32_socle_comctl1.c` → **bit-identique Wine** (`cft -1 1 0`, `ischild 1 0`, `objtype brush=2 pen=1`, upper/lower,
+  `bkmode 1`, `dclick 500`).
+- **Mesure après batch** : comctl32 socle **115 → 102** imports manquants. **Portes** : winediff **159→160 fixtures**, hash
+  `19acad982194bf07` **inchangé**, table triée. Suite : batches 2+ (clipboard, caret, regions GDI, blit, clip, Uniscribe/IMM =
+  no-op sound), puis intégration composite (esp threadé) → contrôles comctl32 peints.
+
 <!-- NOUVELLES ENTRÉES ICI (garder l'ordre chronologique, plus récent en bas) -->
