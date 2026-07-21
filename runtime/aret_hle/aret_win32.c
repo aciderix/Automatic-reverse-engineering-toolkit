@@ -5440,6 +5440,105 @@ uint32_t aret_BitBlt(uint32_t esp) {
         }
     return 1;
 }
+/* ---- comctl32 socle batch 7: StretchBlt / SetDIBits / GdiAlphaBlend / pens.
+ * All reuse the proven 32bpp DIB model (gdi_px / gdi_put / gdi_rop_apply). Semantics
+ * measured bit-exact vs Wine: StretchBlt nearest-neighbour (src = s0 + i*sw/dw),
+ * SetDIBits bottom-up (image row y = H-1-scan), GdiAlphaBlend
+ * out = (src*ca + dst*(255-ca))/255 (AC_SRC_ALPHA adds premultiplied per-pixel alpha). */
+uint32_t aret_StretchBlt(uint32_t esp) {
+    GDI_MAP_GUARD(WU(0), 0);
+    struct gdi_obj *dst = gdi_dc_surface(WU(0));
+    uint32_t rop = WU(10), tmp;
+    if (!gdi_rop_apply(rop, 0, 0, &tmp)) { aret_unimpl("StretchBlt: unmodelled raster-op"); return 0; }
+    int needs = gdi_rop_needs_src(rop);
+    struct gdi_obj *src = needs ? gdi_dc_surface(WU(5)) : NULL;
+    if (!dst || (needs && !src)) return 0;
+    int dx = WI(1), dy = WI(2), dw = WI(3), dh = WI(4), sx = WI(6), sy = WI(7), sw = WI(8), sh = WI(9);
+    if (dw <= 0 || dh <= 0 || (needs && (sw <= 0 || sh <= 0))) {
+        aret_unimpl("StretchBlt: only positive (non-mirrored) extents modelled"); return 0;
+    }
+    for (int j = 0; j < dh; j++)
+        for (int i = 0; i < dw; i++) {
+            uint8_t *d = gdi_px(dst, dx + i, dy + j);
+            if (!d) continue;
+            uint32_t S = 0;
+            if (needs) {
+                uint8_t *s = gdi_px(src, sx + i * sw / dw, sy + j * sh / dh);   /* nearest-neighbour */
+                if (!s) continue;
+                S = (uint32_t)s[0] | s[1] << 8 | s[2] << 16 | (uint32_t)s[3] << 24;
+            }
+            uint32_t D = (uint32_t)d[0] | d[1] << 8 | d[2] << 16 | (uint32_t)d[3] << 24, R;
+            gdi_rop_apply(rop, S, D, &R);
+            d[0] = (uint8_t)R; d[1] = (uint8_t)(R >> 8); d[2] = (uint8_t)(R >> 16); d[3] = (uint8_t)(R >> 24);
+        }
+    return 1;
+}
+/* SetDIBits(hdc, hbm, uStartScan, cScanLines, lpBits, BITMAPINFO*, uColorUse) -> lines set. */
+uint32_t aret_SetDIBits(uint32_t esp) {
+    int bi = gdi_idx(WU(1)); if (bi < 0 || g_gdi[bi].type != GDIT_BITMAP) return 0;
+    struct gdi_obj *bm = &g_gdi[bi];
+    uint32_t start = WU(2), lines = WU(3);
+    const uint8_t *bits = (const uint8_t *)WP(4);
+    const int32_t *h = (const int32_t *)WP(5);       /* BITMAPINFOHEADER */
+    if (!bits || !h) return 0;
+    int W = h[1], Hs = h[2], botup = Hs > 0, H = Hs < 0 ? -Hs : Hs;
+    int bpp = (h[3] >> 16) & 0xFFFF; uint32_t comp = (uint32_t)h[4];
+    if (comp != 0 || (bpp != 32 && bpp != 24)) { aret_unimpl("SetDIBits: only BI_RGB 24/32bpp modelled"); return 0; }
+    int bppB = bpp / 8, stride = (W * bppB + 3) & ~3;
+    uint32_t done = 0;
+    for (uint32_t k = 0; k < lines; k++) {
+        int scan = (int)(start + k); if (scan < 0 || scan >= H) break;
+        int y = botup ? (H - 1 - scan) : scan;         /* memory scanline -> image row (0 = top) */
+        const uint8_t *row = bits + (size_t)scan * stride;
+        for (int x = 0; x < W; x++) {
+            const uint8_t *p = row + x * bppB;
+            gdi_put(bm, x, y, (uint32_t)p[0] << 16 | (uint32_t)p[1] << 8 | p[2]);   /* [B,G,R] -> COLORREF 0x00BBGGRR */
+        }
+        done++;
+    }
+    return done;
+}
+/* GdiAlphaBlend(hdcD, xd,yd,wd,hd, hdcS, xs,ys,ws,hs, BLENDFUNCTION packed in a DWORD). */
+uint32_t aret_GdiAlphaBlend(uint32_t esp) {
+    struct gdi_obj *dst = gdi_dc_surface(WU(0)), *src = gdi_dc_surface(WU(5));
+    if (!dst || !src) return 0;
+    int dx = WI(1), dy = WI(2), dw = WI(3), dh = WI(4), sx = WI(6), sy = WI(7), sw = WI(8), sh = WI(9);
+    if (dw <= 0 || dh <= 0 || sw <= 0 || sh <= 0) { aret_unimpl("GdiAlphaBlend: positive extents only"); return 0; }
+    uint32_t bf = WU(10);
+    int ca = (bf >> 16) & 0xFF, af = (bf >> 24) & 0xFF;   /* SourceConstantAlpha, AlphaFormat */
+    for (int j = 0; j < dh; j++)
+        for (int i = 0; i < dw; i++) {
+            uint8_t *s = gdi_px(src, sx + i * sw / dw, sy + j * sh / dh), *d = gdi_px(dst, dx + i, dy + j);
+            if (!s || !d) continue;
+            int inv;
+            if (af & 1) {   /* AC_SRC_ALPHA: source is premultiplied; blend by src.A*ca */
+                int a = s[3] * ca / 255; inv = 255 - a;
+                for (int c = 0; c < 3; c++) d[c] = (uint8_t)(s[c] * ca / 255 + d[c] * inv / 255);
+            } else {        /* constant alpha only */
+                inv = 255 - ca;
+                for (int c = 0; c < 3; c++) d[c] = (uint8_t)((s[c] * ca + d[c] * inv) / 255);
+            }
+        }
+    return 1;
+}
+uint32_t aret_CreatePenIndirect(uint32_t esp) {
+    const int32_t *lp = (const int32_t *)WP(0); if (!lp) return 0;   /* LOGPEN{style, POINT width, color} */
+    int i = gdi_alloc(GDIT_PEN); if (!i) return 0;
+    g_gdi[i].pen_style = lp[0]; g_gdi[i].pen_width = lp[1]; g_gdi[i].color = (uint32_t)lp[3] & 0x00FFFFFFu;
+    if (lp[0] == 5) g_gdi[i].null_obj = 1;                            /* PS_NULL */
+    return gdi_handle(i);
+}
+uint32_t aret_ExtCreatePen(uint32_t esp) {
+    uint32_t style = WU(0); int width = WI(1);
+    const int32_t *lb = (const int32_t *)WP(2);                       /* LOGBRUSH{lbStyle, lbColor, lbHatch} */
+    int i = gdi_alloc(GDIT_PEN); if (!i) return 0;
+    g_gdi[i].pen_style = (int)(style & 0xF); g_gdi[i].pen_width = width;
+    g_gdi[i].color = lb ? ((uint32_t)lb[1] & 0x00FFFFFFu) : 0;
+    if ((style & 0xF) == 5) g_gdi[i].null_obj = 1;
+    return gdi_handle(i);
+}
+uint32_t aret_GetDIBColorTable(uint32_t esp) { (void)esp; return 0; }   /* 32bpp DC: no palette */
+uint32_t aret_SetDIBColorTable(uint32_t esp) { (void)esp; return 0; }
 
 /* ================================================================== */
 /* Common controls (comctl32) — image list. The data foundation of      */

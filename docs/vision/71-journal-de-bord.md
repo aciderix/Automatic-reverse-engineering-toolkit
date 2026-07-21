@@ -4034,4 +4034,16 @@ Détail : **70 §6** (roadmap). Résumé :
   Même mise en garde résolution de police que les autres fixtures texte / `gdi_uifont`. **Portes** : winediff **164→165**, hash
   `19acad982194bf07` **inchangé**, table triée. Reste 34 : pens/blit/DIB (batch 7), icônes/curseur (8), Uniscribe/locale/divers (9).
 
+### 2026-07-21 — [HLE-WIN32][LOADER] **Socle comctl32 batch 7** : StretchBlt + SetDIBits + GdiAlphaBlend + pens (mesuré 34→27)
+- Réutilisent le **modèle DIB 32bpp éprouvé** (`gdi_px`/`gdi_put`/`gdi_rop_apply`). Sémantiques **mesurées bit-exact vs Wine**
+  (probe GetPixel) : `StretchBlt` **plus-proche-voisin** (`src = s0 + i*sw/dw` ; extents négatifs/miroir = abort sound),
+  `SetDIBits` **bottom-up** (ligne image `y = H-1-scan`, BI_RGB 24/32bpp ; compressé = abort), `GdiAlphaBlend`
+  `out = (src*ca + dst*(255-ca))/255` (alpha constant ; `AC_SRC_ALPHA` = premultiplié par-pixel). Pens : `CreatePenIndirect`
+  (LOGPEN), `ExtCreatePen` (style+largeur, couleur du LOGBRUSH). `GetDIBColorTable`/`SetDIBColorTable` = 0 (pas de palette en
+  32bpp, sound).
+- **Mesure** : comctl32 socle **34 → 27**. Gardé `winecorpus/win32_socle_comctl7.c` (StretchBlt 2×2→4×4, SetDIBits bottom-up,
+  GdiAlphaBlend const 128) → **bit-identique Wine** (`stretch (0,0)=0000FF (1,1)=0000FF`, `setdib (0,0)=CC0000 (0,1)=0000AA`,
+  `alpha const128 = 000080`). **Portes** : winediff **165→166**, hash `19acad982194bf07` **inchangé**, table triée. Reste 27 :
+  icônes/curseur (batch 8), Uniscribe `Script*`/locale/divers (batch 9).
+
 <!-- NOUVELLES ENTRÉES ICI (garder l'ordre chronologique, plus récent en bas) -->
