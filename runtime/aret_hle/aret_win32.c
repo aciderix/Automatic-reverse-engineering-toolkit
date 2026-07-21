@@ -2386,6 +2386,7 @@ static struct {
     int is_dialog;           /* created by u32_dialog_create -> composite its child controls for display */
     char **items; int item_count, item_cap, cur_sel;   /* LISTBOX/COMBOBOX item model */
     uint32_t dlg_font;       /* HFONT of the dialog font (DS_SETFONT), applied to its controls */
+    int wnd_rgn_set, wnd_rgn_l, wnd_rgn_t, wnd_rgn_r, wnd_rgn_b, wnd_rgn_complex;  /* Set/GetWindowRgn */
 #ifdef ARET_HAVE_SDL
     void *sdl_win, *sdl_ren, *sdl_tex;  /* SDL window/renderer/streaming texture */
     uint32_t client_bmp;     /* HBITMAP of the client-area framebuffer (GDI draws here) */
@@ -2548,6 +2549,7 @@ static uint32_t u32_window_create(uint32_t wndproc, uint32_t exstyle, uint32_t s
             g_u32_win[i].extra_len = 0;
             g_u32_win[i].items = NULL; g_u32_win[i].item_count = 0; g_u32_win[i].item_cap = 0; g_u32_win[i].cur_sel = -1;
             g_u32_win[i].is_dialog = 0; g_u32_win[i].du_x = 0; g_u32_win[i].du_y = 0; g_u32_win[i].dlg_font = 0;
+            g_u32_win[i].wnd_rgn_set = 0;
             memset(g_u32_win[i].extra, 0, sizeof g_u32_win[i].extra);
             int k = 0; if (title) for (; title[k] && k < 255; k++) g_u32_win[i].title[k] = title[k];
             g_u32_win[i].title[k] = 0;
@@ -4000,6 +4002,7 @@ static struct gdi_obj {
     int vp_ex, vp_ey, win_ex, win_ey;                    /* viewport/window extent (default 1 = identity) */
     struct { uint32_t font, brush, pen, tc, bc; int bm, mm; } sstk[8];  /* SaveDC/RestoreDC */
     int rgn_l, rgn_t, rgn_r, rgn_b, rgn_complex;         /* REGION: bounding rect + complex flag */
+    int clip_set, clip_l, clip_t, clip_r, clip_b, clip_complex;  /* DC: user clip region (rect bbox) */
 } g_gdi[GDI_MAX];
 
 static uint32_t gdi_handle(int i) { return GDI_BASE | (uint32_t)i; }
@@ -7303,6 +7306,144 @@ uint32_t aret_GetClassLongW(uint32_t esp)     { (void)esp; return 0; }
 uint32_t aret_GetKeyNameTextW(uint32_t esp)   { uint16_t *b = (uint16_t *)WP(1); if (b && WU(2)) b[0] = 0; return 0; }
 uint32_t aret_MapVirtualKeyW(uint32_t esp)    { (void)esp; return 0; }  /* no scan mapping */
 uint32_t aret_GetTextCharsetInfo(uint32_t esp){ (void)esp; return 0; }  /* ANSI_CHARSET */
+
+/* ---- comctl32 socle batch 5: DC clip regions + window regions + FillRgn/FrameRgn.
+ * A DC's user clip is modelled as a rectangular bbox (clip_l..b) plus a complex flag
+ * and a "set" flag (no clip = the whole surface is visible, GetClipRgn returns 0). The
+ * region-type returns (NULL=1/SIMPLE=2/COMPLEX=3) are measured bit-exact vs Wine for the
+ * rectangular cases; a complex clip keeps its bbox (RectVisible is then a conservative
+ * "visible" superset, consistent with ARET's blits which don't honour a clip anyway). */
+static uint32_t u32_clip_type(int i) {  /* type of the DC's current clip */
+    if (!g_gdi[i].clip_set) return 2;   /* no clip = whole surface = SIMPLEREGION-ish; matches SelectClipRgn(NULL) */
+    if (g_gdi[i].clip_r <= g_gdi[i].clip_l || g_gdi[i].clip_b <= g_gdi[i].clip_t) return 1;  /* empty = NULL */
+    return g_gdi[i].clip_complex ? 3 : 2;
+}
+uint32_t aret_GetClipRgn(uint32_t esp) {   /* -> 1 if a clip is set (copied into hrgn), 0 if none, -1 err */
+    int i = gdi_idx(WU(0)); if (i < 0 || g_gdi[i].type != GDIT_DC) return -1;
+    if (!g_gdi[i].clip_set) return 0;
+    int r = gdi_idx(WU(1)); if (r < 0) return 1;   /* NULL hrgn: just report "set" */
+    g_gdi[r].rgn_l = g_gdi[i].clip_l; g_gdi[r].rgn_t = g_gdi[i].clip_t;
+    g_gdi[r].rgn_r = g_gdi[i].clip_r; g_gdi[r].rgn_b = g_gdi[i].clip_b;
+    g_gdi[r].rgn_complex = g_gdi[i].clip_complex;
+    return 1;
+}
+uint32_t aret_IntersectClipRect(uint32_t esp) {
+    int i = gdi_idx(WU(0)); if (i < 0 || g_gdi[i].type != GDIT_DC) return 0;
+    int l = WI(1), t = WI(2), r = WI(3), b = WI(4);
+    if (r < l) { int x = l; l = r; r = x; } if (b < t) { int y = t; t = b; b = y; }
+    if (!g_gdi[i].clip_set) { g_gdi[i].clip_l = l; g_gdi[i].clip_t = t; g_gdi[i].clip_r = r; g_gdi[i].clip_b = b; }
+    else {
+        if (l > g_gdi[i].clip_l) g_gdi[i].clip_l = l; if (t > g_gdi[i].clip_t) g_gdi[i].clip_t = t;
+        if (r < g_gdi[i].clip_r) g_gdi[i].clip_r = r; if (b < g_gdi[i].clip_b) g_gdi[i].clip_b = b;
+    }
+    g_gdi[i].clip_set = 1; g_gdi[i].clip_complex = 0;   /* rect ∩ rect = rect */
+    return u32_clip_type(i);
+}
+uint32_t aret_ExcludeClipRect(uint32_t esp) {
+    int i = gdi_idx(WU(0)); if (i < 0 || g_gdi[i].type != GDIT_DC) return 0;
+    int l = WI(1), t = WI(2), r = WI(3), b = WI(4);
+    if (r < l) { int x = l; l = r; r = x; } if (b < t) { int y = t; t = b; b = y; }
+    if (!g_gdi[i].clip_set) { g_gdi[i].clip_set = 1; g_gdi[i].clip_complex = 1; return 3; }  /* surface minus rect = complex */
+    int cl = g_gdi[i].clip_l, ct = g_gdi[i].clip_t, cr = g_gdi[i].clip_r, cb = g_gdi[i].clip_b;
+    if (r <= cl || l >= cr || b <= ct || t >= cb) return u32_clip_type(i);   /* no overlap: unchanged */
+    if (l <= cl && r >= cr && t <= ct && b >= cb) {                          /* fully covered: empty */
+        g_gdi[i].clip_r = g_gdi[i].clip_l; g_gdi[i].clip_b = g_gdi[i].clip_t; return 1;
+    }
+    /* Excise a rect: result is a rectangle only if the cut removes a full edge band. */
+    if (l <= cl && r >= cr) {         /* spans full width -> cuts top or bottom band */
+        if (t <= ct) { g_gdi[i].clip_t = b > cb ? cb : b; g_gdi[i].clip_complex = 0; }
+        else if (b >= cb) { g_gdi[i].clip_b = t < ct ? ct : t; g_gdi[i].clip_complex = 0; }
+        else g_gdi[i].clip_complex = 1;
+    } else if (t <= ct && b >= cb) {  /* spans full height -> cuts left or right band */
+        if (l <= cl) { g_gdi[i].clip_l = r < cr ? cr : r; g_gdi[i].clip_complex = 0; }
+        else if (r >= cr) { g_gdi[i].clip_r = l > cl ? cl : l; g_gdi[i].clip_complex = 0; }
+        else g_gdi[i].clip_complex = 1;
+    } else g_gdi[i].clip_complex = 1;  /* interior/corner cut -> complex, bbox unchanged */
+    return u32_clip_type(i);
+}
+uint32_t aret_SelectClipRgn(uint32_t esp) {
+    int i = gdi_idx(WU(0)); if (i < 0 || g_gdi[i].type != GDIT_DC) return 0;
+    int r = gdi_idx(WU(1));
+    if (r < 0) { g_gdi[i].clip_set = 0; return 2; }   /* SelectClipRgn(NULL) = remove clip -> SIMPLEREGION */
+    g_gdi[i].clip_set = 1; g_gdi[i].clip_l = g_gdi[r].rgn_l; g_gdi[i].clip_t = g_gdi[r].rgn_t;
+    g_gdi[i].clip_r = g_gdi[r].rgn_r; g_gdi[i].clip_b = g_gdi[r].rgn_b; g_gdi[i].clip_complex = g_gdi[r].rgn_complex;
+    return u32_clip_type(i);
+}
+uint32_t aret_ExtSelectClipRgn(uint32_t esp) {
+    int i = gdi_idx(WU(0)); if (i < 0 || g_gdi[i].type != GDIT_DC) return 0;
+    int r = gdi_idx(WU(1)); uint32_t mode = WU(2);
+    if (r < 0) { if (mode == 5 /*COPY*/) { g_gdi[i].clip_set = 0; return 2; } return u32_clip_type(i); }
+    if (!g_gdi[i].clip_set || mode == 5 /*COPY*/) {   /* no clip: AND/COPY with rgn = rgn; OR = rgn */
+        g_gdi[i].clip_set = 1; g_gdi[i].clip_l = g_gdi[r].rgn_l; g_gdi[i].clip_t = g_gdi[r].rgn_t;
+        g_gdi[i].clip_r = g_gdi[r].rgn_r; g_gdi[i].clip_b = g_gdi[r].rgn_b; g_gdi[i].clip_complex = g_gdi[r].rgn_complex;
+        return u32_clip_type(i);
+    }
+    if (mode == 1 /*AND*/) {
+        if (g_gdi[r].rgn_l > g_gdi[i].clip_l) g_gdi[i].clip_l = g_gdi[r].rgn_l;
+        if (g_gdi[r].rgn_t > g_gdi[i].clip_t) g_gdi[i].clip_t = g_gdi[r].rgn_t;
+        if (g_gdi[r].rgn_r < g_gdi[i].clip_r) g_gdi[i].clip_r = g_gdi[r].rgn_r;
+        if (g_gdi[r].rgn_b < g_gdi[i].clip_b) g_gdi[i].clip_b = g_gdi[r].rgn_b;
+        g_gdi[i].clip_complex = 0;
+    } else {   /* OR/XOR/DIFF: union bbox, generally complex */
+        if (g_gdi[r].rgn_l < g_gdi[i].clip_l) g_gdi[i].clip_l = g_gdi[r].rgn_l;
+        if (g_gdi[r].rgn_t < g_gdi[i].clip_t) g_gdi[i].clip_t = g_gdi[r].rgn_t;
+        if (g_gdi[r].rgn_r > g_gdi[i].clip_r) g_gdi[i].clip_r = g_gdi[r].rgn_r;
+        if (g_gdi[r].rgn_b > g_gdi[i].clip_b) g_gdi[i].clip_b = g_gdi[r].rgn_b;
+        g_gdi[i].clip_complex = 1;
+    }
+    return u32_clip_type(i);
+}
+uint32_t aret_RectVisible(uint32_t esp) {   /* rect intersects the DC clip? no clip = always visible */
+    int i = gdi_idx(WU(0)); const int32_t *r = (const int32_t *)WP(1);
+    if (i < 0 || g_gdi[i].type != GDIT_DC || !r) return 0;
+    if (!g_gdi[i].clip_set) return 1;
+    return !(r[2] <= g_gdi[i].clip_l || r[0] >= g_gdi[i].clip_r || r[3] <= g_gdi[i].clip_t || r[1] >= g_gdi[i].clip_b);
+}
+uint32_t aret_SetWindowRgn(uint32_t esp) {
+    int w = u32_win_idx(WU(0)); if (w < 0) return 0;
+    int r = gdi_idx(WU(1));
+    if (r < 0) { g_u32_win[w].wnd_rgn_set = 0; return 1; }   /* NULL = clear */
+    g_u32_win[w].wnd_rgn_set = 1; g_u32_win[w].wnd_rgn_l = g_gdi[r].rgn_l; g_u32_win[w].wnd_rgn_t = g_gdi[r].rgn_t;
+    g_u32_win[w].wnd_rgn_r = g_gdi[r].rgn_r; g_u32_win[w].wnd_rgn_b = g_gdi[r].rgn_b; g_u32_win[w].wnd_rgn_complex = g_gdi[r].rgn_complex;
+    return 1;
+}
+uint32_t aret_GetWindowRgn(uint32_t esp) {   /* -> region type, or ERROR(0) if the window has none */
+    int w = u32_win_idx(WU(0)); if (w < 0 || !g_u32_win[w].wnd_rgn_set) return 0;
+    int r = gdi_idx(WU(1)); if (r < 0) return 0;
+    g_gdi[r].rgn_l = g_u32_win[w].wnd_rgn_l; g_gdi[r].rgn_t = g_u32_win[w].wnd_rgn_t;
+    g_gdi[r].rgn_r = g_u32_win[w].wnd_rgn_r; g_gdi[r].rgn_b = g_u32_win[w].wnd_rgn_b;
+    g_gdi[r].rgn_complex = g_u32_win[w].wnd_rgn_complex;
+    return u32_rgn_type(r);
+}
+uint32_t aret_FillRgn(uint32_t esp) {   /* fill a region with a brush */
+    int rg = gdi_idx(WU(1)); if (rg < 0) return 0;
+    if (g_gdi[rg].rgn_complex) { aret_unimpl("FillRgn: complex (non-rect) region not modelled"); return 0; }
+    struct gdi_obj *bm = gdi_dc_surface(WU(0)); uint32_t c;
+    if (!bm || !gdi_brush_color(WU(2), &c)) return bm ? 1 : 0;   /* null brush: nothing */
+    for (int y = g_gdi[rg].rgn_t; y < g_gdi[rg].rgn_b; y++)
+        for (int x = g_gdi[rg].rgn_l; x < g_gdi[rg].rgn_r; x++) gdi_put(bm, x, y, c);
+    return 1;
+}
+uint32_t aret_FrameRgn(uint32_t esp) {   /* draw a border of thickness (w,h) around the region */
+    int rg = gdi_idx(WU(1)); if (rg < 0) return 0;
+    if (g_gdi[rg].rgn_complex) { aret_unimpl("FrameRgn: complex (non-rect) region not modelled"); return 0; }
+    struct gdi_obj *bm = gdi_dc_surface(WU(0)); uint32_t c;
+    if (!bm || !gdi_brush_color(WU(2), &c)) return bm ? 1 : 0;
+    int fw = WI(3), fh = WI(4), l = g_gdi[rg].rgn_l, t = g_gdi[rg].rgn_t, r = g_gdi[rg].rgn_r, b = g_gdi[rg].rgn_b;
+    for (int y = t; y < b; y++) for (int x = l; x < r; x++)
+        if (x < l + fw || x >= r - fw || y < t + fh || y >= b - fh) gdi_put(bm, x, y, c);
+    return 1;
+}
+uint32_t aret_ExtCreateRegion(uint32_t esp) {   /* region from RGNDATA (NULL transform only) */
+    if (WP(0)) { aret_unimpl("ExtCreateRegion: XFORM transform not modelled"); return 0; }
+    const uint8_t *rd = (const uint8_t *)WP(2); if (!rd) return 0;
+    const int32_t *hdr = (const int32_t *)rd;      /* RGNDATAHEADER: dwSize,iType,nCount,nRgnSize,rcBound[4] */
+    int32_t ncount = hdr[2];
+    const int32_t *bnd = &hdr[4];                  /* rcBound */
+    uint32_t h = u32_make_rgn(bnd[0], bnd[1], bnd[2], bnd[3]);
+    int gi = gdi_idx(h); if (gi >= 0 && ncount > 1) g_gdi[gi].rgn_complex = 1;   /* >1 rect -> complex bbox */
+    return h;
+}
 
 /* ---- Atom tables (kernel32/user32) — string<->ATOM interning, refcounted.
  * Two separate per-process tables (Global* vs local Add/Find/Delete/GetAtomName):

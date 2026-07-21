@@ -4008,4 +4008,18 @@ Détail : **70 §6** (roadmap). Résumé :
   `childfrompt_is_c2=1`). **Portes** : winediff **162→163**, hash `19acad982194bf07` **inchangé**, table triée. Reste 50 :
   clip appliqué (batch 5), blit/pen/char-widths FreeType (6), icônes/curseur (7), Uniscribe `Script*`/locale/divers (8).
 
+### 2026-07-21 — [HLE-WIN32][LOADER] **Socle comctl32 batch 5** : clip DC + régions fenêtre + FillRgn/FrameRgn (mesuré 50→39)
+- **Clip DC** (bbox rect + flag complex + flag « set ») : `IntersectClipRect` (rect ∩ rect = **SIMPLE**), `ExcludeClipRect`
+  (bande = rect, coupe intérieure = **COMPLEX**, couverture totale = **NULL**), `SelectClipRgn(NULL)` = **SIMPLE** + retire le
+  clip, `SelectClipRgn(hrgn)`/`ExtSelectClipRgn` (AND/OR/COPY), `GetClipRgn` (0 = aucun / 1 = box copiée), `RectVisible`
+  (intersection ; sans clip = toujours visible). **Types NULL/SIMPLE/COMPLEX mesurés bit-exact vs Wine** (probe : `isect=2`,
+  `exclude=3`, `selectnull=2`, `getclip 0/1`).
+- **Régions fenêtre** : `SetWindowRgn`/`GetWindowRgn` (round-trip bbox + type, ERROR=0 si aucune).
+- **FillRgn/FrameRgn** : peignent la **région rectangulaire exactement** (couleur pinceau dans le DIB) ; une région **complexe
+  aborte loud** (`aret_unimpl`) plutôt que peindre son bbox (jamais un pixel faux). `ExtCreateRegion` (RGNDATA, transform NULL :
+  bbox `rcBound`, complex si >1 rect ; transform ≠ NULL = abort).
+- **Mesure** : comctl32 socle **50 → 39**. Gardé `winecorpus/win32_socle_comctl5.c` (clip 9 lignes + FillRgn/FrameRgn GetPixel +
+  window-rgn) → **bit-identique Wine**. **Portes** : winediff **163→164**, hash `19acad982194bf07` **inchangé**, table triée.
+  Reste 39 : blit/pen/char-widths FreeType (batch 6), icônes/curseur (7), Uniscribe `Script*`/locale/divers (8).
+
 <!-- NOUVELLES ENTRÉES ICI (garder l'ordre chronologique, plus récent en bas) -->
