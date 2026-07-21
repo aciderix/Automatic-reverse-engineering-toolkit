@@ -4064,9 +4064,12 @@ Détail : **70 §6** (roadmap). Résumé :
 - **Dernier lot** du socle comctl32. `GetDateFormatW` : parseur de **picture explicite** (`yyyy`/`yy`/`MM`/`M`/`dd`/`d` +
   littéraux + `'quote'`) — champs numériques **bit-exact vs Wine** (`yyyy-MM-dd`→`2024-03-07`, `yy/M/d`→`24/3/7`) ; noms de
   mois/jours en anglais best-effort (mise en garde résolution locale, comme `gdi_uifont`). `GetLocaleInfoW` : défauts en-US
-  (dates/AM-PM/noms). `LocalSize` = `malloc_usable_size` (sound). `LoadMenuA`/`PlayEnhMetaFile` = 0 (sound). `Polygon`
-  (remplissage scanline pair-impair au pinceau + contour au stylo) et `PolyPolyline` (polylignes bres) — peinture écran
-  qualitative. **CRT** : `floor` (`MATH1`, canal x87), `__stdio_common_vsprintf` (délègue à `aret_vformat`).
+  (dates/AM-PM/noms). `LocalSize` = `malloc_usable_size` (sound). `LoadMenuA`/`PlayEnhMetaFile` = 0 (sound). `PolyPolyline`
+  = **contour pur** via la primitive Bresenham déjà DIB-hash-exacte (**vérifié** `pphash=6c583cc5` vs Wine). ⚠️ **`Polygon`
+  = ABORT sound** (jamais un remplissage deviné) : un remplissage pair-impair naïf a été **MESURÉ divergent** de Wine
+  (DIB `fd1adec5` vs `70a8e185`) → contraire au principe sacré et à la ligne « Polygon = abort » du GDI vectoriel ; reste
+  abort tant que le remplissage n'est pas reproduit bit-exact. **CRT** : `floor` (`MATH1`, canal x87),
+  `__stdio_common_vsprintf` (délègue à `aret_vformat`).
 - **Uniscribe** `Script*` (9) : moteur de shaping **hors périmètre** → chaque appel retourne un **échec sound** (`E_FAIL` /
   `NULL` / `pssa=NULL`) pour qu'un comctl32 lifté prenne son chemin **texte GDI non-USP** (rendu bit-exact par ARET). Pas
   d'oracle standalone (Wine implémente Uniscribe → succès) : vérifié uniquement *in situ* via l'intégration comctl32 lifté.

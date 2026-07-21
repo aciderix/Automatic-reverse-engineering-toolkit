@@ -7253,32 +7253,18 @@ uint32_t aret_GetLocaleInfoW(uint32_t esp) {
 uint32_t aret_LoadMenuA(uint32_t esp)     { (void)esp; return 0; }    /* no menu resource loaded (sound) */
 uint32_t aret_PlayEnhMetaFile(uint32_t esp) { (void)esp; return 0; }  /* EMF playback unmodelled (sound fail) */
 uint32_t aret_LocalSize(uint32_t esp) { void *p = WP(0); return p ? (uint32_t)malloc_usable_size(p) : 0; }
-/* Polygon(hdc, POINT*, n): even-odd scanline fill with the brush, then the pen outline. */
+/* Polygon(hdc, POINT*, n): a FILLED polygon. Wine's interior rasterisation (its scanline
+ * fill rule + edge rounding) is not reproduced bit-for-bit here — a naive even-odd fill
+ * was MEASURED to diverge from Wine's DIB (hash 70a8e185 vs fd1adec5), i.e. it would paint
+ * pixels Wine doesn't. Per the sacred principle (never a wrong output as correct) and
+ * consistent with the vector-GDI section (Polygon/Ellipse/Arc = abort-sound), this stays a
+ * loud abort until its fill is reproduced bit-exactly and DIB-hash verified. */
 uint32_t aret_Polygon(uint32_t esp) {
-    GDI_MAP_GUARD(WU(0), 0);
-    int d = gdi_idx(WU(0)); if (d < 0 || g_gdi[d].type != GDIT_DC) return 0;
-    struct gdi_obj *bm = gdi_dc_surface(WU(0));
-    const int32_t *pt = (const int32_t *)WP(1); int nn = WI(2);
-    if (!bm || !pt || nn < 2) return 0;
-    uint32_t bc; int filled = gdi_brush_color(g_gdi[d].sel_brush, &bc);
-    int top = pt[1], bot = pt[1];
-    for (int i = 1; i < nn; i++) { if (pt[2*i+1] < top) top = pt[2*i+1]; if (pt[2*i+1] > bot) bot = pt[2*i+1]; }
-    if (filled)
-        for (int y = top; y <= bot; y++) {
-            int xs[64], xn = 0;
-            for (int i = 0; i < nn; i++) {                  /* edge (i, i+1) crossings at scanline y+0.5 */
-                int j = (i + 1) % nn, y0 = pt[2*i+1], y1 = pt[2*j+1], x0 = pt[2*i], x1 = pt[2*j];
-                if ((y0 <= y && y1 > y) || (y1 <= y && y0 > y))
-                    if (xn < 64) xs[xn++] = x0 + (y - y0) * (x1 - x0) / (y1 - y0);
-            }
-            for (int a = 0; a < xn; a++) for (int b = a + 1; b < xn; b++) if (xs[b] < xs[a]) { int t = xs[a]; xs[a] = xs[b]; xs[b] = t; }
-            for (int a = 0; a + 1 < xn; a += 2) for (int x = xs[a]; x < xs[a+1]; x++) gdi_put(bm, x, y, bc);
-        }
-    uint32_t pc; int pv = gdi_pen(d, &pc);
-    if (pv > 0) for (int i = 0; i < nn; i++) { int j = (i + 1) % nn; gdi_bres(bm, pt[2*i], pt[2*i+1], pt[2*j], pt[2*j+1], pc); }
-    return 1;
+    (void)esp; aret_unimpl("Polygon: filled-polygon rasterisation not bit-exact vs Wine (abort, not a guess)"); return 0;
 }
-/* PolyPolyline(hdc, POINT*, DWORD* counts, n): n independent open polylines. */
+/* PolyPolyline(hdc, POINT*, DWORD* counts, n): n independent OPEN polylines — pure pen
+ * outline via the same Bresenham primitive as Polyline (already DIB-hash exact vs Wine),
+ * no interior fill, so it composes soundly from a proven primitive. */
 uint32_t aret_PolyPolyline(uint32_t esp) {
     GDI_MAP_GUARD(WU(0), 0);
     int d = gdi_idx(WU(0)); if (d < 0 || g_gdi[d].type != GDIT_DC) return 0;
