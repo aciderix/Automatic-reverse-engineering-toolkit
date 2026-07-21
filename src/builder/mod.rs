@@ -1284,6 +1284,9 @@ pub fn transpile(
             | "GetTextExtentPoint32A" | "GetTextExtentPoint32W"
             | "GetTextExtentPointA" | "GetTextExtentPointW" | "GetTextMetricsA" | "GetTextMetricsW"
             | "GetTabbedTextExtentA" | "GetTabbedTextExtentW"
+            // Per-character metrics (comctl32 socle): all share the DC-font FreeType path.
+            | "GetTextExtentExPointA" | "GetTextExtentExPointW"
+            | "GetCharWidthA" | "GetCharWidthW" | "GetCharABCWidthsW" | "GdiGetCharDimensions"
             // A program that creates fonts renders text — its native controls (BUTTON…)
             // paint their captions internally even if it never calls DrawText directly.
             | "CreateFontA" | "CreateFontW" | "CreateFontIndirectA" | "CreateFontIndirectW"

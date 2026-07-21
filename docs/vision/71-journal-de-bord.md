@@ -4022,4 +4022,16 @@ Détail : **70 §6** (roadmap). Résumé :
   window-rgn) → **bit-identique Wine**. **Portes** : winediff **163→164**, hash `19acad982194bf07` **inchangé**, table triée.
   Reste 39 : blit/pen/char-widths FreeType (batch 6), icônes/curseur (7), Uniscribe `Script*`/locale/divers (8).
 
+### 2026-07-21 — [HLE-WIN32][LOADER] **Socle comctl32 batch 6a** : métriques par caractère FreeType (mesuré 39→34)
+- Partagent **le chemin de police DC exact** de `GetTextExtentPoint32` (déjà bit-identique à Wine) → les avances concordent
+  par construction. `GetCharWidthW`/`A` (avance par glyphe), `GetCharABCWidthsW` (A = bearing gauche, B = boîte noire, C =
+  avance-A-B, `A+B+C = avance`), `GetTextExtentExPointW`/`A` (extent plein + `lpnFit` = nb qui tient dans `maxExtent` + tableau
+  `dx` cumulatif ; `SIZE` = extent de **toute** la chaîne, mesuré vs Wine), `GdiGetCharDimensions` (helper interne largeur
+  moyenne, alphabet 52 lettres — réutilisé par le calcul base-units DLU). `GetCharWidthInfo` (ntgdi interne : pas de bearings
+  spéciaux dans notre modèle → zéros, `TRUE`).
+- **Mesure** : comctl32 socle **39 → 34**. Gardé `winecorpus/win32_socle_comctl6.c` (DejaVu Sans : `cw`, `abc`, `extex` avec
+  fit) → **bit-identique Wine** (`cw 11 11 11 12`, `abc[B]=1,9,1`, `extex fit=4 cx=45 dx=11,22,33,45`, `fit20 fit=1 cx=45`).
+  Même mise en garde résolution de police que les autres fixtures texte / `gdi_uifont`. **Portes** : winediff **164→165**, hash
+  `19acad982194bf07` **inchangé**, table triée. Reste 34 : pens/blit/DIB (batch 7), icônes/curseur (8), Uniscribe/locale/divers (9).
+
 <!-- NOUVELLES ENTRÉES ICI (garder l'ordre chronologique, plus récent en bas) -->

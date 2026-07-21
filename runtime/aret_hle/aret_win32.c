@@ -6215,6 +6215,103 @@ uint32_t aret_GetTextExtentPoint32W(uint32_t esp) {
 }
 uint32_t aret_GetTextExtentPointW(uint32_t esp) { return aret_GetTextExtentPoint32W(esp); }
 
+/* ---- comctl32 socle batch 6a: per-character metrics (FreeType). Share the exact DC
+ * font path as GetTextExtentPoint32 (already bit-identical to Wine), so the advances
+ * agree by construction. GetCharWidthW = per-char advance; GetCharABCWidthsW = left
+ * bearing (A) / black-box width (B) / advance-A-B (C); GetTextExtentExPointW = extent
+ * with a fit count + cumulative dx array; GdiGetCharDimensions = the internal average-
+ * width helper (52-letter alphabet, reused by the DLU code). All measured vs Wine. */
+uint32_t aret_GetCharWidthW(uint32_t esp) {
+    int first = WI(1), last = WI(2); int32_t *out = (int32_t *)WP(3);
+    if (!out || last < first) return 0;
+#ifdef ARET_HAVE_FREETYPE
+    int d = gdi_idx(WU(0)); if (d < 0 || g_gdi[d].type != GDIT_DC) return 0;
+    int asc, desc; FT_Face f = u32_dc_font(d, &asc, &desc); if (!f) return 0;
+    for (int c = first; c <= last; c++) {
+        uint32_t cp = (uint32_t)c;
+        out[c - first] = (FT_Load_Char(f, cp, FT_LOAD_DEFAULT) == 0) ? (int)(f->glyph->advance.x >> 6) : 0;
+    }
+    return 1;
+#else
+    (void)esp; aret_unimpl("GetCharWidthW: FreeType not linked"); return 0;
+#endif
+}
+uint32_t aret_GetCharWidthA(uint32_t esp) { return aret_GetCharWidthW(esp); }
+uint32_t aret_GetCharABCWidthsW(uint32_t esp) {
+    int first = WI(1), last = WI(2); int32_t *out = (int32_t *)WP(3);   /* ABC = 3 x LONG */
+    if (!out || last < first) return 0;
+#ifdef ARET_HAVE_FREETYPE
+    int d = gdi_idx(WU(0)); if (d < 0 || g_gdi[d].type != GDIT_DC) return 0;
+    int asc, desc; FT_Face f = u32_dc_font(d, &asc, &desc); if (!f) return 0;
+    for (int c = first; c <= last; c++) {
+        int32_t *abc = &out[(c - first) * 3];
+        if (FT_Load_Char(f, (uint32_t)c, FT_LOAD_DEFAULT) != 0) { abc[0] = abc[1] = abc[2] = 0; continue; }
+        int adv = (int)(f->glyph->advance.x >> 6);
+        int a = (int)(f->glyph->metrics.horiBearingX >> 6);
+        int b = (int)(f->glyph->metrics.width >> 6);
+        abc[0] = a; abc[1] = (int32_t)(uint32_t)b; abc[2] = adv - a - b;   /* B is unsigned; A+B+C = advance */
+    }
+    return 1;
+#else
+    (void)esp; aret_unimpl("GetCharABCWidthsW: FreeType not linked"); return 0;
+#endif
+}
+static int u32_gtee(uint32_t hdc, const uint32_t *cps, int n, int maxext,
+                    int32_t *pfit, int32_t *dx, int32_t *sz) {
+#ifdef ARET_HAVE_FREETYPE
+    int d = gdi_idx(hdc); if (d < 0 || g_gdi[d].type != GDIT_DC) return 0;
+    int asc, desc; FT_Face f = u32_dc_font(d, &asc, &desc); if (!f) return 0;
+    int total = 0, fit = 0, fitting = 1;
+    for (int i = 0; i < n; i++) {
+        int adv = (FT_Load_Char(f, cps[i], FT_LOAD_DEFAULT) == 0) ? (int)(f->glyph->advance.x >> 6) : 0;
+        total += adv;
+        if (dx) dx[i] = total;                          /* cumulative extent through char i */
+        if (fitting && (maxext < 0 || total <= maxext)) fit = i + 1; else fitting = 0;
+    }
+    if (pfit) *pfit = fit;
+    if (sz) { sz[0] = total; sz[1] = asc + desc; }       /* SIZE = full-string extent (not the fitted one) */
+    return 1;
+#else
+    (void)hdc; (void)cps; (void)n; (void)maxext; (void)pfit; (void)dx; (void)sz;
+    aret_unimpl("GetTextExtentExPoint: FreeType not linked"); return 0;
+#endif
+}
+uint32_t aret_GetTextExtentExPointW(uint32_t esp) {
+    const uint16_t *ws = (const uint16_t *)WP(1); int n = WI(2); if (n < 0) n = 0;
+    uint32_t cps[2048]; int m = n < 2048 ? n : 2048;
+    for (int i = 0; i < m; i++) cps[i] = ws ? ws[i] : 0;
+    return u32_gtee(WU(0), cps, ws ? m : 0, WI(3), (int32_t *)WP(4), (int32_t *)WP(5), (int32_t *)WP(6)) ? 1 : 0;
+}
+uint32_t aret_GetTextExtentExPointA(uint32_t esp) {
+    const char *s = WCS(1); int n = WI(2); if (n < 0) n = s ? (int)strlen(s) : 0;
+    uint32_t cps[2048]; int m = n < 2048 ? n : 2048;
+    for (int i = 0; i < m; i++) cps[i] = u32_ansi_cp((unsigned char)(s ? s[i] : 0));
+    return u32_gtee(WU(0), cps, s ? m : 0, WI(3), (int32_t *)WP(4), (int32_t *)WP(5), (int32_t *)WP(6)) ? 1 : 0;
+}
+/* GdiGetCharDimensions(hdc, TEXTMETRIC* tm, LONG* height) -> average char width. Wine's
+ * exact recipe: cx = (GetTextExtentPoint of the 52-letter A..Za..z alphabet / 26 + 1)/2;
+ * height (if requested) = tmHeight. Reused by the dialog-unit base-units computation. */
+uint32_t aret_GdiGetCharDimensions(uint32_t esp) {
+#ifdef ARET_HAVE_FREETYPE
+    int d = gdi_idx(WU(0)); if (d < 0 || g_gdi[d].type != GDIT_DC) return 0;
+    int asc, desc; FT_Face f = u32_dc_font(d, &asc, &desc); if (!f) return 0;
+    static const char alpha[] = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ";
+    uint32_t cps[52]; for (int i = 0; i < 52; i++) cps[i] = (unsigned char)alpha[i];
+    int w = u32_text_width(f, cps, 52);
+    int32_t *ph = (int32_t *)WP(2); if (ph) *ph = asc + desc;   /* tmHeight */
+    return (uint32_t)((w / 26 + 1) / 2);
+#else
+    (void)esp; aret_unimpl("GdiGetCharDimensions: FreeType not linked"); return 0;
+#endif
+}
+/* GetCharWidthInfo(hdc, struct char_width_info{lsb,rsb,unk}) -> internal ntgdi helper
+ * comctl32 calls during font-linking/uniscribe fallback. No per-font side-bearing data
+ * in our model -> report zero bearings (sound: "no special width info"), return TRUE. */
+uint32_t aret_GetCharWidthInfo(uint32_t esp) {
+    int32_t *info = (int32_t *)WP(1); if (info) { info[0] = 0; info[1] = 0; info[2] = 0; }
+    return 1;
+}
+
 /* Tabbed text (TabbedTextOut / GetTabbedTextExtent). Expands '\t' to tab stops and
  * lays out the runs, sharing the proven FreeType text core (u32_textout_core / extent
  * regime). Tab-stop recipe MEASURED bit-exact vs Wine:
