@@ -7150,6 +7150,165 @@ uint32_t aret_DrawStateW(uint32_t esp) {
     if (typ == 3 /* DST_ICON */) { u32_icon_blit(hdc, x, y, u32_icon_idx(lData), 0, 0); return 1; }
     aret_unimpl("DrawStateW: DST_COMPLEX (callback) not modelled"); return 0;
 }
+
+/* ---- comctl32 socle batch 9 (final): locale/date, polygons, heap, Uniscribe stubs.
+ * Uniscribe (Script*) is NOT implemented — the shaping engine is out of scope. Instead
+ * each returns a sound FAILURE so a lifted comctl32 takes its non-Uniscribe GDI text
+ * path (which ARET renders bit-exactly). GetDateFormatW honours an explicit picture
+ * (numeric fields bit-exact vs Wine; month/day names are English best-effort — a
+ * locale-resolution caveat like gdi_uifont). */
+static void u32_wcopy(uint16_t *dst, const char *s, int *pn) {
+    while (*s) { if (dst) dst[*pn] = (uint16_t)(unsigned char)*s; (*pn)++; s++; }
+}
+static void u32_num2(uint16_t *dst, int v, int width, int *pn) {   /* v as `width`-digit, zero-padded */
+    char b[16]; int n = 0; if (v < 0) v = 0;
+    char t[16]; int tn = 0; do { t[tn++] = (char)('0' + v % 10); v /= 10; } while (v);
+    while (n + tn < width) { if (dst) dst[*pn + n] = '0'; n++; }
+    for (int i = tn - 1; i >= 0; i--) { if (dst) dst[*pn + n] = (uint16_t)t[i]; n++; }
+    *pn += n;
+}
+uint32_t aret_GetDateFormatW(uint32_t esp) {
+    const uint16_t *st = (const uint16_t *)WP(2);          /* SYSTEMTIME (WORD fields) */
+    const uint16_t *fmt = (const uint16_t *)WP(3);
+    uint16_t *out = (uint16_t *)WP(4); int cch = WI(5);
+    if (!st) return 0;
+    int year = st[0], month = st[1], dow = st[2], day = st[3];
+    static const char *mon[] = {"January","February","March","April","May","June","July",
+        "August","September","October","November","December"};
+    static const char *wd[] = {"Sunday","Monday","Tuesday","Wednesday","Thursday","Friday","Saturday"};
+    uint16_t tmp[256]; int n = 0; uint16_t *dst = tmp;
+    if (!fmt) { static const uint16_t def[] = {'M','/','d','/','y','y','y','y',0}; fmt = def; }   /* short default */
+    for (int i = 0; fmt[i]; ) {
+        uint16_t c = fmt[i];
+        if (c == '\'') {                                    /* quoted literal */
+            i++;
+            while (fmt[i] && !(fmt[i] == '\'' )) { if (n < 255) dst[n++] = fmt[i]; i++; }
+            if (fmt[i] == '\'') i++;
+            continue;
+        }
+        if (c == 'y' || c == 'M' || c == 'd') {
+            int run = 0; while (fmt[i] == c) { run++; i++; }
+            int p = n;
+            if (c == 'y') { if (run >= 3) u32_num2(dst, year, 4, &p); else u32_num2(dst, year % 100, 2, &p); }
+            else if (c == 'M') {
+                int mi = (month - 1 + 1200) % 12;                       /* 0-based month, guarded */
+                if (run >= 4) u32_wcopy(dst, mon[mi], &p);
+                else if (run == 3) { char a[4] = {mon[mi][0], mon[mi][1], mon[mi][2], 0}; u32_wcopy(dst, a, &p); }
+                else u32_num2(dst, month, run, &p);
+            } else {   /* 'd' */
+                int di = (dow % 7 + 7) % 7;                             /* 0-based weekday (0=Sunday) */
+                if (run >= 4) u32_wcopy(dst, wd[di], &p);
+                else if (run == 3) { char a[4] = {wd[di][0], wd[di][1], wd[di][2], 0}; u32_wcopy(dst, a, &p); }
+                else u32_num2(dst, day, run, &p);
+            }
+            n = p; continue;
+        }
+        if (n < 255) dst[n++] = c; i++;                     /* literal passthrough */
+    }
+    if (n > 255) n = 255; dst[n] = 0;
+    if (cch == 0) return (uint32_t)(n + 1);                 /* required size incl. NUL */
+    if (!out || cch < n + 1) return 0;
+    for (int k = 0; k <= n; k++) out[k] = dst[k];
+    return (uint32_t)(n + 1);
+}
+/* GetLocaleInfoW(lcid, lctype, buf, cch) — en-US/invariant defaults (locale-resolution
+ * caveat like gdi_uifont). Feeds a lifted comctl32's date/time formatting; the numeric
+ * request flag (LOCALE_RETURN_NUMBER, 0x20000000) writes a DWORD instead of a string. */
+static const char *u32_locale_str(uint32_t t) {
+    static const char *mon[] = {"January","February","March","April","May","June","July",
+        "August","September","October","November","December"};
+    static const char *wd[] = {"Monday","Tuesday","Wednesday","Thursday","Friday","Saturday","Sunday"};
+    switch (t & 0xFFFF) {
+        case 0x0001: return "0409";       /* ILANGUAGE */
+        case 0x000E: return ".";          /* SDECIMAL */
+        case 0x000F: return ",";          /* STHOUSAND */
+        case 0x001D: return "/";          /* SDATE */
+        case 0x001E: return ":";          /* STIME */
+        case 0x001F: return "M/d/yyyy";   /* SSHORTDATE */
+        case 0x0020: return "dddd, MMMM d, yyyy";  /* SLONGDATE */
+        case 0x0028: return "AM";         /* S1159 */
+        case 0x0029: return "PM";         /* S2359 */
+        case 0x1003: return "h:mm:ss tt"; /* STIMEFORMAT */
+        case 0x100C: return "6";          /* IFIRSTDAYOFWEEK (Monday=0 .. so 6=Sunday? en-US Sunday first) */
+        default: break;
+    }
+    uint32_t lt = t & 0xFFFF;
+    if (lt >= 0x002A && lt <= 0x0030) return wd[lt - 0x002A];            /* SDAYNAME1..7 (Mon..Sun) */
+    if (lt >= 0x0038 && lt <= 0x0043) return mon[lt - 0x0038];           /* SMONTHNAME1..12 */
+    return "";
+}
+uint32_t aret_GetLocaleInfoW(uint32_t esp) {
+    uint32_t lctype = WU(1); uint16_t *buf = (uint16_t *)WP(2); int cch = WI(3);
+    const char *s = u32_locale_str(lctype);
+    if (lctype & 0x20000000u /* LOCALE_RETURN_NUMBER */) {
+        if (buf && cch >= 2) { uint32_t v = (uint32_t)strtoul(s, NULL, 10); *(uint32_t *)buf = v; }
+        return 2;
+    }
+    int len = 0; while (s[len]) len++;
+    if (cch == 0) return (uint32_t)(len + 1);
+    if (!buf || cch < len + 1) return 0;
+    for (int i = 0; i < len; i++) buf[i] = (uint16_t)(unsigned char)s[i];
+    buf[len] = 0; return (uint32_t)(len + 1);
+}
+uint32_t aret_LoadMenuA(uint32_t esp)     { (void)esp; return 0; }    /* no menu resource loaded (sound) */
+uint32_t aret_PlayEnhMetaFile(uint32_t esp) { (void)esp; return 0; }  /* EMF playback unmodelled (sound fail) */
+uint32_t aret_LocalSize(uint32_t esp) { void *p = WP(0); return p ? (uint32_t)malloc_usable_size(p) : 0; }
+/* Polygon(hdc, POINT*, n): even-odd scanline fill with the brush, then the pen outline. */
+uint32_t aret_Polygon(uint32_t esp) {
+    GDI_MAP_GUARD(WU(0), 0);
+    int d = gdi_idx(WU(0)); if (d < 0 || g_gdi[d].type != GDIT_DC) return 0;
+    struct gdi_obj *bm = gdi_dc_surface(WU(0));
+    const int32_t *pt = (const int32_t *)WP(1); int nn = WI(2);
+    if (!bm || !pt || nn < 2) return 0;
+    uint32_t bc; int filled = gdi_brush_color(g_gdi[d].sel_brush, &bc);
+    int top = pt[1], bot = pt[1];
+    for (int i = 1; i < nn; i++) { if (pt[2*i+1] < top) top = pt[2*i+1]; if (pt[2*i+1] > bot) bot = pt[2*i+1]; }
+    if (filled)
+        for (int y = top; y <= bot; y++) {
+            int xs[64], xn = 0;
+            for (int i = 0; i < nn; i++) {                  /* edge (i, i+1) crossings at scanline y+0.5 */
+                int j = (i + 1) % nn, y0 = pt[2*i+1], y1 = pt[2*j+1], x0 = pt[2*i], x1 = pt[2*j];
+                if ((y0 <= y && y1 > y) || (y1 <= y && y0 > y))
+                    if (xn < 64) xs[xn++] = x0 + (y - y0) * (x1 - x0) / (y1 - y0);
+            }
+            for (int a = 0; a < xn; a++) for (int b = a + 1; b < xn; b++) if (xs[b] < xs[a]) { int t = xs[a]; xs[a] = xs[b]; xs[b] = t; }
+            for (int a = 0; a + 1 < xn; a += 2) for (int x = xs[a]; x < xs[a+1]; x++) gdi_put(bm, x, y, bc);
+        }
+    uint32_t pc; int pv = gdi_pen(d, &pc);
+    if (pv > 0) for (int i = 0; i < nn; i++) { int j = (i + 1) % nn; gdi_bres(bm, pt[2*i], pt[2*i+1], pt[2*j], pt[2*j+1], pc); }
+    return 1;
+}
+/* PolyPolyline(hdc, POINT*, DWORD* counts, n): n independent open polylines. */
+uint32_t aret_PolyPolyline(uint32_t esp) {
+    GDI_MAP_GUARD(WU(0), 0);
+    int d = gdi_idx(WU(0)); if (d < 0 || g_gdi[d].type != GDIT_DC) return 0;
+    struct gdi_obj *bm = gdi_dc_surface(WU(0));
+    const int32_t *pt = (const int32_t *)WP(1); const uint32_t *cnt = (const uint32_t *)WP(2); int npoly = WI(3);
+    if (!bm || !pt || !cnt) return 0;
+    uint32_t pc; int pv = gdi_pen(d, &pc); if (pv <= 0) return pv == 0 ? 1 : 0;
+    int off = 0;
+    for (int p = 0; p < npoly; p++) {
+        int c = (int)cnt[p];
+        for (int i = 0; i + 1 < c; i++) gdi_bres(bm, pt[2*(off+i)], pt[2*(off+i)+1], pt[2*(off+i+1)], pt[2*(off+i+1)+1], pc);
+        off += c;
+    }
+    return 1;
+}
+/* Uniscribe (Script*) — shaping engine out of scope. Each returns a sound FAILURE so a
+ * lifted comctl32 falls back to its GDI text path (which ARET renders bit-exactly). No
+ * standalone oracle: verified only in situ through the lifted-comctl32 integration. */
+uint32_t aret_ScriptStringAnalyse(uint32_t esp) {
+    uint32_t *pssa = (uint32_t *)WP(12); if (pssa) *pssa = 0;   /* SCRIPT_STRING_ANALYSIS out = NULL */
+    return 0x80004005u;                                        /* E_FAIL -> caller uses non-USP path */
+}
+uint32_t aret_ScriptStringFree(uint32_t esp)              { (void)esp; return 0; }   /* S_OK (freeing NULL) */
+uint32_t aret_ScriptStringOut(uint32_t esp)              { (void)esp; return 0x80004005u; }
+uint32_t aret_ScriptStringCPtoX(uint32_t esp)            { (void)esp; return 0x80004005u; }
+uint32_t aret_ScriptStringXtoCP(uint32_t esp)            { (void)esp; return 0x80004005u; }
+uint32_t aret_ScriptStringGetLogicalWidths(uint32_t esp) { (void)esp; return 0x80004005u; }
+uint32_t aret_ScriptBreak(uint32_t esp)                  { (void)esp; return 0x80004005u; }
+uint32_t aret_ScriptString_pSize(uint32_t esp)           { (void)esp; return 0; }    /* NULL -> caller falls back */
+uint32_t aret_ScriptString_pcOutChars(uint32_t esp)      { (void)esp; return 0; }
 /* GetLastActivePopup(hWnd) -> hWnd (no popup owned -> the window itself). */
 uint32_t aret_GetLastActivePopup(uint32_t esp) { return WU(0); }
 

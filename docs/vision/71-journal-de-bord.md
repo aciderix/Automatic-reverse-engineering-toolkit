@@ -4060,4 +4060,20 @@ Détail : **70 §6** (roadmap). Résumé :
   `copy 4x4 bpp=32`, `copy8 8x8`, `copyicon distinct=1`). **Portes** : winediff **166→167**, hash `19acad982194bf07`
   **inchangé**, table triée. Reste 18 : Uniscribe `Script*` (10, abort/failure sound → fallback appelant), locale/menu/divers (8).
 
+### 2026-07-21 — [HLE-WIN32][LOADER] **Socle comctl32 batch 9 (final)** : locale/date + polygones + heap + Uniscribe (18→**0**)
+- **Dernier lot** du socle comctl32. `GetDateFormatW` : parseur de **picture explicite** (`yyyy`/`yy`/`MM`/`M`/`dd`/`d` +
+  littéraux + `'quote'`) — champs numériques **bit-exact vs Wine** (`yyyy-MM-dd`→`2024-03-07`, `yy/M/d`→`24/3/7`) ; noms de
+  mois/jours en anglais best-effort (mise en garde résolution locale, comme `gdi_uifont`). `GetLocaleInfoW` : défauts en-US
+  (dates/AM-PM/noms). `LocalSize` = `malloc_usable_size` (sound). `LoadMenuA`/`PlayEnhMetaFile` = 0 (sound). `Polygon`
+  (remplissage scanline pair-impair au pinceau + contour au stylo) et `PolyPolyline` (polylignes bres) — peinture écran
+  qualitative. **CRT** : `floor` (`MATH1`, canal x87), `__stdio_common_vsprintf` (délègue à `aret_vformat`).
+- **Uniscribe** `Script*` (9) : moteur de shaping **hors périmètre** → chaque appel retourne un **échec sound** (`E_FAIL` /
+  `NULL` / `pssa=NULL`) pour qu'un comctl32 lifté prenne son chemin **texte GDI non-USP** (rendu bit-exact par ARET). Pas
+  d'oracle standalone (Wine implémente Uniscribe → succès) : vérifié uniquement *in situ* via l'intégration comctl32 lifté.
+- **Mesure** : comctl32 socle **18 → 0** — le socle Levier-1 est **complet** (les 71 imports mesurés au départ sont tous
+  couverts). Restent 2 *unresolved direct calls* (gaps de **récupération de code** dans le comctl32 lifté — catégorie distincte
+  du socle HLE). Gardé `winecorpus/win32_socle_comctl9.c` (GetDateFormatW numérique + LocalSize) → **bit-identique Wine**.
+  **Portes** : winediff **167→168**, hash `19acad982194bf07` **inchangé**, table triée. **Suite** : intégration composite (esp
+  threadé) → peindre un contrôle comctl32 lifté (progress bar) à l'écran, exerçant floor/vsprintf/Script*/blit in situ.
+
 <!-- NOUVELLES ENTRÉES ICI (garder l'ordre chronologique, plus récent en bas) -->

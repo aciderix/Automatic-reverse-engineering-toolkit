@@ -297,6 +297,19 @@ uint32_t aret_vsprintf(uint32_t esp) {
     size_t n = aret_vformat(dst, (size_t)1 << 30, fmt, va);
     return (uint32_t)n;
 }
+/* __stdio_common_vsprintf(uint64 options, char* buf, size_t count, const char* fmt,
+ * _locale_t locale, va_list va) — the UCRT vsnprintf core (comctl32 socle). The 64-bit
+ * options occupy slots 0-1; buffer=2, count=3, format=4, locale=5, va=6. We honour the
+ * truncating vsnprintf contract (options/locale ignored — the C locale is our default). */
+uint32_t aret_stdio_common_vsprintf(uint32_t esp) {
+    char *dst = AS(2); size_t cap = AU(3);
+    const char *fmt = ACS(4);
+    const uint32_t *va = (const uint32_t *)(uintptr_t)AU(6);
+    char tmp[8192];
+    size_t n = aret_vformat(tmp, sizeof tmp, fmt, va);
+    if (dst && cap) { size_t c = n < cap - 1 ? n : cap - 1; memcpy(dst, tmp, c); dst[c] = 0; }
+    return (uint32_t)n;
+}
 
 /* sscanf core — parse `in` per `fmt`, writing to the pointer args `a[]`. Returns the
  * number of items assigned, or EOF(-1) if input ran out before the first assignment.
@@ -646,6 +659,7 @@ MATH1(cbrt, cbrt)
 MATH1(exp2, exp2)
 MATH1(expm1, expm1)
 MATH1(log1p, log1p)
+MATH1(floor, floor)   /* comctl32 socle (fp-returning: recovered via the x87 channel) */
 #undef MATH1
 #undef MATH2
 #undef AD
