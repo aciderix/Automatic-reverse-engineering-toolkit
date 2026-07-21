@@ -7743,18 +7743,157 @@ uint32_t aret_InternalGetWindowText(uint32_t esp) {
     uint32_t o = 0; u32_defproc_text(WU(0), U32_WM_GETTEXT, WU(2), WU(1), 1 /*wide*/, &o); return o;
 }
 /* Simple constants / sound no-ops the socle needs. */
-uint32_t aret_IsValidLocale(uint32_t esp)     { (void)esp; return 1; }
 uint32_t aret_GetNearestColor(uint32_t esp)   { return WU(1); }         /* 32bpp: identity */
 uint32_t aret_SelectPalette(uint32_t esp)     { (void)esp; return 0; }  /* no palette */
 uint32_t aret_GdiGetCodePage(uint32_t esp)    { (void)esp; return 1252; }
 uint32_t aret_DragDetect(uint32_t esp)        { (void)esp; return 0; }  /* no drag headless */
-uint32_t aret_ShowScrollBar(uint32_t esp)     { (void)esp; return 1; }
-uint32_t aret_ScrollWindow(uint32_t esp)      { (void)esp; return 1; }  /* display; control redraws */
-uint32_t aret_ScrollWindowEx(uint32_t esp)    { (void)esp; return 0; }  /* SIMPLEREGION-less: 0 */
-uint32_t aret_GetClassLongW(uint32_t esp)     { (void)esp; return 0; }
 uint32_t aret_GetKeyNameTextW(uint32_t esp)   { uint16_t *b = (uint16_t *)WP(1); if (b && WU(2)) b[0] = 0; return 0; }
-uint32_t aret_MapVirtualKeyW(uint32_t esp)    { (void)esp; return 0; }  /* no scan mapping */
 uint32_t aret_GetTextCharsetInfo(uint32_t esp){ (void)esp; return 0; }  /* ANSI_CHARSET */
+
+/* IsValidLocale(Locale, dwFlags): a locale is valid iff its primary language id is in the
+ * MS-LCID assigned range [0x01,0x92] (MEASURED vs Wine: 0x09/0x0C/0x50/0x91/0x92 valid,
+ * 0xA0/0xFF/0x350 invalid), and the USER/SYSTEM_DEFAULT pseudo-LCIDs (0x0400/0x0800) are
+ * rejected as Wine does. Out-of-scope edge (documented): custom locales (0x0C00) and any
+ * unassigned holes inside the range — comctl32 never passes those. No longer "always 1". */
+uint32_t aret_IsValidLocale(uint32_t esp) {
+    uint32_t lcid = WU(0);
+    if (lcid == 0x0400u || lcid == 0x0800u) return 0;
+    uint32_t primlang = lcid & 0x03FFu;
+    return (primlang >= 0x01u && primlang <= 0x92u) ? 1 : 0;
+}
+/* ShowScrollBar(hwnd, wBar, bShow): toggles the WS_HSCROLL/WS_VSCROLL style bit (MEASURED
+ * vs Wine — GetWindowLong(GWL_STYLE) reflects it). SB_HORZ=0/SB_VERT=1/SB_CTL=2/SB_BOTH=3. */
+uint32_t aret_ShowScrollBar(uint32_t esp) {
+    int i = u32_win_idx(WU(0)); if (i < 0) return 0;
+    uint32_t bar = WU(1), show = WU(2);
+    if (bar == 0 || bar == 3) { if (show) g_u32_win[i].style |= 0x00100000u; else g_u32_win[i].style &= ~0x00100000u; }
+    if (bar == 1 || bar == 3) { if (show) g_u32_win[i].style |= 0x00200000u; else g_u32_win[i].style &= ~0x00200000u; }
+    return 1;
+}
+/* Newly-exposed update rect after a scroll of (dx,dy) within a rect (client if scr==NULL).
+ * MEASURED vs Wine: dx>0 exposes the left strip [l,t,l+dx,b], dy<0 the bottom [l,b+dy,r,b],
+ * two axes give the L-shape's bounding box. */
+static void u32_scroll_update(int i, int dx, int dy, const int32_t *scr, int32_t *upd) {
+    int l = scr ? scr[0] : 0, t = scr ? scr[1] : 0, r = scr ? scr[2] : g_u32_win[i].w, b = scr ? scr[3] : g_u32_win[i].h;
+    int have = 0, ul = 0, ut = 0, ur = 0, ub = 0;
+#define U32_SU_ADD(A,C,D,E) do { int xl=(A),xt=(C),xr=(D),xb=(E); if (xr>xl && xb>xt) { \
+        if (!have) { ul=xl; ut=xt; ur=xr; ub=xb; have=1; } \
+        else { if(xl<ul)ul=xl; if(xt<ut)ut=xt; if(xr>ur)ur=xr; if(xb>ub)ub=xb; } } } while (0)
+    if (dx > 0) U32_SU_ADD(l, t, (l+dx<r?l+dx:r), b);
+    else if (dx < 0) U32_SU_ADD((r+dx>l?r+dx:l), t, r, b);
+    if (dy > 0) U32_SU_ADD(l, t, r, (t+dy<b?t+dy:b));
+    else if (dy < 0) U32_SU_ADD(l, (b+dy>t?b+dy:t), r, b);
+#undef U32_SU_ADD
+    if (upd) { if (have) { upd[0]=ul; upd[1]=ut; upd[2]=ur; upd[3]=ub; } else { upd[0]=upd[1]=upd[2]=upd[3]=0; } }
+}
+/* Move the client framebuffer content by (dx,dy) (the real scroll). Only when a client
+ * framebuffer exists (visible SDL window); no headless oracle for the pixels -> qualitative
+ * like the composite. Overlap-safe via a temp copy. */
+static void u32_scroll_pixels(int i, int dx, int dy) {
+#ifdef ARET_HAVE_SDL
+    int bi = gdi_idx(g_u32_win[i].client_bmp); if (bi < 0) return;
+    struct gdi_obj *bm = &g_gdi[bi]; if (!bm->bits || bm->bpp != 32) return;
+    size_t n = (size_t)bm->w * bm->h * 4; uint8_t *tmp = (uint8_t *)malloc(n); if (!tmp) return;
+    memcpy(tmp, bm->bits, n);
+    for (int y = 0; y < bm->h; y++) for (int x = 0; x < bm->w; x++) {
+        int sx = x - dx, sy = y - dy; uint8_t *d = gdi_px(bm, x, y);
+        if (!d) continue;
+        if (sx >= 0 && sx < bm->w && sy >= 0 && sy < bm->h) {
+            int row = bm->topdown ? sy : (bm->h - 1 - sy); uint8_t *s = tmp + ((size_t)row * bm->w + sx) * 4;
+            d[0]=s[0]; d[1]=s[1]; d[2]=s[2]; d[3]=s[3];
+        }
+    }
+    free(tmp);
+#else
+    (void)i; (void)dx; (void)dy;
+#endif
+}
+/* ScrollWindowEx(hwnd, dx, dy, prcScroll, prcClip, hrgnUpdate, prcUpdate, flags) -> region
+ * type. Fills prcUpdate with the exposed strip (bit-exact vs Wine on a client == window
+ * child), scrolls the client framebuffer, and invalidates. ScrollWindow is the same minus
+ * the out-params. */
+uint32_t aret_ScrollWindowEx(uint32_t esp) {
+    int i = u32_win_idx(WU(0)); if (i < 0) return 0;
+    int dx = WI(1), dy = WI(2);
+    u32_scroll_update(i, dx, dy, (const int32_t *)WP(3), (int32_t *)WP(6));
+    u32_scroll_pixels(i, dx, dy);
+    g_u32_win[i].needs_paint = 1;
+    return 2;   /* SIMPLEREGION (rect scroll) */
+}
+uint32_t aret_ScrollWindow(uint32_t esp) {
+    int i = u32_win_idx(WU(0)); if (i < 0) return 0;
+    u32_scroll_pixels(i, WI(1), WI(2));
+    g_u32_win[i].needs_paint = 1;
+    return 1;
+}
+/* GetClassLong(hwnd, nIndex): the real registered class field (window -> class registry).
+ * Class-extra bytes (positive index) are not modelled -> abort sound rather than a fake 0. */
+static int u32_win_class_idx(int wi) {
+    const char *cn = g_u32_win[wi].classname;
+    for (int i = 0; i < U32_MAX_CLASSES; i++) {
+        if (!g_u32_class[i].used) continue;
+        int k = 0; while (cn[k] && g_u32_class[i].name[k] == (uint16_t)(unsigned char)cn[k]) k++;
+        if (cn[k] == 0 && g_u32_class[i].name[k] == 0) return i;
+    }
+    return -1;
+}
+uint32_t aret_GetClassLongW(uint32_t esp) {
+    int wi = u32_win_idx(WU(0)); if (wi < 0) return 0;
+    int ci = u32_win_class_idx(wi); if (ci < 0) return 0;
+    int32_t idx = WI(1);
+    switch (idx) {
+        case -26: return g_u32_class[ci].style;               /* GCL_STYLE */
+        case -24: return g_u32_class[ci].wndproc;             /* GCL_WNDPROC */
+        case -20: return (uint32_t)g_u32_class[ci].cls_extra; /* GCL_CBCLSEXTRA */
+        case -18: return (uint32_t)g_u32_class[ci].wnd_extra; /* GCL_CBWNDEXTRA */
+        case -16: return g_u32_class[ci].hinstance;           /* GCL_HMODULE */
+        case -14: return g_u32_class[ci].hicon;               /* GCL_HICON */
+        case -12: return g_u32_class[ci].hcursor;             /* GCL_HCURSOR */
+        case -10: return g_u32_class[ci].hbr_bg;              /* GCL_HBRBACKGROUND */
+        case -8:  return g_u32_class[ci].menu_name;           /* GCL_MENUNAME */
+        case -34: return g_u32_class[ci].hicon_sm;            /* GCL_HICONSM */
+        default:
+            if (idx >= 0) aret_unimpl("GetClassLong: class-extra bytes (positive index) not modelled");
+            return 0;
+    }
+}
+uint32_t aret_GetClassLongA(uint32_t esp) { return aret_GetClassLongW(esp); }
+/* MapVirtualKey(uCode, uMapType): the US keyboard scan-code table (set-1 make codes),
+ * MEASURED vs Wine (A->0x1E, RETURN->0x1C, SHIFT->0x2A, F1->0x3B). */
+static const uint8_t u32_vk2vsc[256] = {
+    [0x08]=0x0E, [0x09]=0x0F, [0x0D]=0x1C, [0x10]=0x2A, [0x11]=0x1D, [0x12]=0x38, [0x13]=0x45,
+    [0x14]=0x3A, [0x1B]=0x01, [0x20]=0x39, [0x21]=0x49, [0x22]=0x51, [0x23]=0x4F, [0x24]=0x47,
+    [0x25]=0x4B, [0x26]=0x48, [0x27]=0x4D, [0x28]=0x50, [0x2D]=0x52, [0x2E]=0x53,
+    [0x30]=0x0B, [0x31]=0x02, [0x32]=0x03, [0x33]=0x04, [0x34]=0x05, [0x35]=0x06, [0x36]=0x07,
+    [0x37]=0x08, [0x38]=0x09, [0x39]=0x0A,
+    [0x41]=0x1E, [0x42]=0x30, [0x43]=0x2E, [0x44]=0x20, [0x45]=0x12, [0x46]=0x21, [0x47]=0x22,
+    [0x48]=0x23, [0x49]=0x17, [0x4A]=0x24, [0x4B]=0x25, [0x4C]=0x26, [0x4D]=0x32, [0x4E]=0x31,
+    [0x4F]=0x18, [0x50]=0x19, [0x51]=0x10, [0x52]=0x13, [0x53]=0x1F, [0x54]=0x14, [0x55]=0x16,
+    [0x56]=0x2F, [0x57]=0x11, [0x58]=0x2D, [0x59]=0x15, [0x5A]=0x2C,
+    [0x60]=0x52, [0x61]=0x4F, [0x62]=0x50, [0x63]=0x51, [0x64]=0x4B, [0x65]=0x4C, [0x66]=0x4D,
+    [0x67]=0x47, [0x68]=0x48, [0x69]=0x49, [0x6A]=0x37, [0x6B]=0x4E, [0x6D]=0x4A, [0x6E]=0x53,
+    [0x6F]=0x35,
+    [0x70]=0x3B, [0x71]=0x3C, [0x72]=0x3D, [0x73]=0x3E, [0x74]=0x3F, [0x75]=0x40, [0x76]=0x41,
+    [0x77]=0x42, [0x78]=0x43, [0x79]=0x44, [0x7A]=0x57, [0x7B]=0x58,
+    [0xBA]=0x27, [0xBB]=0x0D, [0xBC]=0x33, [0xBD]=0x0C, [0xBE]=0x34, [0xBF]=0x35, [0xC0]=0x29,
+    [0xDB]=0x1A, [0xDC]=0x2B, [0xDD]=0x1B, [0xDE]=0x28,
+};
+uint32_t aret_MapVirtualKeyW(uint32_t esp) {
+    uint32_t code = WU(0) & 0xFFu, type = WU(1);
+    if (type == 0) return u32_vk2vsc[code];                       /* MAPVK_VK_TO_VSC */
+    if (type == 1 || type == 3) {                                 /* MAPVK_VSC_TO_VK(_EX) */
+        if (!code) return 0;
+        for (int vk = 0; vk < 256; vk++) if (u32_vk2vsc[vk] == code) return (uint32_t)vk;
+        return 0;
+    }
+    if (type == 2) {                                              /* MAPVK_VK_TO_CHAR */
+        if ((code >= 'A' && code <= 'Z') || (code >= '0' && code <= '9')) return code;
+        switch (code) { case 0x0D: return 13; case 0x20: return 32; case 0x08: return 8;
+                        case 0x09: return 9; case 0x1B: return 27; default: return 0; }
+    }
+    return 0;
+}
+uint32_t aret_MapVirtualKeyA(uint32_t esp) { return aret_MapVirtualKeyW(esp); }
 
 /* ---- comctl32 socle batch 5: DC clip regions + window regions + FillRgn/FrameRgn.
  * A DC's user clip is modelled as a rectangular bbox (clip_l..b) plus a complex flag

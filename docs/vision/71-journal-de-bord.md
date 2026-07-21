@@ -4079,4 +4079,24 @@ Détail : **70 §6** (roadmap). Résumé :
   **Portes** : winediff **167→168**, hash `19acad982194bf07` **inchangé**, table triée. **Suite** : intégration composite (esp
   threadé) → peindre un contrôle comctl32 lifté (progress bar) à l'écran, exerçant floor/vsprintf/Script*/blit in situ.
 
+### 2026-07-21 — [HLE-WIN32] **Durcissement socle : 5 no-op/constantes « plausibles » → comportement RÉEL mesuré** (audit utilisateur)
+- Suite de l'auto-audit (après le fix `Polygon`) : l'utilisateur a demandé de ne **plus se contenter** de no-op/constantes non
+  prouvés. Chacun **mesuré vs Wine** puis implémenté bit-exact (fixture `winecorpus/win32_socle_harden.c`) :
+  - **`IsValidLocale`** ne renvoie plus **toujours 1** : valide **ssi** l'id de langue primaire ∈ plage assignée MS-LCID
+    `[0x01,0x92]` (mesuré : `0x09`/`0x0C`/`0x50`/`0x91`/`0x92` valides ; `0xA0`/`0xFF`/`0x350` invalides), `0x0400`/`0x0800`
+    (USER/SYSTEM_DEFAULT) rejetés comme Wine. Bord hors-scope documenté : locales custom `0x0C00`, trous non assignés dans la plage.
+  - **`MapVirtualKey(A/W)`** : **vraie table de scan-codes clavier US** (set-1) — VK↔VSC + VK→CHAR (mesuré `A→0x1E`, `RET→0x1C`,
+    `SHIFT→0x2A`, `F1→0x3B`, `A→'A'`, `0x1E→'A'`).
+  - **`ShowScrollBar`** : bascule réellement le bit de style **WS_HSCROLL/WS_VSCROLL** (mesuré via `GetWindowLong(GWL_STYLE)`).
+  - **`GetClassLong(A/W)`** : renvoie les **vrais champs** de la classe enregistrée (fenêtre→registre de classes ;
+    style/wndproc/cbCls/cbWnd/hbr/hicon/hcursor/hmod/menu/hIconSm). Octets class-extra (index positif) = **abort sound** (pas un 0 devin).
+  - **`ScrollWindow(Ex)`** : calcule la **bande d'invalidation exposée** exacte (`prcUpdate` rempli — mesuré sur un enfant où
+    client==window : `dx10→0,0,10,80`, `dy-15→0,65,120,80`, L-shape→bbox) + déplace le framebuffer client (scroll réel,
+    qualitatif SDL) + invalide. Retour SIMPLEREGION(2)/TRUE comme Wine.
+- **Restant honnête** (documenté, pas maquillé) : les **noms** de mois/jours de `GetDateFormatW`/`GetLocaleInfoW` et les défauts
+  `GetLocaleInfoW` restent **en-US best-effort** (dépendance locale = même mise en garde environnementale que `gdi_uifont` ; les
+  champs **numériques** sont bit-exact). `PlayEnhMetaFile`=0 (rejoue EMF = à implémenter si un binaire l'exige). `Polygon` reste
+  **abort sound** (remplissage non reproduit bit-exact). **Portes** : winediff **168→169**, hash `19acad982194bf07` **inchangé**,
+  difftest 272/272, table triée, socle comctl32 **toujours 0**. **Suite** : intégration in situ (contrôle comctl32 lifté à l'écran).
+
 <!-- NOUVELLES ENTRÉES ICI (garder l'ordre chronologique, plus récent en bas) -->
