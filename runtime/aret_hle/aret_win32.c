@@ -7231,6 +7231,79 @@ static uint32_t u32_next_dlg_item(uint32_t hDlg, uint32_t cur, int prev, int tab
 uint32_t aret_GetNextDlgTabItem(uint32_t esp)   { return u32_next_dlg_item(WU(0), WU(1), (int)WU(2), 1); }
 uint32_t aret_GetNextDlgGroupItem(uint32_t esp) { return u32_next_dlg_item(WU(0), WU(1), (int)WU(2), 0); }
 
+/* ---- comctl32 socle batch 4 : window nav + resources + simple constants/no-ops ---- */
+uint32_t aret_SetParent(uint32_t esp) {
+    int i = u32_win_idx(WU(0)); if (i < 0) return 0;
+    uint32_t old = g_u32_win[i].parent; g_u32_win[i].parent = WU(1); return old;
+}
+/* EnumChildWindows(hwnd, proc, lParam): call proc(child, lParam) for each child until it
+ * returns FALSE. */
+uint32_t aret_EnumChildWindows(uint32_t esp) {
+    uint32_t parent = WU(0), proc = WU(1), lp = WU(2);
+    if (!proc) return 0;
+    for (int i = 0; i < U32_MAX_WIN; i++) {
+        if (!g_u32_win[i].used || g_u32_win[i].parent != parent) continue;
+        uint32_t frame = (esp - 64) & ~15u; uint32_t *f = (uint32_t *)(uintptr_t)frame;
+        f[0] = 0; f[1] = (uint32_t)(i + 1); f[2] = lp;
+        if ((uint32_t)aret_call(proc, frame, 0, 0, 0, 0) == 0) break;
+    }
+    return 1;
+}
+/* ChildWindowFromPoint(parent, POINT): the child at the client point, else the parent. */
+uint32_t aret_ChildWindowFromPoint(uint32_t esp) {
+    uint32_t par = WU(0); int px = WI(1), py = WI(2);
+    for (int c = 0; c < U32_MAX_WIN; c++)
+        if (g_u32_win[c].used && g_u32_win[c].parent == par && g_u32_win[c].visible
+            && px >= g_u32_win[c].x && px < g_u32_win[c].x + g_u32_win[c].w
+            && py >= g_u32_win[c].y && py < g_u32_win[c].y + g_u32_win[c].h)
+            return (uint32_t)(c + 1);
+    return par;
+}
+/* WindowFromPoint(POINT screen): the top-level visible window under the point (0 if none). */
+uint32_t aret_WindowFromPoint(uint32_t esp) {
+    int x = WI(0), y = WI(1);
+    for (int i = 0; i < U32_MAX_WIN; i++)
+        if (g_u32_win[i].used && g_u32_win[i].visible && g_u32_win[i].parent == 0
+            && x >= g_u32_win[i].x && x < g_u32_win[i].x + g_u32_win[i].w
+            && y >= g_u32_win[i].y && y < g_u32_win[i].y + g_u32_win[i].h)
+            return (uint32_t)(i + 1);
+    return 0;
+}
+uint32_t aret_GetDC(uint32_t esp);   /* fwd */
+uint32_t aret_GetDCEx(uint32_t esp)  { return aret_GetDC(esp); }   /* clip region/flags ignored */
+uint32_t aret_SetTimer(uint32_t esp);/* fwd */
+uint32_t aret_SetSystemTimer(uint32_t esp) { return aret_SetTimer(esp); }
+/* LoadStringW: copy the RT_STRING entry as wide (no narrowing). */
+uint32_t aret_LoadStringW(uint32_t esp) {
+    uint32_t uID = WU(1); uint16_t *buf = (uint16_t *)WP(2); uint32_t cch = WU(3);
+    if (!buf || cch == 0) return 0;
+    const uint8_t *de = u32_rsrc_data_entry(6 /*RT_STRING*/, uID / 16 + 1);
+    if (!de) { buf[0] = 0; return 0; }
+    const uint16_t *p = (const uint16_t *)(uintptr_t)(aret_image_lo + *(const uint32_t *)de);
+    for (uint32_t i = 0; i < uID % 16; i++) p += 1 + *p;
+    uint16_t len = *p++; uint32_t n = len < cch - 1 ? len : cch - 1;
+    for (uint32_t i = 0; i < n; i++) buf[i] = p[i]; buf[n] = 0; return n;
+}
+uint32_t aret_FindResourceA(uint32_t esp);   /* fwd */
+uint32_t aret_FindResourceW(uint32_t esp) { return aret_FindResourceA(esp); }  /* integer/atom resources */
+/* InternalGetWindowText(hwnd, buf, cch) — wide, like GetWindowTextW. */
+uint32_t aret_InternalGetWindowText(uint32_t esp) {
+    uint32_t o = 0; u32_defproc_text(WU(0), U32_WM_GETTEXT, WU(2), WU(1), 1 /*wide*/, &o); return o;
+}
+/* Simple constants / sound no-ops the socle needs. */
+uint32_t aret_IsValidLocale(uint32_t esp)     { (void)esp; return 1; }
+uint32_t aret_GetNearestColor(uint32_t esp)   { return WU(1); }         /* 32bpp: identity */
+uint32_t aret_SelectPalette(uint32_t esp)     { (void)esp; return 0; }  /* no palette */
+uint32_t aret_GdiGetCodePage(uint32_t esp)    { (void)esp; return 1252; }
+uint32_t aret_DragDetect(uint32_t esp)        { (void)esp; return 0; }  /* no drag headless */
+uint32_t aret_ShowScrollBar(uint32_t esp)     { (void)esp; return 1; }
+uint32_t aret_ScrollWindow(uint32_t esp)      { (void)esp; return 1; }  /* display; control redraws */
+uint32_t aret_ScrollWindowEx(uint32_t esp)    { (void)esp; return 0; }  /* SIMPLEREGION-less: 0 */
+uint32_t aret_GetClassLongW(uint32_t esp)     { (void)esp; return 0; }
+uint32_t aret_GetKeyNameTextW(uint32_t esp)   { uint16_t *b = (uint16_t *)WP(1); if (b && WU(2)) b[0] = 0; return 0; }
+uint32_t aret_MapVirtualKeyW(uint32_t esp)    { (void)esp; return 0; }  /* no scan mapping */
+uint32_t aret_GetTextCharsetInfo(uint32_t esp){ (void)esp; return 0; }  /* ANSI_CHARSET */
+
 /* ---- Atom tables (kernel32/user32) — string<->ATOM interning, refcounted.
  * Two separate per-process tables (Global* vs local Add/Find/Delete/GetAtomName):
  * a local atom is invisible to the global table (measured vs Wine). String atoms

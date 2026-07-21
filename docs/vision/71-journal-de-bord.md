@@ -3995,4 +3995,17 @@ Détail : **70 §6** (roadmap). Résumé :
 - **Mesure** : comctl32 socle **82 → 71**. Portes : hash `19acad982194bf07` **inchangé**, table triée. (Reste : clip appliqué,
   blit, char-widths FreeType, icônes, locale, Uniscribe=abort/deep, puis intégration composite esp → progress bar à l'écran.)
 
+### 2026-07-21 — [HLE-WIN32][LOADER] **Socle comctl32 batch 4** : nav fenêtres + ressources + no-ops (mesuré 71→50)
+- **Navigation fenêtres** : `SetParent` (reparente, retourne l'ancien parent, `GetParent` reflète le déplacement),
+  `EnumChildWindows` (rappel du callback par enfant via frame `aret_call`), `ChildWindowFromPoint`/`WindowFromPoint`
+  (hit-test point→enfant), `GetNextDlgTabItem`-adjacents déjà couverts. `GetDCEx`→`GetDC`, `SetSystemTimer`→`SetTimer`.
+- **Ressources** : `LoadStringW` (copie RT_STRING large), `FindResourceW`→`FindResourceA`, `InternalGetWindowText`.
+- **Constantes/no-ops sound** : `IsValidLocale=1`, `GetNearestColor`=couleur telle quelle, `SelectPalette`=0,
+  `GdiGetCodePage=1252`, `DragDetect=0`, `ShowScrollBar=1`, `ScrollWindow(Ex)`, `GetClassLongW=0`, `GetKeyNameTextW`
+  (buffer vidé, 0), `MapVirtualKeyW=0`, `GetTextCharsetInfo=0`. 21 shims, 21 entrées `stdcall_pops` (triées).
+- **Mesure** : comctl32 socle **71 → 50** imports manquants. Gardé `winecorpus/win32_socle_comctl4.c` (EnumChildWindows +
+  SetParent + ChildWindowFromPoint) → **bit-identique Wine** (`enum=2`, `setparent old_is_p1=1 newparent_is_p2=1`,
+  `childfrompt_is_c2=1`). **Portes** : winediff **162→163**, hash `19acad982194bf07` **inchangé**, table triée. Reste 50 :
+  clip appliqué (batch 5), blit/pen/char-widths FreeType (6), icônes/curseur (7), Uniscribe `Script*`/locale/divers (8).
+
 <!-- NOUVELLES ENTRÉES ICI (garder l'ordre chronologique, plus récent en bas) -->
