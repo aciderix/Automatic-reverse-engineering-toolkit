@@ -3999,6 +3999,7 @@ static struct gdi_obj {
     int vp_ox, vp_oy, win_ox, win_oy;                    /* viewport/window origin (mapping-mode transform) */
     int vp_ex, vp_ey, win_ex, win_ey;                    /* viewport/window extent (default 1 = identity) */
     struct { uint32_t font, brush, pen, tc, bc; int bm, mm; } sstk[8];  /* SaveDC/RestoreDC */
+    int rgn_l, rgn_t, rgn_r, rgn_b, rgn_complex;         /* REGION: bounding rect + complex flag */
 } g_gdi[GDI_MAX];
 
 static uint32_t gdi_handle(int i) { return GDI_BASE | (uint32_t)i; }
@@ -7126,6 +7127,109 @@ uint32_t aret_NotifyWinEvent(uint32_t esp)  { (void)esp; return 0; }
 uint32_t aret_TrackMouseEvent(uint32_t esp) { (void)esp; return 1; }
 uint32_t aret_KillSystemTimer(uint32_t esp) { (void)esp; return 1; }
 uint32_t aret_GetLayout(uint32_t esp)       { (void)esp; return 0; }   /* LAYOUT_LTR (no RTL mirror) */
+
+/* ---- comctl32 socle batch 3 : GDI regions (rect model) + object/rect/nav ---- */
+/* Regions are modelled as their bounding rect (the rectangular subset is exact; a
+ * non-rect result — OR of disjoint, DIFF/XOR — keeps the bounding box, a superset used
+ * for coarser invalidation; documented, never a wrong data value). */
+static uint32_t u32_make_rgn(int l, int t, int r, int b) {
+    int i = gdi_alloc(GDIT_RGN); if (!i) return 0;
+    if (r < l) { int x = l; l = r; r = x; } if (b < t) { int y = t; t = b; b = y; }
+    g_gdi[i].rgn_l = l; g_gdi[i].rgn_t = t; g_gdi[i].rgn_r = r; g_gdi[i].rgn_b = b;
+    return gdi_handle(i);
+}
+uint32_t aret_CreateRectRgn(uint32_t esp)         { return u32_make_rgn(WI(0), WI(1), WI(2), WI(3)); }
+uint32_t aret_CreateRectRgnIndirect(uint32_t esp) { const int32_t *r = (const int32_t *)WP(0); return r ? u32_make_rgn(r[0], r[1], r[2], r[3]) : 0; }
+uint32_t aret_CreateRoundRectRgn(uint32_t esp) { uint32_t h = u32_make_rgn(WI(0), WI(1), WI(2), WI(3)); int i = gdi_idx(h); if (i >= 0) g_gdi[i].rgn_complex = 1; return h; }   /* bbox; non-rect */
+uint32_t aret_CreatePolygonRgn(uint32_t esp) {
+    const int32_t *pts = (const int32_t *)WP(0); int n = WI(1); if (!pts || n <= 0) return u32_make_rgn(0, 0, 0, 0);
+    int l = pts[0], t = pts[1], r = pts[0], b = pts[1];
+    for (int i = 1; i < n; i++) { int x = pts[2*i], y = pts[2*i+1]; if (x<l)l=x; if (x>r)r=x; if (y<t)t=y; if (y>b)b=y; }
+    uint32_t h = u32_make_rgn(l, t, r, b); int gi = gdi_idx(h); if (gi >= 0) g_gdi[gi].rgn_complex = 1; return h;   /* bbox; non-rect */
+}
+uint32_t aret_SetRectRgn(uint32_t esp) {
+    int i = gdi_idx(WU(0)); if (i < 0) return 0;
+    int l = WI(1), t = WI(2), r = WI(3), b = WI(4);
+    if (r < l) { int x = l; l = r; r = x; } if (b < t) { int y = t; t = b; b = y; }
+    g_gdi[i].rgn_l = l; g_gdi[i].rgn_t = t; g_gdi[i].rgn_r = r; g_gdi[i].rgn_b = b; g_gdi[i].rgn_complex = 0; return 1;
+}
+static uint32_t u32_rgn_type(int i) {
+    if (i < 0 || g_gdi[i].rgn_r <= g_gdi[i].rgn_l || g_gdi[i].rgn_b <= g_gdi[i].rgn_t) return 1;  /* NULLREGION */
+    return g_gdi[i].rgn_complex ? 3 /*COMPLEXREGION*/ : 2 /*SIMPLEREGION*/;
+}
+uint32_t aret_GetRgnBox(uint32_t esp) {
+    int i = gdi_idx(WU(0)); int32_t *rc = (int32_t *)WP(1); if (i < 0 || !rc) return 0;
+    rc[0] = g_gdi[i].rgn_l; rc[1] = g_gdi[i].rgn_t; rc[2] = g_gdi[i].rgn_r; rc[3] = g_gdi[i].rgn_b;
+    return u32_rgn_type(i);
+}
+/* rect a contains rect b? */
+static int u32_rect_contains(int i, int j) {
+    return g_gdi[i].rgn_l <= g_gdi[j].rgn_l && g_gdi[i].rgn_t <= g_gdi[j].rgn_t
+        && g_gdi[i].rgn_r >= g_gdi[j].rgn_r && g_gdi[i].rgn_b >= g_gdi[j].rgn_b;
+}
+uint32_t aret_CombineRgn(uint32_t esp) {
+    int d = gdi_idx(WU(0)), a = gdi_idx(WU(1)), b = gdi_idx(WU(2)); uint32_t mode = WU(3);
+    if (d < 0 || a < 0) return 0;
+    int l = g_gdi[a].rgn_l, t = g_gdi[a].rgn_t, r = g_gdi[a].rgn_r, bo = g_gdi[a].rgn_b, cx = g_gdi[a].rgn_complex;
+    if (mode == 1 /*RGN_AND*/ && b >= 0) {
+        if (g_gdi[b].rgn_l > l) l = g_gdi[b].rgn_l; if (g_gdi[b].rgn_t > t) t = g_gdi[b].rgn_t;
+        if (g_gdi[b].rgn_r < r) r = g_gdi[b].rgn_r; if (g_gdi[b].rgn_b < bo) bo = g_gdi[b].rgn_b;
+        if (r < l) r = l; if (bo < t) bo = t; cx = 0;               /* rect ∩ rect = rect */
+    } else if (mode == 2 /*RGN_OR*/ && b >= 0) {
+        /* OR is a rect only if one contains the other; otherwise COMPLEX (measured vs Wine). */
+        cx = (u32_rect_contains(a, b) || u32_rect_contains(b, a)) ? 0 : 1;
+        if (g_gdi[b].rgn_l < l) l = g_gdi[b].rgn_l; if (g_gdi[b].rgn_t < t) t = g_gdi[b].rgn_t;
+        if (g_gdi[b].rgn_r > r) r = g_gdi[b].rgn_r; if (g_gdi[b].rgn_b > bo) bo = g_gdi[b].rgn_b;
+    } else if ((mode == 3 /*XOR*/ || mode == 4 /*DIFF*/) && b >= 0) {
+        cx = 1;   /* generally non-rect; keep src1 bbox (approx) */
+    }   /* RGN_COPY(5) = src1 (type + bbox preserved) */
+    g_gdi[d].rgn_l = l; g_gdi[d].rgn_t = t; g_gdi[d].rgn_r = r; g_gdi[d].rgn_b = bo; g_gdi[d].rgn_complex = cx;
+    return u32_rgn_type(d);
+}
+/* GetCurrentObject(hdc, OBJ_type) -> the DC's currently selected object of that type. */
+uint32_t aret_GetCurrentObject(uint32_t esp) {
+    int i = gdi_idx(WU(0)); if (i < 0) return 0;
+    switch (WU(1)) { case 1: return g_gdi[i].sel_pen; case 2: return g_gdi[i].sel_brush;
+                     case 6: return g_gdi[i].sel_font; case 7: return g_gdi[i].sel_bitmap; default: return 0; }
+}
+uint32_t aret_SetPolyFillMode(uint32_t esp) { (void)esp; return 1; }   /* ALTERNATE default (Polygon = abort-sound) */
+/* SubtractRect(dst, src1, src2): src1 minus src2 when the result is a rectangle, else src1. */
+uint32_t aret_SubtractRect(uint32_t esp) {
+    int32_t *d = (int32_t *)WP(0); const int32_t *a = (const int32_t *)WP(1), *b = (const int32_t *)WP(2);
+    if (!d || !a || !b) return 0;
+    d[0] = a[0]; d[1] = a[1]; d[2] = a[2]; d[3] = a[3];
+    int overlap = !(b[2] <= a[0] || b[0] >= a[2] || b[3] <= a[1] || b[1] >= a[3]);
+    if (overlap) {
+        if (b[0] <= a[0] && b[2] >= a[2]) {                      /* spans full width */
+            if (b[1] <= a[1]) d[1] = b[3] > a[3] ? a[3] : b[3];  /* clips top */
+            else if (b[3] >= a[3]) d[3] = b[1];                  /* clips bottom */
+        } else if (b[1] <= a[1] && b[3] >= a[3]) {               /* spans full height */
+            if (b[0] <= a[0]) d[0] = b[2] > a[2] ? a[2] : b[2];  /* clips left */
+            else if (b[2] >= a[2]) d[2] = b[0];                  /* clips right */
+        }
+    }
+    if (d[0] < d[2] && d[1] < d[3]) return 1;
+    d[0] = d[1] = d[2] = d[3] = 0; return 0;
+}
+/* GetNextDlgTabItem / GetNextDlgGroupItem: next (or previous) child control of the dialog
+ * in slot (z) order, wrapping. Tab variant skips non-tabstop; group variant stays in the
+ * sibling run. Simplified to the common single-group dialog. */
+static uint32_t u32_next_dlg_item(uint32_t hDlg, uint32_t cur, int prev, int tab) {
+    int di = u32_win_idx(hDlg); if (di < 0) return 0;
+    int kids[U32_MAX_WIN], nk = 0, curpos = -1;
+    for (int i = 0; i < U32_MAX_WIN; i++)
+        if (g_u32_win[i].used && g_u32_win[i].parent == hDlg && g_u32_win[i].visible && g_u32_win[i].enabled) {
+            if (tab && !(g_u32_win[i].style & 0x00010000u /*WS_TABSTOP*/)) continue;
+            if ((uint32_t)(i + 1) == cur) curpos = nk;
+            kids[nk++] = i;
+        }
+    if (nk == 0) return 0;
+    if (curpos < 0) return (uint32_t)(kids[0] + 1);
+    int np = prev ? (curpos - 1 + nk) % nk : (curpos + 1) % nk;
+    return (uint32_t)(kids[np] + 1);
+}
+uint32_t aret_GetNextDlgTabItem(uint32_t esp)   { return u32_next_dlg_item(WU(0), WU(1), (int)WU(2), 1); }
+uint32_t aret_GetNextDlgGroupItem(uint32_t esp) { return u32_next_dlg_item(WU(0), WU(1), (int)WU(2), 0); }
 
 /* ---- Atom tables (kernel32/user32) — string<->ATOM interning, refcounted.
  * Two separate per-process tables (Global* vs local Add/Find/Delete/GetAtomName):

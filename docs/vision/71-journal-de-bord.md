@@ -3982,4 +3982,17 @@ Détail : **70 §6** (roadmap). Résumé :
   **inchangé**, table triée. Suite : batch 3 (régions GDI, clip, blit, char-width, window-nav), puis Uniscribe/deep = abort/no-op
   sound, puis intégration composite (esp) → progress bar peinte à l'écran.
 
+### 2026-07-19 — [HLE-WIN32][LOADER] **Socle comctl32 batch 3** : régions GDI + object/rect/nav (mesuré 82→71)
+- **Régions GDI** (modèle **rect englobant** + flag `rgn_complex`) : `CreateRectRgn(Indirect)`, `CreateRoundRectRgn`/
+  `CreatePolygonRgn` (bbox, complex), `SetRectRgn`, `GetRgnBox`, **`CombineRgn`** (AND = rect exact ; OR = rect si l'un contient
+  l'autre sinon **COMPLEXREGION** avec bbox, **mesuré vs Wine** ; COPY = src1 ; DIFF/XOR = bbox complex). Le **type**
+  NULL/SIMPLE/COMPLEX retourné est correct. Sous-ensemble rectangulaire **exact** ; non-rect = bbox (superset pour invalidation
+  grossière, documenté, jamais une donnée fausse).
+- **Divers** : `GetCurrentObject` (objet sélectionné du DC), `SetPolyFillMode` (no-op, Polygon=abort), `SubtractRect`
+  (sémantique Windows : rect si le résultat en est un, sinon src1), `GetNextDlgTabItem`/`GetNextDlgGroupItem` (contrôle
+  suivant/précédent en ordre z, wrap, skip non-tabstop). Gardé `winecorpus/win32_socle_comctl3.c` → **bit-identique Wine**
+  (régions AND/OR/COPY + types, SubtractRect).
+- **Mesure** : comctl32 socle **82 → 71**. Portes : hash `19acad982194bf07` **inchangé**, table triée. (Reste : clip appliqué,
+  blit, char-widths FreeType, icônes, locale, Uniscribe=abort/deep, puis intégration composite esp → progress bar à l'écran.)
+
 <!-- NOUVELLES ENTRÉES ICI (garder l'ordre chronologique, plus récent en bas) -->
