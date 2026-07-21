@@ -4046,4 +4046,18 @@ Détail : **70 §6** (roadmap). Résumé :
   `alpha const128 = 000080`). **Portes** : winediff **165→166**, hash `19acad982194bf07` **inchangé**, table triée. Reste 27 :
   icônes/curseur (batch 8), Uniscribe `Script*`/locale/divers (batch 9).
 
+### 2026-07-21 — [HLE-WIN32][LOADER] **Socle comctl32 batch 8** : icônes + curseurs + DrawState (mesuré 27→18)
+- Les icônes ressource (`LoadIcon`) restent des **jetons opaques** sans forme rasterisée. `CreateIconIndirect` garde les bitmaps
+  couleur/masque de l'appelant dans une table → `GetIconInfo` **round-trip**, en reproduisant la règle Wine : sur une **ICÔNE**,
+  le hotspot rapporté = **centre** du bitmap (`cx/2,cy/2`), pas celui stocké (seul un CURSEUR le garde), et retourne des **copies
+  fraîches** des bitmaps (dims correctes). `CopyImage` **deep-copy** un bitmap (handle distinct, dims/bpp préservés, redimensionné
+  si taille donnée) ; `CopyIcon` = icône distincte ; `DestroyIcon`/`DestroyCursor` libèrent.
+- **Dessin** (`DrawIcon`/`DrawIconEx`/`DrawStateW`) : blit du bitmap couleur si présent, sinon **no-op sound** (un jeton opaque n'a
+  pas de pixels). `DrawStateW` peint les types tractables (texte/bitmap/icône) via les primitives GDI ; `DST_COMPLEX` (callback) =
+  abort. Pas d'oracle headless pour le dessin → vérifié qualitativement (comme le reste de la peinture écran).
+- **Mesure** : comctl32 socle **27 → 18**. Gardé `winecorpus/win32_socle_comctl8.c` (CreateIconIndirect→GetIconInfo hotspot
+  centré + dims, CopyImage distinct+resize, CopyIcon) → **bit-identique Wine** (`hotx=8 hoty=8`, `color 16x16`,
+  `copy 4x4 bpp=32`, `copy8 8x8`, `copyicon distinct=1`). **Portes** : winediff **166→167**, hash `19acad982194bf07`
+  **inchangé**, table triée. Reste 18 : Uniscribe `Script*` (10, abort/failure sound → fallback appelant), locale/menu/divers (8).
+
 <!-- NOUVELLES ENTRÉES ICI (garder l'ordre chronologique, plus récent en bas) -->

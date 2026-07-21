@@ -7042,6 +7042,114 @@ static uint32_t g_u32_cursor;
 uint32_t aret_ShowCursor(uint32_t esp) { g_u32_cursor_show += WU(0) ? 1 : -1; return (uint32_t)g_u32_cursor_show; }
 uint32_t aret_SetCursor(uint32_t esp)  { uint32_t p = g_u32_cursor; g_u32_cursor = WU(0); return p; }
 uint32_t aret_GetCursor(uint32_t esp)  { (void)esp; return g_u32_cursor; }
+
+/* ---- comctl32 socle batch 8: icons / cursors / DrawState. Resource icons (LoadIcon)
+ * stay opaque tokens with no rasterised form. CreateIconIndirect keeps the caller's
+ * colour/mask bitmaps in a table so GetIconInfo round-trips; per Wine, GetIconInfo on
+ * an ICON reports the hotspot as the bitmap centre (cx/2,cy/2) and returns fresh bitmap
+ * COPIES (only a CURSOR keeps its stored hotspot). CopyImage deep-copies a bitmap (with
+ * optional resize). Drawing (DrawIcon/DrawIconEx/DrawStateW) blits the colour bitmap when
+ * one is present, else is a sound no-op (an opaque token has no pixels to raster). */
+static uint32_t u32_bitmap_copy(uint32_t hbm, int nw, int nh) {
+    int s = gdi_idx(hbm); if (s < 0 || g_gdi[s].type != GDIT_BITMAP) return 0;
+    int ow = g_gdi[s].w, oh = g_gdi[s].h;
+    if (nw <= 0) nw = ow; if (nh <= 0) nh = oh;
+    int i = gdi_alloc(GDIT_BITMAP); if (!i) return 0;
+    g_gdi[i].w = nw; g_gdi[i].h = nh; g_gdi[i].topdown = g_gdi[s].topdown; g_gdi[i].bpp = g_gdi[s].bpp;
+    g_gdi[i].bits = (uint8_t *)calloc((size_t)nw * nh, 4); g_gdi[i].owns_bits = 1;
+    if (!g_gdi[i].bits) { g_gdi[i].used = 0; return 0; }
+    struct gdi_obj *S = &g_gdi[s], *D = &g_gdi[i];
+    for (int y = 0; y < nh; y++) for (int x = 0; x < nw; x++) {
+        uint8_t *sp = gdi_px(S, nw == ow ? x : x * ow / nw, nh == oh ? y : y * oh / nh), *dp = gdi_px(D, x, y);
+        if (sp && dp) { dp[0] = sp[0]; dp[1] = sp[1]; dp[2] = sp[2]; dp[3] = sp[3]; }
+    }
+    return gdi_handle(i);
+}
+#define U32_MAX_ICON 128
+#define U32_ICON_BASE 0xCE000000u
+static struct { int used, is_icon, hotx, hoty; uint32_t color, mask; } g_u32_icontab[U32_MAX_ICON];
+static int u32_icon_idx(uint32_t h) {
+    if ((h & 0xFF000000u) != U32_ICON_BASE) return -1;
+    uint32_t i = h & 0x00FFFFFFu;
+    return (i < U32_MAX_ICON && g_u32_icontab[i].used) ? (int)i : -1;
+}
+uint32_t aret_CreateIconIndirect(uint32_t esp) {
+    const int32_t *ii = (const int32_t *)WP(0); if (!ii) return 0;   /* ICONINFO */
+    int slot = -1; for (int i = 1; i < U32_MAX_ICON; i++) if (!g_u32_icontab[i].used) { slot = i; break; }
+    if (slot < 0) return 0;
+    g_u32_icontab[slot].used = 1; g_u32_icontab[slot].is_icon = ii[0] ? 1 : 0;
+    g_u32_icontab[slot].hotx = ii[1]; g_u32_icontab[slot].hoty = ii[2];
+    g_u32_icontab[slot].mask = (uint32_t)ii[3]; g_u32_icontab[slot].color = (uint32_t)ii[4];
+    return U32_ICON_BASE | (uint32_t)slot;
+}
+uint32_t aret_GetIconInfo(uint32_t esp) {
+    int i = u32_icon_idx(WU(0)); int32_t *o = (int32_t *)WP(1); if (!o || i < 0) return 0;
+    o[0] = g_u32_icontab[i].is_icon;
+    int cw = 16, ch = 16, ci = gdi_idx(g_u32_icontab[i].color);
+    if (ci >= 0) { cw = g_gdi[ci].w; ch = g_gdi[ci].h; }
+    if (g_u32_icontab[i].is_icon) { o[1] = cw / 2; o[2] = ch / 2; }   /* icon: hotspot = centre */
+    else { o[1] = g_u32_icontab[i].hotx; o[2] = g_u32_icontab[i].hoty; }
+    o[3] = (int32_t)u32_bitmap_copy(g_u32_icontab[i].mask, 0, 0);      /* fresh copies (Wine contract) */
+    o[4] = (int32_t)u32_bitmap_copy(g_u32_icontab[i].color, 0, 0);
+    return 1;
+}
+static uint32_t u32_icon_dup(uint32_t h) {
+    int i = u32_icon_idx(h); if (i < 0) return h;                      /* opaque token: itself is a valid dup */
+    int slot = -1; for (int k = 1; k < U32_MAX_ICON; k++) if (!g_u32_icontab[k].used) { slot = k; break; }
+    if (slot < 0) return 0;
+    g_u32_icontab[slot] = g_u32_icontab[i]; g_u32_icontab[slot].used = 1;
+    g_u32_icontab[slot].color = u32_bitmap_copy(g_u32_icontab[i].color, 0, 0);   /* independent copy */
+    g_u32_icontab[slot].mask = u32_bitmap_copy(g_u32_icontab[i].mask, 0, 0);
+    return U32_ICON_BASE | (uint32_t)slot;
+}
+uint32_t aret_CopyIcon(uint32_t esp)      { return u32_icon_dup(WU(0)); }
+uint32_t aret_CopyImage(uint32_t esp) {
+    uint32_t h = WU(0), type = WU(1); int cx = WI(2), cy = WI(3);
+    if (type == 0 /* IMAGE_BITMAP */) return u32_bitmap_copy(h, cx, cy);
+    return u32_icon_dup(h);                                            /* IMAGE_ICON / IMAGE_CURSOR */
+}
+uint32_t aret_DestroyIcon(uint32_t esp)   { int i = u32_icon_idx(WU(0)); if (i >= 0) g_u32_icontab[i].used = 0; return 1; }
+uint32_t aret_DestroyCursor(uint32_t esp) { int i = u32_icon_idx(WU(0)); if (i >= 0) g_u32_icontab[i].used = 0; return 1; }
+static void u32_icon_blit(uint32_t hdc, int x, int y, int i, int cx, int cy) {
+    struct gdi_obj *dst = gdi_dc_surface(hdc); if (!dst || i < 0) return;
+    int ci = gdi_idx(g_u32_icontab[i].color); if (ci < 0) return;
+    int ow = g_gdi[ci].w, oh = g_gdi[ci].h; if (cx <= 0) cx = ow; if (cy <= 0) cy = oh;
+    for (int j = 0; j < cy; j++) for (int k = 0; k < cx; k++) {
+        uint8_t *s = gdi_px(&g_gdi[ci], cx == ow ? k : k * ow / cx, cy == oh ? j : j * oh / cy), *d = gdi_px(dst, x + k, y + j);
+        if (s && d) { d[0] = s[0]; d[1] = s[1]; d[2] = s[2]; d[3] = s[3]; }
+    }
+}
+uint32_t aret_DrawIcon(uint32_t esp) { u32_icon_blit(WU(0), WI(1), WI(2), u32_icon_idx(WU(3)), 0, 0); return 1; }
+uint32_t aret_DrawIconEx(uint32_t esp) {
+    uint32_t flags = WU(8);
+    if ((flags & 0x0003) == 0x0001 /* DI_MASK without DI_IMAGE */) return 1;   /* mask-only: best-effort skip */
+    u32_icon_blit(WU(0), WI(1), WI(2), u32_icon_idx(WU(3)), WI(4), WI(5)); return 1;
+}
+/* DrawStateW(hdc, hbrFore, lpFn, lData, wData, x, y, cx, cy, uFlags). Draws the tractable
+ * primitive types (text/bitmap/icon) with the existing GDI helpers; the greyed
+ * (DSS_DISABLED) and callback (DST_COMPLEX) forms are follow-ups (no headless oracle). */
+uint32_t aret_DrawStateW(uint32_t esp) {
+    uint32_t hdc = WU(0), lData = WU(3), wData = WU(4); int x = WI(5), y = WI(6); uint32_t flags = WU(9);
+    int typ = flags & 0x1F;
+    if (typ == 1 /* DST_TEXT */ || typ == 2 /* DST_PREFIXTEXT */) {
+        const uint16_t *ws = (const uint16_t *)(uintptr_t)lData; int n = (int)wData;
+        if (n <= 0) { n = 0; if (ws) while (ws[n]) n++; }
+        uint32_t cps[1024]; int m = n < 1024 ? n : 1024;
+        for (int i = 0; i < m; i++) cps[i] = ws ? ws[i] : 0;
+        return u32_textout_core(hdc, x, y, cps, ws ? m : 0) ? 1 : 0;
+    }
+    if (typ == 4 /* DST_BITMAP */) {
+        struct gdi_obj *dst = gdi_dc_surface(hdc); int s = gdi_idx(lData);
+        if (dst && s >= 0 && g_gdi[s].type == GDIT_BITMAP)
+            for (int j = 0; j < g_gdi[s].h; j++) for (int k = 0; k < g_gdi[s].w; k++) {
+                uint8_t *sp = gdi_px(&g_gdi[s], k, j), *d = gdi_px(dst, x + k, y + j);
+                if (sp && d) { d[0] = sp[0]; d[1] = sp[1]; d[2] = sp[2]; d[3] = sp[3]; }
+            }
+        return 1;
+    }
+    if (typ == 3 /* DST_ICON */) { u32_icon_blit(hdc, x, y, u32_icon_idx(lData), 0, 0); return 1; }
+    aret_unimpl("DrawStateW: DST_COMPLEX (callback) not modelled"); return 0;
+}
 /* GetLastActivePopup(hWnd) -> hWnd (no popup owned -> the window itself). */
 uint32_t aret_GetLastActivePopup(uint32_t esp) { return WU(0); }
 
