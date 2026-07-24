@@ -4145,4 +4145,28 @@ Détail : **70 §6** (roadmap). Résumé :
   longues** (winediff/funcdiff) — le conteneur est éphémère (leçon vécue : un durcissement non-commité perdu au reset).
   ⚠️ Capture GUI = **renderer software + capture racine** ; échantillonner un pixel **dans** la fenêtre (elle est à `100,100`).
 
+### 2026-07-24 — [GUI][DEMO] **FishTank.exe (MFC 1996) : dialogue natif peint à l'écran ; écart = frontière MFC (mesuré)**
+- **Test visuel du vrai binaire shippé** (aquarium-calculateur Win95, `refetch/ft/`) : transpilé en ELF natif, lancé sous Xvfb
+  (renderer **software**, capture **racine**), comparé à la référence Wine (`ft_wine.png`). **L'ELF ARET affiche le dialogue
+  COMPLET, structurellement identique à Wine** : tous les group boxes (`You Provide:`/`Tank Geometry:`/`Calculation Results:`),
+  labels + accélérateurs soulignés, 4 boutons (Exit/Calculate/Help/About), cadres combos (flèche)/radios/edits — au pixel — via
+  `u32_dialog_composite`. **Log d'exécution VIDE** : 0 abort, 0 import manquant touché au démarrage, **24 contrôles enfants créés**,
+  `WM_INITDIALOG` dispatché (`CreateDialogIndirectParamA` modeless).
+- **Seul écart = le CONTENU/ÉTAT des contrôles** (combos vides vs `Tropical Freshwater`/`Custom...`, radios sans point, edits sans
+  `0`). **Cause MESURÉE** (pas devinée, via trace `getenv`-gatée + rebuild) : après `WM_INITDIALOG`, l'appli fait **0 `GetDlgItem`,
+  0 `SendMessage`** → son `OnInitDialog` (les `AddString`/`SetCheck`/DDX qui peuplent) **ne s'exécute pas**. FishTank est **MFC**
+  (`CDialog`) : cette machinerie vit derrière les message maps + mapping `CWnd`↔`HWND`, dépendant du **runtime C++/`__CxxFrameHandler`**.
+  ⇒ **frontière MFC** (doc 70 §5.0 étape 4, gated EH C++), **pas** le composite enfant ni le dispatch HLE des contrôles.
+- **Fausse piste écartée par la mesure** : 1ʳᵉ hypothèse « `SendDlgItemMessage` ne route pas `CB_*`/`BM_*` vers le contrôle
+  système » (réelle incohérence : `SendMessage` les gère via `u32_control_proc`, `SendDlgItemMessage` défère à `u32_defproc_text`
+  qui ne connaît que `WM_*TEXT`). Un correctif de dispatch unifié a été écrit **puis révoqué** : la trace prouve que FishTank
+  **n'appelle jamais** ces chemins au démarrage → aucun bénéfice mesuré (règle §2 : pas de changement sans bénéfice mesuré). À
+  reprendre **avec une fixture dédiée** (dialogue non-MFC peuplant un combo via `SendDlgItemMessage`, round-trip vs Wine) si on
+  veut fermer l'incohérence proprement.
+- ⚠️ **Piège outillage attrapé** : `runtime/aret_hle/aret_win32.c` est **embarqué dans le binaire `aret` par `include_str!`** →
+  tout changement du runtime C **n'a d'effet qu'après `cargo build --release`**. Deux mesures initiales faites sur binaire périmé
+  (conclusions invalidées, refaites). **Toujours `cargo build --release` avant de re-transpiler quand on touche le runtime C.**
+- **Portes** : inchangées (le test est en lecture seule, aucun code committé ; tree = origin). **Suite** : composite enfant
+  (progress bar comctl32) OU fixture-preuve du fix dispatch OU ouvrir l'EH C++ (MFC) — au choix utilisateur.
+
 <!-- NOUVELLES ENTRÉES ICI (garder l'ordre chronologique, plus récent en bas) -->
