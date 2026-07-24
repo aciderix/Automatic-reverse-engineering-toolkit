@@ -4197,4 +4197,20 @@ Détail : **70 §6** (roadmap). Résumé :
   ⇒ indépendant du compositing. Les vraies applis GUI utilisent `GetMessage` (bloquant), qui marche. À investiguer (pop/esp du
   chemin PeekMessage).
 
+### 2026-07-24 — [HLE-WIN32] **Dispatch unifié des contrôles système (SendMessage ET SendDlgItemMessage) — prouvé par fixture**
+- **Étape #2** (reprise du correctif écarté au diagnostic FishTank, cette fois **avec bénéfice mesuré**). Incohérence réelle : un
+  contrôle prédéfini **sans WNDPROC applicatif** doit répondre à la fois à ses **messages de classe** (`CB_ADDSTRING`/`CB_SETCURSEL`,
+  `BM_SETCHECK`, `WM_SETFONT`…) **et** aux **messages texte** communs (`WM_SETTEXT`/`WM_GETTEXT`), quel que soit le point d'entrée.
+  Avant : `SendMessage` routait **seulement** vers `u32_control_proc` (classe, pas texte) et `SendDlgItemMessage` **seulement** vers
+  `u32_defproc_text` (texte, pas classe) — chacun manquait ce que l'autre avait → un dialogue peuplant un combo via
+  `SendDlgItemMessage(CB_ADDSTRING)` ou cochant via `BM_SETCHECK` les **perdait en silence**.
+- **Fix** : `u32_sys_control_msg` (classe **puis** texte, largeur ANSI/UTF-16 correcte par point d'entrée), branché sur les 4 entrées
+  (`SendMessage A/W`, `SendDlgItemMessage A/W`). **Méthode §2** : fixture `winecorpus/user32_dlgitemmsg` (parent + enfants
+  COMBOBOX/BUTTON/EDIT peuplés via `SendDlgItemMessage` **et** `SendMessage(GetDlgItem)`). **Baseline mesurée** ARET =
+  `count=0 sel=0 text= chk=0 edit=` (cassé) ; Wine = `count=3 sel=1 text=Bravo chk=1 edit=hi`. **Après fix** : ARET =
+  `count=3 sel=1 text=Bravo chk=1 edit=hi` **bit-identique Wine**. (Le combo nécessite un parent display-backé → fixture sous le
+  Xvfb partagé du harnais, comme les autres fixtures fenêtrées ; round-trip de messages **déterministe**, pas de pixels.)
+- **Portes** : difftest **272/272**, hash transpile `19acad982194bf07` **inchangé**, winediff **+1 fixture** (le rouge reste
+  `gdi_uifont` environnemental). Committé + poussé.
+
 <!-- NOUVELLES ENTRÉES ICI (garder l'ordre chronologique, plus récent en bas) -->
