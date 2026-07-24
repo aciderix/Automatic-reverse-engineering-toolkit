@@ -2633,6 +2633,41 @@ static int u32_create_dispatch(uint32_t esp, int i, uint32_t hinstance, uint32_t
     return ok;
 }
 
+/* Windows hooks (SetWindowsHookEx): the proc per idHook. idHook runs WH_MSGFILTER(-1)
+ * .. WH_MOUSE_LL(14); store at idHook+1. Only WH_CBT is delivered today (the one MFC
+ * relies on to attach its CWnd); other hooks are stored but not fired — a sound gap,
+ * exactly the old stub behaviour, never a wrong delivery. */
+#define U32_WH_CBT 5
+static uint32_t g_u32_hook[16];
+static uint32_t u32_hook_set(int idHook, uint32_t proc) {
+    int idx = idHook + 1;
+    if (idx < 0 || idx >= 16) return 0x484F4F4Bu;   /* out of range: opaque handle, not fired */
+    g_u32_hook[idx] = proc;
+    return 0x48480000u | (uint32_t)(idx + 1);        /* HHOOK encoding the slot */
+}
+/* Fire the WH_CBT hook's HCBT_CREATEWND for a freshly-created window, BEFORE WM_NCCREATE
+ * — the notification MFC uses to attach/subclass its CWnd (its filter reads the
+ * CREATESTRUCT's class and may SetWindowLong(GWL_WNDPROC) to reroute the wndproc). No
+ * WH_CBT installed -> nothing happens (the pre-hook default). The CBT_CREATEWND +
+ * CREATESTRUCTA are guest-accessible (malloc, 32-bit app), freed after. */
+static void u32_fire_cbt_createwnd(uint32_t esp, int i, uint32_t hinst, uint32_t hmenu,
+                                   uint32_t class_ref, uint32_t name_ref) {
+    uint32_t proc = g_u32_hook[U32_WH_CBT + 1];
+    if (!proc) return;
+    uint32_t *cs = (uint32_t *)malloc(48 + 8);   /* CREATESTRUCTA (48) + CBT_CREATEWND (8) */
+    if (!cs) return;
+    cs[0] = 0; cs[1] = hinst; cs[2] = hmenu; cs[3] = g_u32_win[i].parent;
+    cs[4] = (uint32_t)g_u32_win[i].h;  cs[5] = (uint32_t)g_u32_win[i].w;
+    cs[6] = (uint32_t)g_u32_win[i].y;  cs[7] = (uint32_t)g_u32_win[i].x;
+    cs[8] = g_u32_win[i].style; cs[9] = name_ref; cs[10] = class_ref; cs[11] = g_u32_win[i].exstyle;
+    uint32_t *cbt = cs + 12;                      /* { CREATESTRUCT* lpcs; HWND hwndInsertAfter; } */
+    cbt[0] = (uint32_t)(uintptr_t)cs; cbt[1] = 0;
+    /* HOOKPROC(code, wParam, lParam): code=HCBT_CREATEWND(3), wParam=hwnd, lParam=&cbt.
+     * u32_call_wndproc lays args as f[1..4]=hwnd,msg,wp,lp — so pass code,hwnd,cbt,0. */
+    u32_call_wndproc(esp, proc, 3u, (uint32_t)(i + 1), (uint32_t)(uintptr_t)cbt, 0u);
+    free(cs);
+}
+
 static int  u32_q_empty(void) { return g_u32_qh == g_u32_qt; }
 static int  u32_q_push(uint32_t hwnd, uint32_t msg, uint32_t wp, uint32_t lp) {
     int nt = (g_u32_qt + 1) % U32_MAX_MSG;
@@ -2838,6 +2873,7 @@ uint32_t aret_CreateWindowExW(uint32_t esp) {
              uint32_t we = u32_class_wndextra(WU(1));
              g_u32_win[h - 1].extra_len = we > 64 ? 64 : (int)we;
              if (WU(3) & 0x40000000u) g_u32_win[h - 1].ctrl_id = (int)WU(9);  /* WS_CHILD: hMenu=id */
+             u32_fire_cbt_createwnd(esp, (int)h - 1, WU(8), WU(9), WU(1), WU(2));  /* MFC CWnd attach */
              if (!u32_create_dispatch(esp, (int)h - 1, WU(8), WU(9))) { g_u32_win[h - 1].used = 0; return 0; } }
     return h;
 }
@@ -2858,6 +2894,7 @@ uint32_t aret_CreateWindowExA(uint32_t esp) {
              uint32_t we = u32_class_wndextra(cref);
              g_u32_win[h - 1].extra_len = we > 64 ? 64 : (int)we;
              if (WU(3) & 0x40000000u) g_u32_win[h - 1].ctrl_id = (int)WU(9);  /* WS_CHILD: hMenu=id */
+             u32_fire_cbt_createwnd(esp, (int)h - 1, WU(8), WU(9), WU(1), WU(2));  /* MFC CWnd attach */
              if (!u32_create_dispatch(esp, (int)h - 1, WU(8), WU(9))) { g_u32_win[h - 1].used = 0; return 0; } }
     return h;
 }
@@ -3728,7 +3765,7 @@ static void u32_dlg_base_units(int has_font, int point_size, int weight, int ita
 static int gdi_muldiv(long long a, long long b, long long c);   /* fwd: GDI round-to-nearest MulDiv */
 /* Parse a DLGTEMPLATE(EX) -> create the dialog window (wndproc = dlgproc) and its
  * child controls. Returns the dialog HWND (0 on failure). Handles both templates. */
-static uint32_t u32_dialog_create(const uint8_t *tpl, uint32_t dlgproc, uint32_t parent) {
+static uint32_t u32_dialog_create(uint32_t esp, const uint8_t *tpl, uint32_t dlgproc, uint32_t parent) {
     const uint8_t *p = tpl;
     int ex = 0;
     uint32_t style; uint16_t cdit; int16_t d_cx, d_cy;
@@ -3765,6 +3802,11 @@ static uint32_t u32_dialog_create(const uint8_t *tpl, uint32_t dlgproc, uint32_t
     uint32_t hDlg = u32_window_create(dlgproc, 0, style, 0, 0, dw, dh, parent, dtitle, 0);
     if (!hDlg) return 0;
     int hi = (int)hDlg - 1;
+    /* HCBT_CREATEWND for the dialog window, before WM_INITDIALOG: MFC's CBT filter uses
+     * it to attach the CDialog CWnd (via its m_pWndInit thread-state) and subclass the
+     * wndproc, which is what makes AfxDlgProc route WM_INITDIALOG to OnInitDialog. The
+     * dialog class is the standard #32770 atom (0x8002 — an atom, not a string to deref). */
+    u32_fire_cbt_createwnd(esp, hi, 0, 0, 0x8002u, 0);
     g_u32_win[hi].du_x = bx; g_u32_win[hi].du_y = by;   /* pixels per dialog unit */
     g_u32_win[hi].is_dialog = 1;                        /* composite its controls when shown */
     g_u32_win[hi].dlg_font = dfont;                     /* dialog font, applied to controls below */
@@ -3848,7 +3890,7 @@ static uint32_t u32_dialog_modal(uint32_t esp, const uint8_t *tpl, uint32_t dlgp
                                  uint32_t parent, uint32_t param) {
     if (!tpl || !dlgproc) return (uint32_t)-1;
     if (g_u32_modal_hwnd) aret_unimpl("nested modal DialogBox (mono-thread model)");
-    uint32_t hDlg = u32_dialog_create(tpl, dlgproc, parent);
+    uint32_t hDlg = u32_dialog_create(esp, tpl, dlgproc, parent);
     if (!hDlg) return (uint32_t)-1;
     g_u32_modal_hwnd = hDlg; g_u32_modal_ended = 0; g_u32_modal_result = 0;
     u32_call_wndproc(esp, dlgproc, hDlg, U32_WM_INITDIALOG, 0, param);
@@ -3880,7 +3922,7 @@ static uint32_t u32_dialog_modal(uint32_t esp, const uint8_t *tpl, uint32_t dlgp
 static uint32_t u32_dialog_modeless(uint32_t esp, const uint8_t *tpl, uint32_t dlgproc,
                                     uint32_t parent, uint32_t param) {
     if (!tpl || !dlgproc) return 0;
-    uint32_t hDlg = u32_dialog_create(tpl, dlgproc, parent);
+    uint32_t hDlg = u32_dialog_create(esp, tpl, dlgproc, parent);
     if (!hDlg) return 0;
     u32_call_wndproc(esp, dlgproc, hDlg, U32_WM_INITDIALOG, 0, param);
     return hDlg;
@@ -5394,7 +5436,13 @@ static void u32_free_child_bmp(int i) {
 static void u32_composite_one_child(uint32_t esp, int ci, uint32_t *dst, int W, int H) {
     int cw = g_u32_win[ci].w, ch = g_u32_win[ci].h, ox = g_u32_win[ci].x, oy = g_u32_win[ci].y;
     if (cw <= 0 || ch <= 0) return;
-    if (g_u32_win[ci].wndproc == 0 && u32_ctrl_paintable(g_u32_win[ci].classname)) {
+    /* A known predefined class (button/edit/combo/…) is painted by us via its system
+     * appearance — even when an app (e.g. MFC via DDX_Control) has SUBCLASSED it, because
+     * the control's standard drawing still comes from the system, and its saved "original"
+     * proc is our non-painting stub. Driving the subclass's WM_PAINT would paint nothing
+     * (a black box). Only a genuinely non-standard control (a lifted comctl32 progress
+     * bar/trackbar, unknown class + own WNDPROC) paints itself via WM_PAINT below. */
+    if (u32_ctrl_paintable(g_u32_win[ci].classname)) {
         int td = gdi_alloc(GDIT_DC); if (!td) return;
         u32_dc_defaults(td);
         int tb = gdi_alloc(GDIT_BITMAP); if (!tb) { g_gdi[td].used = 0; return; }
@@ -8438,9 +8486,17 @@ uint32_t aret_IsDialogMessageW(uint32_t esp) { (void)esp; return 0; }
 /* ================================================================== */
 /* Windows hooks — sound stubs                                        */
 /* ================================================================== */
-/* Windows hooks: install accepted (opaque handle), CallNextHookEx passes through
- * (no next hook -> 0), unhook succeeds. No real hook chain in this model. */
-uint32_t aret_SetWindowsHookExA(uint32_t esp)   { (void)esp; return 0x484F4F4Bu; }  /* opaque HHOOK */
-uint32_t aret_SetWindowsHookExW(uint32_t esp)   { (void)esp; return 0x484F4F4Bu; }
-uint32_t aret_UnhookWindowsHookEx(uint32_t esp) { (void)esp; return 1; }
+/* Windows hooks: the proc is stored per idHook (g_u32_hook). Only WH_CBT is actually
+ * delivered — HCBT_CREATEWND at window creation (u32_fire_cbt_createwnd), the hook MFC
+ * uses to attach/subclass its CWnd. Other hook types are accepted and stored but not
+ * fired (a sound gap, the prior stub behaviour). CallNextHookEx = no chained hook (0),
+ * unhook clears the slot. Signature: SetWindowsHookEx(idHook, lpfn, hMod, dwThreadId). */
+uint32_t aret_SetWindowsHookExA(uint32_t esp)   { return u32_hook_set(WI(0), WU(1)); }
+uint32_t aret_SetWindowsHookExW(uint32_t esp)   { return u32_hook_set(WI(0), WU(1)); }
+uint32_t aret_UnhookWindowsHookEx(uint32_t esp) {
+    uint32_t h = WU(0);
+    if ((h & 0xFFFF0000u) == 0x48480000u) { int idx = (int)(h & 0xFFFFu) - 1;
+        if (idx >= 0 && idx < 16) g_u32_hook[idx] = 0; }
+    return 1;
+}
 uint32_t aret_CallNextHookEx(uint32_t esp)      { (void)esp; return 0; }
