@@ -4169,4 +4169,32 @@ Détail : **70 §6** (roadmap). Résumé :
 - **Portes** : inchangées (le test est en lecture seule, aucun code committé ; tree = origin). **Suite** : composite enfant
   (progress bar comctl32) OU fixture-preuve du fix dispatch OU ouvrir l'EH C++ (MFC) — au choix utilisateur.
 
+### 2026-07-24 — [GUI][HLE-WIN32] **Composite parent→enfant généralisé : un contrôle comctl32 LIFTÉ peint à l'écran**
+- **But (suite ordonnée, étape #1)** : faire peindre à l'écran un **contrôle enfant comctl32 lifté** (progress bar), pas seulement
+  les contrôles système d'un dialogue. Le composite existant (`u32_dialog_composite`) ne peignait QUE les classes système
+  peintes bit-exact (button/edit/…) et QUE pour un `is_dialog` ; un contrôle avec son **propre WNDPROC** (comctl32 lifté) et une
+  **fenêtre simple** (non-dialogue) étaient laissés en fond.
+- **Méthode §2** : (a) **fixture visuelle minimale** `pbwin` (fenêtre simple + progress bar enfant `WS_CHILD|WS_VISIBLE` à 60 %,
+  `--with-dll comctl32`) ; (b) **baseline mesurée** : la fenêtre peint son fond gris `COLOR_BTNFACE` (28600 px) mais **la progress
+  bar est absente** (0 px), vs Wine qui montre le bar bleu à 60 % ; (c) implémenté ; (d) **re-mesuré** : bar peinte (2310 px
+  `srgb(0,0,128)` navy ≈ 60 % de 200×24 — le rendu **classique authentique** de la comctl32 liftée, chemin uxtheme→classique).
+- **Implémentation** (généralisation, `aret_win32.c`) : un contrôle enfant reçoit **son propre framebuffer client**
+  (`u32_ensure_child_bmp`) ; le composite **pilote son `WM_PAINT`** (esp threadé — le contrôle Begin/EndPaint dedans, comme une
+  top-level) puis **blitte** son framebuffer à l'offset enfant avec clip (`u32_blit_clip`). `u32_present_toplevel` unifie la
+  présentation (dialogue = refill 3DFACE + enfants ; fenêtre simple = enfants **par-dessus** sa propre peinture), câblé dans
+  `UpdateWindow`/`EndPaint`/`ReleaseDC`/`ShowWindow`. Un contrôle **système** (sans WNDPROC) garde son chemin bit-exact
+  (`u32_control_paint_full`). Framebuffers enfants **libérés à la destruction** (`u32_free_child_bmp`, DestroyWindow + dialog).
+  `esp==0` (chemin sans pile machine, ex. input SDL) saute le pilotage d'un contrôle lifté ce tour (sound : peint au prochain
+  présent porteur d'esp). **Vérité de composition** : l'état du contrôle est déjà bit-identique Wine (fixture headless
+  `comctl32_progress`, `pos=60`) ; le lift du contrôle est prouvé (cpudiff/funcdiff) ; le composite ajoute **le rendu à l'écran** à
+  l'offset/taille mesurés — vérifié qualitativement (Xvfb), même caveat que le dialog composite (Wine n'expose pas ses enfants
+  composités en DIB). L'écart avec Wine = **thème** (classique segmenté vs Wine thémé plat car Wine charge uxtheme), pas géométrie.
+- **CRT** : `_ismbblead`/`_ismbbtrail` = 0 (locale mono-octet, comme `IsDBCSLeadByte`) — touchés par la peinture de la progress bar.
+- **Portes** : difftest **272/272**, hash transpile `19acad982194bf07` **inchangé**, winediff **168/169** (1 rouge = `gdi_uifont`,
+  environnemental fontconfig i386 = le rouge attendu de référence ; les fixtures GUI/paint restent vertes). Committé + poussé.
+- ⚠️ **Bug pré-existant orthogonal noté** (tâche suivi) : une boucle `PeekMessage` en spin serré (500000×, sans `GetMessage`
+  bloquant) crashe par corruption (surface dans `pump_timers`→`mono_ns`). **Reproduit avec le composite entièrement neutralisé**
+  ⇒ indépendant du compositing. Les vraies applis GUI utilisent `GetMessage` (bloquant), qui marche. À investiguer (pop/esp du
+  chemin PeekMessage).
+
 <!-- NOUVELLES ENTRÉES ICI (garder l'ordre chronologique, plus récent en bas) -->

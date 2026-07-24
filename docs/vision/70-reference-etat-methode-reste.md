@@ -1151,8 +1151,11 @@ la **vitesse** change.
   ne les couvre PAS gratuitement** : les contrôles **de base** vivent dans **user32.dll**, qui descend aux syscalls
   **win32k** (`NtUser*`/`NtGdi*`) pour dessiner → lifter user32 = heurter le **mur win32k** (doc 80 §1.2). En revanche les
   contrôles **comctl32** (progress/trackbar/toolbar/listview) sont **user-mode** et peignent en **GDI** qu'on a → **ceux-là**
-  le lifting comctl32 les couvre (logique prouvée sur la progress bar ; les faire **peindre** = router leur WM_PAINT→GDI→
-  framebuffer SDL, chantier suivant). Donc **deux voies** : (a) contrôles **de base user32** → **réimplémenter leur peinture
+  le lifting comctl32 les couvre (logique prouvée sur la progress bar). **✅ FAIT (2026-07-24) : composite parent→enfant généralisé**
+  → un contrôle **comctl32 lifté** (progress bar) **peint à l'écran** : chaque enfant reçoit son framebuffer client, le composite
+  **pilote son `WM_PAINT`** (esp threadé) puis blitte à l'offset (clip), pour dialogue **et** fenêtre simple (`u32_present_toplevel`).
+  Rendu classique authentique (uxtheme→classique), état déjà bit-identique Wine (`comctl32_progress`). Détail journal 71 (2026-07-24).
+  Donc **deux voies** : (a) contrôles **de base user32** → **réimplémenter leur peinture
   dans le HLE** (`aret_win32.c`, dessin via notre GDI, vérifié DIB-hash vs Wine — comme Wine le fait dans user32) **ou**
   lifter user32+router win32k ; (b) contrôles **comctl32** → **lifting DLL** + peinture GDI→SDL. **Calendrier** : non
   planifié comme jalon dédié à ce jour ; listé « reste » (§4.5/§8.5). Fondation à poser d'abord = les **primitives de
