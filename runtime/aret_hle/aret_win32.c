@@ -2955,6 +2955,19 @@ uint32_t aret_PostMessageW(uint32_t esp) { return (uint32_t)u32_q_push(WU(0), WU
  * built-in control proc (paint, font). Fwd-declared here, defined after the GDI
  * primitives it uses (u32_drawedge/u32_drawtext). */
 static int u32_control_proc(uint32_t esp, uint32_t hwnd, uint32_t msg, uint32_t wp, uint32_t lp, uint32_t *out);
+/* Full dispatch for a predefined control with no application WNDPROC: first its class
+ * behaviour (fonts, button check/click, list/combo item model, WM_PRINTCLIENT —
+ * u32_control_proc), then the common text messages (WM_SETTEXT/WM_GETTEXT/
+ * WM_GETTEXTLENGTH — u32_defproc_text). A dialog populates its controls through exactly
+ * these two families (CB_ADDSTRING/CB_SETCURSEL, BM_SETCHECK, WM_SETTEXT, …); routing
+ * SendMessage and SendDlgItemMessage through the same helper keeps a system control's
+ * response identical whichever way the app addresses it. `wide` selects ANSI/UTF-16
+ * for the text messages. Returns 1 if handled, with the result in *out. */
+static int u32_sys_control_msg(uint32_t esp, uint32_t hwnd, uint32_t msg,
+                               uint32_t wp, uint32_t lp, int wide, uint32_t *out) {
+    if (u32_control_proc(esp, hwnd, msg, wp, lp, out)) return 1;
+    return u32_defproc_text(hwnd, msg, wp, lp, wide, out);
+}
 /* Hit-test a dialog's controls at client (x,y) and deliver a click to the one under the
  * point (defined with the control paint code). Used by the real-input path (a mouse
  * release on a dialog) so a click reaches the child control, as Wine's per-window input
@@ -2962,12 +2975,14 @@ static int u32_control_proc(uint32_t esp, uint32_t hwnd, uint32_t msg, uint32_t 
 static void u32_dialog_hittest_click(uint32_t esp, int di, int x, int y);
 static void u32_ctrl_recomposite(uint32_t esp, int ci);   /* fwd: recompose a control's parent dialog (no-op without SDL) */
 static uint32_t g_u32_focus;   /* fwd: focused window/control (keyboard target); defined below */
-/* SendMessageW(HWND,UINT,WPARAM,LPARAM) -> LRESULT. Synchronous: call the WNDPROC now. */
-uint32_t aret_SendMessageW(uint32_t esp) {
+/* SendMessage(HWND,UINT,WPARAM,LPARAM) -> LRESULT. Synchronous: call the WNDPROC now; a
+ * predefined control with no WNDPROC is served by the system-control dispatch. */
+static uint32_t u32_send_message(uint32_t esp, int wide) {
     uint32_t wndproc = u32_win_wndproc(WU(0));
-    if (!wndproc) { uint32_t r = 0; if (u32_control_proc(esp, WU(0), WU(1), WU(2), WU(3), &r)) return r; return 0; }
+    if (!wndproc) { uint32_t r = 0; if (u32_sys_control_msg(esp, WU(0), WU(1), WU(2), WU(3), wide, &r)) return r; return 0; }
     return u32_call_wndproc(esp, wndproc, WU(0), WU(1), WU(2), WU(3));
 }
+uint32_t aret_SendMessageW(uint32_t esp) { return u32_send_message(esp, 1); }
 /* DispatchMessageW(const MSG*) -> LRESULT. Route to the window's WNDPROC (or the
  * TIMERPROC in lParam for a WM_TIMER carrying one). */
 uint32_t aret_DispatchMessageW(uint32_t esp) {
@@ -3081,7 +3096,7 @@ uint32_t aret_GetMessageA(uint32_t esp)      { return aret_GetMessageW(esp); }
 uint32_t aret_PeekMessageA(uint32_t esp)     { return aret_PeekMessageW(esp); }
 uint32_t aret_DispatchMessageA(uint32_t esp) { return aret_DispatchMessageW(esp); }
 uint32_t aret_PostMessageA(uint32_t esp)     { return aret_PostMessageW(esp); }
-uint32_t aret_SendMessageA(uint32_t esp)     { return aret_SendMessageW(esp); }
+uint32_t aret_SendMessageA(uint32_t esp)     { return u32_send_message(esp, 0); }
 /* UnregisterClassA(lpClassName, hInstance) — widen a narrow name, else atom. */
 uint32_t aret_UnregisterClassA(uint32_t esp) {
     uint32_t cref = WU(0);
@@ -3973,7 +3988,7 @@ uint32_t aret_SendDlgItemMessageA(uint32_t esp) {
     uint32_t wp = u32_win_wndproc(child);
     if (wp) return u32_call_wndproc(esp, wp, child, WU(2), WU(3), WU(4));
     uint32_t r;
-    if (u32_defproc_text(child, WU(2), WU(3), WU(4), 0, &r)) return r;  /* system control */
+    if (u32_sys_control_msg(esp, child, WU(2), WU(3), WU(4), 0, &r)) return r;  /* system control */
     return 0;
 }
 uint32_t aret_SendDlgItemMessageW(uint32_t esp) {
@@ -3982,7 +3997,7 @@ uint32_t aret_SendDlgItemMessageW(uint32_t esp) {
     uint32_t wp = u32_win_wndproc(child);
     if (wp) return u32_call_wndproc(esp, wp, child, WU(2), WU(3), WU(4));
     uint32_t r;
-    if (u32_defproc_text(child, WU(2), WU(3), WU(4), 1, &r)) return r;
+    if (u32_sys_control_msg(esp, child, WU(2), WU(3), WU(4), 1, &r)) return r;
     return 0;
 }
 
