@@ -610,9 +610,19 @@ pub fn build_ir(prog: &Program, func: &Function) -> IrFunction {
     // track which registers currently hold an import function pointer and resolve
     // calls through them too. The tracking is a simple forward scan invalidated
     // on reassignment / opaque `Asm`.
+    //
+    // `held` is RESET per block: it is a straight-line forward scan, valid only
+    // within a basic block. Threading it across blocks in storage order (which is
+    // NOT execution/dataflow order) leaked a stale `reg -> importA` mapping into a
+    // later block that actually loaded `importB` into that register, mis-resolving
+    // its `call reg` to the wrong shim (e.g. a message loop's PeekMessageA rendered
+    // as GetModuleHandleA). A register-held import call spanning a block boundary is
+    // therefore left as an indirect call: at runtime it dispatches through the IAT
+    // slot's self-token (correct shim) and gets its @N via __aret_callee_pop (which
+    // knows import IAT slots) — sound, just not statically named.
     {
-        let mut held: std::collections::HashMap<Location, String> = std::collections::HashMap::new();
         for b in &mut blocks {
+            let mut held: std::collections::HashMap<Location, String> = std::collections::HashMap::new();
             let mut out: Vec<Stmt> = Vec::with_capacity(b.stmts.len());
             for mut s in std::mem::take(&mut b.stmts) {
                 // A `call reg` through a register that holds a __stdcall import
