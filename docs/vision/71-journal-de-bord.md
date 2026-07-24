@@ -4213,4 +4213,16 @@ Détail : **70 §6** (roadmap). Résumé :
 - **Portes** : difftest **272/272**, hash transpile `19acad982194bf07` **inchangé**, winediff **+1 fixture** (le rouge reste
   `gdi_uifont` environnemental). Committé + poussé.
 
+### 2026-07-24 — [GUI][HLE-WIN32] **Frontière MFC (#3) : premier blocage diagnostiqué = hook WH_CBT non déclenché**
+- **Diagnostic (avant d'implémenter)** de pourquoi l'`OnInitDialog` de FishTank (MFC) ne s'exécute pas (mesuré : 0 `GetDlgItem`,
+  0 `SendMessage` après `WM_INITDIALOG`). **Cause pinée** : `SetWindowsHookExA/W` est un **stub** (rend un handle opaque, le hook
+  **ne se déclenche jamais**). MFC attache ses objets C++ `CWnd` aux `HWND` **et les subclasse** via un hook **`WH_CBT`**
+  (`HCBT_CREATEWND`) posé au démarrage ; sans déclenchement, `AfxDlgProc`/`AfxWndProc` ne trouvent pas le `CWnd` → le message map
+  ne route pas `WM_INITDIALOG` vers `CDialog::OnInitDialog`. **Bonne nouvelle** : le subclassing `SetWindowLong(GWL_WNDPROC=-4)`
+  **marche déjà** (échange le wndproc) — il ne manque que le déclenchement du hook.
+- **Plan #3 (bricks fixturables isolément, comme les bricks SEH)** : **A** = `WH_CBT`/`HCBT_CREATEWND` déclenché pendant
+  `CreateWindowEx` (avant `WM_NCCREATE`), via le hook proc lifté (esp) → MFC subclasse + attache le `CWnd` (le déblocage probable
+  de FishTank) ; **B** = EH C++ (`_CxxThrowException`/`__CxxFrameHandler`) pour les TRY/CATCH de MFC ; **C** = `__except_handler3`
+  réel (scope-table SEH). Mesurer après chaque brique (souvent A suffit à faire tomber le mur suivant). Chantier **multi-sessions**.
+
 <!-- NOUVELLES ENTRÉES ICI (garder l'ordre chronologique, plus récent en bas) -->
