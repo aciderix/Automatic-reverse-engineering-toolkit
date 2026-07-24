@@ -2696,6 +2696,7 @@ static int u32_next_paint(void) {
 /* Fill a DC's whole surface with a brush colour (the default WM_ERASEBKGND). No
  * surface (display-free / null brush) -> sound no-op. Defined after the GDI model. */
 static void u32_fill_dc_brush(uint32_t hdc, uint32_t brush);
+static void u32_erase_window_client(int wi);
 
 /* RegisterClassW(const WNDCLASSW*) -> ATOM. Fields (32-bit): lpfnWndProc @+4,
  * hbrBackground @+28, lpszClassName @+36. Returns a non-zero atom; 0 on failure. */
@@ -2910,7 +2911,16 @@ static int u32_defproc_common(uint32_t esp, uint32_t hwnd, uint32_t msg, uint32_
     int i = (hwnd >= 1 && hwnd <= U32_MAX_WIN && g_u32_win[hwnd - 1].used) ? (int)hwnd - 1 : -1;
     if (msg == 0x0081u /* WM_NCCREATE */) { *out = 1; return 1; }  /* accept creation */
     if (msg == 0x0001u /* WM_CREATE */)   { *out = 0; return 1; }  /* 0 = success (not -1) */
-    if (msg == U32_WM_PAINT) { if (i >= 0) g_u32_win[i].needs_paint = 0; *out = 0; return 1; }
+    if (msg == U32_WM_PAINT) {
+        /* Default paint: real DefWindowProc runs BeginPaint/EndPaint, which erases the
+         * class background (WM_ERASEBKGND). A window with no WM_PAINT handler must still
+         * show its background on screen, so perform that erase here before validating. */
+        if (i >= 0) {
+            if (g_u32_win[i].needs_erase) { u32_erase_window_client(i); g_u32_win[i].needs_erase = 0; }
+            g_u32_win[i].needs_paint = 0;
+        }
+        *out = 0; return 1;
+    }
     if (msg == U32_WM_ERASEBKGND) {   /* default erase: fill client with class brush */
         if (i >= 0 && g_u32_win[i].bg_brush) u32_fill_dc_brush(wp /* HDC */, g_u32_win[i].bg_brush);
         *out = 1; return 1;           /* TRUE = background erased */
@@ -4658,6 +4668,20 @@ static void u32_fill_dc_brush(uint32_t hdc, uint32_t brush) {
     if (!bm || !gdi_brush_color(brush, &c)) return;      /* no surface / null brush */
     for (int y = 0; y < bm->h; y++)
         for (int x = 0; x < bm->w; x++) gdi_put(bm, x, y, c);
+}
+/* Fill a window's client framebuffer with its class background brush — the default
+ * WM_ERASEBKGND, done directly on the bitmap (used by DefWindowProc's default paint). */
+static void u32_erase_window_client(int wi) {
+#ifdef ARET_HAVE_SDL
+    if (wi < 0 || !g_u32_win[wi].bg_brush) return;
+    int b = gdi_idx(g_u32_win[wi].client_bmp); if (b < 0) return;
+    uint32_t c; if (!gdi_brush_color(g_u32_win[wi].bg_brush, &c)) return;
+    struct gdi_obj *bm = &g_gdi[b];
+    for (int y = 0; y < bm->h; y++)
+        for (int x = 0; x < bm->w; x++) gdi_put(bm, x, y, c);
+#else
+    (void)wi;
+#endif
 }
 
 /* ---- drawing (bit-exact on the offscreen DIB) ---- */
