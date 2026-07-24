@@ -547,6 +547,12 @@ uint32_t aret_iswxdigit(uint32_t esp) { uint32_t c = AU(0); return c < 128 && is
 uint32_t aret_iswcntrl(uint32_t esp)  { uint32_t c = AU(0); return c < 128 && iscntrl((int)c) ? 1 : 0; }
 uint32_t aret_iswprint(uint32_t esp)  { uint32_t c = AU(0); return c < 128 && isprint((int)c) ? 1 : 0; }
 uint32_t aret_iswgraph(uint32_t esp)  { uint32_t c = AU(0); return c < 128 && isgraph((int)c) ? 1 : 0; }
+/* MBCS lead/trail byte tests (msvcrt). In a single-byte (C/en-US) locale — the only
+ * one modelled, matching IsDBCSLeadByte=0 — no byte is a multibyte lead or trail. */
+uint32_t aret_ismbblead(uint32_t esp)  { (void)esp; return 0; }
+uint32_t aret_ismbbtrail(uint32_t esp) { (void)esp; return 0; }
+uint32_t aret_ismbblead_l(uint32_t esp)  { (void)esp; return 0; }
+uint32_t aret_ismbbtrail_l(uint32_t esp) { (void)esp; return 0; }
 
 /* Wide (16-bit) printf family. The wide formatter lives in aret_hle.c beside
  * aret_vformat. Windows wchar_t is 16-bit, so buffers/format strings are uint16_t. */

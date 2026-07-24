@@ -2399,9 +2399,12 @@ static struct {
  * use for the client framebuffer). Show creates the real SDL window on first
  * visibility; present blits the client framebuffer; pump drains SDL input events
  * into WM_* messages. All are no-ops when there is no usable display. */
-static void sdl_window_show(int i);
+static void sdl_window_show(uint32_t esp, int i);
 static void sdl_window_present(int i);
-static void u32_dialog_composite(int di);   /* fwd: compose a dialog's controls into its framebuffer */
+static void u32_dialog_composite(uint32_t esp, int di);       /* fwd: fill 3DFACE + compose child controls */
+static void u32_composite_children(uint32_t esp, int di);     /* fwd: compose visible child controls over the client */
+static void u32_present_toplevel(uint32_t esp, int wi);       /* fwd: compose children (dialog or plain) then present */
+static void u32_free_child_bmp(int i);                        /* fwd: free a child control's client framebuffer */
 static void sdl_window_destroy(int i);
 static void sdl_pump(void);
 static int  sdl_win_idx_from_id(uint32_t winid);
@@ -2560,7 +2563,7 @@ static uint32_t u32_window_create(uint32_t wndproc, uint32_t exstyle, uint32_t s
                 g_u32_win[i].needs_paint = 1;
                 g_u32_win[i].needs_erase = 1;
 #ifdef ARET_HAVE_SDL
-                sdl_window_show(i);
+                sdl_window_show(0, i);   /* create-time: no children yet, esp not threaded here */
 #endif
             }
             return (uint32_t)(i + 1);
@@ -2957,7 +2960,7 @@ static int u32_control_proc(uint32_t esp, uint32_t hwnd, uint32_t msg, uint32_t 
  * release on a dialog) so a click reaches the child control, as Wine's per-window input
  * would. */
 static void u32_dialog_hittest_click(uint32_t esp, int di, int x, int y);
-static void u32_ctrl_recomposite(int ci);   /* fwd: recompose a control's parent dialog (no-op without SDL) */
+static void u32_ctrl_recomposite(uint32_t esp, int ci);   /* fwd: recompose a control's parent dialog (no-op without SDL) */
 static uint32_t g_u32_focus;   /* fwd: focused window/control (keyboard target); defined below */
 /* SendMessageW(HWND,UINT,WPARAM,LPARAM) -> LRESULT. Synchronous: call the WNDPROC now. */
 uint32_t aret_SendMessageW(uint32_t esp) {
@@ -3158,7 +3161,7 @@ uint32_t aret_ShowWindow(uint32_t esp) {
     }
 #ifdef ARET_HAVE_SDL
     if (g_u32_win[i].visible && g_u32_win[i].parent == 0 && !(g_u32_win[i].style & 0x40000000u))
-        sdl_window_show(i);
+        sdl_window_show(esp, i);
     else if (!g_u32_win[i].visible && g_u32_win[i].sdl_win)
         SDL_HideWindow((SDL_Window *)g_u32_win[i].sdl_win);
 #endif
@@ -3175,10 +3178,7 @@ uint32_t aret_UpdateWindow(uint32_t esp) {
         if (wp) u32_call_wndproc(esp, wp, (uint32_t)(i + 1), U32_WM_PAINT, 0, 0);
     }
 #ifdef ARET_HAVE_SDL
-    if (i >= 0) {
-        if (g_u32_win[i].is_dialog) u32_dialog_composite(i);   /* reflect current control state */
-        sdl_window_present(i);                                 /* flush the client framebuffer to screen */
-    }
+    if (i >= 0) u32_present_toplevel(esp, i);   /* compose children (dialog or plain) then flush to screen */
 #endif
     return i >= 0 ? 1u : 0u;
 }
@@ -3448,7 +3448,7 @@ static int u32_dlg_ctrl(uint32_t hdlg, int id) {
 uint32_t aret_CheckDlgButton(uint32_t esp) {
     int c = u32_dlg_ctrl(WU(0), WI(1)); if (c < 0) return 0;
     g_u32_win[c].check_state = (int)WU(2);   /* BST_UNCHECKED/CHECKED/INDETERMINATE */
-    u32_ctrl_recomposite(c);
+    u32_ctrl_recomposite(esp, c);
     return 1;
 }
 uint32_t aret_IsDlgButtonChecked(uint32_t esp) {
@@ -3555,7 +3555,7 @@ uint32_t aret_SetWindowTextA(uint32_t esp) {
     /* A predefined control has no app WNDPROC: store the text directly (DefWindowProc's
      * job), then repaint its parent dialog so the change shows (SetDlgItemText path). */
     if (!wndproc) { uint32_t o = 0; u32_defproc_text(WU(0), U32_WM_SETTEXT, 0, WU(1), 0, &o);
-                    u32_ctrl_recomposite((int)WU(0) - 1); return o; }
+                    u32_ctrl_recomposite(esp, (int)WU(0) - 1); return o; }
     u32_call_wndproc(esp, wndproc, WU(0), U32_WM_SETTEXT, 0, WU(1));
     return 1;
 }
@@ -3800,7 +3800,7 @@ static uint32_t u32_dialog_create(const uint8_t *tpl, uint32_t dlgproc, uint32_t
      * children are in place, and present. (A dialog shown later via ShowWindow composes
      * through sdl_window_show, which sees is_dialog set.) */
     if (g_u32_win[hi].visible && g_u32_win[hi].client_bmp) {
-        u32_dialog_composite(hi);
+        u32_dialog_composite(0, hi);   /* create-time: DLGPROC/WM_INITDIALOG not run yet, esp not threaded here */
         sdl_window_present(hi);
     }
 #endif
@@ -3809,8 +3809,14 @@ static uint32_t u32_dialog_create(const uint8_t *tpl, uint32_t dlgproc, uint32_t
 /* Destroy a dialog and all its child controls. */
 static void u32_dialog_destroy(uint32_t hDlg) {
     for (int i = 0; i < U32_MAX_WIN; i++)
-        if (g_u32_win[i].used && ((uint32_t)(i + 1) == hDlg || g_u32_win[i].parent == hDlg))
+        if (g_u32_win[i].used && ((uint32_t)(i + 1) == hDlg || g_u32_win[i].parent == hDlg)) {
+#ifdef ARET_HAVE_SDL
+            /* Free a control's own client framebuffer (allocated when a lifted child
+             * is composited); the dialog's own is freed by sdl_window_destroy. */
+            if ((uint32_t)(i + 1) != hDlg) u32_free_child_bmp(i);
+#endif
             g_u32_win[i].used = 0;
+        }
 }
 /* Find a dialog control by id (0 if none). */
 static uint32_t u32_dlg_item(uint32_t hDlg, int id) {
@@ -3906,7 +3912,7 @@ uint32_t aret_SetDlgItemTextA(uint32_t esp) {
     const char *s = WCS(2); int k = 0;
     if (s) for (; s[k] && k < 255; k++) g_u32_win[i].title[k] = s[k];
     g_u32_win[i].title[k] = 0;
-    u32_ctrl_recomposite(i);
+    u32_ctrl_recomposite(esp, i);
     return 1;
 }
 /* GetDlgItemTextA(hDlg, id, lpString, cchMax) -> chars copied (excl NUL). */
@@ -3926,7 +3932,7 @@ uint32_t aret_SetDlgItemTextW(uint32_t esp) {
     int i = u32_win_idx(u32_dlg_item(WU(0), WI(1)));
     if (i < 0) return 0;
     u32_w2n((const uint16_t *)WP(2), g_u32_win[i].title, sizeof g_u32_win[i].title);
-    u32_ctrl_recomposite(i);
+    u32_ctrl_recomposite(esp, i);
     return 1;
 }
 /* GetDlgItemTextW(hDlg, id, lpString, cchMax) — widen the stored ANSI text. */
@@ -3947,7 +3953,7 @@ uint32_t aret_SetDlgItemInt(uint32_t esp) {
     if (i < 0) return 0;
     if (WU(3)) snprintf(g_u32_win[i].title, sizeof g_u32_win[i].title, "%d", WI(2));
     else       snprintf(g_u32_win[i].title, sizeof g_u32_win[i].title, "%u", WU(2));
-    u32_ctrl_recomposite(i);
+    u32_ctrl_recomposite(esp, i);
     return 1;
 }
 /* GetDlgItemInt(hDlg, id, lpTranslated, bSigned) -> UINT. */
@@ -4109,7 +4115,7 @@ static int sdl_ensure(void) {
     return g_sdl_ready > 0;
 }
 /* Create the client framebuffer + real SDL window for window i (idempotent). */
-static void sdl_window_show(int i) {
+static void sdl_window_show(uint32_t esp, int i) {
     if (i < 0 || i >= U32_MAX_WIN || !g_u32_win[i].used) return;
     if (g_u32_win[i].sdl_win) { SDL_ShowWindow((SDL_Window *)g_u32_win[i].sdl_win); return; }
     int w = g_u32_win[i].w, h = g_u32_win[i].h;
@@ -4126,7 +4132,7 @@ static void sdl_window_show(int i) {
     }
     g_u32_win[i].client_bmp = b ? gdi_handle(b) : 0;
     g_u32_win[i].cw = w; g_u32_win[i].ch = h;
-    if (g_u32_win[i].is_dialog) u32_dialog_composite(i);   /* fill 3DFACE + paint child controls */
+    if (g_u32_win[i].is_dialog) u32_dialog_composite(esp, i);   /* fill 3DFACE + paint child controls */
     if (!sdl_ensure()) return;                       /* no display: framebuffer only */
     int px = g_u32_win[i].x, py = g_u32_win[i].y;
     SDL_Window *win = SDL_CreateWindow(g_u32_win[i].title[0] ? g_u32_win[i].title : "",
@@ -4206,13 +4212,13 @@ static void u32_edit_key_text(const char *utf8) {
     for (const char *p = utf8; *p && n < (int)sizeof g_u32_win[fi].title - 1; p++)
         if ((unsigned char)*p >= 0x20 && (unsigned char)*p < 0x7F) g_u32_win[fi].title[n++] = *p;
     g_u32_win[fi].title[n] = 0;
-    u32_ctrl_recomposite(fi);
+    u32_ctrl_recomposite(0, fi);   /* SDL input path: system EDIT only, no lifted control to drive */
 }
 /* Backspace in the focused EDIT. */
 static void u32_edit_key_back(void) {
     int fi = u32_focused_edit(); if (fi < 0) return;
     int n = (int)strlen(g_u32_win[fi].title);
-    if (n > 0) { g_u32_win[fi].title[n - 1] = 0; u32_ctrl_recomposite(fi); }
+    if (n > 0) { g_u32_win[fi].title[n - 1] = 0; u32_ctrl_recomposite(0, fi); }
 }
 static void sdl_pump(void) {
     if (g_sdl_ready <= 0) return;
@@ -4296,7 +4302,8 @@ uint32_t aret_ReleaseDC(uint32_t esp) {
 #ifdef ARET_HAVE_SDL
     { int wi = u32_win_idx(WU(0));
       if (wi >= 0) {
-          sdl_window_present(wi);
+          if (g_u32_win[wi].parent == 0) u32_present_toplevel(esp, wi);   /* compose children over the drawn client */
+          else sdl_window_present(wi);
           /* A window DC has the window's shared framebuffer "selected"; free the
            * DC object but never the framebuffer (owned by the window). */
           if (i >= 0 && g_gdi[i].sel_bitmap == g_u32_win[wi].client_bmp) { g_gdi[i].used = 0; return 1; }
@@ -4338,7 +4345,9 @@ uint32_t aret_BeginPaint(uint32_t esp) {
 uint32_t aret_EndPaint(uint32_t esp) {
     const uint8_t *ps = (const uint8_t *)WP(1);
 #ifdef ARET_HAVE_SDL
-    { int wi = u32_win_idx(WU(0)); if (wi >= 0) sdl_window_present(wi); }
+    { int wi = u32_win_idx(WU(0));
+      if (wi >= 0) { if (g_u32_win[wi].parent == 0) u32_present_toplevel(esp, wi);   /* compose children over the just-painted client */
+                     else sdl_window_present(wi); } }   /* a child's own EndPaint: no children, plain present */
 #endif
     if (ps) { int i = gdi_idx(*(const uint32_t *)ps); if (i >= 0) g_gdi[i].used = 0; }
     return 1;
@@ -5222,15 +5231,17 @@ static void u32_control_paint_full(uint32_t hdc, int wi) {
     }
     if (!strcasecmp(cls, "combobox")) { u32_combobox_paint(hdc, wi); return; }
 }
-/* Recomposite the parent dialog of control `ci` (reflect a state change on screen). */
-static void u32_ctrl_recomposite(int ci) {
+/* Recomposite the parent dialog of control `ci` (reflect a state change on screen).
+ * esp==0 (SDL input path) is fine: a dialog's controls are painted without a lifted
+ * call; only a lifted child (driven by WM_PAINT) needs esp, and that path always has it. */
+static void u32_ctrl_recomposite(uint32_t esp, int ci) {
 #ifdef ARET_HAVE_SDL
     uint32_t par = g_u32_win[ci].parent;
     if (par >= 1 && par <= U32_MAX_WIN && g_u32_win[par - 1].used && g_u32_win[par - 1].is_dialog) {
-        u32_dialog_composite((int)par - 1); sdl_window_present((int)par - 1);
+        u32_dialog_composite(esp, (int)par - 1); sdl_window_present((int)par - 1);
     }
 #else
-    (void)ci;
+    (void)esp; (void)ci;
 #endif
 }
 /* Apply a click to a button control `i`: run the auto behaviour (toggle checkbox, cycle
@@ -5249,7 +5260,7 @@ static void u32_ctrl_click(uint32_t esp, int i) {
                 g_u32_win[k].check_state = 0;
         g_u32_win[i].check_state = 1;
     }
-    u32_ctrl_recomposite(i);
+    u32_ctrl_recomposite(esp, i);
     uint32_t par = g_u32_win[i].parent;
     if (par) {
         uint32_t pp = u32_win_wndproc(par);
@@ -5271,7 +5282,7 @@ static int u32_control_proc(uint32_t esp, uint32_t hwnd, uint32_t msg, uint32_t 
     if (msg == 0x0031u /*WM_GETFONT*/)  { *out = g_u32_win[i].ctrl_font; return 1; }
     if (!strcasecmp(cls, "button")) {
         if (msg == 0x00F0u /*BM_GETCHECK*/) { *out = (uint32_t)g_u32_win[i].check_state; return 1; }
-        if (msg == 0x00F1u /*BM_SETCHECK*/) { g_u32_win[i].check_state = (int)wp; u32_ctrl_recomposite(i); *out = 0; return 1; }
+        if (msg == 0x00F1u /*BM_SETCHECK*/) { g_u32_win[i].check_state = (int)wp; u32_ctrl_recomposite(esp, i); *out = 0; return 1; }
         if (msg == 0x00F5u /*BM_CLICK*/)    { u32_ctrl_click(esp, i); *out = 0; return 1; }
     }
     /* LISTBOX (LB_*) / COMBOBOX (CB_*) item model — same operations, different opcodes. */
@@ -5279,11 +5290,11 @@ static int u32_control_proc(uint32_t esp, uint32_t hwnd, uint32_t msg, uint32_t 
         int lb = !strcasecmp(cls, "listbox");
         uint32_t A = lb?0x180u:0x143u, IN = lb?0x181u:0x14Au, DE = lb?0x182u:0x144u, RS = lb?0x184u:0x14Bu,
                  SC = lb?0x186u:0x14Eu, GC = lb?0x188u:0x147u, GT = lb?0x189u:0x148u, GL = lb?0x18Au:0x149u, CN = lb?0x18Bu:0x146u;
-        if (msg == A)  { int p = u32_items_insert(i, -1, (const char *)(uintptr_t)lp); u32_ctrl_recomposite(i); *out = (uint32_t)p; return 1; }
-        if (msg == IN) { int p = u32_items_insert(i, (int)wp, (const char *)(uintptr_t)lp); u32_ctrl_recomposite(i); *out = (uint32_t)p; return 1; }
-        if (msg == RS) { u32_items_free(i); u32_ctrl_recomposite(i); *out = 0; return 1; }
+        if (msg == A)  { int p = u32_items_insert(i, -1, (const char *)(uintptr_t)lp); u32_ctrl_recomposite(esp, i); *out = (uint32_t)p; return 1; }
+        if (msg == IN) { int p = u32_items_insert(i, (int)wp, (const char *)(uintptr_t)lp); u32_ctrl_recomposite(esp, i); *out = (uint32_t)p; return 1; }
+        if (msg == RS) { u32_items_free(i); u32_ctrl_recomposite(esp, i); *out = 0; return 1; }
         if (msg == CN) { *out = (uint32_t)g_u32_win[i].item_count; return 1; }
-        if (msg == SC) { g_u32_win[i].cur_sel = (int)wp; u32_ctrl_recomposite(i); *out = wp; return 1; }
+        if (msg == SC) { g_u32_win[i].cur_sel = (int)wp; u32_ctrl_recomposite(esp, i); *out = wp; return 1; }
         if (msg == GC) { *out = (uint32_t)g_u32_win[i].cur_sel; return 1; }
         if (msg == GT) { const char *s = u32_items_get(i, (int)wp); char *dst = (char *)(uintptr_t)lp;
                          if (!s) { *out = (uint32_t)-1; return 1; }
@@ -5294,7 +5305,7 @@ static int u32_control_proc(uint32_t esp, uint32_t hwnd, uint32_t msg, uint32_t 
                          if (idx >= 0 && idx < g_u32_win[i].item_count) { free(g_u32_win[i].items[idx]);
                              for (int k = idx; k < g_u32_win[i].item_count - 1; k++) g_u32_win[i].items[k] = g_u32_win[i].items[k + 1];
                              g_u32_win[i].item_count--; }
-                         u32_ctrl_recomposite(i); *out = (uint32_t)g_u32_win[i].item_count; return 1; }
+                         u32_ctrl_recomposite(esp, i); *out = (uint32_t)g_u32_win[i].item_count; return 1; }
     }
     if (msg == 0x0318u /*WM_PRINTCLIENT*/) {
         /* Match Wine's observable WM_PRINTCLIENT: only push buttons paint via this
@@ -5325,17 +5336,92 @@ static void u32_dialog_hittest_click(uint32_t esp, int di, int x, int y) {
         }
     }
 }
-/* Composite a dialog's client framebuffer for display: fill the background with
- * COLOR_3DFACE (the dialog erase colour, measured vs Wine) then paint each visible
- * child control at its parent-relative offset. Only classes we can paint bit-exact
- * (BUTTON today) are drawn; others are left as background (a sound, visible gap rather
- * than a guessed rendering). This is the on-screen path (SDL); its geometry+per-control
- * paint are each already verified bit-exact, so the composite is correct by
- * composition. Wine offers no API to capture its own composited dialog into a DIB
- * (WM_PRINT PRF_CHILDREN does not paint children), so the composed window is compared
- * qualitatively (Xvfb screenshot), per doc 70 §7. */
 #ifdef ARET_HAVE_SDL
-static void u32_dialog_composite(int di) {
+/* Blit a source RGB888 buffer (sw×sh) into dst (W×H) at (ox,oy), clipped to dst. */
+static void u32_blit_clip(uint32_t *dst, int W, int H, const uint32_t *src, int sw, int sh, int ox, int oy) {
+    for (int yy = 0; yy < sh; yy++) { int dy = oy + yy; if (dy < 0 || dy >= H) continue;
+        for (int xx = 0; xx < sw; xx++) { int dx = ox + xx; if (dx < 0 || dx >= W) continue;
+            dst[dy * W + dx] = src[yy * sw + xx]; } }
+}
+/* Give a child control its own client framebuffer (its WNDPROC paints here via
+ * BeginPaint/GetDC, exactly like a top-level window). Size = the control's rect. */
+static void u32_ensure_child_bmp(int ci) {
+    if (ci < 0 || g_u32_win[ci].client_bmp) return;
+    int w = g_u32_win[ci].w, h = g_u32_win[ci].h;
+    if (w <= 0 || h <= 0) return;
+    int b = gdi_alloc(GDIT_BITMAP); if (!b) return;
+    g_gdi[b].w = w; g_gdi[b].h = h; g_gdi[b].topdown = 1; g_gdi[b].bpp = 32;
+    g_gdi[b].bits = (uint8_t *)calloc((size_t)w * h, 4); g_gdi[b].owns_bits = 1;
+    if (!g_gdi[b].bits) { g_gdi[b].used = 0; return; }
+    g_u32_win[ci].client_bmp = gdi_handle(b);
+    g_u32_win[ci].cw = w; g_u32_win[ci].ch = h;
+}
+/* Free a child control's own client framebuffer (on destroy). */
+static void u32_free_child_bmp(int i) {
+    if (i < 0 || !g_u32_win[i].client_bmp) return;
+    int b = gdi_idx(g_u32_win[i].client_bmp);
+    if (b >= 0) { if (g_gdi[b].owns_bits) free(g_gdi[b].bits); g_gdi[b].used = 0; }
+    g_u32_win[i].client_bmp = 0;
+}
+/* Composite one visible child control `ci` into the parent framebuffer dst (W×H) at
+ * the child's offset. Two kinds of child:
+ *  - a PREDEFINED control we paint bit-exact (button/static/edit/list/combo, no app
+ *    WNDPROC): drawn via u32_control_paint_full into a temp surface, then blitted.
+ *  - a LIFTED control (its own WNDPROC — e.g. a real comctl32 progress bar/trackbar):
+ *    it paints ITSELF. We give it its own client framebuffer and send a synchronous
+ *    WM_PAINT (the lifted call needs the machine stack `esp`); it Begin/EndPaints into
+ *    that framebuffer, which we then blit. `esp==0` (a present with no machine stack at
+ *    hand) skips driving a lifted control this pass — sound: it paints on the next
+ *    esp-bearing present (UpdateWindow/EndPaint). Correct by composition: the child's
+ *    own lifted paint (cpudiff/funcdiff) + our GDI (winediff) land at the measured
+ *    offset; no API captures Wine's composited children into a DIB, so verified
+ *    qualitatively (Xvfb), per doc 70 §7. */
+static void u32_composite_one_child(uint32_t esp, int ci, uint32_t *dst, int W, int H) {
+    int cw = g_u32_win[ci].w, ch = g_u32_win[ci].h, ox = g_u32_win[ci].x, oy = g_u32_win[ci].y;
+    if (cw <= 0 || ch <= 0) return;
+    if (g_u32_win[ci].wndproc == 0 && u32_ctrl_paintable(g_u32_win[ci].classname)) {
+        int td = gdi_alloc(GDIT_DC); if (!td) return;
+        u32_dc_defaults(td);
+        int tb = gdi_alloc(GDIT_BITMAP); if (!tb) { g_gdi[td].used = 0; return; }
+        g_gdi[tb].w = cw; g_gdi[tb].h = ch; g_gdi[tb].topdown = 1; g_gdi[tb].bpp = 32;
+        g_gdi[tb].bits = (uint8_t *)calloc((size_t)cw * ch, 4); g_gdi[tb].owns_bits = 1;
+        if (!g_gdi[tb].bits) { g_gdi[tb].used = 0; g_gdi[td].used = 0; return; }
+        g_gdi[td].sel_bitmap = gdi_handle(tb);
+        u32_control_paint_full(gdi_handle(td), ci);
+        u32_blit_clip(dst, W, H, (uint32_t *)g_gdi[tb].bits, cw, ch, ox, oy);
+        free(g_gdi[tb].bits); g_gdi[tb].used = 0; g_gdi[td].used = 0;
+        return;
+    }
+    if (g_u32_win[ci].wndproc != 0 && esp != 0) {
+        u32_ensure_child_bmp(ci);
+        int b = gdi_idx(g_u32_win[ci].client_bmp);
+        if (b < 0 || !g_gdi[b].bits) return;
+        g_u32_win[ci].needs_erase = 1;   /* BeginPaint erases the control's class background first */
+        u32_call_wndproc(esp, g_u32_win[ci].wndproc, (uint32_t)(ci + 1), U32_WM_PAINT, 0, 0);
+        u32_blit_clip(dst, W, H, (uint32_t *)g_gdi[b].bits, g_gdi[b].w, g_gdi[b].h, ox, oy);
+        return;
+    }
+    /* Unknown predefined class with no paint, or no esp to drive a lifted control:
+     * sound visible gap (background), never a guessed rendering. */
+}
+/* Composite every visible direct child of `di` into its client framebuffer at their
+ * offsets. Does NOT fill the background (the caller already painted the client: the
+ * dialog erase, or the window's own WM_PAINT). Children draw on top, as in Windows. */
+static void u32_composite_children(uint32_t esp, int di) {
+    if (di < 0 || di >= U32_MAX_WIN || !g_u32_win[di].used) return;
+    int b = gdi_idx(g_u32_win[di].client_bmp);
+    if (b < 0 || !g_gdi[b].bits) return;
+    int W = g_u32_win[di].cw, H = g_u32_win[di].ch;
+    uint32_t *dst = (uint32_t *)g_gdi[b].bits;
+    for (int c = 0; c < U32_MAX_WIN; c++) {
+        if (!g_u32_win[c].used || g_u32_win[c].parent != (uint32_t)(di + 1)) continue;
+        if (!g_u32_win[c].visible) continue;
+        u32_composite_one_child(esp, c, dst, W, H);
+    }
+}
+/* Composite a dialog's client framebuffer: fill COLOR_3DFACE (the dialog erase colour,
+ * measured vs Wine) then compose its child controls on top. */
+static void u32_dialog_composite(uint32_t esp, int di) {
     if (di < 0 || di >= U32_MAX_WIN || !g_u32_win[di].used) return;
     int b = gdi_idx(g_u32_win[di].client_bmp);
     if (b < 0 || !g_gdi[b].bits) return;
@@ -5343,26 +5429,17 @@ static void u32_dialog_composite(int di) {
     uint32_t *dst = (uint32_t *)g_gdi[b].bits;
     uint32_t face = u32_syscolor(15 /*COLOR_3DFACE*/);
     for (int i = 0; i < W * H; i++) dst[i] = face;
-    for (int c = 0; c < U32_MAX_WIN; c++) {
-        if (!g_u32_win[c].used || g_u32_win[c].parent != (uint32_t)(di + 1)) continue;
-        if (!g_u32_win[c].visible) continue;
-        int cw = g_u32_win[c].w, ch = g_u32_win[c].h, ox = g_u32_win[c].x, oy = g_u32_win[c].y;
-        if (cw <= 0 || ch <= 0) continue;
-        if (!u32_ctrl_paintable(g_u32_win[c].classname)) continue;   /* paintable class */
-        int td = gdi_alloc(GDIT_DC); if (!td) continue;
-        u32_dc_defaults(td);
-        int tb = gdi_alloc(GDIT_BITMAP); if (!tb) { g_gdi[td].used = 0; continue; }
-        g_gdi[tb].w = cw; g_gdi[tb].h = ch; g_gdi[tb].topdown = 1; g_gdi[tb].bpp = 32;
-        g_gdi[tb].bits = (uint8_t *)calloc((size_t)cw * ch, 4); g_gdi[tb].owns_bits = 1;
-        if (!g_gdi[tb].bits) { g_gdi[tb].used = 0; g_gdi[td].used = 0; continue; }
-        g_gdi[td].sel_bitmap = gdi_handle(tb);
-        u32_control_paint_full(gdi_handle(td), c);
-        uint32_t *src = (uint32_t *)g_gdi[tb].bits;
-        for (int yy = 0; yy < ch; yy++) { int dy = oy + yy; if (dy < 0 || dy >= H) continue;
-            for (int xx = 0; xx < cw; xx++) { int dx = ox + xx; if (dx < 0 || dx >= W) continue;
-                dst[dy * W + dx] = src[yy * cw + xx]; } }
-        free(g_gdi[tb].bits); g_gdi[tb].used = 0; g_gdi[td].used = 0;
-    }
+    u32_composite_children(esp, di);
+}
+/* Present a top-level window: compose its child controls (a dialog also refills its
+ * 3DFACE background; a plain window keeps whatever its own WM_PAINT drew), then blit
+ * the client framebuffer to the SDL window. This is what makes a child control —
+ * predefined or lifted comctl32 — actually appear on screen. */
+static void u32_present_toplevel(uint32_t esp, int wi) {
+    if (wi < 0 || wi >= U32_MAX_WIN || !g_u32_win[wi].used) return;
+    if (g_u32_win[wi].is_dialog) u32_dialog_composite(esp, wi);
+    else                         u32_composite_children(esp, wi);
+    sdl_window_present(wi);
 }
 #endif /* ARET_HAVE_SDL */
 /* PolylineTo(hdc, const POINT* pts, int count) -> BOOL. Like a run of LineTo: from
