@@ -6828,12 +6828,24 @@ uint32_t aret_MessageBeep(uint32_t esp) { (void)esp; return 1; }
 /* CallWindowProcA/W(lpPrevWndFunc, hWnd, Msg, wParam, lParam) -> LRESULT. Invoke a
  * (lifted) window procedure directly — the subclassing idiom's call to the original
  * proc. */
-uint32_t aret_CallWindowProcA(uint32_t esp) {
+/* CallWindowProc(lpPrevWndFunc, hWnd, msg, wParam, lParam). A subclasser (notably MFC
+ * via SetWindowLong(GWL_WNDPROC)) saves the control's ORIGINAL proc and chains to it for
+ * messages it doesn't handle itself. For our predefined controls that original proc is 0
+ * (their behaviour lives in u32_control_proc, invoked implicitly when wndproc==0) — so
+ * proc==0 here must emulate that system control proc: its class messages (BM_SETCHECK,
+ * CB_*, WM_SETFONT), then the default window proc. Without this, an MFC-subclassed radio
+ * never records BM_SETCHECK (no selection dot) and a subclassed combo/edit loses CB_*. */
+static uint32_t u32_call_window_proc(uint32_t esp, int wide) {
     uint32_t proc = WU(0);
-    if (!proc) return 0;
-    return u32_call_wndproc(esp, proc, WU(1), WU(2), WU(3), WU(4));
+    if (proc) return u32_call_wndproc(esp, proc, WU(1), WU(2), WU(3), WU(4));
+    uint32_t r = 0;
+    if (u32_control_proc(esp, WU(1), WU(2), WU(3), WU(4), &r)) return r;
+    if (u32_defproc_common(esp, WU(1), WU(2), WU(3), &r)) return r;
+    if (u32_defproc_text(WU(1), WU(2), WU(3), WU(4), wide, &r)) return r;
+    return 0;
 }
-uint32_t aret_CallWindowProcW(uint32_t esp) { return aret_CallWindowProcA(esp); }
+uint32_t aret_CallWindowProcA(uint32_t esp) { return u32_call_window_proc(esp, 0); }
+uint32_t aret_CallWindowProcW(uint32_t esp) { return u32_call_window_proc(esp, 1); }
 
 /* LoadCursorA/W, LoadIconA/W(hInstance, lpName) -> opaque non-null handle. Cursors
  * and icons are display-only; a program uses the handle as an opaque token (a
