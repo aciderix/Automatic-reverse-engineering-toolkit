@@ -4244,4 +4244,18 @@ Détail : **70 §6** (roadmap). Résumé :
   du combo Tank Size ne s'affichent pas encore (MFC les pose par un chemin — DDX/CheckRadioButton — pas encore reflété). Bricks B
   (EH C++) / C (`__except_handler3`) mesurés au besoin ensuite.
 
+### 2026-07-24 — [HLE-WIN32] **CallWindowProc(0) exécute le proc système du contrôle (chaînage de subclass) + diag radios FishTank**
+- **Fix (prouvé)** : un subclasser (MFC `AfxWndProc`) sauve le wndproc **original** d'un contrôle prédéfini et y **chaîne** via
+  `CallWindowProc` les messages qu'il ne traite pas. Pour nos contrôles système ce proc original est **0** (leur comportement vit
+  dans `u32_control_proc`) → `CallWindowProc(0, …)` doit **émuler le proc système** : messages de classe (`BM_SETCHECK`/`CB_*`/
+  `WM_SETFONT`) puis `DefWindowProc`. Avant, il rendait 0 et **jetait** le message → un contrôle MFC-subclassé perdait son état
+  coché/liste. Gardé `winecorpus/user32_subclass` (subclasse une checkbox, chaîne `BM_SETCHECK` via `CallWindowProc`, relit
+  `BM_GETCHECK`) : `saw=1 check=1` **bit-identique Wine** (baseline = `check=0`).
+- **Diagnostic FishTank (#17, mesuré)** : les points des radios ne s'affichent **pas** car — trace — les radios ont **`wp=0`
+  (non subclassés)** et **`check=0`** : MFC **n'envoie jamais** `BM_SETCHECK` aux radios. Le combo Water Type se peuple (un
+  `AddString` explicite de `OnInitDialog` tourne), mais le chemin **`DoDataExchange`/`UpdateData(FALSE)`** (qui pose l'état des
+  radios + la sélection Tank Size) **ne s'exécute pas complètement** — probablement **gated sur l'EH C++ (brick B)** ou un mur API
+  MFC interne à `DoDataExchange`. Ce n'est **ni** un défaut de peinture, **ni** de subclass/dispatch. **Suite** : tracer jusqu'où
+  `OnInitDialog`/`DoDataExchange` va sous ARET (ce qu'il appelle avant de s'arrêter) → décide entre brick B (EH C++) et une API manquante.
+
 <!-- NOUVELLES ENTRÉES ICI (garder l'ordre chronologique, plus récent en bas) -->
