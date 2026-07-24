@@ -1,231 +1,175 @@
 # ARET — Automatic Reverse Engineering Toolkit
 
-A reverse-engineering pipeline in Rust that takes a binary, disassembles it,
-recovers its functions and control-flow graphs, lifts the machine code, and
-emits readable **pseudo-C**.
+**ARET turns a 32-bit Windows PE executable into a *native* standalone Linux ELF
+or WebAssembly module — no emulator, no Wine at runtime, no CPU emulation.** The
+foreign binary's x86 machine code is lifted to C, its Windows API calls are
+re-implemented in a native high-level-emulation layer, and the whole thing is
+recompiled to a real native binary that runs directly on the host CPU.
 
 ```
-binary  →  load (PE/ELF/Mach-O)  →  disassemble (x86/x64)  →
-        →  function & CFG recovery  →  IR lifting  →  pseudo-C
+Windows PE  →  lift x86 → typed SSA IR → optimise → C/LLVM  →  recompile
+             +  Win32/CRT re-implemented natively (HLE)      →  native ELF / WASM
 ```
 
-## Honest scope (read this first)
+It began as a decompiler (machine code → readable pseudo-C, still supported) and
+grew into a **Universal Binary Transpiler**: the goal is to take software built
+for one system and make it run, fully functional and fully native, on another.
 
-Marketing claims of "perfectly turning any binary back into its original source
-code" are not physically possible, and this project does not pretend otherwise:
+---
 
-- **Compilation is lossy.** Variable names, comments, types, class layouts and
-  template structure are *discarded* by the compiler. No tool can recover them —
-  the best any decompiler (including Ghidra/IDA Hex-Rays) can do is *invent*
-  plausible replacements. The information is simply not in the bytes anymore.
-- **Some sub-problems are undecidable** in the formal sense (perfectly
-  separating code from data, recovering exact function boundaries on optimized
-  or obfuscated code). Every tool relies on heuristics, not certainties.
+## The one rule that defines the project
 
-So ARET aims to be a *genuinely functional* reverse-engineering pipeline with a
-clean architecture you can extend — not a magic "press button, get source."
-What it produces is real per-instruction semantics on a faithful CFG, which is
-exactly what a young decompiler's output looks like before full structuring.
+> **Never present a wrong result as correct. Be right, or stop loudly.**
 
-## What works today
+Every mechanism is either **proven correct against an independent oracle**, or it
+**aborts with a named message** (`aret_unmodelled("…")`) at the exact point it
+would otherwise guess. There are no silent no-ops, no per-binary hacks, and
+nothing is emitted on a hunch:
 
-- **Loader** (`src/loader`): parses PE / ELF / Mach-O via the `object` crate;
-  extracts sections, entry point, and symbols; exposes a uniform memory view.
-- **Disassembler** (`src/disasm`): decodes x86 / x86-64 with `iced-x86` and
-  classifies each instruction's control flow.
-- **Analysis** (`src/analysis`): recursive-descent **function discovery** from
-  the entry point + symbols + call targets, plus **prologue scanning** to
-  recover functions reached only indirectly (vtables/callbacks), then
-  **basic-block / CFG** construction. Scales via a single global decode pass
-  (27 MB game binary → 43k functions / 3M instructions in ~50 s; `--no-prologue-scan`
-  for the ~5 s directly-called-only subset).
-- **IR lifting** (`src/ir`): local semantic translation of instructions into C
-  (`mov`→`=`, `add`→`+=`, `lea`→address, memory operands→typed dereferences),
-  **branch-condition recovery** (`cmp`/`test` + `jcc` → `eax <= 1`, correct
-  signed/unsigned), and **frame-variable recovery** (`[ebp+8]`→`arg_8`,
-  `[ebp-4]`→`local_4`, with recovered argument lists and local declarations).
-- **Structuring** (`src/structure`): dominator + post-dominator analysis and
-  natural-loop detection drive a recursive emitter that produces `if`/`else`
-  and `while` loops. Edges it cannot reduce degrade to explicit `goto`, so the
-  output is always semantically faithful. (Cut gotos by ~80% on the game.)
-- **Dataflow** (`src/dataflow`): global **constant propagation** (a meet-based
-  forward analysis that is exact across branch joins), global register
-  **liveness**, **dead-assignment elimination**, **single-use expression
-  propagation** (also across straight-line block chains), and **call-result
-  binding** (`f(args)` → `eax = f(args)` when the result is used). All gated on
-  provable safety — constants track exact register names with family-aware
-  aliasing and call-clobber invalidation, so a value is only substituted when
-  every path agrees on it.
-- **Decompiler** (`src/decompile`): the flat goto-based emitter (`--flat`),
-  plus shared per-block lifting used by the structured emitter.
+- **Correct or loud abort.** Anything not provably modelled stays an explicit
+  `Asm`/abort — the program halts and tells you where, instead of drifting.
+- **Fix the general cause, never the single binary.** A bug is a class of
+  binaries, and the fix is verified across that class.
+- **Nothing proven ⇒ nothing guessed.** x87 rounding mode, stack depth,
+  `noreturn`, indirect-call targets: if it isn't proven, ARET takes the sound
+  fallback (a runtime FPU net, an abort), never the optimistic assumption.
 
-## Example
+This makes the honest guarantee *"functional, **or** an abort that says where —
+never wrong in silence."* Genuinely compiled software (compilers, databases,
+interpreters, games) is fully reachable; the theoretically-impossible residue
+(hand-crafted / obfuscated / VM-packed code) **flags itself** rather than lying.
 
-Source:
+---
 
-```c
-int factorial(int n) {
-    int result = 1;
-    for (int i = 2; i <= n; i++) result *= i;
-    return result;
-}
-```
+## Proven results (bit-identical to Wine, natively recompiled)
 
-`aret demo --function factorial` (from the *stripped of source* binary):
+Every demonstrator below is a real third-party binary, transpiled to a native
+Linux ELF and checked **output-for-output against the same PE running under
+Wine** (Wine is used only as ground truth — it is itself native i386, not an
+emulator):
 
-```c
-int64_t factorial(void) {
-    if ((int64_t)edi <= (int64_t)1) {
-        edx = 1;
-    } else {
-        edi += 1;
-        eax = 2;
-        edx = 1;
-        while (true) {
-            edx *= eax;          // result *= i
-            eax += 1;            // i++
-            if (!(eax != edi)) break;
-        }
-    }
-    eax = edx;
-    return rax;
-}
-```
+| Binary | Toolchain | Result |
+|---|---|---|
+| **Lua 5.4.7** (650 KB, symboled **and** stripped) | mingw | **35/35** subsystems: closures, metatables/OOP, coroutines, patterns, `table.sort`, `pcall`, 64-bit, varargs, `goto`, GC stress |
+| **sqlite3.exe** (stripped, 2958 fns) | MSVC | Full SQL engine, sweep **30/30** (`:memory:` + on-disk): CRUD, JOIN, GROUP BY, window functions, CTE, index, JSON, triggers |
+| **NASM 2.16.01** (1.5 MB, stripped) | MSVC | `-f elf` / `-f win32` / `-f bin` / `-f obj` objects **bit-identical to Wine** |
+| **busybox-w32** (stripped) | mingw | sweep **60/60**: `cksum`/`md5sum`/`sha1sum`/`sort`/`grep`/`sed`/`awk`/`tr`/… |
+| **strings.exe** (Sysinternals, static-CRT C++) | MSVC | **100% bit-identical to Wine**, version banner included |
 
-The loop, the `if`/`else`, and both conditions are recovered from raw machine
-code. Use `--flat` for the lower-level goto-based form.
+Plus a committed **gauntlet** of 21 varied PEs (`bench/gauntlet/`) at 21/21
+functional, and a **WebAssembly** target (PE → WASM, 7/7 fixtures) proving the
+same lift retargets to a genuinely different backend.
 
+---
 
-### Measured results (north-star metric)
+## How correctness is enforced — the differential oracle suite
 
-Recompilability (level 1) and differential equivalence (level 2) on real code:
+ARET's credibility is its verification layer. Nothing ships without an oracle,
+and an unmodelled path makes the oracle *skip* (never a false pass):
 
-| Binary | Recompiled |
+| Oracle | Proves | 
 |---|---|
-| gzip (ELF, stripped) | 131/131 (100%) |
-| ls / cat / sha256sum / base64 | 100% |
-| MightyQuest.exe (27 MB game) | 100% (sampled) |
+| **cpudiff** (Unicorn) | each lifted instruction matches a real CPU (registers + flags + memory) over thousands of states; plus generative 2–3-instruction sequences |
+| **funcdiff** (Unicorn) | a whole recovered function's lift, and that the SSA + optimisation passes preserve semantics — **0 divergence** across ~20.6k scored functions |
+| **difftest** | the decompile pipeline, O0→O3 (**272/272**) |
+| **difftest_transpile** | the transpile pipeline is a byte-stable product (a behavioural hash) |
+| **winediff** | OS-API behaviour bit-for-bit vs Wine (**169/169**) |
+| **DIB-hash / Xvfb** | GDI primitives are pixel-exact vs Wine; the window→GDI→SDL pipeline composes on a real screen |
+| **Z3 / SMT** | rewrite-rule equivalence |
 
-Differential equivalence (recompiled vs original on random inputs): **16/16**
-corpus functions, including pointer/array/loop/string code. Z3 is available in
-this environment (`pip install z3-solver`) for the planned level-3 SMT proofs.
+A divergence is a *proven* bug; a match is a *proven* correction. This is what
+lets the project move fast without regressing — `bench/regression.sh` gates every
+change.
+
+---
+
+## What the native runtime covers
+
+The high-level-emulation layer (`runtime/aret_hle/`) re-implements the Windows
+surface natively, in C, statically linked into the output (so the result needs
+no Wine, no DLLs):
+
+- **CPU**: full x86-32 integer + flags (width-aware), x87 FPU (static depth pass
+  **and** a sound runtime FPU net), SSE/SSE2 scalar + packed, string ops.
+- **kernel32 / msvcrt**: files, `printf`/`scanf` (incl. `%I64`), heap, locale &
+  codepage, an in-memory registry, time, `setjmp`/`longjmp`.
+- **Threads** — real **cooperative fibers** (`ucontext`): `CreateThread`,
+  critical sections, events, mutexes, semaphores, per-fiber TLS, deterministic
+  round-robin scheduling (so the differential oracle stays valid). No data races
+  by construction; WASM aborts soundly where `ucontext` is absent.
+- **SEH**: `RaiseException`, `RtlUnwind`, and hardware faults (SIGSEGV→dispatch)
+  routed through the real `fs:[0]` chain.
+- **GUI**: USER32/GDI with **visible SDL2 windows**, a `WM_PAINT` model, and
+  **FreeType text rendering that is pixel-identical to Wine** (Wine rasterises
+  with FreeType too). Native dialogs and controls paint on screen.
+- **DLL lifting** (`--with-dll`): a real system DLL (e.g. Wine's `comctl32.dll`)
+  is lifted through the *same* pipeline as the app — its controls are proven
+  code (cpudiff/funcdiff) on top of the HLE gdi32, the purest form of the
+  doctrine. Real comctl32 controls (progress bar, image list) run bit-identical
+  to Wine.
+
+---
 
 ## Usage
 
 ```bash
-cargo build --release
+cargo build --release        # needs gcc-multilib (32-bit) to build the stack model
 
-aret <binary>                       # structured pseudo-C (default)
-aret <binary> --flat                # flat goto-based pseudo-C
-aret <binary> --mode info           # format, arch, sections, symbols
-aret <binary> --mode asm            # disassembly listing
-aret <binary> --mode cfg            # control-flow graph + call edges
-aret <binary> --function <name|hex> # restrict to one function
-aret <binary> -o out.c              # write to a file
-aret <binary> --split out_dir/      # one .c per function + index.csv
-aret <binary> --mode transpile --run # transpile to a NATIVE binary and run it
+# Transpile a Windows PE to a native ELF and run it:
+aret program.exe --mode transpile --out-dir out/ --run
+
+# Retarget the same lift to WebAssembly:
+aret program.exe --mode transpile --target wasm --out-dir out/ --run
+
+# Lift a system DLL alongside the app:
+aret app.exe --with-dll comctl32.dll=/path/to/comctl32.dll --mode transpile --run
+
+# Static coverage map before running (unmodelled instructions / missing imports):
+aret program.exe --mode walls
+
+# Decompiler mode (machine code → readable pseudo-C):
+aret program.exe            # structured (if/while); --flat for goto form
+aret program.exe --mode asm | --mode cfg | --function <name|hex>
 ```
 
-### Transpilation (UBT) — running a foreign binary natively
+Verification harnesses live in `bench/` (`regression.sh` is the unified gate;
+`winediff.sh`, `funcdiff.sh`, `difftest*.sh`, `sqlite_sweep.sh`, … the
+per-axis ones). Building the PE fixtures and running `winediff` needs
+`gcc-mingw-w64-i686` and a 32-bit Wine.
 
-Beyond decompiling, ARET has the first end-to-end slice of a **Universal Binary
-Transpiler**: it takes a Windows PE, intercepts its OS API imports into a native
-High-Level-Emulation (HLE) shim layer, and recompiles the result into a *native*
-Linux ELF (no emulator, no Wine):
+---
 
-```bash
-aret tests/m1/fixtures/hello_win32.exe --mode transpile --run
-#   --- program output ---
-#   | Hello from Windows, running native on Linux
+## Architecture
+
+```
+src/loader      PE/ELF/Mach-O parsing, multi-module loader (DLL lifting)
+src/analysis    function & CFG recovery, jump/pointer tables, FLIRT
+src/ir/lift     per-instruction x86 → typed SSA IR (explicit CPU flags)
+src/ir/build    shared-stack call model (esp by value, ebp threaded), callee-pops
+src/ssa,opt     SSA construction + optimisation passes
+src/emit        C (structured.rs) and LLVM (llvm.rs) backends; WASM via C
+src/cpudiff     Unicorn-backed differential oracles
+runtime/aret_hle  the native HLE: aret_hle.c / aret_crt.c / aret_win32.c
 ```
 
-It also resolves imports called indirectly through a register
-(`mov reg,[iat]; call reg`) and includes a **Memory Layout Mapper** that places
-the binary's data sections back at their original virtual addresses, so programs
-that reference global data (strings/tables in `.rdata`/`.data`) by absolute
-address run correctly:
+The design, methodology, and full state live in
+[`docs/vision/`](docs/vision/) — start with
+[`70-reference-etat-methode-reste.md`](docs/vision/70-reference-etat-methode-reste.md)
+(the single reference document) and
+[`80-orientations-architecturales.md`](docs/vision/80-orientations-architecturales.md)
+(design of the large in-flight work: fibers, DLL lifting, SEH).
 
-```bash
-aret tests/m1/fixtures/hello_globals.exe --mode transpile --run
-#   | M2: first global string in .rdata
-#   | M2: second global, mapped at its original VA
-```
+---
 
-Multi-function programs work too: a **shared machine stack** lets arguments cross
-internal calls, whether passed on the stack (cdecl/stdcall) or in registers
-(gcc `-O1` regparm / `__fastcall`). This lowering is gated behind a flag, so the
-`verify`/`decompile` paths and their differential-equivalence results are
-unchanged:
+## The honest hard limit
 
-```bash
-aret tests/m1/fixtures/hello_stackargs.exe --mode transpile --run
-#   | M3: argument arrived via the shared STACK
-```
-
-The HLE layer (`runtime/aret_hle/`) also shims the C runtime — including a
-**variadic `printf`** that reads its arguments from the shared stack and reuses
-native `snprintf` for each conversion — so console programs that use `printf` /
-`malloc` / `strlen` run natively:
-
-```bash
-aret tests/m1/fixtures/hello_printf.exe --mode transpile --run
-#   | M4: int=42 hex=0xff str=hello char=Z pct=%
-#   | M4: malloc sum=100
-```
-
-A **filesystem subsystem** translates Windows paths (`C:\dir\file` →
-`$ARET_PREFIX/drive_c/dir/file`) and maps Win32/CRT file I/O onto POSIX, so a
-program that reads/writes files through `C:\` paths works:
-
-```bash
-ARET_PREFIX=/tmp/aretfs aret tests/m1/fixtures/hello_file.exe --mode transpile --run
-#   | FS: round-trip through a C:\ path        # file lands at /tmp/aretfs/drive_c/...
-```
-
-The vision, design notes, and milestone roadmap live in
-[`docs/vision/`](docs/vision/) (start with `00-SYNTHESE-roadmap-UBT.md`). The HLE
-runtime is in [`runtime/aret_hle/`](runtime/aret_hle); the backend builder is in
-`src/builder/`. Requires a 32-bit native toolchain (`gcc-multilib`) to build the
-32-bit stack model; `gcc-mingw-w64-i686` to regenerate the PE fixtures.
-
-## Roadmap (the honest path to "real and powerful")
-
-Done: control-flow structuring (`if`/`while`), frame-variable recovery
-(args/locals), branch-condition recovery, cdecl call-site argument recovery,
-prologue/epilogue cleanup, prologue-scan coverage, large-binary scaling,
-global liveness + dead-code elimination + single-use expression propagation.
-
-### Next: a typed SSA IR
-
-See [`ROADMAP.md`](ROADMAP.md) for the full technical plan (typed SSA IR →
-optimisation passes → type inference → high-level construct recovery →
-compilable C → a verified recompile/equivalence loop → an LLM naming layer).
-
-The central insight from that review: the current text-based IR is the
-architectural ceiling — real constant folding, propagation across branch joins,
-and type inference all need an expression-tree + SSA IR. That migration has
-started, **in parallel** with the working text pipeline (so nothing regresses):
-
-- `src/cfg/dom.rs` — shared dominators / post-dominators / **dominance
-  frontiers** (Cytron), for φ-node placement; the structurer now uses it.
-- `src/ir/types.rs` — the typed SSA IR (`Expr`/`Stmt`/`Ty`/`Location`/`ValueId`,
-  explicit CPU flags), the foundation the rest of the roadmap builds on.
-
-- `src/ir/lift.rs` — lifts instructions to typed IR via `iced-x86`'s structured
-  operand API, with explicit flag definitions (`Stmt::Asm` fallback for the
-  rest, so output is never silently wrong).
-- `src/ssa/mod.rs` — SSA construction (Cytron φ-placement + renaming).
-- `src/ir/build.rs` — builds the IR CFG from a recovered function and runs the
-  whole chain; inspect it with `aret <binary> --mode ir --function <name>`
-  (machine code → typed SSA IR with φ-nodes, verified on real binaries).
-
-Immediate next steps: SCCP (sparse conditional constant propagation + dead
-branch elimination) and DCE on the SSA, then recovering branch conditions from
-the flag definitions, then an IR→C emitter at parity with the text pipeline.
-4. **`switch`/jump-table recovery** and full indirect-call resolution via
-   vtable analysis (names the indirect call sites, not just the targets).
-5. **Library/CRT signature matching** (FLIRT-style) to name known functions and
-   skip runtime boilerplate.
+The triple *"**any** binary + 100% functional + 100% pure native"* is provably
+impossible in general (undecidability — the halting family). What ARET actually
+achieves is: **genuinely compiled software → fully functional native**, and the
+theoretically-impossible residue **signals itself** with a named abort. The
+finality and the guarantee are unchanged whether a mechanism is hand-written or a
+reused, verified brick (Wine as oracle, Unicorn, LLVM) — those only change how
+fast we get there, never the soundness contract.
 
 ## License
 
