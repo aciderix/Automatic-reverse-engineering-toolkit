@@ -4225,4 +4225,23 @@ Détail : **70 §6** (roadmap). Résumé :
   de FishTank) ; **B** = EH C++ (`_CxxThrowException`/`__CxxFrameHandler`) pour les TRY/CATCH de MFC ; **C** = `__except_handler3`
   réel (scope-table SEH). Mesurer après chaque brique (souvent A suffit à faire tomber le mur suivant). Chantier **multi-sessions**.
 
+### 2026-07-24 — [GUI][HLE-WIN32] **MFC brick A : hook WH_CBT déclenché → l'`OnInitDialog` de FishTank s'exécute**
+- **Brick A du chantier MFC.** `SetWindowsHookEx` n'était qu'un stub → le hook **`WH_CBT`** que MFC pose pour attacher/subclasser
+  ses `CWnd` ne se déclenchait jamais → `AfxDlgProc` ne routait pas `WM_INITDIALOG` vers `CDialog::OnInitDialog`. **Implémenté** :
+  le hook proc est stocké par idHook ; **`WH_CBT` est délivré** — `HCBT_CREATEWND` (avec `CBT_CREATEWND`+`CREATESTRUCTA` guest)
+  est déclenché pour chaque fenêtre créée via `CreateWindowEx` **et** pour la fenêtre de dialogue (`u32_dialog_create`), **avant**
+  `WM_NCCREATE`/`WM_INITDIALOG`. Le subclassing `GWL_WNDPROC` marchait déjà → le filtre MFC re-route le wndproc et attache le `CWnd`.
+- **Fix composite associé (mesuré via FishTank)** : une classe prédéfinie connue (button/edit/combo…) est composée par **son
+  apparence système même quand elle est SUBCLASSÉE** (MFC `DDX_Control`). Piloter le `WM_PAINT` du subclass ne peignait rien (une
+  **boîte noire**) car le « proc original » sauvé de nos contrôles système est un stub non-peignant. Seul un contrôle vraiment
+  non-standard (comctl32 lifté) se peint via `WM_PAINT`. La boîte noire sur le combo « Tank Size » subclassé a disparu.
+- **Vérif** : fixture `winecorpus/user32_cbthook` (installe un hook `WH_CBT`, subclasse la fenêtre au `HCBT_CREATEWND`, le proc
+  subclassé reçoit les messages) = `hooked=1 sub_msgs_positive=1 win=1` **bit-identique Wine**. **Démontré sur FishTank.exe (MFC)** :
+  `OnInitDialog` **s'exécute** — le combo Water Type affiche **« Tropical Freshwater »** et les edits Length/Width/Height affichent
+  **« 0 »** (étaient vides), aucun artefact noir. **Portes** : winediff **170/171** (`user32_cbthook` vert, seul rouge `gdi_uifont`),
+  difftest 272/272, hash `19acad982194bf07` inchangé. Committé + poussé.
+- **Reste FishTank (raffinements mesurés, suite)** : les **points des radios** (Rectangular / in.,gal.,lb.) et le texte **« Custom… »**
+  du combo Tank Size ne s'affichent pas encore (MFC les pose par un chemin — DDX/CheckRadioButton — pas encore reflété). Bricks B
+  (EH C++) / C (`__except_handler3`) mesurés au besoin ensuite.
+
 <!-- NOUVELLES ENTRÉES ICI (garder l'ordre chronologique, plus récent en bas) -->
