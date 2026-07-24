@@ -4099,4 +4099,50 @@ Détail : **70 §6** (roadmap). Résumé :
   **abort sound** (remplissage non reproduit bit-exact). **Portes** : winediff **168→169**, hash `19acad982194bf07` **inchangé**,
   difftest 272/272, table triée, socle comctl32 **toujours 0**. **Suite** : intégration in situ (contrôle comctl32 lifté à l'écran).
 
+### 2026-07-24 — [LIFT][RECOV] **Bug MISCOMPILE : appel indirect d'import → mauvais shim (reset held par bloc)**
+- **Découvert en poussant l'intégration GUI** (faire peindre un contrôle comctl32 lifté à l'écran) : un vrai binaire fenêtré
+  (`mv_A`, fenêtre user32 pure) **crashait** (`0xC0000005`) là où Wine tourne. Diagnostic au débogueur (`-O0 -g` + gdb, recette
+  doc 70 §7) : `chunk_0.c` store vers `v183` invalide ; `v183` dérivé d'un appel dont **la boucle de messages appelait
+  `aret_GetModuleHandleA` au lieu de `aret_PeekMessageA`** (`aret_PeekMessageA` apparaissait **0 fois**).
+- **Cause racine** (`src/ir/build.rs`, passe de nommage des appels indirects d'imports) : la map `held` (registre→import, pour
+  `mov reg,[IAT]; call reg`) était threadée **linéairement à travers tous les blocs en ordre de STOCKAGE** (≠ ordre
+  d'exécution/dataflow), **sans reset aux frontières de bloc ni fusion aux jointures**. Un mapping périmé `reg→importA` d'un bloc
+  antérieur **fuyait** dans un bloc ultérieur qui chargeait `importB` dans ce registre → `call reg` mal résolu.
+- **Fix** : **reset de `held` par bloc** — scan avant en ligne droite, valable **seulement dans un bloc** (où il est fiable). Un
+  appel d'import tenu-en-registre qui **franchit une frontière de bloc** reste **indirect** : au runtime il dispatche via le
+  **jeton-auto du slot IAT** (bon shim) — sound, juste pas nommé statiquement. **Portes** : difftest **272/272**, hash
+  `19acad982194bf07` **inchangé** (chirurgical — les fonctions de référence n'ont pas le motif), funcdiff **0 divergence**
+  (20558 scorées), winediff **168/169** (seul `gdi_uifont` env). Vraie correction de justesse **générale** (tout
+  `mov reg,[IAT]; call reg` inter-bloc), sortie par l'intégration. *(Fausse piste écartée : un « fix de pop » ajoutant les slots
+  IAT à `__aret_callee_pop` **double-poppait** les `call [iat]` (déjà poppés par la passe per-insn) et cassait `gdi_drawtext` —
+  reverté ; le reset par-bloc seul suffit, le retaddr des indirects s'équilibre déjà.)*
+
+### 2026-07-24 — [GUI][HLE-WIN32] **Pipeline visuel prouvé : fenêtre Win32 peinte à l'écran X (+ fond par défaut)**
+- **Environnement de capture débloqué** (le redémarrage conteneur avait cassé l'affichage SDL) : (1) **renderer SDL software**
+  obligatoire — le défaut `opengl` se crée mais **ne s'affiche pas sur Xvfb** (pas de GPU/GLX) ⇒ `SDL_RENDER_DRIVER=software` ;
+  (2) **capturer la RACINE** (`import -window root`) — une fenêtre SDL sans window-manager ne se capture pas individuellement
+  (fond noir). Diagnostiqué par un test SDL natif minimal : `renderer name: opengl` → noir ; software → la racine montre les
+  pixels. ⇒ **une fenêtre Win32 d'un PE transpilé en ELF natif peint réellement à l'écran X** (fenêtre bleue `custom WM_PAINT`
+  vérifiée `srgb(20,110,210)`).
+- **Fix `DefWindowProc(WM_PAINT)` = efface le fond de classe** (`u32_erase_window_client`) : le vrai DefWindowProc fait
+  BeginPaint/EndPaint → efface (WM_ERASEBKGND) ; le nôtre ne faisait que valider → une fenêtre **sans handler de peinture**
+  affichait un client **noir**. Corrigé → elle montre son fond (COLOR_BTNFACE = gris 192, vérifié à l'écran). Runtime-only (hash
+  inchangé), winediff **168/169** (les fixtures à WM_PAINT custom ne passent pas par ce chemin ⇒ pas de régression).
+- **RESTE pour la progress bar** : un **contrôle enfant** comctl32 ne **compose pas** ses pixels dans le framebuffer du parent
+  (ce chemin existe pour les **dialogues** via `u32_dialog_composite`, pas pour un parent+enfant simple). Prochain morceau :
+  router le DC de l'enfant vers le framebuffer de l'**ancêtre** avec offset de viewport + clip, puis présenter l'ancêtre.
+
+### 2026-07-24 — [HANDOFF] **Note pour le successeur (si compression de contexte)**
+- **Reprise** : relis le **doc 70 EN ENTIER** et le **doc 80 EN ENTIER** ; relis les **dernières entrées du doc 71** + les
+  **derniers commits** ; **énumère toutes les règles de travail** (principe sacré §0, doctrine §1, méthode §2, doc 80 §3 — elles
+  sont et resteront **incontournables**) ; **fais le point**, puis **poursuis**.
+- **État** : socle comctl32 **complet** (71→0) + durcissement ; **bug 2 (miscompile indirect-import) corrigé** ; pipeline visuel
+  **prouvé** (fenêtre peinte à l'écran, fond par défaut). **Portes vertes** : difftest 272/272, hash `19acad982194bf07`, funcdiff
+  0 div, winediff 168/169 (`gdi_uifont` env). Tout est **poussé** sur `claude/zen-hamilton-6pi1k4`.
+- **Suite ordonnée (demandée par l'utilisateur)** : (1) **composite enfant** (progress bar comctl32 à l'écran — DC enfant→
+  framebuffer ancêtre, offset+clip, vérifié vs Wine) ; (2) **FishTank.exe** (dialogue à contrôles natifs — le composite de
+  dialogue existe déjà, donc mesurer d'abord ce qui s'affiche avant de coder). ⚠️ **Toujours committer AVANT les vérifs
+  longues** (winediff/funcdiff) — le conteneur est éphémère (leçon vécue : un durcissement non-commité perdu au reset).
+  ⚠️ Capture GUI = **renderer software + capture racine** ; échantillonner un pixel **dans** la fenêtre (elle est à `100,100`).
+
 <!-- NOUVELLES ENTRÉES ICI (garder l'ordre chronologique, plus récent en bas) -->
