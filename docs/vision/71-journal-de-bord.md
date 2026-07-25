@@ -4272,4 +4272,16 @@ Détail : **70 §6** (roadmap). Résumé :
   reste** : les **points des radios** (Rectangular / in.,gal.,lb.) — MFC n'envoie **jamais** `BM_SETCHECK` (0 mesuré) → le chemin
   `DoDataExchange`/`DDX_Radio` ne s'exécute pas (brick B / EH C++ ou mur API interne). Tâche #17 (radios) reste ouverte.
 
+### 2026-07-24 — [HLE-WIN32] **Diagnostic précis des points de radio FishTank : DDX_Radio gate sur WS_TABSTOP=0**
+- **Suite #17** (le combo Tank Size est réglé ; reste les points des radios). **Trace définitive** : `DoDataExchange`/`DDX_Radio`
+  **s'exécute bien** (35 appels `GetWindow(GW_HWNDNEXT)` = la marche de groupe de DDX_Radio, tracés). Mais nos radios de dialogue
+  sont des `BS_AUTORADIOBUTTON` avec **`WS_TABSTOP=0`** (styles `0x50000009` / `0x50020009` avec `WS_GROUP`). Or `DDX_Radio`
+  **conditionne l'envoi de `BM_SETCHECK` sur `WS_TABSTOP`** → chaque radio est sauté → **0 `BM_SETCHECK`** → aucun point (mesuré).
+  Également trouvé : **`WM_GETDLGCODE` (0x0087) non géré** (DDX/PrepareCtrl l'interroge) → tâche dédiée.
+- **Prochaine MESURE (pas une supposition, règle §0)** : une fixture dialogue (DLGTEMPLATE mémoire ou .rc) avec un groupe de radios
+  **sans `WS_TABSTOP`** → sous Wine, `GetWindowLong(GWL_STYLE)` rapporte-t-il `WS_TABSTOP` (le gestionnaire de dialogue l'ajoute-t-il ?)
+  et la marche façon DDX_Radio coche-t-elle le radio ? Si Wine diffère d'ARET sur ce bit → corriger notre création de contrôle de
+  dialogue pour matcher ; si identique → l'état « coché » de Wine vient d'un autre chemin (à investiguer). **Ne pas deviner-ajouter
+  `WS_TABSTOP`.** Le reste du dialogue FishTank (combos + edits) = **peuplé comme Wine**.
+
 <!-- NOUVELLES ENTRÉES ICI (garder l'ordre chronologique, plus récent en bas) -->
