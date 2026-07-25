@@ -1,0 +1,17 @@
+#include <windows.h>
+
+#define IDD  101
+#define IDR0 201
+#define IDR1 202
+#define IDR2 203
+
+IDD DIALOG 0, 0, 120, 80
+STYLE WS_POPUP | WS_CAPTION
+CAPTION "radio"
+BEGIN
+    /* CONTROL (not AUTORADIOBUTTON) so no WS_TABSTOP is added; first radio starts the
+       group with WS_GROUP — exactly the FishTank radio-group shape. */
+    CONTROL "R0", IDR0, "BUTTON", BS_AUTORADIOBUTTON | WS_GROUP | WS_CHILD | WS_VISIBLE, 10, 10, 80, 12
+    CONTROL "R1", IDR1, "BUTTON", BS_AUTORADIOBUTTON | WS_CHILD | WS_VISIBLE, 10, 25, 80, 12
+    CONTROL "R2", IDR2, "BUTTON", BS_AUTORADIOBUTTON | WS_CHILD | WS_VISIBLE, 10, 40, 80, 12
+END
