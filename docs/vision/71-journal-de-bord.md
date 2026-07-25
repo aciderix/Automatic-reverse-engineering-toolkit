@@ -4646,4 +4646,20 @@ Détail : **70 §6** (roadmap). Résumé :
 - **Portes** : hash transpile `19acad982194bf07` **inchangé**, ehdiff **4/4**, difftest/winediff (confirmés inchangés). Committé + poussé.
 - **Reste brick B** : rethrow (`throw;` nu), catch-by-value avec copy-ctor non trivial, driver réel WinZip `WZ32.DLL` (v1), MFC.
 
+### 2026-07-25 — [EH] **Brick B — bornage : rethrow & driver réel = CRT statiquement liée (prochain jalon identifié)**
+- **Rethrow non fixturable** : `throw;` nu re-lève l'exception **courante** (MSVC : `_CxxThrowException(NULL,NULL)` lit l'état
+  par-thread de la CRT). Le harnais minimal (`mainCRTStartup`, **sans init CRT**) ne l'initialise pas → **Wine lui-même faute**
+  (page fault) sur la fixture. Donc rethrow n'est pas testable ainsi (l'oracle crashe) ; il faut la vraie CRT / le driver réel.
+- **Driver réel = découverte architecturale majeure** : `WZSEPE32.EXE` (auto-extracteur WinZip, 203 Ko) **utilise bien le C++ EH
+  v1** (magic `0x19930520`, 2 régions mesurées) **MAIS la CRT est liée statiquement** — `__CxxFrameHandler`/`_CxxThrowException`
+  sont **dans le `.text`**, PAS des imports (173 imports = kernel32/user32/gdi32 GUI, zéro runtime EH). Conséquence : le modèle
+  HLE gaté-sur-import de brick B **ne s'engage pas** sur ces binaires — le throw/dispatch est du **code lifté interne**, pas routé
+  vers le HLE. C'est cohérent avec doc 80 §1.3 (« driver réel = multi-sessions »).
+- **Prochain jalon brick B (précisé)** : **reconnaissance FLIRT de la CRT EH statiquement liée** (`_CxxThrowException` /
+  `__CxxFrameHandler[3]` internes) → routage vers le HLE, exactement la doctrine memmove/libm (§4.4/§4.2 : reconnaître par
+  signature **prouvée** vs Unicorn, emballer « correct ou abort »). C'est un chantier distinct (signatures version-spécifiques +
+  ABI d'appel interne + gate élargi au-delà de l'import). La base fixturée (runtime EH **importé**) est, elle, **complète et
+  bit-identique Wine** (throw/catch, destructeurs, multi-frames). Binaires réels disponibles : scratchpad `wz/` (WZ32.DLL v1 66
+  régions, WZSEPE32.EXE v1 2 régions).
+
 <!-- NOUVELLES ENTRÉES ICI (garder l'ordre chronologique, plus récent en bas) -->
