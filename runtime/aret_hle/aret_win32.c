@@ -3858,8 +3858,8 @@ static uint32_t u32_dialog_create(uint32_t esp, const uint8_t *tpl, uint32_t dlg
         /* Windows sends WM_SETFONT(dialog font) to each control at dialog init; mirror
          * it so a control paints its caption in the dialog font (the app may override). */
         if (hc && dfont) g_u32_win[hc - 1].ctrl_font = dfont;
-        /* Default keyboard focus = the first EDIT (the app's WM_INITDIALOG may SetFocus). */
-        if (hc && !g_u32_focus && !strcasecmp(cclass, "edit")) g_u32_focus = hc;
+        /* Keyboard focus is set AFTER WM_INITDIALOG by u32_dialog_default_focus (first
+         * tab-stop), the way the real dialog manager does it — not guessed at create time. */
     }
 #ifdef ARET_HAVE_SDL
     /* If the template is WS_VISIBLE, the window auto-showed during u32_window_create —
@@ -3893,6 +3893,18 @@ static uint32_t u32_dlg_item(uint32_t hDlg, int id) {
     return 0;
 }
 
+/* After WM_INITDIALOG returns TRUE, the Win32 dialog manager gives the keyboard focus
+ * to the first tab-stop control (GetNextDlgTabItem(hDlg, NULL, FALSE)) and fires
+ * WM_SETFOCUS — matching Wine. A FALSE return means the DLGPROC set focus itself, so we
+ * leave it. u32_set_focus / u32_next_dlg_item are defined later in the file. */
+static uint32_t u32_set_focus(uint32_t esp, uint32_t neu);
+static uint32_t u32_next_dlg_item(uint32_t hDlg, uint32_t cur, int prev, int tab);
+static void u32_dialog_default_focus(uint32_t esp, uint32_t hDlg, uint32_t initret) {
+    if (!initret) return;                                  /* DLGPROC set focus itself */
+    uint32_t first = u32_next_dlg_item(hDlg, 0, 0, 1);     /* first visible+enabled tab-stop */
+    if (first) u32_set_focus(esp, first);
+}
+
 /* Modal dialog core (shared by DialogBoxParam and DialogBoxIndirectParam — they
  * differ only in where the DLGTEMPLATE comes from): create, WM_INITDIALOG, pump until
  * EndDialog, return the EndDialog result. */
@@ -3903,7 +3915,8 @@ static uint32_t u32_dialog_modal(uint32_t esp, const uint8_t *tpl, uint32_t dlgp
     uint32_t hDlg = u32_dialog_create(esp, tpl, dlgproc, parent);
     if (!hDlg) return (uint32_t)-1;
     g_u32_modal_hwnd = hDlg; g_u32_modal_ended = 0; g_u32_modal_result = 0;
-    u32_call_wndproc(esp, dlgproc, hDlg, U32_WM_INITDIALOG, 0, param);
+    uint32_t initret = u32_call_wndproc(esp, dlgproc, hDlg, U32_WM_INITDIALOG, 0, param);
+    if (!g_u32_modal_ended) u32_dialog_default_focus(esp, hDlg, initret);
     while (!g_u32_modal_ended) {
         u32_pump_timers();
 #ifdef ARET_HAVE_SDL
@@ -3934,7 +3947,8 @@ static uint32_t u32_dialog_modeless(uint32_t esp, const uint8_t *tpl, uint32_t d
     if (!tpl || !dlgproc) return 0;
     uint32_t hDlg = u32_dialog_create(esp, tpl, dlgproc, parent);
     if (!hDlg) return 0;
-    u32_call_wndproc(esp, dlgproc, hDlg, U32_WM_INITDIALOG, 0, param);
+    uint32_t initret = u32_call_wndproc(esp, dlgproc, hDlg, U32_WM_INITDIALOG, 0, param);
+    u32_dialog_default_focus(esp, hDlg, initret);
     return hDlg;
 }
 /* DialogBoxParamA(hInst, lpTemplate, hWndParent, lpDialogFunc, dwInitParam) -> INT_PTR.
@@ -5247,11 +5261,16 @@ static void u32_combobox_paint(uint32_t hdc, int wi) {
     if (!bm || d < 0) return;
     int w = g_u32_win[wi].w, h = g_u32_win[wi].h;
     int fh = h < 21 ? h : 21;                      /* closed field height */
+    /* A focused CBS_DROPDOWNLIST shows its selection highlighted (COLOR_HIGHLIGHT field
+     * + COLOR_HIGHLIGHTTEXT), like Wine; unfocused it is COLOR_WINDOW + COLOR_WINDOWTEXT. */
+    int focused = (g_u32_focus == (uint32_t)(wi + 1));
     u32_ctrl_fill(bm, w, h, u32_syscolor(15 /*COLOR_3DFACE*/));  /* area below the field */
-    for (int y = 0; y < fh; y++) for (int x = 0; x < w; x++) gdi_put(bm, x, y, u32_syscolor(5 /*COLOR_WINDOW*/));
+    uint32_t fieldc = focused ? u32_syscolor(13 /*COLOR_HIGHLIGHT*/) : u32_syscolor(5 /*COLOR_WINDOW*/);
+    for (int y = 0; y < fh; y++) for (int x = 0; x < w - 17; x++) gdi_put(bm, x, y, fieldc);
+    for (int y = 0; y < fh; y++) for (int x = w - 17; x < w; x++) gdi_put(bm, x, y, u32_syscolor(5 /*COLOR_WINDOW*/));
     int32_t r2[4] = { 2, 0, w - 18, fh };
     u32_paint_text(hdc, d, g_u32_win[wi].ctrl_font, u32_items_get(wi, g_u32_win[wi].cur_sel), r2,
-                   0x4u | 0x20u /*DT_VCENTER|DT_SINGLELINE*/, 8 /*COLOR_WINDOWTEXT*/);
+                   0x4u | 0x20u /*DT_VCENTER|DT_SINGLELINE*/, focused ? 14 /*HIGHLIGHTTEXT*/ : 8 /*WINDOWTEXT*/);
     int32_t br[4] = { w - 17, 0, w, fh };
     u32_drawedge(bm, br, 0x5 /*EDGE_RAISED*/, 0xFu | 0x800u | 0x1000u);   /* drop button bevel */
     int ax = w - 9, ay = fh / 2 - 1; uint32_t tx = u32_syscolor(8);       /* down arrow */
@@ -6831,6 +6850,13 @@ static uint32_t u32_set_focus(uint32_t esp, uint32_t neu) {
     g_u32_focus = neu;
     if (old) { uint32_t wp = u32_win_wndproc(old); if (wp) u32_call_wndproc(esp, wp, old, 0x0008u /*WM_KILLFOCUS*/, neu, 0); }
     if (neu) { uint32_t wp = u32_win_wndproc(neu); if (wp) u32_call_wndproc(esp, wp, neu, 0x0007u /*WM_SETFOCUS*/, old, 0); }
+    /* Repaint the controls that lost/gained focus so their focus-state rendering updates
+     * (a CBS_DROPDOWNLIST highlights its selection, a button/radio shows/hides its focus
+     * rect) — as Windows repaints on focus change. Recompositing a dialog child repaints
+     * the whole dialog, so one call covers both when they share a parent. */
+    if (old) u32_ctrl_recomposite(esp, (int)old - 1);
+    if (neu && (!old || g_u32_win[neu - 1].parent != g_u32_win[old - 1].parent))
+        u32_ctrl_recomposite(esp, (int)neu - 1);
     return old;
 }
 uint32_t aret_SetFocus(uint32_t esp) { return u32_set_focus(esp, WU(0)); }
