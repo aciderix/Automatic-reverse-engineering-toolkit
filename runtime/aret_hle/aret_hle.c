@@ -3276,9 +3276,10 @@ static int aret_cxx_type_matches(uint32_t pCatchType, const uint32_t *cta) {
 }
 /* Would unwinding this frame from state `from` down to (excl.) `to` run any destructor?
  * The UnwindMap is an array of {int toState; void *action} indexed by state; a non-null
- * action is a destructor funclet the real unwind would call. We do NOT yet run C++ unwind
- * destructors — so if the throw's path would invoke one, we must ABORT loudly (never skip a
- * destructor silently and present the result as correct). `from > to` walks the toState chain.*/
+ * action is a destructor funclet the real unwind would call. Used on the propagation
+ * (no-catch) path, which we do NOT yet fully model — so if a frame the exception passes
+ * through would run a destructor, we ABORT loudly (never skip it silently). `from > to`
+ * walks the toState chain. */
 static int aret_cxx_unwind_has_dtor(const uint32_t *fi, int from, int to) {
     uint32_t pUnwind = fi[2]; int maxState = (int)fi[1];
     int s = from;
@@ -3288,6 +3289,25 @@ static int aret_cxx_unwind_has_dtor(const uint32_t *fi, int from, int to) {
         s = (int)ue[0];                                             /* toState */
     }
     return 0;
+}
+/* Run the C++ destructors for the states unwound from `from` down to (excl.) `to`, following
+ * the UnwindMap toState chain — mirrors Wine's cxx_local_unwind. Each UnwindMapEntry
+ * {toState, action} with action != 0 is a destructor funclet, called with the establisher ebp
+ * (frame + 0xc). frame->state is advanced BEFORE each call so a throw inside a destructor
+ * continues the unwind from the right point rather than re-running it. */
+static void aret_cxx_local_unwind(const uint32_t *fi, uint32_t framep, int from, int to) {
+    uint32_t pUnwind = fi[2]; int maxState = (int)fi[1];
+    uint32_t *pstate = &((uint32_t *)(uintptr_t)framep)[2];         /* frame->state @ +8 */
+    uint32_t ebp = framep + 0xc;
+    int s = from;
+    for (int g = 0; g < maxState + 2 && s != to && s >= 0; g++) {
+        const uint32_t *ue = (const uint32_t *)(uintptr_t)(pUnwind + (uint32_t)s * 8u);
+        int next = (int)ue[0]; uint32_t action = ue[1];
+        *pstate = (uint32_t)next;                                  /* advance state before the dtor */
+        if (action) aret_seh_funclet(action, ebp);
+        s = next;
+    }
+    *pstate = (uint32_t)to;
 }
 uint32_t aret_CxxFrameHandler3(uint32_t esp) {
     uint32_t recp = arg(esp, 0), framep = arg(esp, 1);
@@ -3314,15 +3334,16 @@ uint32_t aret_CxxFrameHandler3(uint32_t esp) {
             const uint32_t *ht = (const uint32_t *)(uintptr_t)(pH + h * 16u); /* HandlerType */
             uint32_t adj = ht[0], pCatchType = ht[1]; int dispObj = (int)ht[2]; uint32_t handlerVA = ht[3];
             if (!aret_cxx_type_matches(pCatchType, cta)) continue;
-            /* Entering this catch unwinds the frame from the current state down to the try's
-             * low state. If that would run a destructor we don't model, abort (sound). */
-            if (aret_cxx_unwind_has_dtor(fi, state, (int)tb[0]))
-                aret_unmodelled("C++ exception: destructor during catch unwind not modelled");
             if (dispObj) {                                           /* bind the catch parameter */
                 uint32_t *slot = (uint32_t *)(uintptr_t)(ebp + (uint32_t)dispObj);
                 if (adj & 0x08u) *slot = pObject;                    /* catch by reference: the pointer */
                 else *slot = *(const uint32_t *)(uintptr_t)pObject;  /* by value: the object's first word (fundamental) */
             }
+            /* Unwind this frame from the current state down to the try's low state, running the
+             * local destructors (Wine's cxx_local_unwind), then set the state to just past the
+             * try block, before transferring to the catch. */
+            aret_cxx_local_unwind(fi, framep, state, (int)tb[0]);
+            ((uint32_t *)(uintptr_t)framep)[2] = tb[1] + 1;         /* frame->state := tryHigh + 1 */
             g_seh_frame = framep; g_seh_handler_va = handlerVA; g_seh_ebp = ebp; g_seh_is_cxx = 1;
             aret_longjmp_do(framep, 1);                              /* -> establisher setjmp -> run the catch funclet */
             /* not reached */

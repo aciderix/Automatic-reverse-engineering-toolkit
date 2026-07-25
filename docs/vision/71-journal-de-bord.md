@@ -4613,4 +4613,19 @@ Détail : **70 §6** (roadmap). Résumé :
   (le driver FishTank). La base (throw/catch simple, types fondamentaux + classes par réf/valeur, multi-try + continuations) est
   **complète et bit-identique Wine**.
 
+### 2026-07-25 — [EH] **Brick B — destructeurs d'unwind C++ exécutés (local unwind) bit-identique Wine**
+- **Increment** : la garde d'abort « destructor during catch unwind not modelled » est **levée** — les destructeurs locaux
+  s'exécutent réellement pendant l'unwind. `aret_cxx_local_unwind(fi, framep, from, to)` reproduit `cxx_local_unwind` de Wine :
+  parcourt l'`UnwindMap` de l'état courant vers l'état cible (chaîne `toState`), avance `frame->state` **avant** chaque action
+  (un throw dans un destructeur reprend l'unwind au bon point), et appelle chaque destructeur non-nul via `aret_seh_funclet`
+  (ebp = `frame+0xc`). Appelé à l'entrée du catch (`state`→`tryLow`), puis `frame->state := tryHigh+1` (comme Wine).
+- **Oracle** : `bench/eh/throw_dtor.cpp` (destructeur à `printf` non-foldable) — Wine imprime `dtor` puis `r=42` ; **ARET
+  identique** (le destructeur s'exécute, dans l'ordre). Passe désormais du statut « oracle d'abort » à **égalité stricte**
+  (`.abort` retiré). ehdiff **3/3** en égalité.
+- **Garde restante (sound)** : `aret_cxx_unwind_has_dtor` conservée sur le **chemin de propagation** (frame traversée sans
+  catch) — un destructeur dans un frame **intermédiaire** multi-frames n'est pas encore lancé ⇒ abort bruyant (jamais sauté en
+  silence). Fixture multi-frames à ajouter avec cet incrément.
+- **Portes** : hash transpile `19acad982194bf07` **inchangé** (changement 100 % dans le chemin HLE C++ EH, gaté), ehdiff **3/3**,
+  difftest/winediff (confirmés inchangés — les binaires n'exercent pas le chemin `__CxxFrameHandler`). Committé + poussé.
+
 <!-- NOUVELLES ENTRÉES ICI (garder l'ordre chronologique, plus récent en bas) -->

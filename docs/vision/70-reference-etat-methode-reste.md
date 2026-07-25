@@ -822,10 +822,12 @@ SEH-establish — gate `uses_seh` élargi à `__CxxFrameHandler*` — + longjmp)
 l'adresse de reprise en eax ; `aret_seh_run` (branche `g_seh_is_cxx`) l'appelle puis `aret_call(continuation, …, ebp)` ; throw
 imbriqué re-longjmpe au même setjmp (boucle). **ebp funclet = `frame+0xc`** (`&frame->ebp` de Wine). **Récupération SOUND des
 funclets + continuations** par parse des tables EH du binaire (`analysis::cxx_eh_entries` — rien de deviné, prouvé par la
-métadonnée). **Destructeurs d'unwind non modélisés = abort sound** (`aret_cxx_unwind_has_dtor` scanne l'`UnwindMap` ; oracle
-`throw_dtor.cpp`+`.abort` : Wine `dtor`+`r=42`, ARET aborte). Portes : difftest **272/272**, hash **inchangé** (gaté sur l'import),
-ehdiff **3/3**. **Reste** : destructeurs d'unwind (lancer les funclets `UnwindMap`), rethrow, multi-frames, driver réel WinZip
-`WZ32.DLL` (v1 `__CxxFrameHandler`, mêmes offsets), MFC (FishTank).
+métadonnée). **Destructeurs d'unwind exécutés** (`aret_cxx_local_unwind` = `cxx_local_unwind` de Wine : parcourt l'`UnwindMap`,
+avance `frame->state` avant chaque action, appelle le funclet destructeur ebp=`frame+0xc` ; à l'entrée du catch `state`→`tryLow`
+puis `state:=tryHigh+1`) — oracle `throw_dtor.cpp` (dtor à `printf`) bit-identique Wine (`dtor`+`r=42`). Garde `aret_cxx_unwind_has_dtor`
+conservée sur le chemin de **propagation** (frame intermédiaire non-catchante multi-frames = pas encore lancée → abort sound).
+Portes : difftest **272/272**, hash **inchangé** (gaté sur l'import), ehdiff **3/3**. **Reste** : destructeurs multi-frames, rethrow,
+driver réel WinZip `WZ32.DLL` (v1 `__CxxFrameHandler`, mêmes offsets), MFC (FishTank).
 
 ### P3.9 — EH MSVC : brick C — `__except_handler3` réel (SEH scope-table) ✅ FAIT (2026-07-25)
 `__try/__except/__finally` MSVC bit-identique Wine (`bench/eh/seh_except.c` → `a=42 b=1 c=3 d=5 fin=110`). `aret_except_handler3`

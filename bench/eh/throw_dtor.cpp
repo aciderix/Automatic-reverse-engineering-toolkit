@@ -1,10 +1,8 @@
 /* C++ exception with a destructor whose side effect the optimizer cannot fold away (it
-   calls printf), so clang must emit a real UnwindMap destructor funclet that the unwind
-   runs. ARET does not yet model C++ unwind destructors, so rather than silently skip it
-   (which would drop the "dtor" line and present a wrong stdout as correct), the HLE
-   __CxxFrameHandler3 dispatch must ABORT loudly (sacred principle §0). Oracle: Wine prints
-   "dtor" then "r=42"; ARET must abort, never print "r=42" alone. Checked separately from the
-   ehdiff pass/fail set (which compares stdout equality) as an abort oracle. */
+   calls printf), so clang emits a real UnwindMap destructor funclet that the unwind runs.
+   ARET's __CxxFrameHandler3 dispatch runs the local destructors (aret_cxx_local_unwind,
+   mirroring Wine's cxx_local_unwind) before transferring to the catch. Oracle: Wine prints
+   "dtor" then "r=42"; ARET matches (the destructor's side effect appears, in order). */
 extern "C" __declspec(dllimport) int printf(const char*, ...);
 struct Guard { ~Guard() { printf("dtor\n"); } };
 struct E { int code; };
