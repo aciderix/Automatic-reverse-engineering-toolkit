@@ -3094,6 +3094,99 @@ uint32_t aret_RtlUnwind(uint32_t esp) {
     return retval;
 }
 
+/* Structured Exception Handling — the MSVC/clang scope-table handler `_except_handler3`.
+ *
+ * Every function with __try/__except/__finally installs one SEH frame whose handler is
+ * `_except_handler3`; the frame is the 4-word registration {prev, handler, scopetable,
+ * trylevel} on the machine stack, with the establisher's ebp just above it
+ * (ebp = &registration + 16). The SEH dispatch (RaiseException / a hardware fault) walks
+ * fs:[0] and calls this handler. It reads the frame's SCOPE TABLE — an array of
+ * {EnclosingLevel, FilterFunc, HandlerFunc} indexed by trylevel — to find a matching
+ * __except: from the current trylevel it walks EnclosingLevel-wards, runs each __except
+ * FILTER (FilterFunc != 0) with the establisher's ebp, and on EXECUTE_HANDLER (1) it
+ * unwinds (outer frames + this frame's __finally blocks) then transfers to the __except
+ * block — a longjmp to the setjmp the lifter injects at the SEH-establish (keyed by the
+ * registration address); the establisher then runs the recovered handler funclet
+ * (`aret_seh_run`) and returns its value. Filter CONTINUE_SEARCH (0) walks outward;
+ * CONTINUE_EXECUTION (-1) resumes at the fault. No __except matches here -> return
+ * ExceptionContinueSearch (1) so the dispatcher tries the next frame.
+ *
+ * The recovered filter/handler/__finally blocks are separate lifted functions (the scope
+ * table takes their address); they read the parent's locals via the threaded ebp
+ * register-param, which aret_call conveys as its last argument. */
+
+/* Call a recovered __try funclet (filter / __except body / __finally) with the
+ * establisher's ebp threaded in aret_call's ebp slot; return its eax. */
+static uint32_t aret_seh_funclet(uint32_t va, uint32_t ebp) {
+    return (uint32_t)aret_call(va, ebp - 0x400 /*free stack below the frame*/, 0, 0, 0, ebp);
+}
+/* Run the __finally blocks for the levels in (to, from]: from the current trylevel `from`
+ * down to — but not including — `to`, following EnclosingLevel. A scope entry is a
+ * __finally when FilterFunc==0 (HandlerFunc is then the cleanup block). */
+static void aret_seh_local_unwind(uint32_t scopetable, int from, int to, uint32_t ebp) {
+    for (int lvl = from; lvl != -1 && lvl != to; ) {
+        const uint32_t *e = (const uint32_t *)(uintptr_t)(scopetable + (uint32_t)lvl * 12u);
+        if (e[1] == 0 && e[2] != 0) aret_seh_funclet(e[2], ebp);   /* __finally cleanup */
+        lvl = (int)e[0];
+    }
+}
+/* Global unwind: pop fs:[0] from its head up to (not incl.) `target`, calling each
+ * intervening handler with EH_UNWINDING so its __finally blocks run (same walk as
+ * RtlUnwind, inlined so this handler is self-contained). */
+static void aret_seh_global_unwind(uint32_t esp, uint32_t target) {
+    uint32_t rec[20]; memset(rec, 0, sizeof rec);
+    rec[0] = 0xC0000027u; rec[1] = ARET_EH_UNWINDING;          /* STATUS_UNWIND */
+    uint32_t ctx[200]; memset(ctx, 0, sizeof ctx);
+    uint32_t *teb = (uint32_t *)(uintptr_t)__aret_fs();
+    uint32_t frame = teb[0];
+    for (int g = 0; g < 100000 && frame && frame != 0xFFFFFFFFu && frame != target; g++) {
+        uint32_t *f = (uint32_t *)(uintptr_t)frame; uint32_t next = f[0];
+        uint32_t hesp = esp - 0x80; uint32_t *cf = (uint32_t *)(uintptr_t)hesp;
+        cf[1] = (uint32_t)(uintptr_t)rec; cf[2] = frame; cf[3] = (uint32_t)(uintptr_t)ctx; cf[4] = frame;
+        (void)aret_call(f[1], hesp, 0, 0, 0, 0);
+        teb[0] = next; frame = next;
+    }
+}
+uint32_t aret_except_handler3(uint32_t esp) {
+    uint32_t recp = arg(esp, 0), framep = arg(esp, 1);
+    uint32_t *rec = (uint32_t *)(uintptr_t)recp;
+    uint32_t *frame = (uint32_t *)(uintptr_t)framep;          /* {prev, handler, scopetable, trylevel} */
+    uint32_t flags = rec ? rec[1] : 0;
+    uint32_t scopetable = frame[2];
+    uint32_t ebp = framep + 16;
+    if (flags & (ARET_EH_UNWINDING | ARET_EH_EXIT_UNWIND)) {
+        aret_seh_local_unwind(scopetable, (int)frame[3], -1, ebp);   /* run all __finally */
+        return 1;                                                     /* ExceptionContinueSearch */
+    }
+    for (int lvl = (int)frame[3]; lvl != -1; ) {
+        const uint32_t *e = (const uint32_t *)(uintptr_t)(scopetable + (uint32_t)lvl * 12u);
+        int enclosing = (int)e[0];
+        if (e[1] != 0) {                                             /* __except (has a filter) */
+            int32_t d = (int32_t)aret_seh_funclet(e[1], ebp);
+            if (d < 0) return 0;                                     /* CONTINUE_EXECUTION */
+            if (d > 0) {                                             /* EXECUTE_HANDLER */
+                aret_seh_global_unwind(esp, framep);                 /* outer frames' __finally */
+                aret_seh_local_unwind(scopetable, (int)frame[3], lvl, ebp); /* this frame's __finally */
+                frame[3] = (uint32_t)enclosing;                      /* trylevel := enclosing */
+                aret_longjmp_do(framep, lvl + 1);                    /* -> establisher setjmp */
+                /* not reached */
+            }
+        }
+        lvl = enclosing;
+    }
+    return 1;                                                        /* no match -> next frame */
+}
+/* Runs from the setjmp the lifter injects at the SEH-establish when a longjmp from
+ * _except_handler3 lands (an __except caught): `level` is the matched scope index — run
+ * its handler funclet with the establisher's ebp and return its value as the establisher
+ * function's return. */
+uint64_t aret_seh_run(uint32_t framep, uint32_t level) {
+    uint32_t scopetable = ((uint32_t *)(uintptr_t)framep)[2];
+    const uint32_t *e = (const uint32_t *)(uintptr_t)(scopetable + level * 12u);
+    uint32_t ebp = framep + 16;
+    return aret_call(e[2], ebp - 0x400, 0, 0, 0, ebp);              /* HandlerFunc -> function return */
+}
+
 /* Structured Exception Handling — hardware faults (native only).
  *
  * On Windows a CPU trap (access violation, integer divide-by-zero, …) is turned by
