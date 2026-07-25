@@ -190,8 +190,8 @@ bash bench/wallsweep.sh <dir1> [dir2…]  # AGRÈGE --mode walls sur un corpus :
 
 ### État régression (référence — doit rester vert)
 difftest **272/272** · transpile-diff **4/4** (H=`19acad982194bf07`) · winediff
-**177/178** (le seul rouge = `gdi_uifont`, **environnemental** : fontconfig i386, orthogonal au code) · **ehdiff 3/3** (SEH `seh_except`
-+ C++ `throw_catch` bit-identiques Wine + `throw_dtor` oracle d'abort sound) · cpudiff vert (per-instruction + séquences génératives) · funcdiff corpus **0 divergence** (lift **~20,6k** scorées /
+**177/178** (le seul rouge = `gdi_uifont`, **environnemental** : fontconfig i386, orthogonal au code) · **ehdiff 4/4** (SEH `seh_except`
++ C++ `throw_catch`/`throw_dtor`/`throw_across` — throw/catch, destructeur d'unwind, multi-frames — bit-identiques Wine) · cpudiff vert (per-instruction + séquences génératives) · funcdiff corpus **0 divergence** (lift **~20,6k** scorées /
 **~20k appels** — **imports (stubs `@N` + `@0` scalaires) + appels indirects résolus + intrinsèques mémoire host-backés (memmove/memcpy)** ; scratch sous-esp exclu ; opt ~10k scorées) · SMT **11/11** · in-place **3/3** · magicdiv **2³²** ·
 recompilabilité **100 %** · WASM **7/7**.
 
@@ -824,10 +824,13 @@ imbriqué re-longjmpe au même setjmp (boucle). **ebp funclet = `frame+0xc`** (`
 funclets + continuations** par parse des tables EH du binaire (`analysis::cxx_eh_entries` — rien de deviné, prouvé par la
 métadonnée). **Destructeurs d'unwind exécutés** (`aret_cxx_local_unwind` = `cxx_local_unwind` de Wine : parcourt l'`UnwindMap`,
 avance `frame->state` avant chaque action, appelle le funclet destructeur ebp=`frame+0xc` ; à l'entrée du catch `state`→`tryLow`
-puis `state:=tryHigh+1`) — oracle `throw_dtor.cpp` (dtor à `printf`) bit-identique Wine (`dtor`+`r=42`). Garde `aret_cxx_unwind_has_dtor`
-conservée sur le chemin de **propagation** (frame intermédiaire non-catchante multi-frames = pas encore lancée → abort sound).
-Portes : difftest **272/272**, hash **inchangé** (gaté sur l'import), ehdiff **3/3**. **Reste** : destructeurs multi-frames, rethrow,
-driver réel WinZip `WZ32.DLL` (v1 `__CxxFrameHandler`, mêmes offsets), MFC (FishTank).
+puis `state:=tryHigh+1`) — oracle `throw_dtor.cpp` (dtor à `printf`) bit-identique Wine (`dtor`+`r=42`). **Unwind à deux passes multi-frames**
+(`aret_cxx_global_unwind` : à la frame catchante, re-marche `fs:[0]` tête→cible avec `EH_UNWINDING`, lance les destructeurs de
+chaque frame intermédiaire innermost-first ; dispatch 0xB8-aware) — oracle `throw_across.cpp` (throw dans callee, catch dans
+caller, `Guard` dans l'intermédiaire) bit-identique Wine. Funclets destructeurs récupérés via l'**UnwindMap** (`parse_cxx_func_info` :
+une frame peut n'avoir qu'une UnwindMap sans try). Portes : difftest **272/272**, hash **inchangé** (gaté sur l'import), ehdiff
+**4/4**. **Reste** : rethrow (`throw;`), catch-by-value copy-ctor non trivial, driver réel WinZip `WZ32.DLL` (v1 `__CxxFrameHandler`,
+mêmes offsets), MFC (FishTank).
 
 ### P3.9 — EH MSVC : brick C — `__except_handler3` réel (SEH scope-table) ✅ FAIT (2026-07-25)
 `__try/__except/__finally` MSVC bit-identique Wine (`bench/eh/seh_except.c` → `a=42 b=1 c=3 d=5 fin=110`). `aret_except_handler3`

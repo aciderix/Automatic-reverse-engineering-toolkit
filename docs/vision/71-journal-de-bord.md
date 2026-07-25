@@ -4628,4 +4628,22 @@ Détail : **70 §6** (roadmap). Résumé :
 - **Portes** : hash transpile `19acad982194bf07` **inchangé** (changement 100 % dans le chemin HLE C++ EH, gaté), ehdiff **3/3**,
   difftest/winediff (confirmés inchangés — les binaires n'exercent pas le chemin `__CxxFrameHandler`). Committé + poussé.
 
+### 2026-07-25 — [EH] **Brick B — unwind à deux passes multi-frames (throw dans un callee, catch dans le caller) bit-identique Wine**
+- **Increment** : le vrai motif réel (MFC/WinZip : `throw` profond, `catch` superficiel, nettoyage entre les deux). Passe le
+  modèle mono-passe (search+transfer) à un vrai **deux-passes** façon Wine :
+  - **Phase 1 (search)** : `aret_CxxThrowException` marche `fs:[0]` sans effet de bord ; un handler qui ne catch pas retourne 1.
+  - **Phase 2 (unwind)** : à la frame qui catch, `aret_cxx_global_unwind(esp, framep)` re-marche `fs:[0]` de la tête jusqu'à
+    (exclu) la frame catchante, appelle chaque handler intermédiaire avec `EH_UNWINDING` (dispatch `aret_cxx_call_handler`,
+    0xB8-aware : thunk C++ → `aret_CxxFrameHandler3`, sinon `aret_call`), pop chaque frame — **innermost d'abord**. Sur la passe
+    d'unwind, `aret_CxxFrameHandler3` lance les destructeurs locaux de la frame (`aret_cxx_local_unwind(state,-1)`). Puis unwind
+    partiel de la frame catchante (→`tryLow`) + transfert.
+- **Récupération des funclets destructeurs** (`analysis::parse_cxx_func_info`) : le bug était le `return` anticipé sur
+  `nTryBlocks==0` — une frame peut n'avoir **qu'une UnwindMap** (un local à destructeur, sans catch — ex. `inner()`). On parse
+  désormais l'**UnwindMap** (`{maxState, pUnwindMap}` → entrées `{toState, action}`) et on récupère chaque `action` non-nulle
+  (funclet destructeur) comme entrée de fonction. Sans ça, `aret_call(dtor_funclet)` abortait « unrecovered ».
+- **Oracle** : `bench/eh/throw_across.cpp` (`inner()` `noinline` avec `Guard` à `printf`, throw ; `catch` dans `mainCRTStartup`)
+  — Wine `inner-dtor`+`r=42`, **ARET identique**. ehdiff **4/4** (seh_except, throw_catch, throw_dtor, throw_across).
+- **Portes** : hash transpile `19acad982194bf07` **inchangé**, ehdiff **4/4**, difftest/winediff (confirmés inchangés). Committé + poussé.
+- **Reste brick B** : rethrow (`throw;` nu), catch-by-value avec copy-ctor non trivial, driver réel WinZip `WZ32.DLL` (v1), MFC.
+
 <!-- NOUVELLES ENTRÉES ICI (garder l'ordre chronologique, plus récent en bas) -->

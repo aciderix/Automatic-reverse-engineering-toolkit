@@ -3229,6 +3229,37 @@ uint64_t aret_seh_run(uint32_t framep, uint32_t level) {
  * memory (32-bit, the program is -m32). */
 #define ARET_CXX_EH_CODE 0xE06D7363u
 uint32_t aret_CxxFrameHandler3(uint32_t esp);   /* fwd */
+/* Call one frame's SEH handler with the call frame at hesp ({_, rec, frame, ctx, frame}).
+ * The frame's handler is a `mov eax,&FuncInfo; jmp __CxxFrameHandler[3]` thunk — guest code
+ * (the image's .text is mapped as data, so the 0xB8 lead byte is readable), but *not* a
+ * recovered function we can aret_call. Detect that lead byte and route straight to our
+ * __CxxFrameHandler3 (it recovers FuncInfo from the thunk's imm). A non-C++ frame's handler is
+ * a recovered function (SEH `_except_handler3`) reached via aret_call. The shim reads its cdecl
+ * args at [esp+0], so pass hesp+4 (skip the return-addr slot), as aret_call's dispatchers do;
+ * aret_call adds that +4 itself. */
+static uint32_t aret_cxx_call_handler(uint32_t handler, uint32_t hesp) {
+    return (*(const uint8_t *)(uintptr_t)handler == 0xB8u)
+        ? aret_CxxFrameHandler3(hesp + 4)
+        : (uint32_t)aret_call(handler, hesp, 0, 0, 0, 0);
+}
+/* Phase-2 global unwind for a C++ throw: pop fs:[0] from its head up to (not incl.) `target`
+ * (the catching frame), calling each intervening frame's handler with EH_UNWINDING so its C++
+ * destructors run (each C++ handler's unwind pass calls aret_cxx_local_unwind). Innermost
+ * first, matching the machine-stack order. */
+static void aret_cxx_global_unwind(uint32_t esp, uint32_t target) {
+    uint32_t rec[20]; memset(rec, 0, sizeof rec);
+    rec[0] = 0xC0000027u; rec[1] = ARET_EH_UNWINDING;              /* STATUS_UNWIND */
+    uint32_t ctx[200]; memset(ctx, 0, sizeof ctx);
+    uint32_t *teb = (uint32_t *)(uintptr_t)__aret_fs();
+    uint32_t frame = teb[0];
+    for (int g = 0; g < 100000 && frame && frame != 0xFFFFFFFFu && frame != target; g++) {
+        uint32_t *f = (uint32_t *)(uintptr_t)frame; uint32_t next = f[0];
+        uint32_t hesp = esp - 0x80; uint32_t *cf = (uint32_t *)(uintptr_t)hesp;
+        cf[1] = (uint32_t)(uintptr_t)rec; cf[2] = frame; cf[3] = (uint32_t)(uintptr_t)ctx; cf[4] = frame;
+        aret_cxx_call_handler(f[1], hesp);
+        teb[0] = next; frame = next;
+    }
+}
 uint32_t aret_CxxThrowException(uint32_t esp) {
     aret_teb_init();
     uint32_t pobj = arg(esp, 0), pthrow = arg(esp, 1);
@@ -3238,21 +3269,14 @@ uint32_t aret_CxxThrowException(uint32_t esp) {
     uint32_t ctx[200]; memset(ctx, 0, sizeof ctx);
     uint32_t *teb = (uint32_t *)(uintptr_t)__aret_fs();
     uint32_t frame = teb[0];
+    /* Phase-1 search: walk fs:[0] calling each handler (no side effects). A handler that
+     * catches performs phase-2 global unwind + its own local unwind + the non-local transfer
+     * itself (it never returns); otherwise it returns ExceptionContinueSearch (1). */
     while (frame != 0 && frame != 0xFFFFFFFFu) {
         uint32_t *f = (uint32_t *)(uintptr_t)frame;
         uint32_t hesp = esp - 0x80; uint32_t *cf = (uint32_t *)(uintptr_t)hesp;
         cf[1] = (uint32_t)(uintptr_t)rec; cf[2] = frame; cf[3] = (uint32_t)(uintptr_t)ctx; cf[4] = frame;
-        /* The frame's handler is a `mov eax,&FuncInfo; jmp __CxxFrameHandler[3]` thunk — guest
-         * code (the image's .text is mapped as data, so the 0xB8 lead byte is readable), but
-         * *not* a recovered function we can aret_call. Detect that lead byte and route straight
-         * to our __CxxFrameHandler3 (it recovers FuncInfo from the thunk's imm). A non-C++
-         * frame's handler is a recovered function (SEH `_except_handler3`) reached via aret_call.
-         * The shim reads its cdecl args at [esp+0], so pass hesp+4 (skip the return-addr slot),
-         * exactly as aret_call's dispatchers do; aret_call adds that +4 itself. */
-        uint32_t disp = (*(const uint8_t *)(uintptr_t)f[1] == 0xB8u)
-            ? aret_CxxFrameHandler3(hesp + 4)
-            : (uint32_t)aret_call(f[1], hesp, 0, 0, 0, 0);
-        if (disp == 0) return 0;
+        if (aret_cxx_call_handler(f[1], hesp) == 0) return 0;
         frame = f[0];
     }
     fprintf(stderr, "aret: unhandled C++ exception (0x%08x)\n", (unsigned)pthrow);
@@ -3271,22 +3295,6 @@ static int aret_cxx_type_matches(uint32_t pCatchType, const uint32_t *cta) {
         uint32_t pct = cta[1 + i];
         uint32_t ctd = ((const uint32_t *)(uintptr_t)pct)[1];        /* CatchableType.pType */
         if (!strcmp(cname, (const char *)(uintptr_t)(ctd + 8))) return 1;
-    }
-    return 0;
-}
-/* Would unwinding this frame from state `from` down to (excl.) `to` run any destructor?
- * The UnwindMap is an array of {int toState; void *action} indexed by state; a non-null
- * action is a destructor funclet the real unwind would call. Used on the propagation
- * (no-catch) path, which we do NOT yet fully model — so if a frame the exception passes
- * through would run a destructor, we ABORT loudly (never skip it silently). `from > to`
- * walks the toState chain. */
-static int aret_cxx_unwind_has_dtor(const uint32_t *fi, int from, int to) {
-    uint32_t pUnwind = fi[2]; int maxState = (int)fi[1];
-    int s = from;
-    for (int g = 0; g < maxState + 2 && s > to && s >= 0; g++) {
-        const uint32_t *ue = (const uint32_t *)(uintptr_t)(pUnwind + (uint32_t)s * 8u);
-        if (ue[1] != 0) return 1;                                    /* destructor action present */
-        s = (int)ue[0];                                             /* toState */
     }
     return 0;
 }
@@ -3312,14 +3320,17 @@ static void aret_cxx_local_unwind(const uint32_t *fi, uint32_t framep, int from,
 uint32_t aret_CxxFrameHandler3(uint32_t esp) {
     uint32_t recp = arg(esp, 0), framep = arg(esp, 1);
     const uint32_t *rec = (const uint32_t *)(uintptr_t)recp;
-    if (rec[0] != ARET_CXX_EH_CODE) return 1;
-    if (rec[1] & (ARET_EH_UNWINDING | ARET_EH_EXIT_UNWIND)) return 1; /* unwind pass: no dtors modelled yet */
     /* FuncInfo = the imm of the frame handler's `mov eax, imm32` (0xB8) thunk. */
     uint32_t thunk = ((const uint32_t *)(uintptr_t)framep)[1];
     if (*(const uint8_t *)(uintptr_t)thunk != 0xB8u) return 1;
     const uint32_t *fi = (const uint32_t *)(uintptr_t)(*(const uint32_t *)(uintptr_t)(thunk + 1));
-    uint32_t nTry = fi[3], pTryMap = fi[4];                          /* nTryBlocks, pTryBlockMap */
     int state = (int)((const uint32_t *)(uintptr_t)framep)[2];       /* frame->state @ +8 */
+    if (rec[1] & (ARET_EH_UNWINDING | ARET_EH_EXIT_UNWIND)) {
+        aret_cxx_local_unwind(fi, framep, state, -1);               /* phase 2: run this frame's dtors */
+        return 1;
+    }
+    if (rec[0] != ARET_CXX_EH_CODE) return 1;
+    uint32_t nTry = fi[3], pTryMap = fi[4];                          /* nTryBlocks, pTryBlockMap */
     const uint32_t *ti = (const uint32_t *)(uintptr_t)rec[7];        /* ThrowInfo */
     const uint32_t *cta = (const uint32_t *)(uintptr_t)ti[3];        /* CatchableTypeArray */
     /* Wine's call_catch_block invokes the catch funclet with ebp = &frame->ebp =
@@ -3339,9 +3350,10 @@ uint32_t aret_CxxFrameHandler3(uint32_t esp) {
                 if (adj & 0x08u) *slot = pObject;                    /* catch by reference: the pointer */
                 else *slot = *(const uint32_t *)(uintptr_t)pObject;  /* by value: the object's first word (fundamental) */
             }
-            /* Unwind this frame from the current state down to the try's low state, running the
-             * local destructors (Wine's cxx_local_unwind), then set the state to just past the
-             * try block, before transferring to the catch. */
+            /* Phase 2: global-unwind the frames between the throw and here (their destructors),
+             * then unwind this frame to the try's low state (its destructors), set the state to
+             * just past the try block, and transfer to the catch. */
+            aret_cxx_global_unwind(esp, framep);
             aret_cxx_local_unwind(fi, framep, state, (int)tb[0]);
             ((uint32_t *)(uintptr_t)framep)[2] = tb[1] + 1;         /* frame->state := tryHigh + 1 */
             g_seh_frame = framep; g_seh_handler_va = handlerVA; g_seh_ebp = ebp; g_seh_is_cxx = 1;
@@ -3349,11 +3361,7 @@ uint32_t aret_CxxFrameHandler3(uint32_t esp) {
             /* not reached */
         }
     }
-    /* No catch in this frame: the exception propagates through it, fully unwinding it (states
-     * `state` down to -1). If that would run a destructor we don't model, abort (sound). */
-    if (aret_cxx_unwind_has_dtor(fi, state, -1))
-        aret_unmodelled("C++ exception: destructor during frame unwind not modelled");
-    return 1;                                                        /* no catch here -> next frame */
+    return 1;   /* no catch here (phase-1 search) -> next frame; destructors run in the phase-2 pass */
 }
 
 

@@ -737,6 +737,20 @@ fn parse_cxx_func_info(prog: &Program, disasm: &Disassembler, fi: u64, out: &mut
     if magic & 0xffff_ff00 != 0x1993_0500 {
         return; // not an EH magic (0x19930520 / 21 / 22)
     }
+    // UnwindMap {maxState, pUnwindMap}: an array of {int toState; void *action} indexed by
+    // state; each non-null `action` is a destructor funclet the unwind runs. Recover them (a
+    // frame can have only an UnwindMap and no try block — a function with a local that has a
+    // destructor but no catch).
+    let max_state = prog.read_u32(fi + 0x04).unwrap_or(0) as u64;
+    let p_unwind = prog.read_u32(fi + 0x08).unwrap_or(0) as u64;
+    if p_unwind != 0 && max_state <= 0x1000 {
+        for s in 0..max_state {
+            let action = prog.read_u32(p_unwind + s * 8 + 0x04).unwrap_or(0) as u64;
+            if action != 0 && prog.is_executable(action) {
+                out.push(action);
+            }
+        }
+    }
     let n_try = prog.read_u32(fi + 0x0c).unwrap_or(0) as u64; // nTryBlocks
     let p_try = prog.read_u32(fi + 0x10).unwrap_or(0) as u64; // pTryBlockMap
     if n_try == 0 || n_try > 0x1000 {
