@@ -4409,4 +4409,28 @@ Détail : **70 §6** (roadmap). Résumé :
   SetROP2/SetStretchBltMode, MDI, ou palette-restants) — toujours par la donnée. Brick B (EH C++) reste **bloqué faute de driver**
   (mur points-to sur GlidePath/winetest à lever d'abord).
 
+### 2026-07-25 — [EH][INFRA] **Chantier EH C++ / MFC — Phase 0 : chaîne fixture MSVC-C++ prouvée + diagnostic v1/v3 (driver réel wzbeta32)**
+- **Cap fixé par l'utilisateur** : objectifs prioritaires = **exceptions C++/MFC** (le multiplicateur) + mur d'appels indirects.
+  « On n'a pas tout sous la main » n'est pas un blocage : on **obtient** ce qu'il faut. (Recadrage : arrêter les victoires
+  faciles, aller au bout — ingénierie sérieuse.)
+- **Correction factuelle (vérifiée journal 17/07, confirmée par Perplexity)** : le **mur points-to est déjà largement tombé**
+  (slidelib/itiem95/DEMO32/ARTLANT franchissent leurs appels indirects → limites GUI/headless, pas couverture). La Phase
+  « points-to » se réduit aux **résiduels mesurés**, pas un chantier neuf.
+- **Mon « brick B impossible à fixturer sans MSVC » était FAUX.** `clang` 18.1.3 **cible l'ABI MSVC** (`--target=i686-pc-windows-msvc`)
+  et émet le vrai EH C++ : `__CxxThrowException@8`, `___CxxFrameHandler3`. Avec `lld-link` + une **import-lib msvcrt générée depuis
+  la vraie msvcrt de Wine** (`bench/eh/gen_msvcrt_lib.py`) + un pont décoration/type_info (`bench/eh/eh_support.c`), on **bâtit un
+  PE C++ throw/catch qui tourne sous Wine** (`bench/eh/throw_catch.cpp` → **Wine `r=49`**). ⇒ **la même PE = oracle bit-exact**
+  (Wine) vs ARET. Chaîne : `bench/eh/build.sh`.
+- **Driver réel diagnostiqué (wzbeta32 = install WinZip beta 32, fourni par l'utilisateur)** : `WZ32.DLL` = **66 régions C++ EH**,
+  `WZSEPE32.EXE` = 2, tous **`__CxxFrameHandler` v1 (magic `0x19930520`)** — **PAS** le v3 (`…522`) qu'émet clang. ⇒ **mise en garde
+  Perplexity fondée** : implémentation **dual-version keyée par le magic** (v1 réel + v3 fixtures clang). « VC20 » (`0x56433230`)
+  est un marqueur CRT distinct, **pas** le magic EH (le diag de juillet les avait conflés). `SETUP.EXE` = SEH pur (`_XcptFilter`,
+  bon driver brick C).
+- **Mur reproduit + trou de soundness trouvé** : sous ARET, `_CxxThrowException`/`__CxxFrameHandler3` non implémentés → le stub
+  d'import **retourne** au lieu d'aborter → le `throw` tombe à travers, le `catch` lit du garbage (`r=4198623`) et le programme
+  **sort 0** = **faux silencieux (§0.1) existant aujourd'hui**. Brick B le corrige (et devra faire ARET = Wine = `r=49`).
+- **Portes** : aucun code runtime touché (Phase 0 = outillage `bench/eh/` + docs). difftest/hash inchangés. **Suite** : Phase 1
+  brick C (`__except_handler3`, driver SETUP.EXE) → Phase 2 brick B (`__CxxFrameHandler` v1 + v3). Fixture clang = oracle de dev,
+  binaires WinZip v1 = validation réelle.
+
 <!-- NOUVELLES ENTRÉES ICI (garder l'ordre chronologique, plus récent en bas) -->
