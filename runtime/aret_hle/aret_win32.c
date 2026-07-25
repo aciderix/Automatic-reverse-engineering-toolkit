@@ -4082,10 +4082,11 @@ uint32_t aret_SendDlgItemMessageW(uint32_t esp) {
  * the measured, exactly-reproducible core (doc 72 §5). */
 #define GDI_MAX  512
 #define GDI_BASE 0x30000000u
-enum { GDIT_DC = 1, GDIT_BITMAP, GDIT_BRUSH, GDIT_PEN, GDIT_FONT, GDIT_RGN };
+enum { GDIT_DC = 1, GDIT_BITMAP, GDIT_BRUSH, GDIT_PEN, GDIT_FONT, GDIT_RGN, GDIT_PALETTE };
 static struct gdi_obj {
     int type, used, stock, null_obj;
-    uint32_t sel_bitmap, sel_brush, sel_pen, sel_font;   /* DC */
+    uint32_t sel_bitmap, sel_brush, sel_pen, sel_font, sel_palette;   /* DC */
+    uint8_t *pal; int pal_count;                          /* PALETTE: pal_count PALETTEENTRY (4 bytes each) */
     uint32_t text_color, bk_color; int bk_mode; uint32_t text_align;  /* DC */
     int w, h, topdown, bpp; uint8_t *bits; int owns_bits; /* BITMAP */
     uint32_t color;                                      /* BRUSH/PEN */
@@ -4567,8 +4568,10 @@ uint32_t aret_CreatePen(uint32_t esp) {
 }
 /* GetStockObject(i) -> HGDIOBJ. Distinct, cached handle per stock id (opaque). */
 static uint32_t g_gdi_stock[32];
+static uint32_t u32_default_palette(void);   /* fwd: the 20-colour DEFAULT_PALETTE */
 static uint32_t u32_stock(int id) {
     if (id < 0 || id >= 32) return 0;
+    if (id == 15) return u32_default_palette();   /* DEFAULT_PALETTE */
     if (!g_gdi_stock[id]) {
         int type = (id <= 5) ? GDIT_BRUSH : (id <= 8) ? GDIT_PEN : GDIT_FONT;
         int i = gdi_alloc(type); if (!i) return 0;
@@ -4738,6 +4741,7 @@ uint32_t aret_DeleteObject(uint32_t esp) {
     if (i < 0) return 0;
     if (g_gdi[i].stock) return 1;
     if (g_gdi[i].owns_bits && g_gdi[i].bits) { free(g_gdi[i].bits); g_gdi[i].bits = NULL; }
+    if (g_gdi[i].pal) { free(g_gdi[i].pal); g_gdi[i].pal = NULL; }
     g_gdi[i].used = 0;
     return 1;
 }
@@ -7164,6 +7168,11 @@ uint32_t aret_GetObjectA(uint32_t esp) {
         *(uint32_t *)(lpv + 8) = 0;                            /* lbHatch */
         return 12;
     }
+    if (g_gdi[i].type == GDIT_PALETTE) {
+        if (cb < 2) return 0;
+        *(uint16_t *)lpv = (uint16_t)g_gdi[i].pal_count;        /* GetObject(hpal,2,&WORD) = entry count */
+        return 2;
+    }
     return 0;
 }
 uint32_t aret_GetObjectW(uint32_t esp) { return aret_GetObjectA(esp); }
@@ -7979,9 +7988,97 @@ uint32_t aret_FindResourceW(uint32_t esp) { return aret_FindResourceA(esp); }  /
 uint32_t aret_InternalGetWindowText(uint32_t esp) {
     uint32_t o = 0; u32_defproc_text(WU(0), U32_WM_GETTEXT, WU(2), WU(1), 1 /*wide*/, &o); return o;
 }
+/* --- Palette family. On our truecolor (32bpp) target a palette does no colour
+ * remapping, but the object model + queries must match Wine bit-for-bit so palette-using
+ * Win95 apps run instead of aborting at CreatePalette. Measured vs Wine (gdi_palette):
+ * RealizePalette->0, GetNearestColor->identity, GetSystemPaletteEntries->0 but fills the
+ * default static palette, GetPaletteEntries round-trips CreatePalette, ResizePalette->1. */
+
+/* The 20 static system-palette colours Windows reserves (indices 0-9 and 246-255),
+ * measured from Wine on a truecolor DC. {R,G,B}; all other indices are 0. */
+static const uint8_t u32_syspal_static[20][3] = {
+    {0,0,0},{128,0,0},{0,128,0},{128,128,0},{0,0,128},{128,0,128},{0,128,128},{192,192,192},{192,220,192},{166,202,240},
+    {255,251,240},{160,160,164},{128,128,128},{255,0,0},{0,255,0},{255,255,0},{0,0,255},{255,0,255},{0,255,255},{255,255,255}
+};
+static void u32_syspal_entry(int idx, uint8_t out[4]) {   /* default system-palette entry idx (0..255) */
+    out[0] = out[1] = out[2] = out[3] = 0;
+    if (idx >= 0 && idx <= 9)          { const uint8_t *e = u32_syspal_static[idx];      out[0]=e[0]; out[1]=e[1]; out[2]=e[2]; }
+    else if (idx >= 246 && idx <= 255) { const uint8_t *e = u32_syspal_static[10+idx-246]; out[0]=e[0]; out[1]=e[1]; out[2]=e[2]; }
+}
+/* Lazily-created DEFAULT_PALETTE (the 20 static colours) — SelectPalette returns it as the
+ * "previously selected" palette when none was set (Wine returns a non-null default). */
+static uint32_t u32_default_palette(void) {
+    static uint32_t h = 0;
+    if (!h) {
+        int i = gdi_alloc(GDIT_PALETTE); if (!i) return 0;
+        g_gdi[i].stock = 1; g_gdi[i].pal_count = 20;
+        g_gdi[i].pal = (uint8_t *)malloc(20 * 4);
+        if (g_gdi[i].pal) for (int k = 0; k < 20; k++) u32_syspal_entry(k < 10 ? k : 246 + (k - 10), g_gdi[i].pal + k * 4);
+        h = gdi_handle(i);
+    }
+    return h;
+}
+uint32_t aret_CreatePalette(uint32_t esp) {
+    const uint8_t *lp = (const uint8_t *)WP(0); if (!lp) return 0;
+    uint32_t n = *(const uint16_t *)(lp + 2);          /* LOGPALETTE.palNumEntries (after WORD palVersion) */
+    int i = gdi_alloc(GDIT_PALETTE); if (!i) return 0;
+    g_gdi[i].pal_count = (int)n;
+    if (n) { g_gdi[i].pal = (uint8_t *)malloc((size_t)n * 4); if (g_gdi[i].pal) memcpy(g_gdi[i].pal, lp + 4, (size_t)n * 4); }
+    return gdi_handle(i);
+}
+uint32_t aret_GetPaletteEntries(uint32_t esp) {
+    int i = gdi_idx(WU(0)); if (i < 0 || g_gdi[i].type != GDIT_PALETTE) return 0;
+    uint32_t start = WU(1), count = WU(2); uint8_t *out = (uint8_t *)WP(3);
+    if (count == 0) return (uint32_t)g_gdi[i].pal_count;    /* count 0 = query total (MSDN) */
+    if (!out) return 0;
+    uint32_t got = 0;
+    for (uint32_t k = 0; k < count && (int)(start + k) < g_gdi[i].pal_count; k++) { memcpy(out + k * 4, g_gdi[i].pal + (start + k) * 4, 4); got++; }
+    return got;
+}
+uint32_t aret_SetPaletteEntries(uint32_t esp) {
+    int i = gdi_idx(WU(0)); if (i < 0 || g_gdi[i].type != GDIT_PALETTE || !g_gdi[i].pal) return 0;
+    uint32_t start = WU(1), count = WU(2); const uint8_t *in = (const uint8_t *)WP(3); if (!in) return 0;
+    uint32_t set = 0;
+    for (uint32_t k = 0; k < count && (int)(start + k) < g_gdi[i].pal_count; k++) { memcpy(g_gdi[i].pal + (start + k) * 4, in + k * 4, 4); set++; }
+    return set;
+}
+uint32_t aret_GetNearestPaletteIndex(uint32_t esp) {
+    int i = gdi_idx(WU(0)); if (i < 0 || g_gdi[i].type != GDIT_PALETTE || g_gdi[i].pal_count <= 0 || !g_gdi[i].pal) return 0;
+    uint32_t c = WU(1); int r = c & 0xFF, g = (c >> 8) & 0xFF, b = (c >> 16) & 0xFF;
+    int best = 0; long bestd = -1;
+    for (int k = 0; k < g_gdi[i].pal_count; k++) {
+        const uint8_t *e = g_gdi[i].pal + k * 4;
+        long dr = r - e[0], dg = g - e[1], db = b - e[2], d = dr*dr + dg*dg + db*db;
+        if (bestd < 0 || d < bestd) { bestd = d; best = k; }
+    }
+    return (uint32_t)best;
+}
+uint32_t aret_ResizePalette(uint32_t esp) {
+    int i = gdi_idx(WU(0)); if (i < 0 || g_gdi[i].type != GDIT_PALETTE) return 0;
+    uint32_t n = WU(1);
+    uint8_t *np = (uint8_t *)calloc(n ? n : 1, 4); if (!np) return 0;
+    int copy = g_gdi[i].pal_count < (int)n ? g_gdi[i].pal_count : (int)n;
+    if (g_gdi[i].pal && copy > 0) memcpy(np, g_gdi[i].pal, (size_t)copy * 4);
+    free(g_gdi[i].pal); g_gdi[i].pal = np; g_gdi[i].pal_count = (int)n;
+    return 1;
+}
+uint32_t aret_RealizePalette(uint32_t esp)     { (void)esp; return 0; }  /* truecolor: 0 entries remapped */
+uint32_t aret_UnrealizeObject(uint32_t esp)    { (void)esp; return 1; }
+uint32_t aret_GetSystemPaletteUse(uint32_t esp){ (void)esp; return 1; }  /* SYSPAL_STATIC */
+uint32_t aret_SetSystemPaletteUse(uint32_t esp){ (void)esp; return 1; }  /* prev = SYSPAL_STATIC */
+uint32_t aret_GetSystemPaletteEntries(uint32_t esp) {
+    uint32_t start = WU(1), count = WU(2); uint8_t *out = (uint8_t *)WP(3);
+    if (out) for (uint32_t k = 0; k < count; k++) u32_syspal_entry((int)(start + k), out + k * 4);
+    return 0;   /* truecolor DC has no palette -> 0 (Wine); buffer still filled with defaults */
+}
+uint32_t aret_SelectPalette(uint32_t esp) {
+    int d = gdi_idx(WU(0)); if (d < 0 || g_gdi[d].type != GDIT_DC) return 0;
+    uint32_t prev = g_gdi[d].sel_palette ? g_gdi[d].sel_palette : u32_default_palette();
+    g_gdi[d].sel_palette = WU(1);
+    return prev;
+}
 /* Simple constants / sound no-ops the socle needs. */
 uint32_t aret_GetNearestColor(uint32_t esp)   { return WU(1); }         /* 32bpp: identity */
-uint32_t aret_SelectPalette(uint32_t esp)     { (void)esp; return 0; }  /* no palette */
 uint32_t aret_GdiGetCodePage(uint32_t esp)    { (void)esp; return 1252; }
 uint32_t aret_DragDetect(uint32_t esp)        { (void)esp; return 0; }  /* no drag headless */
 uint32_t aret_GetKeyNameTextW(uint32_t esp)   { uint16_t *b = (uint16_t *)WP(1); if (b && WU(2)) b[0] = 0; return 0; }
