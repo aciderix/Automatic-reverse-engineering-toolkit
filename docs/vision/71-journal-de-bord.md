@@ -4433,4 +4433,25 @@ Détail : **70 §6** (roadmap). Résumé :
   brick C (`__except_handler3`, driver SETUP.EXE) → Phase 2 brick B (`__CxxFrameHandler` v1 + v3). Fixture clang = oracle de dev,
   binaires WinZip v1 = validation réelle.
 
+### 2026-07-25 — [EH] **Phase 1 (brick C) — mur reproduit + design de `_except_handler3` mappé (le cœur dur identifié)**
+- **Outillage fixture finalisé** (`bench/eh/`, sur import-libs mingw + `/safeseh:no` + lib générée pour `__CxxFrameHandler3` v3) :
+  `throw_catch.cpp` (C++) → Wine `r=49` ; `seh_except.c` (`__try/__except/__finally` via `RaiseException` logiciel) → Wine
+  `a=42 b=1 c=3 d=5 fin=110`. **Deux oracles valides.**
+- **Mur brick C reproduit** : sous ARET, `_except_handler3` non implémenté → `RaiseException` dispatche, appelle le handler du
+  frame = `_except_handler3` (absent) → l'exception n'est pas attrapée → `a=999 b=1 c=1 d=1` (faux-silencieux, comme `_CxxThrowException`).
+- **Design mappé (lecture du C généré + de la PE)** : la fonction `__try` liftée est du **C structuré** ; le prologue pose la
+  registration SEH inline (`[frame+4]`=handler `_except_handler3`, `[+8]`=scopetable, `[+0xc]`=trylevel, `fs:[0]`=frame). **La
+  scope-table** (`{EnclosingLevel, FilterFunc, HandlerFunc}[]`) pointe des VAs que l'analyse ARET **récupère comme fonctions
+  liftées séparées** (address-taken) : ex. `[0] filter=sub_40120e handler=sub_40109c`. ⇒ `_except_handler3` peut **appeler le
+  filtre** (`aret_call(filter, ebp=frame+16)`) et lire son verdict (1 EXECUTE / 0 SEARCH / -1 CONTINUE).
+- **Le cœur dur = le transfert non-local vers le handler.** Sur EXECUTE_HANDLER, `_except_handler3` doit dérouler (RtlUnwind +
+  `__finally` via `_local_unwind2`), poser `trylevel=enclosing`, puis **sauter au bloc `__except`** — or ce bloc vit dans la
+  fonction établisseuse (bloquée dans la pile C au site `RaiseException`). Options : (a) **setjmp injecté par le lifter** à
+  l'établissement du frame SEH (`mov fs:[0],esp`) + `longjmp` depuis `_except_handler3` vers la continuation ; (b) exécuter le
+  **funclet handler récupéré** puis propager son retour comme celui de la fonction. (a) est le modèle MSVC fidèle
+  (`_JumpToContinuation`). ⇒ brick C = **changement lifter (setjmp au SEH-establish) + shim HLE `_except_handler3`** (scope-walk
+  + filtre + unwind + jump). Chantier lourd **correctness-critique** (touche le lifter → toutes les portes). **Prochaine étape**
+  ciblée, à concevoir proprement avant d'écrire (pas de demi-mesure).
+- **Portes** : inchangées (Phase 1 = fixtures + repro, zéro code runtime/lifter modifié).
+
 <!-- NOUVELLES ENTRÉES ICI (garder l'ordre chronologique, plus récent en bas) -->
