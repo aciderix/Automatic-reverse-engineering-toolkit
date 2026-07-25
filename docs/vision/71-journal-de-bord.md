@@ -4545,4 +4545,29 @@ Détail : **70 §6** (roadmap). Résumé :
   injecté au SEH-establish, longjmp, funclet call). Reproduction en main : `bench/eh/throw_catch.cpp` DIFF (`r=49` Wine vs
   `r=4198623` ARET) — `_CxxThrowException` tombe à travers, à implémenter.
 
+### 2026-07-25 — [EH] **Brick B (C++ EH) — reproduit + structure analysée ; plan (réutilise le transfert de brick C)**
+- **Reproduction** : `bench/eh/throw_catch.cpp` DIFF (`r=49` Wine vs `r=4198623` ARET) — `_CxxThrowException` tombe à travers.
+- **Structure mesurée (disasm `tc.exe`)** : `mainCRTStartup` installe un frame SEH dont le handler `[frame+4]=0x4010e0` est
+  le thunk **`__CxxFrameHandler3`** (donc **l'injection setjmp de brick C fire déjà** au `mov fs:0x0,eax`). `[frame+8]`=state
+  (-1 puis 0). `throw E{42}` = construit l'objet puis `_CxxThrowException(&obj, &ThrowInfo=0x402184)`. Le **catch funclet**
+  (0x40104c) est atteint par le transfert du handler, fait `add ebp,0xc`, exécute le catch, puis **CONTINUE** l'exécution
+  (0x401054, le throw suivant) — **pas de return** : c'est la différence avec `__except` (qui retournait la valeur de fonction).
+- **Plan brick B** (méthode §2, réutilise le transfert non-local de brick C) :
+  1. **`aret__CxxThrowException(pobj, pThrowInfo)`** : construit l'EXCEPTION_RECORD C++ (code `0xE06D7363`, params
+     `[magic=0x19930520/22, pobj, pThrowInfo]`) et **dispatche via la chaîne fs:[0]** (réutilise le walk de `RaiseException`).
+  2. **`aret__CxxFrameHandler3` (+ v1 `__CxxFrameHandler`)** : lire le **FuncInfo** (passé via edx par le thunk du frame) +
+     le **ThrowInfo** (param exception) ; parcourir le **TryBlockMap** pour le `state` courant ; pour chaque catch, **matcher
+     le type** (ThrowInfo→CatchableTypeArray→CatchableType→TypeDescriptor, compare les noms manglés) ; sur match → unwind +
+     appeler le **catch funclet** (copie l'objet dans le param catch, exécute le corps, rend l'**adresse de continuation**) →
+     transfert (longjmp établisseur + reprise à la continuation). **v1 vs v3** : layout FuncInfo différent (v3 ajoute EHFlags/
+     pESTypeList), keyé par le magic.
+  3. Structures MSVC à parser : `FuncInfo{magic, maxState, pUnwindMap, nTryBlocks, pTryBlockMap, ...}`, `TryBlockMapEntry
+     {tryLow, tryHigh, catchHigh, nCatches, pHandlerArray}`, `HandlerType{adjectives, pType, dispCatchObj, addressOfHandler}`,
+     `ThrowInfo{attributes, pmfnUnwind, pForwardCompat, pCatchableTypeArray}`, `CatchableType{properties, pType, ...}`,
+     `TypeDescriptor{pVFTable, spare, name[]}`.
+  - **Nuance vs brick C** : la continuation de catch n'est pas un simple return — le catch funclet rend une **adresse de
+     continuation** dans l'établisseur. Modéliser via le même setjmp/longjmp mais reprendre à la continuation (à concevoir :
+     soit le funclet récupéré inclut la continuation, soit transfert explicite). Chantier substantiel mais borné, driver réel
+     = WinZip `WZ32.DLL` (v1, 66 régions).
+
 <!-- NOUVELLES ENTRÉES ICI (garder l'ordre chronologique, plus récent en bas) -->
