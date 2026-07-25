@@ -4474,4 +4474,26 @@ Détail : **70 §6** (roadmap). Résumé :
   proprement avec la fixture `seh_except` (Wine `a=42 b=1 c=3 d=5 fin=110`) + **toutes les portes** comme oracle — pas de
   demi-mesure sur du code lifter correctness-critique. Zéro code runtime/lifter modifié à ce stade.
 
+### 2026-07-25 — [EH] **Brick C composant 1 LIVRÉ (handler HLE) + composant 2 conçu (injection emit setjmp)**
+- **Sous-problème 2 (threading ebp) RÉSOLU par la mesure** : `internal_call_args()` (build.rs) montre que le **6e arg
+  d'`aret_call` (`b`) EST l'ebp** (registre-param callee-saved threadé), et le C généré confirme `establisher_ebp = frame+16`
+  (le handler lifté restaure `fs:[0]` depuis `[ebp-0x10]=frame[0]`). ⇒ appeler un funclet filtre/handler avec le bon ebp =
+  `aret_call(va, scratch, 0,0,0, frame+16)`. Le nœud craint était en fait propre.
+- **Composant 1 (LIVRÉ, committé, portes vertes)** : `aret_except_handler3` (HLE) — scope-walk {EnclosingLevel, FilterFunc,
+  HandlerFunc}[trylevel], appel du filtre, EXECUTE_HANDLER → global_unwind (RtlUnwind) + local_unwind (`__finally`) +
+  `aret_longjmp_do(frame, lvl+1)` ; passe d'unwind = `__finally`. + `aret_seh_run(frame, level)` (exécute le funclet handler au
+  retour du setjmp). **Additif** : `_except_handler3` couvert 100 % (fixture seh), hash `19acad982194bf07` **inchangé**,
+  difftest 272/272. (Piège respecté : `sanitize_import` retire l'underscore de tête → shim `aret_except_handler3`.)
+- **Composant 2 (conçu, à écrire) = injection lifter du setjmp au SEH-establish.** Approche **la moins risquée = niveau
+  émission** (structured.rs `body_line`) : quand on rend le Store `fs:[0] = esp` **et** que le programme importe
+  `_except_handler3` (gate programme → **tout le reste byte-identique, portes intactes**), appender
+  `{ uint32_t _sj = aret_seh_setjmp(<esp>); if (_sj) return aret_seh_run(g_seh_frame, _sj-1); }`. **Macro dédiée**
+  `aret_seh_setjmp(f)=setjmp(*aret_jmpbuf_for(f))` (keyé par `frame` **direct**, pas via `ARET_SJ_KEY` qui lit `[esp]`).
+  **Subtilité setjmp/locals résolue** : après longjmp les locaux C non-volatile sont indéterminés → passer `frame` via un
+  global `g_seh_frame` (posé par `_except_handler3` avant le longjmp) et le `level` via la valeur de longjmp (`_sj`), pas via un
+  local. (Global = limite ré-entrance/fibers connue, à durcir plus tard.) Reste : détecter le motif fs:[0]-store-de-esp dans
+  `body_line` (match Expr) + le gate `seh_active()` + build/test fixture `seh_except` (doit rendre `a=42 b=1 c=3 d=5 fin=110`
+  = Wine) + régression complète. **Correctness-critique (emit) → à écrire soigneusement, pas en fin de marathon.**
+- **État** : runway complet + composant 1 livré/vert/committé + composant 2 spécifié au détail. Prochaine étape focalisée.
+
 <!-- NOUVELLES ENTRÉES ICI (garder l'ordre chronologique, plus récent en bas) -->
