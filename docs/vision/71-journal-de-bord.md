@@ -4313,4 +4313,18 @@ Détail : **70 §6** (roadmap). Résumé :
   Fixtures : `user32_getdlgcode` (8 classes bit-identiques Wine), `user32_dlgradio` (locke le comportement radio-sans-WS_TABSTOP).
   **#17 clos par une cause générale, vérifiée, testée, documentée.**
 
+### 2026-07-24 — [HANDOFF] **Note pour le successeur (si compression de contexte)**
+- **Reprise** : relis le **doc 70 EN ENTIER** et le **doc 80 EN ENTIER** ; relis les **dernières entrées du doc 71** + les
+  **derniers commits** ; **énumère toutes les règles de travail** (principe sacré §0, doctrine §1, méthode §2, doc 80 §3 — elles
+  sont et resteront **incontournables**) ; **fais le point**, puis **reprends le travail**.
+- **En cours** : **tâche « focus » (gestion + rendu), dans les règles**, par incréments : (1) `SetFocus` envoie
+  `WM_KILLFOCUS`/`WM_SETFOCUS` (ordre/wParam mesurés vs Wine, fixture) ; (2) `IsDialogMessage` (Tab/Shift-Tab via
+  `GetNextDlgTabItem`, flèches via `GetNextDlgGroupItem`, Entrée=bouton défaut, Échap=IDCANCEL) ; (3) **rendu de focus** (#18 :
+  pointillé `DrawFocusRect` auto + surbrillance bleue du combo fermé focalisé). Chaque incrément : fixture vs Wine → vert → commit → doc.
+  **Puis enchaîner le plan** (brick B EH C++ = multiplicateur MFC ; résidus bornés #13 esp-drift, #15/#16).
+- **État** : #17 **clos** (radios FishTank via `WM_GETDLGCODE` général, dialogue MFC complet). Portes vertes : difftest **272/272**,
+  hash `19acad982194bf07`, winediff **173/174** (seul rouge `gdi_uifont` env). Tout poussé sur `claude/zen-hamilton-6pi1k4`.
+  ⚠️ **`aret_win32.c` embarqué par `include_str!` → rebuild `cargo` après tout changement du runtime C.** ⚠️ Capture GUI = renderer
+  software + capture racine, Xvfb `:99` (le relancer s'il meurt). ⚠️ Committer AVANT les vérifs longues (conteneur éphémère).
+
 <!-- NOUVELLES ENTRÉES ICI (garder l'ordre chronologique, plus récent en bas) -->
