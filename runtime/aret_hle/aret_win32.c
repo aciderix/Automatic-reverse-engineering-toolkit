@@ -2980,8 +2980,17 @@ static int u32_defproc_common(uint32_t esp, uint32_t hwnd, uint32_t msg, uint32_
 }
 /* DefWindowProcW(HWND,UINT,WPARAM,LPARAM) -> LRESULT. Handles the text messages
  * (wide) + the common paint/close defaults; everything else defaults to 0. */
+/* DefWindowProc: for a window that IS a predefined control (its implicit "system
+ * proc" is u32_control_proc — our controls carry wndproc==0), also answer the control's
+ * class messages here. A subclasser (MFC) whose saved original proc is NULL chains
+ * unhandled messages to ::DefWindowProc (not CallWindowProc), so CB_ADDSTRING/CB_SETCURSEL/
+ * BM_SETCHECK on a subclassed combo/button arrive here — without this they were dropped
+ * (items/selection/check lost). u32_control_proc returns 0 for non-control windows, so
+ * ordinary windows are unaffected. */
+static int u32_control_proc(uint32_t esp, uint32_t hwnd, uint32_t msg, uint32_t wp, uint32_t lp, uint32_t *out);
 uint32_t aret_DefWindowProcW(uint32_t esp) {
     uint32_t r;
+    if (u32_control_proc(esp, WU(0), WU(1), WU(2), WU(3), &r)) return r;
     if (u32_defproc_common(esp, WU(0), WU(1), WU(2), &r)) return r;
     if (u32_defproc_text(WU(0), WU(1), WU(2), WU(3), 1, &r)) return r;
     return 0;
@@ -3125,6 +3134,7 @@ uint32_t aret_MsgWaitForMultipleObjectsEx(uint32_t esp) {
  * DefWindowProcA/Set-GetWindowTextA differ (ANSI vs wide payloads). --- */
 uint32_t aret_DefWindowProcA(uint32_t esp) {
     uint32_t r;
+    if (u32_control_proc(esp, WU(0), WU(1), WU(2), WU(3), &r)) return r;   /* subclassed control class msgs */
     if (u32_defproc_common(esp, WU(0), WU(1), WU(2), &r)) return r;
     if (u32_defproc_text(WU(0), WU(1), WU(2), WU(3), 0, &r)) return r;  /* narrow */
     return 0;
