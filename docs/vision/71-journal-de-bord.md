@@ -4284,4 +4284,16 @@ Détail : **70 §6** (roadmap). Résumé :
   dialogue pour matcher ; si identique → l'état « coché » de Wine vient d'un autre chemin (à investiguer). **Ne pas deviner-ajouter
   `WS_TABSTOP`.** Le reste du dialogue FishTank (combos + edits) = **peuplé comme Wine**.
 
+### 2026-07-24 — [HLE-WIN32] **Radios FishTank : hypothèse WS_TABSTOP RÉFUTÉE par la mesure**
+- **Mesure décisive** (fixture `winecorpus/user32_dlgradio` : groupe de radios **sans `WS_TABSTOP`** + marche façon DDX_Radio) :
+  **bit-identique Wine vs ARET** — `tabstop r0=0`, la marche gated-WS_TABSTOP ne coche **rien** dans **les deux**. ⇒ l'hypothèse
+  « les points de radio FishTank sont gated sur WS_TABSTOP » est **RÉFUTÉE** : le gestionnaire de dialogue de Wine n'ajoute pas
+  `WS_TABSTOP` et une marche gated-WS_TABSTOP ne coche rien sous Wine non plus. (Règle §2 : mesurer, ne pas affirmer — hypothèse tombée.)
+- **Où on en est** : le `DDX_Radio` réel de FishTank **s'exécute** (35 `GetWindow(GW_HWNDNEXT)`), envoie **0 `BM_SETCHECK`** sous ARET,
+  alors que les radios sont cochés sous Wine — **même code MFC lifté** dans les deux. La divergence vient donc d'une **lecture HLE qui
+  diffère au milieu de `DoDataExchange`** (candidats : ordre/appartenance des frères de `GetWindow`, une valeur `GetWindowLong`,
+  `PrepareCtrl`/`GetDlgItem`, ou une valeur membre lue) qui fait sauter le `BM_SETCHECK` au code lifté. **Prochain** : trace niveau
+  débogueur (`-O0 -g` gdb) du `DoDataExchange` lifté pour trouver la lecture HLE exacte qui diverge — **lourd** (MFC strippé, ~1380 fn).
+  Le gros du dialogue (combos + edits) matche déjà Wine ; les points de radio sont le résidu profond.
+
 <!-- NOUVELLES ENTRÉES ICI (garder l'ordre chronologique, plus récent en bas) -->
