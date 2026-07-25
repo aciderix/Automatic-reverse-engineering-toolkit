@@ -5347,6 +5347,19 @@ static int u32_control_proc(uint32_t esp, uint32_t hwnd, uint32_t msg, uint32_t 
     if (!u32_ctrl_paintable(cls)) return 0;
     if (msg == 0x0030u /*WM_SETFONT*/)  { g_u32_win[i].ctrl_font = wp; *out = 0; return 1; }
     if (msg == 0x0031u /*WM_GETFONT*/)  { *out = g_u32_win[i].ctrl_font; return 1; }
+    if (msg == 0x0087u /*WM_GETDLGCODE*/) {   /* control classification (values measured vs Wine) */
+        if (!strcasecmp(cls, "button")) { uint32_t t = g_u32_win[i].style & 0xFu;
+            *out = (t == 4 || t == 9) ? 0x2040u   /* DLGC_BUTTON|DLGC_RADIOBUTTON */
+                 : (t == 1)          ? 0x2010u   /* DLGC_BUTTON|DLGC_DEFPUSHBUTTON */
+                 : (t == 0)          ? 0x2020u   /* DLGC_BUTTON|DLGC_UNDEFPUSHBUTTON */
+                 : (t == 7)          ? 0x0100u   /* DLGC_STATIC (group box) */
+                 :                     0x2000u;  /* DLGC_BUTTON (checkbox/3-state) */
+            return 1; }
+        if (!strcasecmp(cls, "edit"))     { *out = 0x0089u; return 1; }  /* WANTCHARS|HASSETSEL|WANTARROWS */
+        if (!strcasecmp(cls, "static"))   { *out = 0x0100u; return 1; }  /* DLGC_STATIC */
+        if (!strcasecmp(cls, "combobox")) { *out = 0x0081u; return 1; }  /* WANTCHARS|WANTARROWS */
+        if (!strcasecmp(cls, "listbox"))  { *out = 0x0081u; return 1; }
+    }
     if (!strcasecmp(cls, "button")) {
         if (msg == 0x00F0u /*BM_GETCHECK*/) { *out = (uint32_t)g_u32_win[i].check_state; return 1; }
         if (msg == 0x00F1u /*BM_SETCHECK*/) { g_u32_win[i].check_state = (int)wp; u32_ctrl_recomposite(esp, i); *out = 0; return 1; }
