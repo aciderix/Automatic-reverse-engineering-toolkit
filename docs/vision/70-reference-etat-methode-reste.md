@@ -190,7 +190,7 @@ bash bench/wallsweep.sh <dir1> [dir2…]  # AGRÈGE --mode walls sur un corpus :
 
 ### État régression (référence — doit rester vert)
 difftest **272/272** · transpile-diff **4/4** (H=`19acad982194bf07`) · winediff
-**169/169** (le seul rouge possible = `gdi_uifont`, **environnemental** : fontconfig i386, orthogonal au code) · cpudiff vert (per-instruction + séquences génératives) · funcdiff corpus **0 divergence** (lift **~20,6k** scorées /
+**176** fixtures (le seul rouge possible = `gdi_uifont`, **environnemental** : fontconfig i386, orthogonal au code) · cpudiff vert (per-instruction + séquences génératives) · funcdiff corpus **0 divergence** (lift **~20,6k** scorées /
 **~20k appels** — **imports (stubs `@N` + `@0` scalaires) + appels indirects résolus + intrinsèques mémoire host-backés (memmove/memcpy)** ; scratch sous-esp exclu ; opt ~10k scorées) · SMT **11/11** · in-place **3/3** · magicdiv **2³²** ·
 recompilabilité **100 %** · WASM **7/7**.
 
@@ -525,6 +525,14 @@ recompilabilité **100 %** · WASM **7/7**.
   focus/activation (`Set`/`GetFocus`/`ActiveWindow`/`ForegroundWindow`/`BringWindowToTop`), `InvalidateRect`/
   `ValidateRect`/… (no-op sound), `MessageBeep`, `CallWindowProcA/W` (appelle un wndproc lifté), `LoadCursorA/W`/
   `LoadIconA/W` (handles opaques), `MsgWaitForMultipleObjects`. Mesuré bit-identique Wine (`user32_helpers.c`).
+- **✅ FOCUS complet (2026-07-25, gestion + rendu, bit-identique Wine)** : **`SetFocus`** fire `WM_KILLFOCUS`(wParam=gagnant)
+  puis `WM_SETFOCUS`(wParam=perdant), `g_u32_focus` à jour avant (GetFocus correct dans les handlers) — `user32_focusmsg` ;
+  **`IsDialogMessageA/W`** (était un stub) navigue au clavier : Tab→`GetNextDlgTabItem`, flèches→`GetNextDlgGroupItem`, Entrée→
+  bouton défaut/IDOK, Échap→IDCANCEL (`WM_COMMAND`), focus via `u32_set_focus` — `user32_isdlgmsg` ; **focus initial de
+  dialogue** = premier tab-stop après `WM_INITDIALOG` **gated sur son retour** (TRUE→gestionnaire pose le focus, FALSE→le
+  DLGPROC l'a fait) — `user32_dlgfocus` (`TRUE→100`, `FALSE→101`) ; **rendu** = un changement de focus **repeint** les
+  contrôles affectés (`u32_set_focus` recompose leur dialog) → un **`CBS_DROPDOWNLIST` focalisé** montre sa sélection sur
+  `COLOR_HIGHLIGHT`+`COLOR_HIGHLIGHTTEXT` (mesuré sur FishTank = Wine ; teinte = caveat classique-vs-uxtheme des composités).
 - **`SystemParametersInfo(A/W)`** (2026-07-17) : actions GET **display-indépendantes** modélisées à valeur
   déterministe vérifiée vs Wine (`SPI_GETBEEP`=1/`GETBORDER`=1/`GETSCREENSAVEACTIVE`=1/`GETDRAGFULLWINDOWS`=0/
   `GETWHEELSCROLLLINES`=3), `SPI_GETWORKAREA` = invariant écran 1024×768 (comme GetSystemMetrics), et la paire

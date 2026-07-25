@@ -4327,4 +4327,41 @@ Détail : **70 §6** (roadmap). Résumé :
   ⚠️ **`aret_win32.c` embarqué par `include_str!` → rebuild `cargo` après tout changement du runtime C.** ⚠️ Capture GUI = renderer
   software + capture racine, Xvfb `:99` (le relancer s'il meurt). ⚠️ Committer AVANT les vérifs longues (conteneur éphémère).
 
+### 2026-07-25 — [GUI][HLE-WIN32] **Focus management (SetFocus messages + IsDialogMessage) + focus rendering — chantier « focus » clos dans les règles**
+- **Objectif utilisateur** : « terminer focus dans les règles puis enchaîner le plan ». Le chantier couvre **la gestion**
+  (qui a le focus, changement de focus, messages) **et le rendu** (état visuel du contrôle focalisé). Livré par incréments,
+  chacun fixture→vert→commit→doc.
+- **Incrément 1 — `SetFocus` notifie comme Wine** (`u32_set_focus`) : `WM_KILLFOCUS` au perdant (wParam = gagnant) **puis**
+  `WM_SETFOCUS` au gagnant (wParam = perdant), `g_u32_focus` mis à jour **avant** (GetFocus correct dans les handlers),
+  no-op si inchangé, retourne l'ancien focus. Gardé `winecorpus/user32_focusmsg` (ordre + wParam **bit-identique Wine**).
+- **Incrément 2 — `IsDialogMessage`** (était un stub → 0) : navigation clavier de dialogue. Tab → `GetNextDlgTabItem` (Shift
+  indisponible headless ⇒ avant, documenté), flèches → `GetNextDlgGroupItem` (groupe), Entrée → `WM_COMMAND` du bouton défaut
+  (sinon IDOK), Échap → `WM_COMMAND(IDCANCEL)`. Le focus bouge via `u32_set_focus` (donc KILL/SET firent). Renvoie TRUE pour
+  ces touches (les autres messages → FALSE, l'appelant les dispatche). Gardé `winecorpus/user32_isdlgmsg` (tab c1→c2, wrap
+  c3→c1, enter/esc ret=1 **bit-identique Wine**).
+- **Incrément 3 — rendu de focus (#18)**, **deux comportements généraux mesurés vs Wine** :
+  1. **Focus initial de dialogue.** Après `WM_INITDIALOG`, si le DLGPROC retourne **TRUE**, le gestionnaire de dialogue donne
+     le focus au **premier contrôle tab-stop** (`GetNextDlgTabItem(hDlg, NULL, FALSE)`) et fire `WM_SETFOCUS` ; s'il retourne
+     **FALSE**, le DLGPROC a posé le focus lui-même → on le laisse. `u32_dialog_default_focus`, câblé dans les cœurs modal
+     **et** modeless, **gated sur la valeur de retour** de `WM_INITDIALOG`. **Remplace** l'ancienne devinette au moment de la
+     création (« premier EDIT » — ni le bon contrôle ni le bon moment).
+  2. **Un changement de focus repeint les contrôles affectés** (`u32_set_focus` recompose la dialog de l'ancien et du nouveau
+     contrôle) → leur rendu d'état de focus se met à jour, comme Windows repeint au changement de focus. ⇒ un
+     **`CBS_DROPDOWNLIST` focalisé** montre sa sélection **surlignée** (`COLOR_HIGHLIGHT` + `COLOR_HIGHLIGHTTEXT`) ; non
+     focalisé = `COLOR_WINDOW`. Vaut aussi pour la **navigation Tab** (le surlignage suit le focus).
+- **Preuve bit-exact du général** : `winecorpus/user32_dlgfocus` (nouvelle) — dialogue à 3 contrôles (STATIC **non**-tabstop,
+  puis BUTTON tab-stop id 100, puis EDIT tab-stop id 101) rapporte `GetDlgCtrlID(GetFocus())` après création :
+  `initret=TRUE → focus_id=100` (premier tab-stop, static sauté), `initret=FALSE → focus_id=101` (l'EDIT que le proc a
+  focalisé), **bit-identique Wine**.
+- **Mesuré bout-en-bout sur FishTank.exe (MFC)** : le combo **Water Type** montre désormais sa sélection « Tropical Freshwater »
+  sur la **couleur de surbrillance** = l'état focalisé de Wine (le combo est le premier tab-stop → focus initial). L'écart de
+  **teinte** (ARET `#000080` COLOR_HIGHLIGHT **classique** vs Wine `#3096FA` **thémé uxtheme**) = **exactement le caveat
+  classique-vs-uxtheme** déjà documenté pour tout contrôle composité (progress bar, checkbox, radio) — le **comportement**
+  correspond, la teinte suit le thème chargé. Aucun focus-rect pointillé n'était requis (Wine focalise le combo, pas un bouton).
+- **Portes** : difftest **272/272**, hash transpile `19acad982194bf07` **inchangé** (changement HLE-only), winediff (+`user32_focusmsg`
+  +`user32_isdlgmsg` +`user32_dlgfocus`, seul rouge `gdi_uifont` environnemental). Committé + poussé sur `claude/zen-hamilton-6pi1k4`.
+- **⇒ Chantier « focus » COMPLET** (gestion fonctionnelle + rendu). **Suite = le plan** : brick B EH C++
+  (`_CxxThrowException`/`__CxxFrameHandler`, #15 — le multiplicateur MFC), puis résidus bornés (#13 esp-drift PeekMessage, #16
+  `__except_handler3`).
+
 <!-- NOUVELLES ENTRÉES ICI (garder l'ordre chronologique, plus récent en bas) -->
