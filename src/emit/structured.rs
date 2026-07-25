@@ -40,9 +40,13 @@ fn body_line(s: &Stmt) -> Option<String> {
             // an establish links the new frame's prev to the current head, so
             // `newframe->prev == fs:[0]` holds here (before the store); a restore pops to
             // an older frame, for which it does not. Only an establish arms a setjmp.
+            // Exclude the chain terminator (0xffffffff) / null before dereferencing the
+            // candidate frame: a RESTORE that pops fs:[0] back to the end-of-chain
+            // sentinel would otherwise deref an invalid address.
             let f = expr_c(&args[0]);
             Some(format!(
-                "if (*(uint32_t*)(uintptr_t)({f}) == *(uint32_t*)(uintptr_t)__aret_fs()) \
+                "if ((uint32_t)({f}) != 0xffffffffu && (uint32_t)({f}) != 0 && \
+                 *(uint32_t*)(uintptr_t)({f}) == *(uint32_t*)(uintptr_t)__aret_fs()) \
                  {{ uint32_t _sj = aret_seh_setjmp({f}); if (_sj) return aret_seh_run(g_seh_frame, _sj - 1); }}"
             ))
         }

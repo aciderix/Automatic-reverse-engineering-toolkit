@@ -3158,19 +3158,19 @@ uint32_t aret_except_handler3(uint32_t esp) {
     uint32_t *frame = (uint32_t *)(uintptr_t)framep;          /* {prev, handler, scopetable, trylevel} */
     uint32_t flags = rec ? rec[1] : 0;
     uint32_t scopetable = frame[2];
-    uint32_t ebp = framep + 16;
-    /* WIP (brick C): the scope-walk + unwind + longjmp-to-establisher machinery below is
-     * complete and the setjmp is injected at the SEH-establish, but the exact
-     * _except_handler3<->funclet ABI is not yet nailed: the filter reads
-     * GetExceptionInformation from [ebp-0x14] (a pointer _except_handler3 must populate)
-     * and the filter/handler ebp reference offset is still being measured. Running a
-     * filter with that slot unpopulated double-derefs garbage and faults. Until the ABI is
-     * measured exactly, abort loudly (sound) rather than mis-run a filter. */
-    aret_unmodelled("_except_handler3: SEH scope-table dispatch (funclet call ABI WIP)");
+    uint32_t ebp = framep + 16;                          /* funclet ebp = EstablisherFrame + 16 */
     if (flags & (ARET_EH_UNWINDING | ARET_EH_EXIT_UNWIND)) {
         aret_seh_local_unwind(scopetable, (int)frame[3], -1, ebp);   /* run all __finally */
         return 1;                                                     /* ExceptionContinueSearch */
     }
+    /* GetExceptionInformation: an __except filter reads a PEXCEPTION_POINTERS from
+     * [establisher_ebp - 0x14] = [EstablisherFrame - 4]; _except_handler3 must publish it
+     * there before calling filters (else the filter double-derefs an unpopulated slot and
+     * faults). The pointer is a 2-word EXCEPTION_POINTERS {ExceptionRecord, ContextRecord}
+     * — everything is 32-bit here (the recompiled program is -m32). */
+    static uint32_t xp[2];
+    xp[0] = recp; xp[1] = arg(esp, 2) /* ContextRecord */;
+    *(uint32_t *)(uintptr_t)(framep - 4) = (uint32_t)(uintptr_t)xp;
     for (int lvl = (int)frame[3]; lvl != -1; ) {
         const uint32_t *e = (const uint32_t *)(uintptr_t)(scopetable + (uint32_t)lvl * 12u);
         int enclosing = (int)e[0];
@@ -3178,7 +3178,7 @@ uint32_t aret_except_handler3(uint32_t esp) {
             int32_t d = (int32_t)aret_seh_funclet(e[1], ebp);
             if (d < 0) return 0;                                     /* CONTINUE_EXECUTION */
             if (d > 0) {                                             /* EXECUTE_HANDLER */
-                aret_seh_global_unwind(esp, framep);                 /* outer frames' __finally */
+                aret_seh_global_unwind(esp, framep);
                 aret_seh_local_unwind(scopetable, (int)frame[3], lvl, ebp); /* this frame's __finally */
                 frame[3] = (uint32_t)enclosing;                      /* trylevel := enclosing */
                 g_seh_frame = framep;                                /* stable frame for aret_seh_run (a C local would be indeterminate post-longjmp) */

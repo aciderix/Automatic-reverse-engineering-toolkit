@@ -4515,4 +4515,34 @@ Détail : **70 §6** (roadmap). Résumé :
   (mesuré sur la fixture seh), jamais boucle ni faux-silencieux. **Prochaine étape** : mesurer l'ABI exacte (peupler le slot
   exception-info + fixer l'ebp filtre) → retirer l'abort → fixture `seh_except` doit rendre `a=42 b=1 c=3 d=5 fin=110` = Wine.
 
+### 2026-07-25 — [HANDOFF] **Consigne de reprise (à suivre DÈS la prise de travail, si compression)**
+- **Rituel obligatoire avant tout** : relis le **doc 70 EN ENTIER** et le **doc 80 EN ENTIER** ; relis les **dernières entrées
+  du doc 71** + les **derniers commits** ; **énumère toutes les règles de travail** (principe sacré §0, doctrine §1, méthode §2,
+  doc 80 §3 — elles sont et resteront **incontournables**). Puis reprends.
+- **Tâche en cours (demande utilisateur)** : **terminer brick C puis brick B** (EH C++/MFC), en planifiant bien, travail propre
+  et dans les règles. brick C = ~90 % (handler HLE + injection setjmp gatée committés, portes vertes) ; reste l'**ABI funclet**
+  (peupler le slot `EXCEPTION_POINTERS` à `[frame-4]` + ebp funclet=frame+16). Oracle : `bench/eh/seh_except.c` doit rendre
+  `a=42 b=1 c=3 d=5 fin=110` = Wine. Puis brick B (`__CxxFrameHandler` v1+v3) réutilise le même transfert non-local.
+- ⚠️ Outillage : `aret_win32.c`/`aret_hle.c` embarqués par `include_str!` → `cargo build --release` avant re-transpiler. Fixtures
+  EH via `bench/eh/build.sh` (clang ABI MSVC). Driver réel = WinZip (`bench/eh` diag, `WZ32.DLL` v1).
+
+### 2026-07-25 — [EH][LIFT] **✅ BRICK C COMPLET : `_except_handler3` (SEH `__try/__except/__finally`) bit-identique Wine**
+- **Fonctionnel end-to-end** : la fixture `bench/eh/seh_except.c` rend `a=42 b=1 c=3 d=5 fin=110` = **exactement Wine** (catch
+  simple, `__finally` normal + exceptionnel, filtre CONTINUE_SEARCH → catch externe). Harnais `bench/ehdiff.sh` (nouveau) :
+  `seh_except` **ok**.
+- **Les 2 dernières pièces de l'ABI, mesurées** : (1) **slot GetExceptionInformation** — un filtre lit `PEXCEPTION_POINTERS`
+  à `[establisher_ebp-0x14]=[EstablisherFrame-4]` ; `_except_handler3` l'y **publie** ({ExceptionRecord, ContextRecord}) avant
+  d'appeler les filtres (tout est 32-bit, recompile `-m32`). (2) **ebp funclet = EstablisherFrame+16** (confirmé : le handler
+  fait `mov esp,[ebp-0x18]`=esp sauvé `[frame-8]` puis `add ebp,0xc`→ebp réel). (3) **guard d'injection durci** : le check
+  establish/restore `newframe->prev == fs:[0]` **déréférençait** `newframe` — au restore vers le terminateur `0xffffffff` ça
+  fautait ; on exclut `0xffffffff`/`0` avant de déréférencer.
+- **Bilan machinerie** (composants 1+2, tous committés) : handler HLE scope-table (filtre/unwind/`__finally`) + injection setjmp
+  gatée sur l'import `_except_handler3` (tout le reste **byte-identique**) + guard runtime establish-vs-restore (sans dataflow) +
+  transfert non-local par longjmp vers l'établisseur (`g_seh_frame`/valeur de longjmp portent frame/level à travers le longjmp).
+- **Portes** : difftest **272/272**, hash `19acad982194bf07` **inchangé**, winediff **177/178** (seul `gdi_uifont`), sqlite3/
+  busybox/winetest byte-identiques et fonctionnels (n'importent pas `_except_handler3`), `ehdiff` `seh_except` ok. Committé + poussé.
+- **Suite = brick B** (`__CxxFrameHandler` v1+v3, `_CxxThrowException`) : réutilise **tout** ce transfert non-local (setjmp
+  injecté au SEH-establish, longjmp, funclet call). Reproduction en main : `bench/eh/throw_catch.cpp` DIFF (`r=49` Wine vs
+  `r=4198623` ARET) — `_CxxThrowException` tombe à travers, à implémenter.
+
 <!-- NOUVELLES ENTRÉES ICI (garder l'ordre chronologique, plus récent en bas) -->
