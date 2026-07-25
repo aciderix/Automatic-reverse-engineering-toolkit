@@ -4258,4 +4258,18 @@ Détail : **70 §6** (roadmap). Résumé :
   MFC interne à `DoDataExchange`. Ce n'est **ni** un défaut de peinture, **ni** de subclass/dispatch. **Suite** : tracer jusqu'où
   `OnInitDialog`/`DoDataExchange` va sous ARET (ce qu'il appelle avant de s'arrêter) → décide entre brick B (EH C++) et une API manquante.
 
+### 2026-07-24 — [HLE-WIN32] **DefWindowProc répond aux messages de classe d'un contrôle prédéfini (combo Tank Size FishTank)**
+- **Suite #17.** Trace : le combo « Tank Size » de FishTank (subclassé par MFC `DDX_Control`) recevait bien **39 `CB_ADDSTRING`
+  + `CB_SETCURSEL`** — mais routés via **`DefWindowProc`** (`dwp=40, cwp=0`), pas `CallWindowProc`. Cause : nos contrôles ont
+  `wndproc==0` → MFC sauve un proc original **NULL** → `CWnd::Default()` chaîne les messages non traités vers **`::DefWindowProc`**
+  (et non `CallWindowProc`). Notre `DefWindowProc` ne connaissait pas `CB_*`/`BM_*` → items perdus (combo vide).
+- **Fix** : `DefWindowProc(A/W)` route d'abord par **`u32_control_proc`** (qui rend 0 pour une fenêtre non-contrôle → fenêtres
+  ordinaires inchangées) — le « proc système » implicite de nos contrôles tient lieu du vrai proc contrôle qu'un super non-NULL
+  serait sous Windows. **Mesuré sur FishTank** : le combo Tank Size affiche maintenant **« Custom… »** (comme Wine). ⚠️ **Pas
+  bit-exact-fixturable en isolation** (le `DefWindowProc` de Wine ne gère **pas** `CB_*` — un vrai contrôle n'a jamais de super
+  NULL) → vérifié sur le **vrai binaire MFC** + régression. Fixtures contrôle existantes (`user32_subclass`/`_dlgitemmsg`) toujours vertes.
+- **Bilan FishTank** : combos (Water Type « Tropical Freshwater », Tank Size « Custom… ») + edits (« 0 ») **peuplés = Wine**. **Seul
+  reste** : les **points des radios** (Rectangular / in.,gal.,lb.) — MFC n'envoie **jamais** `BM_SETCHECK` (0 mesuré) → le chemin
+  `DoDataExchange`/`DDX_Radio` ne s'exécute pas (brick B / EH C++ ou mur API interne). Tâche #17 (radios) reste ouverte.
+
 <!-- NOUVELLES ENTRÉES ICI (garder l'ordre chronologique, plus récent en bas) -->
