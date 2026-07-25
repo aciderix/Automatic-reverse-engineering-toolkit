@@ -6820,8 +6820,19 @@ uint32_t aret_GetClientRect(uint32_t esp) {
 uint32_t aret_AdjustWindowRect(uint32_t esp)   { return WP(0) ? 1u : 0u; }
 uint32_t aret_AdjustWindowRectEx(uint32_t esp) { return WP(0) ? 1u : 0u; }
 
-/* Focus / activation: tracked so Get* round-trips Set*; no real input focus. */
-uint32_t aret_SetFocus(uint32_t esp)         { uint32_t p = g_u32_focus;  g_u32_focus = WU(0);  return p; }
+/* Focus / activation: tracked so Get* round-trips Set*; no real input focus.
+ * SetFocus notifies the two windows like Wine: WM_KILLFOCUS to the one losing focus
+ * (wParam = the window gaining it), then WM_SETFOCUS to the one gaining it (wParam =
+ * the window losing it); g_u32_focus is updated first so GetFocus is correct inside
+ * the handlers. No change (new==old) sends nothing. Return the previous focus. */
+uint32_t aret_SetFocus(uint32_t esp) {
+    uint32_t old = g_u32_focus, neu = WU(0);
+    if (neu == old) return old;
+    g_u32_focus = neu;
+    if (old) { uint32_t wp = u32_win_wndproc(old); if (wp) u32_call_wndproc(esp, wp, old, 0x0008u /*WM_KILLFOCUS*/, neu, 0); }
+    if (neu) { uint32_t wp = u32_win_wndproc(neu); if (wp) u32_call_wndproc(esp, wp, neu, 0x0007u /*WM_SETFOCUS*/, old, 0); }
+    return old;
+}
 uint32_t aret_GetFocus(uint32_t esp)         { (void)esp; return g_u32_focus; }
 uint32_t aret_SetActiveWindow(uint32_t esp)  { uint32_t p = g_u32_active; g_u32_active = WU(0); return p; }
 uint32_t aret_GetActiveWindow(uint32_t esp)  { (void)esp; return g_u32_active; }
