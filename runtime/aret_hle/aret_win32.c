@@ -6825,14 +6825,15 @@ uint32_t aret_AdjustWindowRectEx(uint32_t esp) { return WP(0) ? 1u : 0u; }
  * (wParam = the window gaining it), then WM_SETFOCUS to the one gaining it (wParam =
  * the window losing it); g_u32_focus is updated first so GetFocus is correct inside
  * the handlers. No change (new==old) sends nothing. Return the previous focus. */
-uint32_t aret_SetFocus(uint32_t esp) {
-    uint32_t old = g_u32_focus, neu = WU(0);
+static uint32_t u32_set_focus(uint32_t esp, uint32_t neu) {
+    uint32_t old = g_u32_focus;
     if (neu == old) return old;
     g_u32_focus = neu;
     if (old) { uint32_t wp = u32_win_wndproc(old); if (wp) u32_call_wndproc(esp, wp, old, 0x0008u /*WM_KILLFOCUS*/, neu, 0); }
     if (neu) { uint32_t wp = u32_win_wndproc(neu); if (wp) u32_call_wndproc(esp, wp, neu, 0x0007u /*WM_SETFOCUS*/, old, 0); }
     return old;
 }
+uint32_t aret_SetFocus(uint32_t esp) { return u32_set_focus(esp, WU(0)); }
 uint32_t aret_GetFocus(uint32_t esp)         { (void)esp; return g_u32_focus; }
 uint32_t aret_SetActiveWindow(uint32_t esp)  { uint32_t p = g_u32_active; g_u32_active = WU(0); return p; }
 uint32_t aret_GetActiveWindow(uint32_t esp)  { (void)esp; return g_u32_active; }
@@ -8526,8 +8527,59 @@ uint32_t aret_MapDialogRect(uint32_t esp) {
 }
 /* IsDialogMessageA/W(hDlg, lpMsg) -> BOOL. Headless keyboard navigation has no
  * input to translate, so no message is consumed as a dialog message. */
-uint32_t aret_IsDialogMessageA(uint32_t esp) { (void)esp; return 0; }
-uint32_t aret_IsDialogMessageW(uint32_t esp) { (void)esp; return 0; }
+/* Is `h` `anc` or a descendant of it (parent chain)? */
+static int u32_is_descendant(uint32_t anc, uint32_t h) {
+    for (int guard = 0; h && guard <= U32_MAX_WIN; guard++) {
+        if (h == anc) return 1;
+        int i = u32_win_idx(h); if (i < 0) return 0;
+        h = g_u32_win[i].parent;
+    }
+    return 0;
+}
+/* IsDialogMessage(hDlg, MSG*): dialog keyboard navigation. Handles the navigation keys
+ * (Tab/Shift-Tab, arrows within a group, Enter=default command, Esc=IDCANCEL) — moving
+ * focus and firing WM_COMMAND like Wine — and returns TRUE for those. Any other message
+ * returns FALSE so the caller's loop dispatches it normally (functionally the control
+ * still receives it), which keeps us from dropping messages. MSG layout: hwnd, message,
+ * wParam, lParam. Shift state is unavailable headless, so Tab goes forward (documented). */
+static uint32_t u32_is_dialog_message(uint32_t esp) {
+    uint32_t hDlg = WU(0);
+    const uint32_t *m = (const uint32_t *)WP(1);
+    if (!m || u32_win_idx(hDlg) < 0) return 0;
+    uint32_t mhwnd = m[0], msg = m[1], wp = m[2];
+    if (mhwnd != hDlg && !u32_is_descendant(hDlg, mhwnd)) return 0;   /* not for this dialog */
+    if (msg != 0x0100u /*WM_KEYDOWN*/) return 0;
+    uint32_t cur = g_u32_focus;
+    if (wp == 0x09u /*VK_TAB*/) {
+        uint32_t nx = u32_next_dlg_item(hDlg, cur, 0 /*shift unavailable headless -> forward*/, 1);
+        if (nx) u32_set_focus(esp, nx);
+        return 1;
+    }
+    if (wp == 0x25u || wp == 0x26u) {                                 /* VK_LEFT / VK_UP -> prev in group */
+        uint32_t nx = u32_next_dlg_item(hDlg, cur, 1, 0); if (nx) u32_set_focus(esp, nx); return 1;
+    }
+    if (wp == 0x27u || wp == 0x28u) {                                 /* VK_RIGHT / VK_DOWN -> next in group */
+        uint32_t nx = u32_next_dlg_item(hDlg, cur, 0, 0); if (nx) u32_set_focus(esp, nx); return 1;
+    }
+    if (wp == 0x0Du /*VK_RETURN*/) {                                  /* default push button, else IDOK */
+        uint32_t id = 1u, bh = 0u;
+        for (int k = 0; k < U32_MAX_WIN; k++)
+            if (g_u32_win[k].used && g_u32_win[k].parent == hDlg &&
+                !strcasecmp(g_u32_win[k].classname, "button") && (g_u32_win[k].style & 0xFu) == 1u) {
+                id = (uint32_t)g_u32_win[k].ctrl_id; bh = (uint32_t)(k + 1); break; }
+        uint32_t wpc = u32_win_wndproc(hDlg);
+        if (wpc) u32_call_wndproc(esp, wpc, hDlg, 0x0111u /*WM_COMMAND*/, id & 0xFFFFu, bh);
+        return 1;
+    }
+    if (wp == 0x1Bu /*VK_ESCAPE*/) {                                  /* IDCANCEL */
+        uint32_t wpc = u32_win_wndproc(hDlg);
+        if (wpc) u32_call_wndproc(esp, wpc, hDlg, 0x0111u /*WM_COMMAND*/, 2u /*IDCANCEL*/, 0);
+        return 1;
+    }
+    return 0;
+}
+uint32_t aret_IsDialogMessageA(uint32_t esp) { return u32_is_dialog_message(esp); }
+uint32_t aret_IsDialogMessageW(uint32_t esp) { return u32_is_dialog_message(esp); }
 
 /* ================================================================== */
 /* Windows hooks — sound stubs                                        */
