@@ -4496,4 +4496,23 @@ Détail : **70 §6** (roadmap). Résumé :
   = Wine) + régression complète. **Correctness-critique (emit) → à écrire soigneusement, pas en fin de marathon.**
 - **État** : runway complet + composant 1 livré/vert/committé + composant 2 spécifié au détail. Prochaine étape focalisée.
 
+### 2026-07-25 — [EH][LIFT] **Brick C composant 2 : injection setjmp au SEH-establish (machinerie complète, gatée, sound) — reste l'ABI funclet**
+- **Machinerie d'injection écrite et fonctionnelle** (gatée sur l'import `_except_handler3` → tout le reste byte-identique) :
+  `emit::set_seh_active(uses_seh(prog))` ; **lift.rs** émet, à chaque store `fs:[0]=reg` (segment fs, disp 0), un marqueur
+  `__aret_seh_establish(value)` **avant** le store ; **structured.rs** rend le marqueur en setjmp **gardé par un check runtime**
+  qui distingue establish de restore **sans dataflow** : `newframe->prev == fs:[0] courant` (vrai seulement à l'establish, le
+  prologue vient de lier prev=ancienne tête). Macro dédiée `aret_seh_setjmp(frame)` keyée **directement** par le frame ;
+  `g_seh_frame` porte le frame à travers le longjmp (les locaux C sont indéterminés après longjmp), le level via la valeur de
+  longjmp. **Vérifié** : `mov fs:0x0,eax` (clang, pas esp) détecté ; le guard filtre bien les restores ; `_except_handler3`
+  atteint et fait le scope-walk. Portes **vertes** : hash `19acad982194bf07` inchangé, difftest 272/272, sqlite3/busybox/winetest
+  n'importent pas `_except_handler3` (byte-identiques), sqlite3 tourne (`4`/`64120494`/`42`).
+- **Reste = l'ABI précise `_except_handler3`↔funclet** (la dernière pièce, mesurée) : (a) le **filtre** lit
+  `GetExceptionInformation` via `[ebp-0x14]` = un pointeur EXCEPTION_POINTERS que `_except_handler3` doit **peupler** avant
+  l'appel (sinon double-deref de garbage → faute) ; (b) l'**offset ebp** de référence des funclets (le handler `sub_40109c` fait
+  `mov esp,[ebp-0x18]; add ebp,0xc` ⇒ appelé avec ebp=frame+16, vérifié `[frame+16-0x18]=[frame-8]`=esp sauvé ✓ ; le filtre
+  utilise `[ebp+0]` comme base — à re-mesurer). **Interim sound** : `aret_except_handler3` fait un **abort bruyant**
+  (`aret_unmodelled`, message clair) plutôt que de mal-exécuter un filtre → un programme `__try/__except` **aborte proprement**
+  (mesuré sur la fixture seh), jamais boucle ni faux-silencieux. **Prochaine étape** : mesurer l'ABI exacte (peupler le slot
+  exception-info + fixer l'ebp filtre) → retirer l'abort → fixture `seh_except` doit rendre `a=42 b=1 c=3 d=5 fin=110` = Wine.
+
 <!-- NOUVELLES ENTRÉES ICI (garder l'ordre chronologique, plus récent en bas) -->

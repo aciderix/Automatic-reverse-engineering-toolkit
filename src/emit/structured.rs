@@ -25,6 +25,27 @@ fn body_line(s: &Stmt) -> Option<String> {
             super::lvalue_c(addr, super::int_bits(ty)),
             expr_c(value)
         )),
+        // SEH-establish marker (see lift.rs): render the setjmp that lets
+        // _except_handler3 transfer to this function's __except block. On the first pass
+        // setjmp returns 0 and the __try body runs; a longjmp from _except_handler3 (after
+        // it matched a filter and unwound) returns non-zero, carrying the matched scope
+        // level + 1, so we run that __except handler funclet and return its value. The
+        // frame comes from g_seh_frame (a C local holding it would be indeterminate after
+        // longjmp); the level comes from the longjmp value (well-defined). Keyed by the
+        // frame address (= esp here), matching _except_handler3's aret_longjmp_do(frame,…).
+        Stmt::CallStmt(Expr::Call { target: CallTarget::Named(n), args, .. })
+            if n == "__aret_seh_establish" && !args.is_empty() =>
+        {
+            // Runtime guard distinguishes an ESTABLISH from a RESTORE without dataflow:
+            // an establish links the new frame's prev to the current head, so
+            // `newframe->prev == fs:[0]` holds here (before the store); a restore pops to
+            // an older frame, for which it does not. Only an establish arms a setjmp.
+            let f = expr_c(&args[0]);
+            Some(format!(
+                "if (*(uint32_t*)(uintptr_t)({f}) == *(uint32_t*)(uintptr_t)__aret_fs()) \
+                 {{ uint32_t _sj = aret_seh_setjmp({f}); if (_sj) return aret_seh_run(g_seh_frame, _sj - 1); }}"
+            ))
+        }
         Stmt::CallStmt(e) => Some(format!("(void)({});", expr_c(e))),
         // An instruction the lifter could not model. In the read-only decompile
         // it is a comment; in the *transpile* (shared-stack) path it is live code

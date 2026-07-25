@@ -525,7 +525,32 @@ fn write_op0(ins: &Instruction, value: Expr, bits: u32) -> Option<Vec<Stmt>> {
                 if crate::emit::shared_stack() {
                     if let (Some(base), Some((addr, sz))) = (seg_base(ins), mem_addr_raw(ins)) {
                         let ea = Expr::Binary(BinOp::Add, Box::new(base), Box::new(addr));
-                        return Some(vec![Stmt::Store { addr: ea, value, ty: Ty::int(sz as u8) }]);
+                        // A store to `fs:[0]` sets the SEH ExceptionList head. This is
+                        // either an ESTABLISH (installing a fresh EXCEPTION_REGISTRATION,
+                        // whose prev field was just linked to the old head) or a RESTORE
+                        // (popping the current head back to a saved prev). When the program
+                        // uses _except_handler3, emit — BEFORE the store — a marker carrying
+                        // the new head value; emit renders it as a runtime-guarded setjmp
+                        // (guard: `newframe->prev == current fs:[0]`, true only for an
+                        // establish) so _except_handler3 can longjmp to the __except block.
+                        // Gated on seh_active(), so every other program is byte-identical.
+                        let seh_fs0_store = crate::emit::seh_active()
+                            && ins.segment_prefix() == Register::FS
+                            && ins.memory_base() == Register::None
+                            && ins.memory_index() == Register::None
+                            && ins.memory_displacement64() == 0;
+                        let store = Stmt::Store { addr: ea, value: value.clone(), ty: Ty::int(sz as u8) };
+                        if seh_fs0_store {
+                            return Some(vec![
+                                Stmt::CallStmt(Expr::Call {
+                                    target: CallTarget::Named("__aret_seh_establish".to_string()),
+                                    args: vec![value],
+                                    ret: Ty::int(32),
+                                }),
+                                store,
+                            ]);
+                        }
+                        return Some(vec![store]);
                     }
                 }
                 return Some(vec![Stmt::Nop]);

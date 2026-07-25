@@ -3115,6 +3115,11 @@ uint32_t aret_RtlUnwind(uint32_t esp) {
  * table takes their address); they read the parent's locals via the threaded ebp
  * register-param, which aret_call conveys as its last argument. */
 
+/* The frame _except_handler3 caught in, handed to the establisher's aret_seh_run after
+ * the longjmp (a C local holding it would be indeterminate across longjmp). Set right
+ * before the longjmp, read right after — no intervening setjmp. */
+uint32_t g_seh_frame = 0;
+
 /* Call a recovered __try funclet (filter / __except body / __finally) with the
  * establisher's ebp threaded in aret_call's ebp slot; return its eax. */
 static uint32_t aret_seh_funclet(uint32_t va, uint32_t ebp) {
@@ -3154,6 +3159,14 @@ uint32_t aret_except_handler3(uint32_t esp) {
     uint32_t flags = rec ? rec[1] : 0;
     uint32_t scopetable = frame[2];
     uint32_t ebp = framep + 16;
+    /* WIP (brick C): the scope-walk + unwind + longjmp-to-establisher machinery below is
+     * complete and the setjmp is injected at the SEH-establish, but the exact
+     * _except_handler3<->funclet ABI is not yet nailed: the filter reads
+     * GetExceptionInformation from [ebp-0x14] (a pointer _except_handler3 must populate)
+     * and the filter/handler ebp reference offset is still being measured. Running a
+     * filter with that slot unpopulated double-derefs garbage and faults. Until the ABI is
+     * measured exactly, abort loudly (sound) rather than mis-run a filter. */
+    aret_unmodelled("_except_handler3: SEH scope-table dispatch (funclet call ABI WIP)");
     if (flags & (ARET_EH_UNWINDING | ARET_EH_EXIT_UNWIND)) {
         aret_seh_local_unwind(scopetable, (int)frame[3], -1, ebp);   /* run all __finally */
         return 1;                                                     /* ExceptionContinueSearch */
@@ -3168,6 +3181,7 @@ uint32_t aret_except_handler3(uint32_t esp) {
                 aret_seh_global_unwind(esp, framep);                 /* outer frames' __finally */
                 aret_seh_local_unwind(scopetable, (int)frame[3], lvl, ebp); /* this frame's __finally */
                 frame[3] = (uint32_t)enclosing;                      /* trylevel := enclosing */
+                g_seh_frame = framep;                                /* stable frame for aret_seh_run (a C local would be indeterminate post-longjmp) */
                 aret_longjmp_do(framep, lvl + 1);                    /* -> establisher setjmp */
                 /* not reached */
             }

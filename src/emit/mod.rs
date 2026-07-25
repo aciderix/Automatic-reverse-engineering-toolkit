@@ -638,6 +638,12 @@ thread_local! {
     /// array. This is what lets stack-passed arguments cross function calls. Off
     /// by default, so the verify/decompile paths are unchanged.
     static SHARED_STACK: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+
+    /// SEH scope-table mode: set when the program imports `_except_handler3`. Gates the
+    /// setjmp injected at each SEH-establish (`mov fs:[0],esp`) so a program that uses
+    /// __try/__except can transfer to its __except block, while every other program stays
+    /// byte-identical (no injection, no marker). Off by default.
+    static SEH_ACTIVE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
 /// Enable/disable shared machine-stack emission for the current thread.
@@ -647,6 +653,15 @@ pub fn set_shared_stack(on: bool) {
 
 pub(crate) fn shared_stack() -> bool {
     SHARED_STACK.with(|c| c.get())
+}
+
+/// Enable/disable SEH scope-table (`_except_handler3`) injection for the current thread.
+pub fn set_seh_active(on: bool) {
+    SEH_ACTIVE.with(|c| c.set(on));
+}
+
+pub(crate) fn seh_active() -> bool {
+    SEH_ACTIVE.with(|c| c.get())
 }
 
 /// Render the function's value declarations. Frame-base values (entry rsp/rbp)

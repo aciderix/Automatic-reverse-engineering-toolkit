@@ -366,6 +366,27 @@ fn uses_setjmp(prog: &Program) -> bool {
         .any(|raw| is_setjmp_intrinsic(&ir::build::sanitize_import(raw)))
 }
 
+/// Does this program import `_except_handler3` (i.e. use __try/__except)? Gates the SEH
+/// setjmp injection + its runtime declarations.
+fn uses_seh(prog: &Program) -> bool {
+    prog.imports
+        .values()
+        .any(|raw| ir::build::sanitize_import(raw) == "aret_except_handler3")
+}
+
+/// Declarations for the SEH-establish injection (see structured.rs): the setjmp keyed
+/// directly by the frame address (not via ARET_SJ_KEY, which reads [esp]), the handler
+/// runner, and the frame carried across the longjmp. Emitted only when uses_seh.
+fn seh_decls() -> &'static str {
+    "\n/* SEH __try/__except: setjmp injected at each `mov fs:[0],esp`, keyed by the frame\n\
+     address so _except_handler3's aret_longjmp_do(frame,…) lands here (see aret_hle.c). */\n\
+     #include <setjmp.h>\n\
+     jmp_buf *aret_jmpbuf_for(uint32_t key);\n\
+     uint64_t aret_seh_run(uint32_t frame, uint32_t level);\n\
+     extern uint32_t g_seh_frame;\n\
+     #define aret_seh_setjmp(frame) ((uint32_t)setjmp(*aret_jmpbuf_for((uint32_t)(frame))))\n\n"
+}
+
 /// Imports whose return value occupies the full `edx:eax` pair — a `long long`,
 /// or an 8-byte struct (`div_t`/`ldiv_t`) the 32-bit ABI returns in edx:eax.
 /// Their shim must be declared returning `uint64_t` so the call site reads both
@@ -958,6 +979,9 @@ pub fn transpile(
     // split into chunks of functions so the compiler never sees one giant TU.
     const CHUNK_FUNCS: usize = 200;
     emit::set_shared_stack(true);
+    // Inject the SEH setjmp only when the program uses _except_handler3 (__try/__except),
+    // so every other program's lifted code stays byte-identical.
+    emit::set_seh_active(uses_seh(prog));
     // Partition recovered functions at the host/translate frontier and make it
     // *structural*: a host-backed function (libm/CRT/glue recognized by symbol) is
     // NOT translated — its body would be dead for direct calls (redirected to the
@@ -1009,6 +1033,7 @@ pub fn transpile(
         emit::structured::emit_split(&irfs, CHUNK_FUNCS)
     };
     emit::set_shared_stack(false);
+    emit::set_seh_active(false);
     // Soundness: which called shims have no real implementation (they would hit
     // the weak "unimplemented" stub — warn + return 0, a silent wrong result).
     let unimplemented_imports: Vec<String> = {
@@ -1205,6 +1230,9 @@ pub fn transpile(
             decls_h.push_str(&protos);
             if uses_setjmp(prog) {
                 decls_h.push_str(setjmp_macros());
+            }
+            if uses_seh(prog) {
+                decls_h.push_str(seh_decls());
             }
         }
         write("aret_decls.h", &decls_h)?;
