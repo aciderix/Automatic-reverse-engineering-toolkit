@@ -4454,4 +4454,24 @@ Détail : **70 §6** (roadmap). Résumé :
   ciblée, à concevoir proprement avant d'écrire (pas de demi-mesure).
 - **Portes** : inchangées (Phase 1 = fixtures + repro, zéro code runtime/lifter modifié).
 
+### 2026-07-25 — [EH] **Brick C — cœur dur disséqué : setjmp au SEH-establish + threading ebp des funclets (2 sous-problèmes)**
+- **Poursuite de la conception** (avant d'écrire du code lifter correctness-critique). Le mécanisme setjmp/longjmp d'ARET est
+  réutilisable (`aret_jmpbuf_for`/`aret_longjmp_do`, keyé par adresse, expansé inline). Le flux visé : le lifter injecte
+  `setjmp(key=frame)` au SEH-establish ; `aret__except_handler3` fait scope-walk → filtre → unwind → `aret_longjmp_do(frame,
+  lvl+1)` ; au retour du setjmp l'établisseur appelle le funclet handler et retourne sa valeur.
+- **Sous-problème 1 — injection setjmp.** Impossible de faire retourner une fonction C bloquée (l'établisseur, coincé au site
+  `RaiseException`) sans un setjmp qu'elle a posé. ⇒ le lifter doit émettre, au `mov fs:[0],esp` dont le handler poussé =
+  `_except_handler3`, un `setjmp` + un épilogue de dispatch. **Gaté** sur ce motif ⇒ code non-SEH **byte-identique** (hash
+  inchangé, régression verte).
+- **Sous-problème 2 — threading ebp des funclets (le vrai nœud).** Mesuré sur le C généré : le filtre `sub_40120e` et le
+  handler `sub_40109c` accèdent aux **locaux du parent** via un **registre-param threadé** (leur dernier param = l'ebp de
+  l'établisseur), pas via un ebp machine. Or `aret_call(va,esp,a,c,d,b)` = eax/ecx/edx/ebx, **sans slot ebp**. Donc
+  `aret__except_handler3` doit appeler ces funclets en plaçant l'**ebp de l'établisseur** (= `frame+16`) dans le bon slot
+  registre-param — ce qui dépend du modèle exact de threading ebp d'ARET (per-fonction). C'est le point délicat qui rend brick C
+  **lourd** (doc 80 §1.3 : « chantier lourd »).
+- **État** : runway complet + validé (Phase 0/1), design **complet** jusqu'aux 2 sous-problèmes précis. Implémentation =
+  **prochain travail focalisé** (lifter setjmp-injection gaté + `_except_handler3` avec threading ebp correct), à faire
+  proprement avec la fixture `seh_except` (Wine `a=42 b=1 c=3 d=5 fin=110`) + **toutes les portes** comme oracle — pas de
+  demi-mesure sur du code lifter correctness-critique. Zéro code runtime/lifter modifié à ce stade.
+
 <!-- NOUVELLES ENTRÉES ICI (garder l'ordre chronologique, plus récent en bas) -->
