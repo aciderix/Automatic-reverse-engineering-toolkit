@@ -29,6 +29,17 @@ for src in "$EH"/*.c "$EH"/*.cpp; do
     echo "FAIL  $name (build: $(head -1 "$TMP/err"))"; continue
   fi
   wine "$TMP/$name.exe" >"$TMP/wine.out" 2>/dev/null
+  # An `<name>.abort` sidecar marks an ABORT ORACLE: ARET does not yet model this construct,
+  # so the sound behaviour is a loud abort (never a wrong stdout). Pass = ARET aborts.
+  if [ -f "$EH/$name.abort" ]; then
+    if "$ARET" "$TMP/$name.exe" --mode transpile --out-dir "$TMP/$name.out" --run 2>&1 \
+         | grep -q "aborting — translation is incomplete"; then
+      echo "  ok    $name (abort oracle)"; pass=$((pass+1))
+    else
+      echo "DIFF  $name (expected a sound abort, got none)"
+    fi
+    continue
+  fi
   "$ARET" "$TMP/$name.exe" --mode transpile --out-dir "$TMP/$name.out" --run 2>/dev/null \
     | extract >"$TMP/aret.out"
   if diff -q <(tr -d '\r' <"$TMP/wine.out") <(tr -d '\r' <"$TMP/aret.out") >/dev/null; then

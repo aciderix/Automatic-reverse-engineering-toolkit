@@ -659,6 +659,139 @@ fn reg_imm_reaches_indirect_call(
     None
 }
 
+/// C++ exception-handling entry recovery (MSVC/clang `__CxxFrameHandler[123]` model).
+///
+/// A function with try/catch installs an SEH frame whose handler is a small thunk
+/// `mov eax, &FuncInfo; jmp __CxxFrameHandler[3]`. The FuncInfo's TryBlockMap points at the
+/// **catch funclets**; each catch funclet, after running the catch body, returns *in eax* the
+/// **continuation address** — where execution resumes in the establisher after the try/catch.
+/// Neither the funclets (reached only through the EH dispatch) nor the continuations
+/// (materialised only as a `mov eax,imm32` inside a funclet) are found by recursive descent,
+/// the prologue scan, or the data-pointer scan — yet the program provably transfers to both.
+///
+/// This parses the binary's *own* EH tables to recover them as function entries: sound (nothing
+/// guessed — every entry is proven by the metadata / a `mov eax,codeaddr;…;ret` the program
+/// executes) and general (any MSVC-ABI C++ binary). At runtime the HLE `__CxxFrameHandler3`
+/// dispatch finds the catch, runs the funclet, and resumes the returned continuation
+/// (aret_seh_run), so both must exist as callable functions.
+fn cxx_eh_entries(prog: &Program, disasm: &Disassembler) -> Vec<u64> {
+    let mut out = Vec::new();
+    // IAT slots of the C++ frame handler import(s) (`__CxxFrameHandler`, `…Handler3`).
+    let handler_slots: BTreeSet<u64> = prog
+        .imports
+        .iter()
+        .filter(|(_, n)| n.contains("CxxFrameHandler"))
+        .map(|(&a, _)| a)
+        .collect();
+    if handler_slots.is_empty() {
+        return out;
+    }
+    // Does the code at `addr` reach — in at most two `jmp` hops (`E9 rel32` then a final
+    // `FF25 [IAT]`, or `FF25 [IAT]` directly) — a jump through a C++ frame-handler IAT slot?
+    let targets_handler = |start: u64| -> bool {
+        let mut addr = start;
+        for _ in 0..2 {
+            let b = match prog.read_from(addr) {
+                Some(b) if b.len() >= 6 => b,
+                _ => return false,
+            };
+            if b[0] == 0xE9 {
+                let rel = i32::from_le_bytes([b[1], b[2], b[3], b[4]]) as i64;
+                addr = (addr as i64 + 5 + rel) as u64;
+            } else if b[0] == 0xFF && b[1] == 0x25 {
+                let iat = u32::from_le_bytes([b[2], b[3], b[4], b[5]]) as u64;
+                return handler_slots.contains(&iat);
+            } else {
+                return false;
+            }
+        }
+        false
+    };
+    // Scan every executable section for a handler thunk `B8 <FuncInfo> <jmp -> handler>`.
+    for sec in prog.sections.iter().filter(|s| s.executable) {
+        let data = &sec.data;
+        let mut i = 0usize;
+        while i + 10 <= data.len() {
+            if data[i] == 0xB8 {
+                let func_info =
+                    u32::from_le_bytes([data[i + 1], data[i + 2], data[i + 3], data[i + 4]]) as u64;
+                if targets_handler(sec.address + (i + 5) as u64) {
+                    parse_cxx_func_info(prog, disasm, func_info, &mut out);
+                }
+            }
+            i += 1;
+        }
+    }
+    out.sort_unstable();
+    out.dedup();
+    out
+}
+
+/// Parse one MSVC C++ `FuncInfo` (`{magic, maxState, pUnwindMap, nTryBlocks, pTryBlockMap, …}`,
+/// dwords) → its catch funclets + their continuation targets, appended to `out`.
+fn parse_cxx_func_info(prog: &Program, disasm: &Disassembler, fi: u64, out: &mut Vec<u64>) {
+    let magic = match prog.read_u32(fi) {
+        Some(m) => m,
+        None => return,
+    };
+    if magic & 0xffff_ff00 != 0x1993_0500 {
+        return; // not an EH magic (0x19930520 / 21 / 22)
+    }
+    let n_try = prog.read_u32(fi + 0x0c).unwrap_or(0) as u64; // nTryBlocks
+    let p_try = prog.read_u32(fi + 0x10).unwrap_or(0) as u64; // pTryBlockMap
+    if n_try == 0 || n_try > 0x1000 {
+        return;
+    }
+    for t in 0..n_try {
+        // TryBlockMapEntry {tryLow, tryHigh, catchHigh, nCatches, pHandlerArray} (20 bytes).
+        let e = p_try + t * 20;
+        let n_catch = prog.read_u32(e + 0x0c).unwrap_or(0) as u64;
+        let p_h = prog.read_u32(e + 0x10).unwrap_or(0) as u64;
+        if n_catch > 0x1000 {
+            continue;
+        }
+        for h in 0..n_catch {
+            // HandlerType {adjectives, pType, dispCatchObj, addressOfHandler} (16 bytes).
+            let handler = prog.read_u32(p_h + h * 16 + 0x0c).unwrap_or(0) as u64;
+            if handler != 0 && prog.is_executable(handler) {
+                out.push(handler);
+                if let Some(cont) = cxx_funclet_continuation(prog, disasm, handler) {
+                    out.push(cont);
+                }
+            }
+        }
+    }
+}
+
+/// The continuation address a catch funclet resumes into: the funclet ends `mov eax, imm32;
+/// …; ret`, where `imm32` is a code address in the establisher. Decode the funclet
+/// instruction-aware (a raw `B8` byte can occur inside another instruction's operand) and take
+/// the last `mov eax, <executable imm32>` before the terminating `ret`.
+fn cxx_funclet_continuation(prog: &Program, disasm: &Disassembler, funclet: u64) -> Option<u64> {
+    use iced_x86::{Mnemonic, OpKind, Register};
+    let mut addr = funclet;
+    let mut cont = None;
+    for _ in 0..64 {
+        let insn = disasm.decode_at(prog, addr)?;
+        let r = &insn.raw;
+        if r.mnemonic() == Mnemonic::Mov
+            && r.op0_kind() == OpKind::Register
+            && r.op0_register() == Register::EAX
+            && matches!(r.op1_kind(), OpKind::Immediate32 | OpKind::Immediate32to64)
+        {
+            let v = r.immediate(1);
+            if prog.is_executable(v) {
+                cont = Some(v);
+            }
+        }
+        if matches!(r.mnemonic(), Mnemonic::Ret | Mnemonic::Retf) {
+            break;
+        }
+        addr = insn.next_addr();
+    }
+    cont
+}
+
 fn global_decode(
     prog: &Program,
     disasm: &Disassembler,
@@ -666,6 +799,12 @@ fn global_decode(
 ) -> (BTreeMap<u64, Insn>, BTreeSet<u64>, HashMap<u64, Vec<u64>>, BTreeSet<u64>) {
     let mut global: BTreeMap<u64, Insn> = BTreeMap::new();
     let mut entries: BTreeSet<u64> = prog.seed_functions().into_iter().collect();
+    // C++ exception handling: recover catch funclets + their catch-continuation targets from
+    // the binary's own EH metadata (sound, general — see cxx_eh_entries). Reached by no direct
+    // call and by no prologue/data-pointer scan, but the program provably transfers to them.
+    for va in cxx_eh_entries(prog, disasm) {
+        entries.insert(va);
+    }
     let mut jump_tables: HashMap<u64, Vec<u64>> = HashMap::new();
     if entries.is_empty() && prog.is_executable(prog.entry) {
         entries.insert(prog.entry);

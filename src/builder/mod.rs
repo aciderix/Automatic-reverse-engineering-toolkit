@@ -366,12 +366,16 @@ fn uses_setjmp(prog: &Program) -> bool {
         .any(|raw| is_setjmp_intrinsic(&ir::build::sanitize_import(raw)))
 }
 
-/// Does this program import `_except_handler3` (i.e. use __try/__except)? Gates the SEH
-/// setjmp injection + its runtime declarations.
+/// Does this program use table-driven exception handling — SEH (`_except_handler3`,
+/// __try/__except) or C++ (`__CxxFrameHandler`/`2`/`3`, throw/catch)? Both dispatch
+/// through the same non-local transfer: a handler longjmps to a setjmp the lifter must
+/// inject at the SEH-establish (`mov fs:[0],reg`). Gates that injection + its runtime
+/// declarations (so a binary using neither stays byte-identical).
 fn uses_seh(prog: &Program) -> bool {
-    prog.imports
-        .values()
-        .any(|raw| ir::build::sanitize_import(raw) == "aret_except_handler3")
+    prog.imports.values().any(|raw| {
+        let s = ir::build::sanitize_import(raw);
+        s == "aret_except_handler3" || s.starts_with("aret_CxxFrameHandler")
+    })
 }
 
 /// Declarations for the SEH-establish injection (see structured.rs): the setjmp keyed

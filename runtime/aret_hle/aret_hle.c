@@ -3115,10 +3115,16 @@ uint32_t aret_RtlUnwind(uint32_t esp) {
  * table takes their address); they read the parent's locals via the threaded ebp
  * register-param, which aret_call conveys as its last argument. */
 
-/* The frame _except_handler3 caught in, handed to the establisher's aret_seh_run after
- * the longjmp (a C local holding it would be indeterminate across longjmp). Set right
- * before the longjmp, read right after — no intervening setjmp. */
-uint32_t g_seh_frame = 0;
+/* State stashed by an EH handler (SEH __except OR C++ catch) right before it longjmps to
+ * the establisher's injected setjmp — a C local would be indeterminate across longjmp.
+ * aret_seh_run (called from the establisher after the longjmp) reads these to run the
+ * matched handler/catch funclet. Single-slot: set immediately before the longjmp, read
+ * immediately after; no intervening setjmp. */
+uint32_t g_seh_frame = 0;       /* the establisher frame (for the setjmp key symmetry) */
+uint32_t g_seh_handler_va = 0;  /* the __except / catch funclet to run */
+uint32_t g_seh_ebp = 0;         /* the establisher ebp to run the funclet with */
+int      g_seh_is_cxx = 0;      /* 0 = SEH __except (funclet return = fn return); 1 = C++ catch
+                                 * (funclet returns a continuation VA to resume in the establisher) */
 
 /* Call a recovered __try funclet (filter / __except body / __finally) with the
  * establisher's ebp threaded in aret_call's ebp slot; return its eax. */
@@ -3181,7 +3187,7 @@ uint32_t aret_except_handler3(uint32_t esp) {
                 aret_seh_global_unwind(esp, framep);
                 aret_seh_local_unwind(scopetable, (int)frame[3], lvl, ebp); /* this frame's __finally */
                 frame[3] = (uint32_t)enclosing;                      /* trylevel := enclosing */
-                g_seh_frame = framep;                                /* stable frame for aret_seh_run (a C local would be indeterminate post-longjmp) */
+                g_seh_frame = framep; g_seh_handler_va = e[2]; g_seh_ebp = ebp; g_seh_is_cxx = 0;  /* __except handler funclet */
                 aret_longjmp_do(framep, lvl + 1);                    /* -> establisher setjmp */
                 /* not reached */
             }
@@ -3195,11 +3201,140 @@ uint32_t aret_except_handler3(uint32_t esp) {
  * its handler funclet with the establisher's ebp and return its value as the establisher
  * function's return. */
 uint64_t aret_seh_run(uint32_t framep, uint32_t level) {
-    uint32_t scopetable = ((uint32_t *)(uintptr_t)framep)[2];
-    const uint32_t *e = (const uint32_t *)(uintptr_t)(scopetable + level * 12u);
-    uint32_t ebp = framep + 16;
-    return aret_call(e[2], ebp - 0x400, 0, 0, 0, ebp);              /* HandlerFunc -> function return */
+    (void)framep; (void)level;   /* the funclet VA + establisher ebp were stashed pre-longjmp */
+    if (g_seh_is_cxx) {
+        /* C++ catch: run the catch funclet (it copies the caught object, runs the catch
+         * body, and returns — in eax — the CONTINUATION address in the establisher, i.e.
+         * where execution resumes after the try/catch). Then resume there. The funclet and
+         * the continuation both take the establisher frame base in ebp (Wine calls them with
+         * ebp = &frame->ebp = EstablisherFrame + 0xc). A nested throw inside the continuation
+         * longjmps back to the establisher's setjmp (not here), so this call returns only when
+         * the continuation runs to the function's natural end. */
+        uint32_t cont = (uint32_t)aret_call(g_seh_handler_va, g_seh_ebp - 0x400, 0, 0, 0, g_seh_ebp);
+        return aret_call(cont, g_seh_ebp - 0x400, 0, 0, 0, g_seh_ebp);
+    }
+    return aret_call(g_seh_handler_va, g_seh_ebp - 0x400, 0, 0, 0, g_seh_ebp);
 }
+
+/* ---- C++ exceptions (MSVC _CxxThrowException / __CxxFrameHandler) ------------------
+ * A C++ `throw` calls _CxxThrowException(pObject, pThrowInfo), which raises a software
+ * exception (code 0xE06D7363 'msc', params {EH-magic, pObject, pThrowInfo}) down the
+ * fs:[0] chain — the same dispatch as RaiseException. Each frame with try/catch installs
+ * a SEH frame whose handler is __CxxFrameHandler3 (via a `mov eax,&FuncInfo; jmp` thunk);
+ * that handler reads the function's FuncInfo (state map + TryBlockMap) and the throw's
+ * ThrowInfo (the list of types the object can be caught as), finds a try block covering
+ * the current state whose catch type matches, copies the object into the catch parameter,
+ * and transfers to the catch funclet — reusing brick C's non-local transfer (the setjmp
+ * injected at the SEH-establish + aret_seh_run). C++ exception structures are all in guest
+ * memory (32-bit, the program is -m32). */
+#define ARET_CXX_EH_CODE 0xE06D7363u
+uint32_t aret_CxxFrameHandler3(uint32_t esp);   /* fwd */
+uint32_t aret_CxxThrowException(uint32_t esp) {
+    aret_teb_init();
+    uint32_t pobj = arg(esp, 0), pthrow = arg(esp, 1);
+    uint32_t rec[20]; memset(rec, 0, sizeof rec);
+    rec[0] = ARET_CXX_EH_CODE; rec[1] = 1u /*NONCONTINUABLE*/; rec[4] = 3u /*NumberParameters*/;
+    rec[5] = 0x19930520u /*EH magic*/; rec[6] = pobj; rec[7] = pthrow;
+    uint32_t ctx[200]; memset(ctx, 0, sizeof ctx);
+    uint32_t *teb = (uint32_t *)(uintptr_t)__aret_fs();
+    uint32_t frame = teb[0];
+    while (frame != 0 && frame != 0xFFFFFFFFu) {
+        uint32_t *f = (uint32_t *)(uintptr_t)frame;
+        uint32_t hesp = esp - 0x80; uint32_t *cf = (uint32_t *)(uintptr_t)hesp;
+        cf[1] = (uint32_t)(uintptr_t)rec; cf[2] = frame; cf[3] = (uint32_t)(uintptr_t)ctx; cf[4] = frame;
+        /* The frame's handler is a `mov eax,&FuncInfo; jmp __CxxFrameHandler[3]` thunk — guest
+         * code (the image's .text is mapped as data, so the 0xB8 lead byte is readable), but
+         * *not* a recovered function we can aret_call. Detect that lead byte and route straight
+         * to our __CxxFrameHandler3 (it recovers FuncInfo from the thunk's imm). A non-C++
+         * frame's handler is a recovered function (SEH `_except_handler3`) reached via aret_call.
+         * The shim reads its cdecl args at [esp+0], so pass hesp+4 (skip the return-addr slot),
+         * exactly as aret_call's dispatchers do; aret_call adds that +4 itself. */
+        uint32_t disp = (*(const uint8_t *)(uintptr_t)f[1] == 0xB8u)
+            ? aret_CxxFrameHandler3(hesp + 4)
+            : (uint32_t)aret_call(f[1], hesp, 0, 0, 0, 0);
+        if (disp == 0) return 0;
+        frame = f[0];
+    }
+    fprintf(stderr, "aret: unhandled C++ exception (0x%08x)\n", (unsigned)pthrow);
+    abort();
+    return 0;
+}
+/* Does the thrown object (its CatchableTypeArray) match a catch whose TypeDescriptor is
+ * pCatchType? A NULL pCatchType is catch(...). Match = the catch type's mangled name
+ * equals one of the thrown object's catchable-type names (covers exact type + bases,
+ * which the compiler already enumerates in the CatchableTypeArray). */
+static int aret_cxx_type_matches(uint32_t pCatchType, const uint32_t *cta) {
+    if (pCatchType == 0) return 1;
+    const char *cname = (const char *)(uintptr_t)(pCatchType + 8);
+    int n = (int)cta[0];
+    for (int i = 0; i < n; i++) {
+        uint32_t pct = cta[1 + i];
+        uint32_t ctd = ((const uint32_t *)(uintptr_t)pct)[1];        /* CatchableType.pType */
+        if (!strcmp(cname, (const char *)(uintptr_t)(ctd + 8))) return 1;
+    }
+    return 0;
+}
+/* Would unwinding this frame from state `from` down to (excl.) `to` run any destructor?
+ * The UnwindMap is an array of {int toState; void *action} indexed by state; a non-null
+ * action is a destructor funclet the real unwind would call. We do NOT yet run C++ unwind
+ * destructors — so if the throw's path would invoke one, we must ABORT loudly (never skip a
+ * destructor silently and present the result as correct). `from > to` walks the toState chain.*/
+static int aret_cxx_unwind_has_dtor(const uint32_t *fi, int from, int to) {
+    uint32_t pUnwind = fi[2]; int maxState = (int)fi[1];
+    int s = from;
+    for (int g = 0; g < maxState + 2 && s > to && s >= 0; g++) {
+        const uint32_t *ue = (const uint32_t *)(uintptr_t)(pUnwind + (uint32_t)s * 8u);
+        if (ue[1] != 0) return 1;                                    /* destructor action present */
+        s = (int)ue[0];                                             /* toState */
+    }
+    return 0;
+}
+uint32_t aret_CxxFrameHandler3(uint32_t esp) {
+    uint32_t recp = arg(esp, 0), framep = arg(esp, 1);
+    const uint32_t *rec = (const uint32_t *)(uintptr_t)recp;
+    if (rec[0] != ARET_CXX_EH_CODE) return 1;
+    if (rec[1] & (ARET_EH_UNWINDING | ARET_EH_EXIT_UNWIND)) return 1; /* unwind pass: no dtors modelled yet */
+    /* FuncInfo = the imm of the frame handler's `mov eax, imm32` (0xB8) thunk. */
+    uint32_t thunk = ((const uint32_t *)(uintptr_t)framep)[1];
+    if (*(const uint8_t *)(uintptr_t)thunk != 0xB8u) return 1;
+    const uint32_t *fi = (const uint32_t *)(uintptr_t)(*(const uint32_t *)(uintptr_t)(thunk + 1));
+    uint32_t nTry = fi[3], pTryMap = fi[4];                          /* nTryBlocks, pTryBlockMap */
+    int state = (int)((const uint32_t *)(uintptr_t)framep)[2];       /* frame->state @ +8 */
+    const uint32_t *ti = (const uint32_t *)(uintptr_t)rec[7];        /* ThrowInfo */
+    const uint32_t *cta = (const uint32_t *)(uintptr_t)ti[3];        /* CatchableTypeArray */
+    /* Wine's call_catch_block invokes the catch funclet with ebp = &frame->ebp =
+     * EstablisherFrame + 0xc (the 4th dword of the cxx_exception_frame). dispCatchObj and
+     * the funclet's local accesses are all relative to that base. */
+    uint32_t pObject = rec[6], ebp = framep + 0xc;
+    for (uint32_t t = 0; t < nTry; t++) {
+        const uint32_t *tb = (const uint32_t *)(uintptr_t)(pTryMap + t * 20u); /* TryBlockMapEntry */
+        if (state < (int)tb[0] || state > (int)tb[1]) continue;      /* tryLow..tryHigh */
+        uint32_t nCatch = tb[3], pH = tb[4];
+        for (uint32_t h = 0; h < nCatch; h++) {
+            const uint32_t *ht = (const uint32_t *)(uintptr_t)(pH + h * 16u); /* HandlerType */
+            uint32_t adj = ht[0], pCatchType = ht[1]; int dispObj = (int)ht[2]; uint32_t handlerVA = ht[3];
+            if (!aret_cxx_type_matches(pCatchType, cta)) continue;
+            /* Entering this catch unwinds the frame from the current state down to the try's
+             * low state. If that would run a destructor we don't model, abort (sound). */
+            if (aret_cxx_unwind_has_dtor(fi, state, (int)tb[0]))
+                aret_unmodelled("C++ exception: destructor during catch unwind not modelled");
+            if (dispObj) {                                           /* bind the catch parameter */
+                uint32_t *slot = (uint32_t *)(uintptr_t)(ebp + (uint32_t)dispObj);
+                if (adj & 0x08u) *slot = pObject;                    /* catch by reference: the pointer */
+                else *slot = *(const uint32_t *)(uintptr_t)pObject;  /* by value: the object's first word (fundamental) */
+            }
+            g_seh_frame = framep; g_seh_handler_va = handlerVA; g_seh_ebp = ebp; g_seh_is_cxx = 1;
+            aret_longjmp_do(framep, 1);                              /* -> establisher setjmp -> run the catch funclet */
+            /* not reached */
+        }
+    }
+    /* No catch in this frame: the exception propagates through it, fully unwinding it (states
+     * `state` down to -1). If that would run a destructor we don't model, abort (sound). */
+    if (aret_cxx_unwind_has_dtor(fi, state, -1))
+        aret_unmodelled("C++ exception: destructor during frame unwind not modelled");
+    return 1;                                                        /* no catch here -> next frame */
+}
+
 
 /* Structured Exception Handling — hardware faults (native only).
  *

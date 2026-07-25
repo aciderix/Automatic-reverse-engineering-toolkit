@@ -4570,4 +4570,47 @@ Détail : **70 §6** (roadmap). Résumé :
      soit le funclet récupéré inclut la continuation, soit transfert explicite). Chantier substantiel mais borné, driver réel
      = WinZip `WZ32.DLL` (v1, 66 régions).
 
+### 2026-07-25 — [EH][LIFT] **✅ BRICK B — C++ EH base (`_CxxThrowException` + `__CxxFrameHandler3`) bit-identique Wine**
+- **Fonctionnel end-to-end** : `bench/eh/throw_catch.cpp` rend `r=49` = **exactement Wine** (2 try/catch : classe par référence
+  `catch(E&)` + type fondamental `catch(int)`, dans une même fonction, avec reprise de continuation entre les deux). Harnais
+  `bench/ehdiff.sh` : **3/3** (`seh_except` brick C + `throw_catch` brick B + `throw_dtor` oracle d'abort).
+- **Trois murs résolus (mesurés, pas devinés)** :
+  1. **ABI du call HLE→funclet** — la boucle de dispatch de `aret_CxxThrowException` appelait `aret_CxxFrameHandler3(hesp)` mais
+     le shim lit ses args cdecl à `[esp+0]` ; les dispatchers d'`aret_call` passent `esp+4` (saut du slot d'adresse-retour). Le
+     `hesp` (args posés à `cf[1..4]`) donnait un `recp` garbage → **SIGSEGV** → le handler de faute matérielle rappelait le thunk
+     `0x4010e0` via `aret_call` (non récupéré) → « indirect call to unrecovered ». Fix : `aret_CxxFrameHandler3(hesp + 4)`. *(La
+     lecture de l'octet 0xB8 du thunk marche : le `.text` de l'image EST mappé à son VA — le résumé antérieur « guest code non
+     mappé » était **faux**, mesuré `byte@handler=b8`.)*
+  2. **Injection setjmp non déclenchée** — le gate `uses_seh` ne voyait que `_except_handler3` ; un binaire C++ pur importe
+     `__CxxFrameHandler3`. Élargi à `starts_with("aret_CxxFrameHandler")` → le setjmp est injecté au SEH-establish C++ aussi
+     (tout le reste **byte-identique**, hash inchangé). Sans lui, le longjmp du handler tombait dans un jmp_buf non-initialisé.
+  3. **Continuation de catch (le vrai nœud)** — un catch funclet MSVC exécute le catch puis **retourne (eax) l'adresse de
+     continuation** dans l'établisseur (où l'exécution reprend après le try/catch) ; ce n'est PAS un return de fonction (≠ brick C
+     SEH). Modèle : `aret_seh_run` branche sur `g_seh_is_cxx` — côté C++ il appelle le funclet (→ VA de continuation) puis
+     `aret_call(continuation, …, ebp)` pour reprendre. Un throw imbriqué dans la continuation re-longjmp vers le **même** setjmp
+     (boucle naturelle, la pile hôte ne croît pas). **ebp funclet = `EstablisherFrame + 0xc`** (= `&frame->ebp` de Wine
+     `call_catch_block`, mesuré/vérifié — ≠ `+16` du SEH).
+- **Récupération SOUND des entrées EH** (`src/analysis/mod.rs::cxx_eh_entries`) — les funclets (atteints seulement par le
+  dispatch EH) et surtout les **continuations** (matérialisées seulement en `mov eax,imm32` dans un funclet) ne sont vues ni par
+  descente récursive, ni par le scan de prologues/pointeurs, alors que le programme y transfère **prouvablement**. On parse les
+  **tables EH du binaire lui-même** : thunk `mov eax,&FuncInfo; jmp __CxxFrameHandler[3]` (scan `B8 … E9/FF25→IAT handler`) →
+  `FuncInfo{magic,maxState,pUnwindMap,nTryBlocks,pTryBlockMap}` → `TryBlockMapEntry` (20 o) → `HandlerType` (16 o,
+  `addressOfHandler`) = funclet ; puis décode le funclet (instruction-aware) pour le `mov eax,<code-imm>` final = la continuation.
+  Rien de deviné (chaque entrée est prouvée par la métadonnée / un `mov eax,codeaddr;…;ret` que le programme exécute), général
+  (tout binaire ABI-MSVC C++). Effet mesuré : `throw_catch` **4 → 6 fonctions** (les 2 continuations récupérées).
+- **Soundness — destructeurs d'unwind NON modélisés = abort bruyant** (pas de faux silencieux). Le modèle mono-passe longjmpe
+  droit au catch ; il ne lance pas les destructeurs C++ que le vrai unwind exécuterait. Garde : `aret_cxx_unwind_has_dtor` scanne
+  l'`UnwindMap` des états unwindés (à l'entrée du catch **et** à la propagation à travers un frame non-catchant) ; toute action
+  non-nulle ⇒ `aret_unmodelled("destructor during … unwind not modelled")`. Oracle `bench/eh/throw_dtor.cpp` (+ `.abort`) :
+  Wine imprime `dtor`+`r=42`, **ARET aborte** (jamais `r=42` seul). *(Piège mesuré : un destructeur à effet foldable — `cleaned++`
+  — est **constant-foldé** par clang en `inc eax`, sans funclet ni UnwindMap : d'où le destructeur à `printf` non-foldable.)*
+- **Portes** : difftest **272/272**, hash transpile `19acad982194bf07` **inchangé** (changements C++ EH gatés sur l'import ;
+  `cxx_eh_entries` retourne vide sans import `CxxFrameHandler` → binaires non-EH byte-identiques), ehdiff **3/3**, winediff (à
+  confirmer, orthogonal). Committé + poussé.
+- **Reste brick B** : (a) **destructeurs d'unwind** (lancer les funclets `UnwindMap`, lever la garde) — fixture `throw_dtor` prête ;
+  (b) **rethrow** / catch imbriqués multi-frames ; (c) validation sur le **driver réel** WinZip `WZ32.DLL` (v1, magic `0x19930520`,
+  `__CxxFrameHandler` — mêmes offsets FuncInfo, le dispatch route déjà par le thunk 0xB8 indépendamment de la version) ; (d) MFC
+  (le driver FishTank). La base (throw/catch simple, types fondamentaux + classes par réf/valeur, multi-try + continuations) est
+  **complète et bit-identique Wine**.
+
 <!-- NOUVELLES ENTRÉES ICI (garder l'ordre chronologique, plus récent en bas) -->

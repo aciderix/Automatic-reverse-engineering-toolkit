@@ -190,7 +190,8 @@ bash bench/wallsweep.sh <dir1> [dir2…]  # AGRÈGE --mode walls sur un corpus :
 
 ### État régression (référence — doit rester vert)
 difftest **272/272** · transpile-diff **4/4** (H=`19acad982194bf07`) · winediff
-**176/177** (le seul rouge = `gdi_uifont`, **environnemental** : fontconfig i386, orthogonal au code) · cpudiff vert (per-instruction + séquences génératives) · funcdiff corpus **0 divergence** (lift **~20,6k** scorées /
+**177/178** (le seul rouge = `gdi_uifont`, **environnemental** : fontconfig i386, orthogonal au code) · **ehdiff 3/3** (SEH `seh_except`
++ C++ `throw_catch` bit-identiques Wine + `throw_dtor` oracle d'abort sound) · cpudiff vert (per-instruction + séquences génératives) · funcdiff corpus **0 divergence** (lift **~20,6k** scorées /
 **~20k appels** — **imports (stubs `@N` + `@0` scalaires) + appels indirects résolus + intrinsèques mémoire host-backés (memmove/memcpy)** ; scratch sous-esp exclu ; opt ~10k scorées) · SMT **11/11** · in-place **3/3** · magicdiv **2³²** ·
 recompilabilité **100 %** · WASM **7/7**.
 
@@ -810,6 +811,32 @@ documenté pour plus tard ; *ne pas* y consacrer une session de forensics sans u
 qui **échoue réellement** (le filet couvre tout le testé). Pistes si un jour un op sort
 du filet : suivre les valeurs conservées `fstp st(i)`/`fxch` ; fp-returning auto-récursif
 (prouvé) ; host-back par signature d'idiome. Délicat (une fn à la fois, toutes portes).
+
+### P3.10 — EH MSVC : brick B — **C++ EH base** (`_CxxThrowException` + `__CxxFrameHandler3`) ✅ FAIT (2026-07-25)
+`throw`/`catch` C++ MSVC bit-identique Wine (`bench/eh/throw_catch.cpp` → `r=49`). `_CxxThrowException(pobj,pThrowInfo)` bâtit
+l'`EXCEPTION_RECORD` C++ (`0xE06D7363`) et dispatche `fs:[0]` ; le handler du frame (`mov eax,&FuncInfo; jmp __CxxFrameHandler[3]`)
+est détecté par son octet `0xB8` (le `.text` de l'image EST mappé à son VA) et routé droit sur `aret_CxxFrameHandler3` (arg à
+`hesp+4` — ABI shim cdecl). Celui-ci parse `FuncInfo`→`TryBlockMap`→`HandlerType`, matche le type (`ThrowInfo`→`CatchableTypeArray`,
+noms manglés), lie le param catch (`dispCatchObj`, réf/valeur), et **transfère** via la machinerie brick C (setjmp injecté au
+SEH-establish — gate `uses_seh` élargi à `__CxxFrameHandler*` — + longjmp). **Continuation de catch** (≠ SEH) : le funclet retourne
+l'adresse de reprise en eax ; `aret_seh_run` (branche `g_seh_is_cxx`) l'appelle puis `aret_call(continuation, …, ebp)` ; throw
+imbriqué re-longjmpe au même setjmp (boucle). **ebp funclet = `frame+0xc`** (`&frame->ebp` de Wine). **Récupération SOUND des
+funclets + continuations** par parse des tables EH du binaire (`analysis::cxx_eh_entries` — rien de deviné, prouvé par la
+métadonnée). **Destructeurs d'unwind non modélisés = abort sound** (`aret_cxx_unwind_has_dtor` scanne l'`UnwindMap` ; oracle
+`throw_dtor.cpp`+`.abort` : Wine `dtor`+`r=42`, ARET aborte). Portes : difftest **272/272**, hash **inchangé** (gaté sur l'import),
+ehdiff **3/3**. **Reste** : destructeurs d'unwind (lancer les funclets `UnwindMap`), rethrow, multi-frames, driver réel WinZip
+`WZ32.DLL` (v1 `__CxxFrameHandler`, mêmes offsets), MFC (FishTank).
+
+### P3.9 — EH MSVC : brick C — `__except_handler3` réel (SEH scope-table) ✅ FAIT (2026-07-25)
+`__try/__except/__finally` MSVC bit-identique Wine (`bench/eh/seh_except.c` → `a=42 b=1 c=3 d=5 fin=110`). `aret_except_handler3`
+lit la registration `{prev,handler,scopetable,trylevel}`, marche la scope-table `{EnclosingLevel,FilterFunc,HandlerFunc}[trylevel]`,
+appelle le **filtre** (avec `GetExceptionInformation` publié à `[EstablisherFrame-4]`), et sur `EXECUTE_HANDLER` fait global-unwind
+(`RtlUnwind`) + local-unwind (`__finally`) + transfert non-local. **Transfert = setjmp injecté par le lifter** au SEH-establish
+(`mov fs:[0],reg`, gaté sur l'import `_except_handler3` → tout le reste **byte-identique**, hash inchangé) : `emit::set_seh_active`
++ marqueur `__aret_seh_establish` (lift.rs) rendu en setjmp gardé par un check runtime establish-vs-restore (`newframe->prev ==
+fs:[0]`, exclut `0xffffffff`/`0` avant deref) ; le handler stashe funclet/ebp en globals (survivent au longjmp) puis longjmpe ;
+l'établisseur exécute le funclet via `aret_seh_run`. **ebp funclet = `EstablisherFrame+16`**. Portes : difftest **272/272**, hash
+`19acad982194bf07` **inchangé**, winediff **177/178**, ehdiff.
 
 ### P3.6 — EH MSVC lourd : brique 1 — dispatch SEH `RaiseException` ✅ FAIT (2026-07-17)
 `aret_RaiseException` (`aret_hle.c`) **dispatche** une exception software-raised dans la chaîne SEH `fs:[0]` (déjà
