@@ -4296,4 +4296,21 @@ Détail : **70 §6** (roadmap). Résumé :
   débogueur (`-O0 -g` gdb) du `DoDataExchange` lifté pour trouver la lecture HLE exacte qui diverge — **lourd** (MFC strippé, ~1380 fn).
   Le gros du dialogue (combos + edits) matche déjà Wine ; les points de radio sont le résidu profond.
 
+### 2026-07-24 — [HLE-WIN32] **✅ #17 CLÔTURÉ : `WM_GETDLGCODE` = la cause générale des points de radio FishTank**
+- **Cause racine trouvée par trace** (tous les messages aux fenêtres radio) : chaque radio reçoit **`WM_GETDLGCODE` (0x0087)** —
+  **non géré** (rendait 0) — et **jamais `BM_SETCHECK`**. Le code de groupe-radio de MFC (`DDX_Radio`/`PrepareCtrl`) interroge
+  `SendMessage(WM_GETDLGCODE) & DLGC_RADIOBUTTON` pour **confirmer qu'un contrôle est un radio** avant de le sélectionner ; recevant
+  0, il classait chaque radio comme « pas un radio » → sauté → **0 `BM_SETCHECK`**. (Les hypothèses WS_TABSTOP puis DefWindowProc
+  étaient des **fausses pistes réfutées par la mesure** — §2.)
+- **Fix GÉNÉRAL (pas de rustine par binaire, §0)** : `u32_control_proc` répond à `WM_GETDLGCODE` avec la valeur par classe **mesurée
+  bit-à-bit vs Wine** (fixture `user32_getdlgcode`) : radio=`0x2040` (BUTTON|RADIOBUTTON), defpush=`0x2010`, push=`0x2020`,
+  checkbox=`0x2000`, groupbox/static=`0x100`, edit=`0x89`, combo/listbox=`0x81`. Vaut pour **tout contrôle, tout dialogue** (la
+  classification de contrôle que le gestionnaire de dialogue + `IsDialogMessage` + MFC utilisent).
+- **Résultat FishTank.exe (MFC)** : les radios **Tank Geometry (Rectangular) + Units (in.,gal.,lb.)** affichent leur **point de
+  sélection = Wine**. **⇒ Le dialogue MFC est COMPLET** : combos (Water Type / Tank Size) + edits (0) + radios, tous conformes à
+  Wine. Reste cosmétique hors #17 : surbrillance bleue du combo fermé focalisé (#18, focus-rendering, différé).
+- **Portes** : difftest **272/272**, hash `19acad982194bf07` **inchangé**, winediff (+`user32_getdlgcode` +`user32_dlgradio`).
+  Fixtures : `user32_getdlgcode` (8 classes bit-identiques Wine), `user32_dlgradio` (locke le comportement radio-sans-WS_TABSTOP).
+  **#17 clos par une cause générale, vérifiée, testée, documentée.**
+
 <!-- NOUVELLES ENTRÉES ICI (garder l'ordre chronologique, plus récent en bas) -->
