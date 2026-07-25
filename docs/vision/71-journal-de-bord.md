@@ -4364,4 +4364,24 @@ Détail : **70 §6** (roadmap). Résumé :
   (`_CxxThrowException`/`__CxxFrameHandler`, #15 — le multiplicateur MFC), puis résidus bornés (#13 esp-drift PeekMessage, #16
   `__except_handler3`).
 
+### 2026-07-25 — [GUI][HLE-WIN32] **#13 (crash spin PeekMessage) : NON reproductible sur le build actuel — borné**
+- **Reprise du plan après le chantier focus.** Brick B (EH C++, #15) mesuré **bloqué faute de driver** : FishTank n'importe
+  aucun `_CxxThrowException`/`__CxxFrameHandler` (dialogue complet **sans** EH C++, cause #17 = `WM_GETDLGCODE`), mingw n'émet
+  pas le modèle EH MSVC (pas de fixture possible), et les seuls candidats présents (`GlidePath.exe` jeu MFC+WinG,
+  `winetest.exe`) abortent sur un **mur points-to orthogonal** (`call [ordinal non résolu]`) **avant** d'atteindre l'EH C++.
+  Règle P2 : pas de forensics sur un mécanisme sans binaire qui échoue réellement dessus → brick B en attente.
+- **Pivot sur #13 (échec dur reproduit = soundness, borné, autonome).** **Reproduction fidèle** du crash « spin PeekMessage » du
+  2026-07-24 : fenêtre simple, puis fenêtre **montrée** (chemin SDL/`sdl_pump` actif), puis **enfant progress bar comctl32**
+  (`--with-dll comctl32`, exactement `pbwin`), avec dispatch complet (`Translate`/`Dispatch`), **de 500 000 à 5 000 000
+  itérations**, **avec** display (Xvfb :99, renderer software), **sans** display, et driver `dummy`. **Aucune configuration ne
+  plante** (`exit=0`, `got=0/1`). ⇒ Le crash décrit **ne se reproduit plus**.
+- **Verdict (mesuré, pas supposé)** : soit **corrigé incidemment** par le remaniement composite/pompe depuis le 2026-07-24
+  (le chemin `PeekMessage`→`u32_pump_timers` a changé), soit **artefact environnemental** (le journal du 2026-07-24 notait
+  lui-même un **Xvfb mort** donnant des faux résultats + « clock_gettime part en garbage » = symptôme de pile corrompue OU de
+  display dégradé, pas un bug esp isolé prouvé). **#13 borné : rien à corriger à l'aveugle** (pas de repro = pas de cause
+  prouvée à fixer, règle §0.4). À **rouvrir seulement** avec un repro concret et déterministe.
+- **Portes** : inchangées (investigation lecture seule, aucun code touché). **Suite** : re-mesurer (Levier 0) le paysage des
+  murs sur le corpus présent pour prioriser le prochain fix **général par la donnée** (le mur points-to/ordinaux qui bloque les
+  drivers EH C++ est un candidat — à confirmer par la mesure, pas l'intuition).
+
 <!-- NOUVELLES ENTRÉES ICI (garder l'ordre chronologique, plus récent en bas) -->
