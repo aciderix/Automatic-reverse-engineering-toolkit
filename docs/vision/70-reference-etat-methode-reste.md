@@ -487,6 +487,12 @@ recompilabilité **100 %** · WASM **7/7**.
   `GetSysColor`/`GetDeviceCaps` (métriques par invariant), `GetDC`/`ReleaseDC`/`BeginPaint`/`EndPaint`. Cible
   vérifiée = un **DIB qu'on possède** (COLORREF↔`[B,G,R,0]`) → oracle = **hash du framebuffer** vs Wine. Hors
   périmètre (abort sound) : <32bpp. Gardé `winecorpus/gdi_dib.c`.
+- **Famille PALETTE (2026-07-25, `GDIT_PALETTE`, sound truecolor, bit-exact vs Wine)** — piloté par la donnée (wall sweep Win95,
+  5-7 binaires abortaient à `CreatePalette`). Sur 32bpp une palette ne remappe rien, mais le modèle d'objet + les requêtes
+  matchent Windows : `CreatePalette`/`Get`/`SetPaletteEntries`/`GetNearestPaletteIndex`(euclidien)/`ResizePalette`/`RealizePalette`
+  (→0)/`UnrealizeObject`/`SelectPalette`(rend DEFAULT_PALETTE non-null)/`Get`/`SetSystemPaletteUse`(→1 SYSPAL_STATIC)/
+  `GetSystemPaletteEntries`(→0 mais **remplit les 20 couleurs statiques** 0-9/246-255, mesurées) + `GetObject(hpal)`=count +
+  `GetStockObject(DEFAULT_PALETTE)`. `GetNearestColor`=identité. Gardé `winecorpus/gdi_palette.c`.
 - **GDI vectoriel + raster** (M7 G6, doc 72, **bit-identique à Wine**, oracle DIB-hash) : `MoveToEx`/`LineTo`/
   `GetCurrentPositionEx` (**Bresenham** entier, point final exclu, position courante sur le DC), `Rectangle`
   (bord stylo `[l,r-1]×[t,b-1]` + remplissage pinceau `[l+1,r-1)×[t+1,b-1)`), `Polyline` (segments connectés,

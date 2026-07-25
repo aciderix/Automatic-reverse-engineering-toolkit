@@ -4384,4 +4384,29 @@ Détail : **70 §6** (roadmap). Résumé :
   murs sur le corpus présent pour prioriser le prochain fix **général par la donnée** (le mur points-to/ordinaux qui bloque les
   drivers EH C++ est un candidat — à confirmer par la mesure, pas l'intuition).
 
+### 2026-07-25 — [GUI][HLE-WIN32] **Famille palette GDI (comportement truecolor sound, bit-exact vs Wine) — piloté par la donnée**
+- **Levier 0 re-mesuré** (`wallsweep.sh` sur le corpus Win95, **29 PE32**) après le chantier focus : instructions = **bruit**
+  confirmé (`outsb`/`insb`/`out`/`in`/`hlt`/`arpl`/`bound`/`aam`/`daa`/`sldt` = privilégié/16-bit/**data-décodée-en-code** →
+  abort correct ; `push`/`pop`/`mov` « unmodelled » co-occurrents = régions data mal-alignées). **Imports (le vrai signal)** :
+  tête = `CoCreateInstance` 16/29 + `VerInstallFileA` 15/29 (**lourds**, vrais objets COM / install versionné → « plus tard ») ;
+  **première famille bornée et testable = palette** (`CreatePalette`/`RealizePalette`/`GetSystemPaletteEntries`/… 5-7 binaires),
+  doc-sanctionnée « 32bpp = no-op sound » (§5.0 2bis).
+- **Implémenté (mesuré bit-pour-bit vs Wine, `winecorpus/gdi_palette`)** : sur notre cible **truecolor (32bpp)** une palette ne
+  fait **aucun remapping de couleur**, mais le **modèle d'objet + les requêtes** doivent matcher Windows pour qu'une appli
+  palette **tourne** au lieu d'aborter à `CreatePalette`. `CreatePalette` (stocke les entrées, nouvel objet `GDIT_PALETTE`) /
+  `GetPaletteEntries` (round-trip ; count 0 = requête du total) / `SetPaletteEntries` / `GetNearestPaletteIndex` (plus proche
+  euclidien) / `ResizePalette` (→1, entries ré-alloués+zéro) / `RealizePalette` (**→0**, truecolor : 0 entrée remappée) /
+  `UnrealizeObject` (→1) / `SelectPalette` (rend la précédente, ou un **DEFAULT_PALETTE non-null** paresseux) /
+  `GetSystemPaletteUse` (→1 SYSPAL_STATIC) / `SetSystemPaletteUse` / **`GetSystemPaletteEntries`** (→**0** mais **remplit** le
+  buffer avec les **20 couleurs statiques réservées** — indices 0-9 et 246-255, **mesurés** ; reste à 0) + `GetObject(hpal,WORD)`
+  = count d'entrées + `GetStockObject(DEFAULT_PALETTE=15)`. `GetNearestColor` reste **identité** (truecolor). Entrées libérées à
+  `DeleteObject`.
+- **`stdcall_pops` : +12 entrées palette** (triées, binary-search — sinon dérive esp = miscompile silencieux). Auto-couvertes par
+  le scan `aret_X(uint32_t` du builder.
+- **Effet mesuré** : coverage `GlidePath.exe` (jeu MFC) **31→34** (les 3 fonctions palette importées passent couvertes).
+- **Portes** : difftest **272/272**, hash transpile `19acad982194bf07` **inchangé**, winediff **+`gdi_palette`** (bit-identique
+  Wine ; seul rouge `gdi_uifont` env). Committé + poussé. **Suite plan** : re-mesurer / prochaine famille bornée (cluster GDI
+  SetROP2/SetStretchBltMode, MDI, ou palette-restants) — toujours par la donnée. Brick B (EH C++) reste **bloqué faute de driver**
+  (mur points-to sur GlidePath/winetest à lever d'abord).
+
 <!-- NOUVELLES ENTRÉES ICI (garder l'ordre chronologique, plus récent en bas) -->
