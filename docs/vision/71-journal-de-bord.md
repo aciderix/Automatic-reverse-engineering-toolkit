@@ -4833,4 +4833,22 @@ Détail : **70 §6** (roadmap). Résumé :
 - **Reste** : (a) les imports COM/OLE/GUI (CoGetClassObject… 272) — data-driven, oracle Wine ; (b) le cas 4-modules (+msvcr90/p90)
   qui émettait 0 fichier = bug distinct à diagnostiquer (le 2-modules, lui, marche). Portes du fix chunking : à confirmer.
 
+### 2026-07-25 — [EH] **Brick B SE DÉCLENCHE sur une vraie exception MFC (WinMerge) — backtrace : throw pendant l'init statique CRT**
+- **Backtrace gdb du binaire natif WinMerge+mfc90u** (au moment de l'abort) :
+  `main → sub_4ac1c2 → aret_initterm → aret_call → sub_4bb4b0 → sub_4ad95c → sub_4aab9e → aret_call → sub_6ac27c → sub_6acd6a →
+  sub_6a20fd → aret_CxxThrowException → aret_cxx_dispatch → aret_cxx_call_handler → aret_call(0x1111c718) → abort`.
+- **⇒ Le C++ EH de brick B S'EXÉCUTE sur un vrai binaire MFC** : pendant `_initterm` (constructeurs globaux CRT), un ctor global de
+  **mfc90u lifté** (`sub_6a20fd`, dans la plage rebasée mfc90u >0x642000) **throw** → mon `aret_CxxThrowException`/`aret_cxx_dispatch`
+  parcourt `fs:[0]`. Validation réelle de la machinerie EH, au-delà des fixtures.
+- **Mur** : `aret_cxx_call_handler` appelle un handler `0x1111c718` — **au-dessus de tous les modules mappés** (0x400000–0x9c2000) ⇒
+  **pointeur garbage** (mappé mais `!=0xB8`, donc `aret_call` → abort ; pas un thunk C++). Donc une frame de la chaîne `fs:[0]` porte
+  un handler bidon.
+- **Contexte mesuré** : WinMerge n'a **pas** `__except_handler3/4` ni `__security_cookie` en chaîne (CRT statique, noms strippés) mais
+  **a** `__CxxFrameHandler3`, `_XcptFilter`, `_purecall` ; mfc90u utilise `_CxxThrowException`. Frames GS-protégées (VC9) probables.
+- **Question ouverte (à trancher d'abord)** : le throw est-il **réel** (MFC throw+catch en interne pendant l'init) ou **spurious**
+  (un miscompile dans le ctor lifté prend une branche throw à tort) ? Si réel → la chaîne `fs:[0]` a une frame dont le handler
+  n'est pas récupéré/mal posé (setjmp inter-modules, `__except_handler4`, cookie GS). Si spurious → bug de lift en amont. **Prochain
+  pas §2** : déterminer réel vs spurious (idéalement comparer à WinMerge sous Wine, mais GUI+display requis), puis corriger. C'est un
+  sous-chantier EH-sur-vrai-MFC focalisé.
+
 <!-- NOUVELLES ENTRÉES ICI (garder l'ordre chronologique, plus récent en bas) -->
