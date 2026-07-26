@@ -2971,6 +2971,13 @@ uint32_t __aret_gs(void) {
  * Hardware faults (a real SIGSEGV/#DE) are NOT yet routed here — only the software
  * `RaiseException`/`_CxxThrowException` path. WASM has no SEH: there `RaiseException`
  * stays a sound abort. */
+/* C++ exception code (`msc`) and the two-phase dispatch over an already-built C++
+ * EXCEPTION_RECORD (defined with the rest of the C++ EH machinery below). A C++ throw — even
+ * from a statically-linked CRT — funnels through the imported kernel32 `RaiseException` with
+ * this code, so intercepting it here catches both the imported-`_CxxThrowException` and the
+ * static-CRT cases with one path. */
+#define ARET_CXX_EH_CODE 0xE06D7363u
+static uint32_t aret_cxx_dispatch(uint32_t esp, uint32_t *rec);   /* fwd */
 uint32_t aret_RaiseException(uint32_t esp) {
     aret_teb_init();
     uint32_t code = arg(esp, 0), flags = arg(esp, 1);
@@ -2986,6 +2993,15 @@ uint32_t aret_RaiseException(uint32_t esp) {
     if (argp) {
         const uint32_t *ap = (const uint32_t *)(uintptr_t)argp;
         for (uint32_t i = 0; i < rec[4]; i++) rec[5 + i] = ap[i];
+    }
+    /* A C++ throw: params are {EH-magic, pObject, pThrowInfo} (now in rec[5..7]). Route to the
+     * C++ two-phase dispatch (type match, unwind destructors, catch transfer) — the same path
+     * as an imported _CxxThrowException, so a statically-linked CRT (throw funnels through this
+     * imported RaiseException) is handled identically. Returns only if unhandled. */
+    if (code == ARET_CXX_EH_CODE) {
+        aret_cxx_dispatch(esp, rec);
+        fprintf(stderr, "aret: unhandled C++ exception (0x%08x)\n", (unsigned)rec[7]);
+        abort();
     }
     uint32_t ctx[200];                   /* a zeroed CONTEXT (defined, benign)  */
     memset(ctx, 0, sizeof(ctx));
@@ -3226,8 +3242,7 @@ uint64_t aret_seh_run(uint32_t framep, uint32_t level) {
  * the current state whose catch type matches, copies the object into the catch parameter,
  * and transfers to the catch funclet — reusing brick C's non-local transfer (the setjmp
  * injected at the SEH-establish + aret_seh_run). C++ exception structures are all in guest
- * memory (32-bit, the program is -m32). */
-#define ARET_CXX_EH_CODE 0xE06D7363u
+ * memory (32-bit, the program is -m32). ARET_CXX_EH_CODE is defined above aret_RaiseException. */
 uint32_t aret_CxxFrameHandler3(uint32_t esp);   /* fwd */
 /* Call one frame's SEH handler with the call frame at hesp ({_, rec, frame, ctx, frame}).
  * The frame's handler is a `mov eax,&FuncInfo; jmp __CxxFrameHandler[3]` thunk — guest code
@@ -3260,18 +3275,16 @@ static void aret_cxx_global_unwind(uint32_t esp, uint32_t target) {
         teb[0] = next; frame = next;
     }
 }
-uint32_t aret_CxxThrowException(uint32_t esp) {
-    aret_teb_init();
-    uint32_t pobj = arg(esp, 0), pthrow = arg(esp, 1);
-    uint32_t rec[20]; memset(rec, 0, sizeof rec);
-    rec[0] = ARET_CXX_EH_CODE; rec[1] = 1u /*NONCONTINUABLE*/; rec[4] = 3u /*NumberParameters*/;
-    rec[5] = 0x19930520u /*EH magic*/; rec[6] = pobj; rec[7] = pthrow;
+/* Phase-1 search of the fs:[0] chain for a C++ throw whose EXCEPTION_RECORD is `rec`
+ * (rec[0]=0xE06D7363, rec[6]=pObject, rec[7]=pThrowInfo). Calls each frame's handler (no side
+ * effects); a handler that catches performs phase-2 global unwind + local unwind + the
+ * non-local transfer itself (never returns). Returns 0 if a handler continued execution, 1 if
+ * the chain was exhausted with no catch (the caller then aborts — unhandled). Shared by the
+ * imported `_CxxThrowException` shim and the `RaiseException(0xE06D7363)` path (static CRT). */
+static uint32_t aret_cxx_dispatch(uint32_t esp, uint32_t *rec) {
     uint32_t ctx[200]; memset(ctx, 0, sizeof ctx);
     uint32_t *teb = (uint32_t *)(uintptr_t)__aret_fs();
     uint32_t frame = teb[0];
-    /* Phase-1 search: walk fs:[0] calling each handler (no side effects). A handler that
-     * catches performs phase-2 global unwind + its own local unwind + the non-local transfer
-     * itself (it never returns); otherwise it returns ExceptionContinueSearch (1). */
     while (frame != 0 && frame != 0xFFFFFFFFu) {
         uint32_t *f = (uint32_t *)(uintptr_t)frame;
         uint32_t hesp = esp - 0x80; uint32_t *cf = (uint32_t *)(uintptr_t)hesp;
@@ -3279,6 +3292,15 @@ uint32_t aret_CxxThrowException(uint32_t esp) {
         if (aret_cxx_call_handler(f[1], hesp) == 0) return 0;
         frame = f[0];
     }
+    return 1;   /* exhausted -> unhandled */
+}
+uint32_t aret_CxxThrowException(uint32_t esp) {
+    aret_teb_init();
+    uint32_t pobj = arg(esp, 0), pthrow = arg(esp, 1);
+    uint32_t rec[20]; memset(rec, 0, sizeof rec);
+    rec[0] = ARET_CXX_EH_CODE; rec[1] = 1u /*NONCONTINUABLE*/; rec[4] = 3u /*NumberParameters*/;
+    rec[5] = 0x19930520u /*EH magic*/; rec[6] = pobj; rec[7] = pthrow;
+    if (aret_cxx_dispatch(esp, rec) == 0) return 0;
     fprintf(stderr, "aret: unhandled C++ exception (0x%08x)\n", (unsigned)pthrow);
     abort();
     return 0;

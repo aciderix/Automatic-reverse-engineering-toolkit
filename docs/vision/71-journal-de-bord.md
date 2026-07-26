@@ -4676,4 +4676,40 @@ Détail : **70 §6** (roadmap). Résumé :
   (l'ancien code aurait donné `a`+garbage). ehdiff **5/5**.
 - **Portes** : hash transpile `19acad982194bf07` **inchangé** (gaté), ehdiff **5/5**, difftest/winediff (confirmés). Committé + poussé.
 
+### 2026-07-25 — [EH] **Jalon suivant : reconnaissance CRT-EH statiquement liée — grounding + plan (comprendre avant d'implémenter, §2)**
+- **But** : router le `_CxxThrowException` **interne** (CRT liée statiquement, cas des vrais binaires 1990s) vers le HLE. Le
+  dispatch des handlers réutilise déjà la détection **structurelle** du thunk `0xB8` (indépendante de l'import), donc **la seule
+  pièce manquante = reconnaître `_CxxThrowException` interne** et le brancher sur `aret_CxxThrowException` (doctrine memmove/libm :
+  `crt_symbol` → shim, reconnaissance **prouvée**, emballage « correct ou abort »).
+- **Grounding mesuré (WZ32.DLL, imgbase 0x20000000, 8 réfs `0xE06D7363` en `.text`)** : à `0x20024e..` le code fait
+  `cmp [esi],0x19930520` / `cmp [eax],0xe06d7363` = le **handler** qui *lit/compare* les codes. Donc **`__CxxFrameHandler` ET
+  `_CxxThrowException` référencent tous deux les constantes** → « contient `0xE06D7363` » **ne suffit pas** à distinguer. Signature
+  structurelle requise : le *thrower* **construit** un EXCEPTION_RECORD (`mov/push 0xe06d7363`, `push 0x19930520`, params
+  `[magic,pobj,pThrowInfo]`) puis **appelle `RaiseException`** ; le *handler* **compare** `[reg]==0xe06d7363`.
+- **Blocage de testabilité (honnête, §2 « mesurer pas affirmer »)** : pas d'oracle exécutable sous la main — le **MSVC CRT statique
+  est proprio** (pas de `libcmt`), et `WZ32.DLL` est une **DLL** (pas lançable seule ; WZSEPE32.EXE, lui, n'a **aucun** `0xE06D7363`
+  en `.text` = throw C++ quasi absent). ⇒ le vrai 1er pas propre = **fabriquer une fixture reproductible** : le toolchain
+  `bench/eh/build.sh` en variante « CRT statique » (fournir `_CxxThrowException`/`__CxxFrameHandler` **localement** au lieu de les
+  importer de msvcrt), pour que ARET doive les reconnaître structurellement et router — vérifiable vs Wine comme les autres. C'est
+  le prochain incrément focalisé (chantier multi-sessions, doc 80 §1.3).
+- **Ne PAS rusher** le code de reconnaissance correctness-critique sans cet oracle (règle §2). Base fixturée (runtime importé) =
+  **complète et bit-identique Wine** (5/5), indépendante de ce jalon.
+
+### 2026-07-25 — [EH] **CRT-EH statique — côté thrower FAIT via `RaiseException(0xE06D7363)` (insight clé : pas de reconnaissance fragile)**
+- **Insight majeur qui dé-risque le jalon** : un `throw` C++ — **même avec CRT liée statiquement** — passe **toujours** par le
+  `RaiseException` **importé** (kernel32, un wrapper syscall que la CRT ne peut pas inliner ; vérifié : `WZ32.DLL` importe
+  `RaiseException`). Donc **inutile de reconnaître le `_CxxThrowException` interne** (dont la signature structurelle est ambiguë —
+  le thrower *construit* et le handler *compare* les mêmes constantes `0xE06D7363`/`0x19930520`). On intercepte au niveau
+  `RaiseException` : quand `code == 0xE06D7363`, `aret_RaiseException` extrait `{magic, pObject, pThrowInfo}` des params et lance le
+  **même dispatch C++ deux-passes** que le shim `_CxxThrowException` importé (helper partagé `aret_cxx_dispatch`, 0xB8-aware).
+- **Un seul chemin couvre les deux cas** (runtime EH importé **et** CRT statique) — aucune rustine, aucune constante par-binaire.
+- **Oracle reproductible** `bench/eh/throw_static.cpp` : `_CxxThrowException` défini **localement** (dans le `.text`, override du
+  symbole d'import — lld-link prend l'objet, ne tire pas le membre d'archive) et appelant `RaiseException` — exactement la CRT
+  statique réelle. Wine `r=49`, **ARET identique**. `_CxxThrowException` **absent des imports** (= local, confirmé). ehdiff **6/6**.
+- **Portes** : hash transpile `19acad982194bf07` **inchangé** ; `aret_RaiseException` ne fait qu'ajouter une branche sur le code
+  C++ (les autres RaiseException — SEH — inchangés) ; difftest/winediff (confirmés).
+- **Reste pour le driver réel COMPLET** : le **handler** aussi statiquement lié (gate `uses_seh` + parse `cxx_eh_entries` détectent
+  aujourd'hui le thunk par la cible d'import ; il faut les faire détecter le thunk `mov eax,&FuncInfo(magic valide); jmp <interne>`
+  par la **magie du FuncInfo** plutôt que par l'import) → puis faire tourner un vrai binaire bout-en-bout (les autres murs).
+
 <!-- NOUVELLES ENTRÉES ICI (garder l'ordre chronologique, plus récent en bas) -->
