@@ -14,6 +14,7 @@
 | **50-plan-execution** | **Archive** : journal chronologique append-only historique (3500 l.) | Uniquement pour le récit détaillé d'un vieux fix non encore migré en 71 |
 | **00 / 01 / 30** | **Vision stratégique** : roadmap UBT, design, intégration briques (Wine/DXVK/LLVM) | Résumé intégré ici §6 ; ouvrir pour la vision d'origine |
 | **80-orientations-architecturales** | **Design des grands chantiers à venir** : fibers (threads), lifting DLL binaire, SEH in-HLE, PGL, SoftFloat, **rétro-cible Windows** (§1.6) — verdicts + conformité au principe sacré | Avant d'engager threads/DLL/SEH/indirects/x87-universel/**rétro-cible-Windows** |
+| **81-industrialisation** | **Plan d'industrialisation (document vivant)** : passer à l'échelle (traceur d'exécution, ABI-gen + lifting DLL, classification, EH générique, surface GUI/COM) — analyse critique du doc externe ChatGPT/Gemini + roadmap priorisée par la mesure | Avant/pendant la phase « scale » ; **maj à chaque incrément d'industrialisation** |
 | **HANDOFF / 40** | Architecture détaillée, pièges, état des lieux | Complément |
 
 **Comment un agent trouve une info** : `grep` le tag de sous-système dans **71**

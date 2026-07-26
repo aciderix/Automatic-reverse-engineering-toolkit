@@ -4988,4 +4988,17 @@ Détail : **70 §6** (roadmap). Résumé :
   désormais). WinMerge traverse tout le démarrage CRT + une **grande partie de l'init statique MFC** avant l'échec headless. Aller
   au-delà = la surface **COM/OLE/GUI/ressources** (endgame M7-GUI, multi-session). Les briques EH (B/C) sont prouvées sur du **vrai MFC**.
 
+### 2026-07-26 — [EH][ORACLE] **CORRECTION mesurée : WinMerge tourne SOUS WINE (fenêtre ouverte) → la `CUserException` n'est PAS « non gérée par design », c'est un manque HLE en amont**
+- **Oracle décisif** : `wine WinMergeU.exe` (wine-9.0, Xvfb :99, avec `mfc90u/msvcr90/msvcp90.dll` posés à côté de l'exe) **ouvre la
+  fenêtre principale de WinMerge** (menus File/Edit/View/Tools/Plugins/Window/Help + toolbar + status bar « Ready » — capture d'écran).
+  L'init MFC **réussit** sous un vrai Win32. ⇒ la `CUserException` qu'ARET lance en headless **n'est pas** un « unhandled by design »
+  ni une barrière headless dure : c'est **une valeur HLE incorrecte en amont** (une API qu'ARET rend en échec là où Wine réussit) qui
+  fait **abandonner MFC**. **Rectifie** ma formulation précédente (« limite headless-MFC ») : le chemin d'init EST complétable.
+- **Ce qui reste vrai** : `_except_handler4` **n'est pas** le bloqueur (l'exception ne devrait pas être lancée du tout) ; les fixes de la
+  session (`_EH_prolog3`, continuation, dispatch) restent justes ; l'abort « unhandled » typé reste le bon filet.
+- **Ce qui change** : le prochain pas WinMerge est **traçable et data-driven** — identifier LA (les) API HLE dont le retour fait
+  diverger MFC vers `AfxThrowUserException` (comparer l'exécution ARET vs Wine autour de l'init). C'est **tractable**, pas un mur dur.
+  Confirme aussi un **oracle GUI bout-en-bout** utilisable (Wine+Xvfb+capture), et que WinMerge est un **bon driver** (pas une impasse).
+- Détail méthode + plan d'industrialisation : nouveau **doc 81**.
+
 <!-- NOUVELLES ENTRÉES ICI (garder l'ordre chronologique, plus récent en bas) -->
