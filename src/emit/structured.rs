@@ -516,6 +516,12 @@ impl Structurer {
 /// addresses)`. The last are call targets ARET did not recover (e.g. inside a
 /// packer section, or indirect targets); the builder emits weak stubs for them so
 /// the program still links.
+/// Byte cap per emitted C chunk (in addition to the `chunk_size` function-count cap). gcc -O0
+/// on a single 40+ MB translation unit — what `chunk_size` large MFC functions produce —
+/// effectively hangs; ~4 MB compiles in seconds. Far above any small binary's total, so their
+/// single-chunk output (and the transpile hash) is unaffected.
+const MAX_CHUNK_BYTES: usize = 4_000_000;
+
 pub fn emit_split(funcs: &[IrFunction], chunk_size: usize) -> (String, Vec<String>, Vec<u64>) {
     // The cdecl arity fixup (non-shared only) needs an owned, mutable copy. In
     // shared-stack mode we skip it, so borrow directly — cloning tens of
@@ -546,7 +552,13 @@ pub fn emit_split(funcs: &[IrFunction], chunk_size: usize) -> (String, Vec<Strin
         cur.push_str(&body);
         cur.push('\n');
         n += 1;
-        if n >= chunk_size.max(1) {
+        // Split on the function count OR a byte cap: a real MFC/GUI binary has functions so
+        // large that `chunk_size` of them makes a 40+ MB translation unit that gcc -O0 chokes
+        // on (effectively hangs). Capping the emitted bytes keeps every chunk compilable; a
+        // single function bigger than the cap still lands alone in its chunk (unavoidable — a
+        // whole function must share a TU). Small binaries stay one chunk (bytes << cap), so
+        // their chunking — and the transpile hash — is unchanged.
+        if n >= chunk_size.max(1) || cur.len() >= MAX_CHUNK_BYTES {
             chunks.push(std::mem::take(&mut cur));
             n = 0;
         }
