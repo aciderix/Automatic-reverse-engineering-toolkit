@@ -5060,4 +5060,26 @@ Détail : **70 §6** (roadmap). Résumé :
 - ⇒ **I7 fait** (filet soundness indépendant). Le bug de fond reste **I6** (threader `esi/edi/ebx` callee-saved live-in) — chantier cœur
   dédié, désormais **signalé bruyamment** au lieu de hanguer.
 
+### 2026-07-26 — [LIFT][ABI] **✅ I6 : threader les registres callee-saved `esi/edi/ebx` (live-in) — fixe le `this`-en-registre des helpers MSVC ; WinMerge dépasse le store-NULL**
+- **Cause (rappel)** : certains helpers optimisés MSVC/MFC reçoivent un argument dans un **registre callee-saved** (`sub_6ac51f` : `this`
+  dans **`esi`**, `mov [esi],vtable` sans sauvegarde). ARET ne threadait que `esp` + `eax/ecx/edx` + `ebp` ⇒ `esi` entrant lu à **0** ⇒
+  store NULL. Le vrai reste du blob MFC = **lift-correctness ABI**, pas EH/imports.
+- **Fix (modèle cœur, en synchronisation)** : la liste FIXE de reg-params passe de `[eax,ecx,edx,ebp]` à `[eax,ecx,edx,ebp,**esi,edi,ebx**]`
+  (RegId `[0,1,2,5,6,7,3]`), threadés à **chaque appel** direct **et** indirect. Sites synchronisés : `ssa/mod.rs` (liste), `ir/build.rs`
+  (`internal_call_args`/`internal_tailcall_args`), `emit/structured.rs` (signature forward 8 args), `emit/mod.rs` (auto via `reg_params`),
+  `builder/mod.rs` (`emit_dispatch` : typedef `aret_fn`, décls `sub_`, adaptateurs host/IAT, corps `aret_call`), `aret_hle.h` +
+  **17 sites** `aret_call` runtime (+`,0,0,0`), `emit/llvm.rs` (backend expérimental, aligné). **9-arg** `aret_call(va, esp, a,c,d,b, si,di,bx)`.
+- **Sûr par construction (strictement additif)** : le code standard save/restore ses `esi/edi/ebx` ⇒ la valeur entrante threadée est **morte**
+  (poussée/restaurée symétriquement) ⇒ comportement inchangé ; le caller garde son propre `esi` à travers l'appel (callee-saved, sa valeur
+  SSA n'est pas réassignée). Seuls les helpers qui **lisent** le registre entrant en profitent.
+- **Portes toutes vertes** : difftest **272/272**, **cpudiff 6/0**, **funcdiff 0 divergence** (20558, identique), transpile hash
+  **`19acad982194bf07` INCHANGÉ** (les fixtures n'utilisent pas le pattern ⇒ comportement byte-identique ; le hash est comportemental),
+  winediff (en cours, 0 régression). ⇒ **correctness-neutre sur tout le code testé**, additif.
+- **✅ Effet WinMerge (preuve positive)** : le **store-NULL disparaît** (`sub_6ac51f` reçoit le vrai `this` en `esi`) ; plus de boucle de
+  faute. WinMerge **avance** et bute sur une **faute différente/plus profonde** : `unhandled hardware exception 0xc0000005 at 0xe` — un
+  **abort BRUYANT** (sound, via I7/le filet faute-non-gérée), pas un hang. Mur suivant = un accès `[ptr+0xe]` sur pointeur bas (bug de lift
+  distinct, plus loin dans l'init MFC).
+- **Note testabilité** : pas de fixture minimale (le pattern `this`-en-`esi` est spécifique MSVC, non émis par mingw ; l'inline-asm ne
+  lifte pas proprement). Vérif = régression complète (aucun dommage) + WinMerge bout-en-bout (le bug disparaît = preuve positive).
+
 <!-- NOUVELLES ENTRÉES ICI (garder l'ordre chronologique, plus récent en bas) -->

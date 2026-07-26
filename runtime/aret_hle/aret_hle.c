@@ -2428,7 +2428,7 @@ uint32_t aret_UnhandledExceptionFilter(uint32_t esp) {
         uint32_t hesp = esp - 0x40;
         uint32_t *cf = (uint32_t *)(uintptr_t)hesp;
         cf[1] = arg(esp, 0);         /* ExceptionInfo @ [esp+4] */
-        return (uint32_t)aret_call(g_top_exception_filter, hesp, 0, 0, 0, 0);
+        return (uint32_t)aret_call(g_top_exception_filter, hesp, 0, 0, 0, 0, 0, 0, 0);
     }
     return 1;                        /* EXCEPTION_EXECUTE_HANDLER */
 }
@@ -2794,7 +2794,7 @@ static void aret_run_atexit(void) {
     static uint8_t scratch[64 * 1024];
     uint32_t *f = (uint32_t *)(void *)(scratch + sizeof(scratch) - 64);
     for (int i = aret_atexit_n - 1; i >= 0; i--)
-        aret_call(aret_atexit_fns[i], (uint32_t)(uintptr_t)f, 0, 0, 0, 0);
+        aret_call(aret_atexit_fns[i], (uint32_t)(uintptr_t)f, 0, 0, 0, 0, 0, 0, 0);
 }
 /* Shared by aret_atexit and aret_onexit (mingw's static `atexit` registers its
  * callback through the msvcrt `_onexit` import, so that path must register too). */
@@ -2902,7 +2902,7 @@ uint32_t aret_initterm(uint32_t esp) {
     uint32_t first = arg(esp, 0), last = arg(esp, 1);
     for (uint32_t p = first; p + 4 <= last; p += 4) {
         uint32_t fn = *(const uint32_t *)(uintptr_t)p;
-        if (fn) aret_call(fn, esp, 0, 0, 0, 0);
+        if (fn) aret_call(fn, esp, 0, 0, 0, 0, 0, 0, 0);
     }
     return 0;
 }
@@ -2913,7 +2913,7 @@ uint32_t aret_initterm_e(uint32_t esp) {
     for (uint32_t p = first; p + 4 <= last; p += 4) {
         uint32_t fn = *(const uint32_t *)(uintptr_t)p;
         if (fn) {
-            uint32_t r = (uint32_t)aret_call(fn, esp, 0, 0, 0, 0);
+            uint32_t r = (uint32_t)aret_call(fn, esp, 0, 0, 0, 0, 0, 0, 0);
             if (r) return r;
         }
     }
@@ -3051,7 +3051,7 @@ uint32_t aret_RaiseException(uint32_t esp) {
         cf[2] = frame;
         cf[3] = (uint32_t)(uintptr_t)ctx;
         cf[4] = frame;                   /* DispatcherContext (dummy)           */
-        uint32_t disp = (uint32_t)aret_call(handler, hesp, 0, 0, 0, 0);
+        uint32_t disp = (uint32_t)aret_call(handler, hesp, 0, 0, 0, 0, 0, 0, 0);
         if (disp == 0) return 0;         /* ExceptionContinueExecution          */
         frame = f[0];                    /* ExceptionContinueSearch: next frame */
     }
@@ -3132,7 +3132,7 @@ uint32_t aret_RtlUnwind(uint32_t esp) {
         cf[2] = frame;
         cf[3] = (uint32_t)(uintptr_t)ctx;
         cf[4] = frame;                   /* DispatcherContext (dummy) */
-        (void)aret_call(handler, hesp, 0, 0, 0, 0);
+        (void)aret_call(handler, hesp, 0, 0, 0, 0, 0, 0, 0);
 
         teb[0] = next;                   /* pop this frame off the chain */
         frame = next;
@@ -3176,7 +3176,7 @@ int      g_seh_is_cxx = 0;      /* 0 = SEH __except (funclet return = fn return)
 /* Call a recovered __try funclet (filter / __except body / __finally) with the
  * establisher's ebp threaded in aret_call's ebp slot; return its eax. */
 static uint32_t aret_seh_funclet(uint32_t va, uint32_t ebp) {
-    return (uint32_t)aret_call(va, ebp - 0x400 /*free stack below the frame*/, 0, 0, 0, ebp);
+    return (uint32_t)aret_call(va, ebp - 0x400 /*free stack below the frame*/, 0, 0, 0, ebp, 0, 0, 0);
 }
 /* Run the __finally blocks for the levels in (to, from]: from the current trylevel `from`
  * down to — but not including — `to`, following EnclosingLevel. A scope entry is a
@@ -3201,7 +3201,7 @@ static void aret_seh_global_unwind(uint32_t esp, uint32_t target) {
         uint32_t *f = (uint32_t *)(uintptr_t)frame; uint32_t next = f[0];
         uint32_t hesp = esp - 0x80; uint32_t *cf = (uint32_t *)(uintptr_t)hesp;
         cf[1] = (uint32_t)(uintptr_t)rec; cf[2] = frame; cf[3] = (uint32_t)(uintptr_t)ctx; cf[4] = frame;
-        (void)aret_call(f[1], hesp, 0, 0, 0, 0);
+        (void)aret_call(f[1], hesp, 0, 0, 0, 0, 0, 0, 0);
         teb[0] = next; frame = next;
     }
 }
@@ -3257,10 +3257,10 @@ uint64_t aret_seh_run(uint32_t framep, uint32_t level) {
          * ebp = &frame->ebp = EstablisherFrame + 0xc). A nested throw inside the continuation
          * longjmps back to the establisher's setjmp (not here), so this call returns only when
          * the continuation runs to the function's natural end. */
-        uint32_t cont = (uint32_t)aret_call(g_seh_handler_va, g_seh_ebp - 0x400, 0, 0, 0, g_seh_ebp);
-        return aret_call(cont, g_seh_ebp - 0x400, 0, 0, 0, g_seh_ebp);
+        uint32_t cont = (uint32_t)aret_call(g_seh_handler_va, g_seh_ebp - 0x400, 0, 0, 0, g_seh_ebp, 0, 0, 0);
+        return aret_call(cont, g_seh_ebp - 0x400, 0, 0, 0, g_seh_ebp, 0, 0, 0);
     }
-    return aret_call(g_seh_handler_va, g_seh_ebp - 0x400, 0, 0, 0, g_seh_ebp);
+    return aret_call(g_seh_handler_va, g_seh_ebp - 0x400, 0, 0, 0, g_seh_ebp, 0, 0, 0);
 }
 
 /* ---- C++ exceptions (MSVC _CxxThrowException / __CxxFrameHandler) ------------------
@@ -3286,7 +3286,7 @@ uint32_t aret_CxxFrameHandler3(uint32_t esp);   /* fwd */
 static uint32_t aret_cxx_call_handler(uint32_t handler, uint32_t hesp) {
     return (*(const uint8_t *)(uintptr_t)handler == 0xB8u)
         ? aret_CxxFrameHandler3(hesp + 4)
-        : (uint32_t)aret_call(handler, hesp, 0, 0, 0, 0);
+        : (uint32_t)aret_call(handler, hesp, 0, 0, 0, 0, 0, 0, 0);
 }
 /* Phase-2 global unwind for a C++ throw: pop fs:[0] from its head up to (not incl.) `target`
  * (the catching frame), calling each intervening frame's handler with EH_UNWINDING so its C++
@@ -3553,7 +3553,7 @@ static void aret_hw_fault(int sig, siginfo_t *si, void *uctx) {
         cf[2] = frame;
         cf[3] = (uint32_t)(uintptr_t)ctx;
         cf[4] = frame;
-        uint32_t disp = (uint32_t)aret_call(handler, hesp, 0, 0, 0, 0);
+        uint32_t disp = (uint32_t)aret_call(handler, hesp, 0, 0, 0, 0, 0, 0, 0);
         /* ExceptionContinueExecution(0): retry the faulting instruction (the handler
          * fixed the cause). ExceptionContinueSearch(1): next frame. A handler that
          * catches never returns (longjmp / scope jump). */

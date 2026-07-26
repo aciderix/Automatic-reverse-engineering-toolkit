@@ -287,4 +287,12 @@ affiché. On priorise par la donnée.
   internal_call_args, `structured.rs` sig, `builder/mod.rs` emit_dispatch, `aret_call` .h + sites, backends). Fait proprement en session
   focalisée (hash rebaseline + portes complètes).
 
+- **2026-07-26 (I6 — ✅ FAIT)** — Threader les registres callee-saved `esi/edi/ebx` (live-in) comme `ebp` : liste reg-params
+  `[eax,ecx,edx,ebp]`→`[…,esi,edi,ebx]`, threadés à chaque appel direct+indirect, `aret_call` 9-arg, 17 sites runtime alignés, backends
+  C+LLVM. **Strictement additif** (le code standard save/restore ⇒ valeur entrante morte ; hash comportemental **inchangé**). Fixe le
+  `this`-en-`esi` des helpers MSVC : WinMerge **dépasse le store-NULL** et avance jusqu'à une faute distincte plus profonde
+  (`0xc0000005 at 0xe`), désormais **bruyante** (I7). **Portes** : difftest 272/272, cpudiff 6/0, funcdiff 0 div, hash inchangé, winediff
+  0 régression. ⇒ Les deux chantiers cœur signalés (I6+I7) sont **faits et vérifiés**. Prochain mur MFC = un accès `[ptr+0xe]` (lift
+  distinct, plus profond) — data-driven au coup par coup, ou traceur I1 pour accélérer.
+
 <!-- NOUVELLES LIGNES D'AVANCEMENT ICI (plus récent en bas) -->

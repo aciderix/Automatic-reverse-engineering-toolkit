@@ -47,7 +47,7 @@ pub fn emit_unit(funcs: &[IrFunction]) -> String {
         emit_decl(&mut out, name);
     }
     if super::shared_stack() {
-        out.push_str("declare i64 @aret_call(i32, i64, i64, i64, i64)\n");
+        out.push_str("declare i64 @aret_call(i32, i64, i64, i64, i64, i64, i64, i64, i64)\n");
     }
     out.push('\n');
 
@@ -85,7 +85,7 @@ pub fn emit_split(funcs: &[IrFunction], chunk_size: usize) -> Vec<String> {
             emit_decl(&mut out, name);
         }
         if shared {
-            out.push_str("declare i64 @aret_call(i32, i64, i64, i64, i64)\n");
+            out.push_str("declare i64 @aret_call(i32, i64, i64, i64, i64, i64, i64, i64, i64)\n");
         }
         out.push('\n');
         for f in chunk {
@@ -551,20 +551,20 @@ fn emit_call(cx: &mut Ctx, target: &CallTarget, args: &[Expr]) -> String {
         }
     }
     // Shared-stack indirect call: a function pointer holds the original code VA,
-    // so dispatch through `aret_call(va, esp, eax, ecx, edx)`.
+    // so dispatch through `aret_call(va, esp, eax, ecx, edx, ebp, esi, edi, ebx)`.
     if super::shared_stack() {
         if let CallTarget::Indirect(x) = target {
             let v = emit_expr(cx, x);
             let va = cx.fresh();
             cx.line(&format!("{} = trunc i64 {} to i32", va, v));
             let mut a: Vec<String> = args.iter().map(|e| emit_expr(cx, e)).collect();
-            while a.len() < 4 {
+            while a.len() < 8 {
                 a.push("0".to_string());
             }
             let t = cx.fresh();
             cx.line(&format!(
-                "{} = call i64 @aret_call(i32 {}, i64 {}, i64 {}, i64 {}, i64 {})",
-                t, va, a[0], a[1], a[2], a[3]
+                "{} = call i64 @aret_call(i32 {}, i64 {}, i64 {}, i64 {}, i64 {}, i64 {}, i64 {}, i64 {}, i64 {})",
+                t, va, a[0], a[1], a[2], a[3], a[4], a[5], a[6], a[7]
             ));
             return t;
         }

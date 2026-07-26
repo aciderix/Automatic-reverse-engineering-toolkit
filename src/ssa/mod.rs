@@ -271,17 +271,23 @@ pub fn to_ssa(func: &mut IrFunction) {
     } else if crate::emit::shared_stack() {
         // 32-bit shared machine stack (UBT M3): besides the stack, pass the
         // volatile general registers eax/ecx/edx so register-passed arguments
-        // (gcc `-O1` regparm, `__fastcall`) cross calls, AND ebp — the frame
-        // pointer is callee-saved, so a *frameless* helper that uses the caller's
-        // frame without a `push ebp; mov ebp,esp` prologue (the MSVC EH funclets
-        // that share their parent's frame and read `[ebp+x]`) must inherit the
-        // caller's ebp, not start from its own entry esp. Threading ebp is the
-        // correct ABI; without it those helpers read arguments from the wrong
-        // place (a NULL/garbage pointer, then a crash). The list is FIXED so every
+        // (gcc `-O1` regparm, `__fastcall`) cross calls, AND the callee-saved
+        // registers ebp/esi/edi/ebx. ebp: a *frameless* helper that uses the
+        // caller's frame without a `push ebp; mov ebp,esp` prologue (the MSVC EH
+        // funclets that share their parent's frame and read `[ebp+x]`) must inherit
+        // the caller's ebp. esi/edi/ebx: standard code save/restores them (so their
+        // incoming value is dead), but some optimised MSVC/MFC helpers receive an
+        // argument in one — e.g. a constructor whose `this` arrives in ESI and is
+        // used (`mov [esi],vtable`) without a save. Without threading them, such a
+        // helper reads 0 (its SSA entry/undef) and dereferences NULL. Threading is
+        // the correct ABI and strictly additive: a helper that only save/restores
+        // esi is unaffected (its incoming value flows through the push/pop), and the
+        // caller keeps its own esi across the call (callee-saved) since the call
+        // does not reassign the caller's SSA value. The list is FIXED so every
         // function has the same parameter positions; a register not read before
         // being written gets an unused placeholder value to keep the position
-        // stable.
-        for r in [0u16, 1, 2, 5] {
+        // stable. Order: eax,ecx,edx,ebp then esi,edi,ebx (RegId 6,7,3).
+        for r in [0u16, 1, 2, 5, 6, 7, 3] {
             match undef.get(&Location::Reg(RegId(r))).copied() {
                 Some(v) => func.reg_params.push(v.0),
                 None => {

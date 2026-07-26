@@ -2105,6 +2105,9 @@ fn internal_call_args() -> Vec<Expr> {
         Expr::Read(Location::Reg(RegId(1))), // ecx
         Expr::Read(Location::Reg(RegId(2))), // edx
         Expr::Read(Location::Reg(RegId(5))), // ebp (callee-saved frame pointer)
+        Expr::Read(Location::Reg(RegId(6))), // esi (callee-saved; `this` in some MSVC helpers)
+        Expr::Read(Location::Reg(RegId(7))), // edi (callee-saved)
+        Expr::Read(Location::Reg(RegId(3))), // ebx (callee-saved)
     ]
 }
 
@@ -2121,6 +2124,9 @@ fn internal_tailcall_args() -> Vec<Expr> {
         Expr::Read(Location::Reg(RegId(1))), // ecx
         Expr::Read(Location::Reg(RegId(2))), // edx
         Expr::Read(Location::Reg(RegId(5))), // ebp (callee-saved frame pointer)
+        Expr::Read(Location::Reg(RegId(6))), // esi (callee-saved)
+        Expr::Read(Location::Reg(RegId(7))), // edi (callee-saved)
+        Expr::Read(Location::Reg(RegId(3))), // ebx (callee-saved)
     ]
 }
 

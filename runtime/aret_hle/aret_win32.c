@@ -1556,7 +1556,7 @@ static void u32_fiber_trampoline(void) {
     uint32_t *sp = (uint32_t *)(uintptr_t)(f->mstack + U32_FIBER_MSTACK - 64);
     sp[0] = 0;                          /* return address (proc never returns here) */
     sp[1] = f->param;                   /* LPVOID lpParameter @ [esp+4]             */
-    uint64_t r = aret_call(f->start, (uint64_t)(uintptr_t)sp, 0, 0, 0, 0);
+    uint64_t r = aret_call(f->start, (uint64_t)(uintptr_t)sp, 0, 0, 0, 0, 0, 0, 0);
     f->exit_code = (uint32_t)r;
     f->state = FST_DONE;
     /* returns into uc_link = g_sched_ctx */
@@ -2605,7 +2605,7 @@ static uint32_t u32_call_wndproc(uint32_t esp, uint32_t wndproc,
     uint32_t frame = (esp - 64) & ~15u;
     uint32_t *f = (uint32_t *)(uintptr_t)frame;
     f[0] = 0; f[1] = hwnd; f[2] = msg; f[3] = wp; f[4] = lp;
-    return (uint32_t)aret_call(wndproc, frame, 0, 0, 0, 0);
+    return (uint32_t)aret_call(wndproc, frame, 0, 0, 0, 0, 0, 0, 0);
 }
 
 /* Send WM_NCCREATE then WM_CREATE to a freshly created window's WNDPROC, with a
@@ -7979,7 +7979,7 @@ uint32_t aret_EnumChildWindows(uint32_t esp) {
         if (!g_u32_win[i].used || g_u32_win[i].parent != parent) continue;
         uint32_t frame = (esp - 64) & ~15u; uint32_t *f = (uint32_t *)(uintptr_t)frame;
         f[0] = 0; f[1] = (uint32_t)(i + 1); f[2] = lp;
-        if ((uint32_t)aret_call(proc, frame, 0, 0, 0, 0) == 0) break;
+        if ((uint32_t)aret_call(proc, frame, 0, 0, 0, 0, 0, 0, 0) == 0) break;
     }
     return 1;
 }
