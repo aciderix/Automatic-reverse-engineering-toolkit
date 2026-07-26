@@ -633,6 +633,19 @@ uint32_t aret_localeconv(uint32_t esp) { (void)esp; return RP(localeconv()); }
  * returning the function pointer on success. */
 uint32_t aret_onexit(uint32_t esp) { aret_register_atexit(AU(0)); return AU(0); }
 
+/* _encode_pointer/_decode_pointer (MSVC security): obfuscate a pointer with a per-process
+ * cookie so a stored function pointer can't be trivially overwritten; DecodePointer reverses
+ * it. Only the round-trip matters to the program (encode on store, decode on use), so an
+ * identity passthrough is exact and sound (no weak-stub garbage). */
+uint32_t aret_encode_pointer(uint32_t esp) { return AU(0); }
+uint32_t aret_decode_pointer(uint32_t esp) { return AU(0); }
+/* (kernel32 EncodePointer/DecodePointer already live in aret_hle.c, same passthrough.) */
+
+/* __dllonexit(func, pbegin, pend): the DLL form of _onexit — register an at-exit callback and
+ * return it. Route to the same atexit table as _onexit (the callback list bookkeeping in
+ * pbegin/pend is the CRT's; we own the registration). */
+uint32_t aret_dllonexit(uint32_t esp) { aret_register_atexit(AU(0)); return AU(0); }
+
 /* ------------------------------------------------------------------ */
 /* <math.h> — the transcendental libm functions. Their statically-linked */
 /* bodies are dense x87 (and don't model), so bind them to the host libm.*/
