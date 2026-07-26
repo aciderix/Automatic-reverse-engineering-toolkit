@@ -4728,4 +4728,20 @@ Détail : **70 §6** (roadmap). Résumé :
   sur la présence de thunks EH) — non validable sans exécuter un vrai binaire ; (b) faire tourner un vrai binaire jusqu'à l'EH
   (tous les autres murs : imports GUI, appels indirects…). Base fixturée = **complète et bit-identique Wine** (6/6).
 
+### 2026-07-25 — [RECOV] **Murs d'appels indirects — MESURE sur binaires réels : la récupération les résout déjà ; le 1er mur = imports HLE**
+- **58 vs 66 (WZ32.DLL) élucidé** : les « 66 » du README = occurrences brutes de la constante `0x19930520`. Ventilation mesurée :
+  **58 vrais FuncInfo `.rdata` référencés par un thunk (tous détectés)** + **6 en `.text`** = opérande `cmp [reg],0x19930520` *dans*
+  `__CxxFrameHandler` (pas des régions) + 1 `.data` + 1 `.rdata` **orphelin** (magie coïncidente, `nTryBlocks=0xffffffff` garbage, **0
+  référence**). ⇒ détection EH **complète** (58/58 actifs), pas incomplète.
+- **Mesure des murs d'appels indirects (§2, donnée d'abord)** sur les binaires réels disponibles :
+  - `WZ32.DLL` (973 fn) : **0 appel direct non résolu** ; murs = 7 imports HLE + 1 vraie jump-table + qq instructions décodées-en-code.
+  - `WZSEPE32.EXE` (auto-extracteur, 336 fn liftées) : **0 appel direct non résolu, 0 mur d'appel indirect statique** ; sous ARET il
+    **tourne** (exit 0). Murs = **12 imports HLE** (GUI/shell : `CreateDCA`, `DragQueryFileA`, `EnumWindows`, `GetWindowWord`…) + 1
+    `outsb` (donnée-en-code, benin).
+- **Conclusion honnête & mesurée** : sur ces vrais binaires, **la récupération de fonctions d'ARET (§4.4 : scan address-taken data =
+  vtables, jump-tables, callbacks) résout déjà les appels indirects** — le « mur points-to » est largement tombé (cohérent avec la
+  note Perplexity). Le **1er mur réel = les imports HLE** (GUI/shell). La séquence donnée-pilotée pour aller plus loin sur un vrai
+  binaire = **fermer ces imports** (shims généraux, oracle Wine) → il tourne plus loin → **alors** re-mesurer un éventuel mur
+  d'appel indirect **profond** (dispatch vtable C++/MFC), qui n'apparaît que sur un vrai binaire MFC (driver, non dispo ici).
+
 <!-- NOUVELLES ENTRÉES ICI (garder l'ordre chronologique, plus récent en bas) -->
