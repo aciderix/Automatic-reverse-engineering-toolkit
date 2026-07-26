@@ -4744,4 +4744,20 @@ Détail : **70 §6** (roadmap). Résumé :
   binaire = **fermer ces imports** (shims généraux, oracle Wine) → il tourne plus loin → **alors** re-mesurer un éventuel mur
   d'appel indirect **profond** (dispatch vtable C++/MFC), qui n'apparaît que sur un vrai binaire MFC (driver, non dispo ici).
 
+### 2026-07-25 — [EH][RECOV] **✅ Brick B VALIDÉ sur un vrai driver MFC — WinMerge 2.14.0 (MFC90, CRT statique, 869 régions EH)**
+- **Driver réel fourni** (utilisateur) : `WinMergeU.exe` (2,3 Mo, **i386 32-bit**, **MFC90 lié statiquement**, **869 magies EH v3
+  `0x19930522`**, importe `RaiseException`). Exactement la cible de brick B (CRT statique + vtables MFC).
+- **✅ Reconnaissance EH statique PROUVÉE sur données réelles** : ma détection par magie FuncInfo trouve **868/869 thunks handler**
+  (le 1 restant = magie coïncidente en donnée, comme l'orphelin WZ32). ⇒ la reconnaissance CRT-EH statique (handler par magie +
+  thrower par `RaiseException`) **marche sur un vrai binaire MFC90**, pas seulement sur fixtures.
+- **Récupération** : **9761 fonctions** (9573 liftées), **appels indirects résolus** (le mur points-to ne se manifeste pas ; 4
+  « appels directs non résolus » = adresses garbage de données-en-code). ⇒ confirme : sur un vrai MFC, la récup gère les indirects.
+- **1er mur runtime mesuré (§2)** : au **démarrage CRT**, `_encode_pointer` (import HLE, cookie de sécurité MSVC) puis **`pushfd`**
+  (instruction non liftée) → abort sound. Murs statiques : **148 imports HLE** (COM/shell/GUI) + qq instructions décodées-en-code.
+- **Prochain incrément concret & général = lifter `pushfd`/`popfd`** : reconstruire EFLAGS depuis les drapeaux suivis
+  individuellement (CF bit0, PF bit2, AF bit4, ZF bit6, SF bit7, DF bit10, OF bit11 + bits réservés/IF) et redistribuer au pop.
+  **Correctness-critique** (positions de bits + bits non-suivis) → à implémenter **avec validation cpudiff vs Unicorn** (pas à
+  l'arrache). C'est le blocage du démarrage CRT de tout binaire MSVC statique. Ensuite : les 148 imports HLE (data-driven, oracle
+  Wine) pour faire tourner WinMerge plus loin.
+
 <!-- NOUVELLES ENTRÉES ICI (garder l'ordre chronologique, plus récent en bas) -->
