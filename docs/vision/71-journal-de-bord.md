@@ -4801,4 +4801,20 @@ Détail : **70 §6** (roadmap). Résumé :
 - **Ce que WinMerge a déjà prouvé** (sans tourner jusqu'au bout) : reconnaissance EH statique **868/869** sur MFC90 réel, récup
   **9573 fn** (indirects résolus), et il a piloté deux vrais incréments généraux : **pushfd/popfd** (validé Unicorn) + shims CRT.
 
+### 2026-07-25 — [RECOV] **MFC90 lifting (endgame M7-GUI) — pièces prouvées, la frontière ordinaux TOMBE ; reste l'échelle du blob 4-modules**
+- **`mfc90u.dll` obtenu** : extrait de `vcredist_x86.exe` (VC++ 2008 SP1, fourni par l'utilisateur) → `vc_red.cab` → `nosxs_mfc90u.dll`
+  (3,78 Mo, i386, table d'export OK) + `msvcr90.dll`/`msvcp90.dll`. **Non committés** (binaires MS propriétaires ; doctrine licence,
+  doc 80 §3.5 — gardés en scratchpad pour validation locale).
+- **✅ Résolution des ordinaux MFC : FONCTIONNE** — `WinMergeU.exe --with-dll mfc90u.dll=…` : ARET *« lifted 1 DLL module »* et les
+  **imports de WinMerge passent de la forme ordinal à 893 imports nommés**. La frontière `0x80000471` (mfc90u ordinal) **tombe** avec
+  le DLL — c'est exactement le mécanisme BYO-DLL (doc 80 §1.2).
+- **✅ `mfc90u.dll` se lifte seul** — `aret mfc90u.dll --mode transpile` **émet** (200+ fichiers/chunks à t+50s) : ARET **encaisse un
+  DLL MFC de 3,7 Mo**. Donc ni la résolution ni le lifting d'un gros DLL ne bloquent.
+- **Reste = l'ÉCHELLE du blob 4-modules** : `WinMerge + mfc90u + msvcr90 + msvcp90` (~20k fonctions, ~15 Mo de code) — le transpile
+  produit un out-dir **vide** (exit 0, seul le *note* imprimé). Les pièces marchent séparément mais la **fusion multi-modules à cette
+  échelle** ne sort rien → à diagnostiquer (OOM ? early-return du chemin multi-modules géant ?). C'est le cœur du chantier **endgame
+  M7-GUI**, multi-sessions.
+- **⇒ La voie est prouvée ouverte** : redist MFC90 en main, ordinaux résolus, MFC liftable. Le dernier verrou est l'ingénierie
+  d'échelle du pipeline multi-modules sur un vrai blob GUI complet (à mener en session focalisée).
+
 <!-- NOUVELLES ENTRÉES ICI (garder l'ordre chronologique, plus récent en bas) -->
