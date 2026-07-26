@@ -4760,4 +4760,17 @@ Détail : **70 §6** (roadmap). Résumé :
   l'arrache). C'est le blocage du démarrage CRT de tout binaire MSVC statique. Ensuite : les 148 imports HLE (data-driven, oracle
   Wine) pour faire tourner WinMerge plus loin.
 
+### 2026-07-25 — [LIFT] **Spec `pushfd`/`popfd` : subtilité CPUID → shadow EFLAGS (ne PAS modéliser naïvement)**
+- **Blocage mesuré** : le démarrage CRT MSVC de WinMerge abort sur `pushfd` (non lifté). ARET suit les drapeaux
+  **individuellement** (`read_flag`/`set_flag` ; CF b0, PF b2, AF b4, ZF b6, SF b7, DF b10, OF b11) — il n'a pas de registre EFLAGS.
+- **Piège identifié (avant d'écrire)** : la CRT MSVC détecte CPUID par l'idiome `pushfd; pop eax; mov ecx,eax; xor eax,0x200000;
+  push eax; popfd; pushfd; pop eax; xor eax,ecx` = **bascule le bit 21 (ID)** et teste s'il tient. Un modèle naïf (pushfd =
+  assembler seulement les drapeaux suivis, bit21=0) pousserait **bit21=0 les deux fois** → l'idiome conclut « CPUID absent » →
+  chemin CRT legacy/faux. **Faux silencieux potentiel.**
+- **Modèle SOUND requis** : un **registre shadow `eflags_other`** portant les bits **non suivis** (init `0x202` = IF+réservé b1),
+  préservé au travers du couple push/pop : `pushfd = push(eflags_other | assemble(drapeaux suivis))` ; `popfd = { set drapeaux
+  suivis depuis la valeur ; eflags_other = valeur & ~MASK_suivis }`. Ainsi le bit 21 basculé par l'idiome **survit** au round-trip →
+  CPUID correctement détecté. **À valider cpudiff vs Unicorn** (positions de bits + valeur des bits non suivis dans le seed
+  Unicorn) — correctness-critique, à faire en focalisé, pas à l'arrache. C'est le prochain incrément lifter concret.
+
 <!-- NOUVELLES ENTRÉES ICI (garder l'ordre chronologique, plus récent en bas) -->
