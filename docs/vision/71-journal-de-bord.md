@@ -4949,4 +4949,20 @@ Détail : **70 §6** (roadmap). Résumé :
   « unhandled ») : `aret_cxx_dispatch` retourne 0 (un handler a rendu 0) sur ce **vrai throw MFC imbriqué**. Prochain sous-chantier : brick B
   dispatch sur throw réel (pourquoi le catch n'est pas trouvé / handler rend 0). C'est un vrai throw pendant l'init MFC.
 
+### 2026-07-26 — [EH] **Mur `int3` précisé : le throw MFC réel remonte au frame `_except_handler4` du CRT (statique), dont le worker lifté rend 0 → dispatch s'arrête**
+- **Trace dispatch** (gdb, `aret_cxx_call_handler`) : le throw de `sub_6d9a17` fait **un seul** appel de handler : `handler=0x4ac555 lead=0x8b`
+  (≠ `0xB8` ⇒ chemin `aret_call`, pas un thunk C++). Ce handler **rend 0** ⇒ `aret_cxx_dispatch` s'arrête (`==0 → return 0`) ⇒
+  `aret_CxxThrowException` retourne ⇒ chute dans le `int3` *unreachable* qui suit le `_CxxThrowException` noreturn.
+- **Identité de `0x4ac555`** (désassemblé) : `mov edi,edi; push ebp; mov ebp,esp; push [ebp+14]; push [ebp+10]; push [ebp+0c]; push
+  [ebp+08]; push 0x4ac1cc; push 0x51e7ec (__security_cookie); call 0x4accf6; add esp,18; pop ebp; ret` = **`_except_handler4`**
+  (SEH /GS du CRT statique), qui appelle `_except_handler4_common`. C'est le **frame SEH top-level du CRT** (autour de `main`/
+  `_XcptFilter`) — la tête `fs:[0]` au moment du throw.
+- **Lecture** : le throw MFC pendant l'init **remonte jusqu'au handler top-level du CRT** (aucun catch C++ intermédiaire ne l'attrape
+  dans notre exécution headless). Deux sous-problèmes distincts : (1) notre `_except_handler4_common` **lifté** rend 0 au lieu de la
+  bonne disposition (ContinueSearch=1) ⇒ le dispatch devrait soit continuer/épuiser → abort « unhandled C++ exception » **propre**, soit
+  le throw devrait être attrapé plus tôt ; (2) c'est vraisemblablement une **exception réellement non gérée** (MFC échoue en init
+  headless — surface GUI/ressources absente), donc même corrigé le programme ne dépasserait pas sans cette surface. **Sous-chantier
+  brick-B-sur-vrai-MFC** (dispatch à travers un `_except_handler4` lifté du CRT statique) — multi-session, comme anticipé (doc 70 §5.0.4).
+  **Borné ici** : les deux murs tractables de la session (relocalisation `_EH_prolog3` + split de continuation) sont corrigés et vérifiés.
+
 <!-- NOUVELLES ENTRÉES ICI (garder l'ordre chronologique, plus récent en bas) -->
