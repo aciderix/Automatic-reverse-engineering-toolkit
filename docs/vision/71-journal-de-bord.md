@@ -5082,4 +5082,22 @@ Détail : **70 §6** (roadmap). Résumé :
 - **Note testabilité** : pas de fixture minimale (le pattern `this`-en-`esi` est spécifique MSVC, non émis par mingw ; l'inline-asm ne
   lifte pas proprement). Vérif = régression complète (aucun dommage) + WinMerge bout-en-bout (le bug disparaît = preuve positive).
 
+### 2026-07-26 — [LIFT] **Mur WinMerge suivant (post-I6) : faute `0xc0000005 at 0xe` — champ SEH d'objet = 0xe (mop-up lift-correctness, multi-session)**
+- **Trace gdb** : faute à `sub_7924d5` (deep MFC init, `main→sub_864ff5→…→aret_initterm→sub_87f251→sub_79195d→sub_7924d5`), instruction
+  `mov (%eax),%ebx` avec **eax=0xe**. Le désassemblage amont montre le pattern du **check d'établissement SEH injecté** :
+  `frame = *(obj+0x30); if (frame != -1 && frame != 0 && *frame == fs:[0]) { setjmp }` — mais `frame = *(obj+0x30) = 0xe` (garbage) passe
+  le garde `!= -1 && != 0` et `*frame = *(0xe)` **faute**. La faute est un **abort BRUYANT** (I7/le filet faute-non-gérée), pas un hang.
+- **Nature** : le champ **+0x30 d'un objet** (état thread/module MFC portant la frame SEH par-thread) vaut **0xe** au lieu de -1/frame
+  valide. Objet lisible mais champ garbage ⇒ **bug de lift-correctness** distinct (pas le `this`-en-esi d'I6, déjà corrigé ; pas EH ni
+  imports). Une écriture liftée a posé 0xe là où le programme réel écrit -1/une frame. Racine = dig individuel dans le blob 40k-fn.
+- **Note soundness** : durcir le garde (valider que `frame` est un pointeur pile plausible avant deref) éviterait la faute ICI mais
+  **masquerait** le bug (fs:[0]=0xe garbage relu plus tard) — contraire au §0. La faute bruyante actuelle est **correcte** (pointe le bug).
+- **⇒ Inflexion stratégique (mesurée cette session)** : chaque fix (corruption fs:[0], continuation, dispatch, 4 imports, **I6 esi**, I7)
+  fait **avancer** WinMerge et **révèle le bug de lift suivant**. C'est exactement le **mop-up lift-correctness** du blob MFC 40k-fn
+  (doc 81) — **multi-session**, chaque bug = un dig (build→run→gdb ~10 min). L'**accélérateur documenté = le traceur I1** (doc 81 §I1) :
+  voir la séquence d'instructions produisant la valeur garbage en **1 run** au lieu de digger manuellement. **Prochain pas recommandé =
+  bâtir I1** (multiplicateur pour tout le mop-up), plutôt que digger le `0xe` isolément.
+- **Acquis session** : WinMerge est passé de « abort dès l'init » à « traverse tout le CRT + une longue série de ctors globaux MFC »
+  (7 incréments vérifiés, dont 2 changements de modèle cœur I6+I7). Portes toutes vertes. Le reste = mop-up (I1 pour l'accélérer).
+
 <!-- NOUVELLES ENTRÉES ICI (garder l'ordre chronologique, plus récent en bas) -->
