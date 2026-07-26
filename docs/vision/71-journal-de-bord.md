@@ -4866,4 +4866,14 @@ Détail : **70 §6** (roadmap). Résumé :
   + 85 appels non résolus qui corrompent l'état), pas l'EH ni l'échelle. Chantier de debug ciblé sur binaire 40k-fonctions
   (multi-sessions) : isoler LA fonction fautive (bisection : quel appel juste avant l'init corrompt esp). Trace retirée (diagnostic).
 
+### 2026-07-25 — [EH] **Précision : l'objet lancé est un heap valide ; c'est `fs:[0]` qui est corrompu (pointe l'objet, pas une frame SEH)**
+- `aret_malloc` = host `malloc` ⇒ `0x1111c6fc` est très probablement une **allocation heap valide** (l'objet lancé est **correct**).
+- **Bug précis** : `fs:[0]` (teb[0], tête de la chaîne SEH) a été **mis = l'adresse de l'objet lancé** au lieu d'une frame de
+  registration SEH (sur la pile). D'où `frame=pobj`, `handler=pobj+0x1c` (garbage), abort. La chaîne SEH est **corrompue** durant
+  l'init MFC — un `mov fs:[0],reg` lifté qui a stocké la mauvaise valeur, OU une écriture parasite dans le TEB par une fonction
+  mal-liftée (parmi les 2956 partial-asm / 85 appels non résolus).
+- **Prochain pas §2 (session focalisée)** : instrumenter les écritures `fs:[0]` (l'injection SEH-establish) pour capturer **quand**
+  teb[0] devient l'objet, remonter à la fonction fautive. C'est un bug de complétude/justesse de lift sur le blob 40k-fonctions —
+  le dernier verrou du endgame M7-GUI. Ni EH, ni échelle : **complétude de récup/lift sur MFC massif**.
+
 <!-- NOUVELLES ENTRÉES ICI (garder l'ordre chronologique, plus récent en bas) -->
