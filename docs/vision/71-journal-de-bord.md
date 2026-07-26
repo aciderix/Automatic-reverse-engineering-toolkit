@@ -4923,4 +4923,30 @@ Détail : **70 §6** (roadmap). Résumé :
   byte-identique), funcdiff/winediff : à confirmer (en cours). Le fix est **gaté** (n'affecte que les call-sites matchant le nouvel
   idiome) ⇒ nul effet sur les binaires sans `_EH_prolog3`.
 
+### 2026-07-26 — [RECOV][EH] **✅ Mur suivant WinMerge : les continuations de catch ne doivent PAS tronquer l'établisseur — récup, WinMerge avance dans l'init MFC profonde**
+- **Mur mesuré** (après le fix `_EH_prolog3`) : `jne short 0x85fd5a` / `je short 0x85fd56` **non liftés** (`aret_unmodelled`) dans `sub_85fd18`,
+  atteints en flot **normal** (init MFC, sans throw). Un `Jcc` tombe en `Asm` quand sa cible n'est pas un **leader de bloc** de la
+  fonction (`build.rs` : `idx.get(succ)==None`).
+- **Cause racine (la mienne, brick B)** : à `0x85fdb8` le binaire a `mov eax,0x85fd56; ret` = un **funclet de catch** qui retourne sa
+  **continuation** `0x85fd56` (le code après le try/catch). `cxx_funclet_continuation` enregistrait cette continuation comme **entrée de
+  fonction** → elle devient une **frontière** (`boundary`) qui **tronque** `sub_85fd18` à `0x85fd56` → `fd56`/`fd5a` (aussi cibles de `je`/
+  `jne` internes, la continuation étant un point de reprise **dans le corps** de l'établisseur) sortent de la fonction → `Jcc` non résolus →
+  abort. `sub_85fd56` apparaissait même comme fonction séparée (preuve du split).
+- **Tension** : le runtime **résume** la continuation via `aret_call(cont)` (`aret_seh_run`, `g_seh_is_cxx`) ⇒ elle **doit** rester une
+  fonction appelable ; mais elle est **aussi** un joint du flot normal de l'établisseur ⇒ elle ne doit **pas** tronquer celui-ci.
+- **Fix (général, sound, `src/analysis/mod.rs`)** — sur le modèle du hot/cold split (`.cold` exclu de la `boundary`) : `cxx_eh_entries`
+  retourne `(funclets, continuations)` séparément ; `analyze` **garde** les continuations dans la **liste de fonctions** (`func_entries` →
+  bâties pour l'`aret_call` de reprise EH) **mais les exclut de la frontière de troncature** → l'établisseur **absorbe** la queue post-try
+  comme **ses propres blocs** (ses `je`/`jne` internes résolvent). La queue partagée est **dupliquée** entre établisseur et fonction-
+  continuation : **sound** (code identique). Les **funclets** (atteints seulement par le dispatch EH) restent des frontières réelles.
+- **Byte-neutre hors C++ EH** : un binaire sans tables EH ⇒ `cxx_conts` **vide** ⇒ `boundary == func_entries` (comportement inchangé).
+- **✅ Résultat** : `sub_85fd18` récupéré **entier**, les `je`/`jne` résolvent, WinMerge **franchit** ce mur et avance **bien plus loin**
+  dans l'init MFC (`main→sub_4ac1c2→sub_4ad951→sub_6baf17→sub_6f0286→sub_6f0312→sub_6d9a17`), 5 imports HLE exercés en plus.
+- **Portes toutes vertes** : difftest **272/272**, transpile hash **`19acad982194bf07` inchangé**, **ehdiff 6/6** (la reprise EH marche
+  toujours — continuations toujours bâties), funcdiff **0 divergence** (20558, identique), winediff **177/178** (baseline).
+- **Mur suivant (borné, à pivoter)** : `int3` dans `sub_6d9a17`, **juste après** `aret_CxxThrowException` (noreturn) → le `int3` est le
+  marqueur *unreachable* du compilo. On l'atteint parce que le **dispatch du throw retourne** (au lieu de longjmp vers un catch ou d'aborter
+  « unhandled ») : `aret_cxx_dispatch` retourne 0 (un handler a rendu 0) sur ce **vrai throw MFC imbriqué**. Prochain sous-chantier : brick B
+  dispatch sur throw réel (pourquoi le catch n'est pas trouvé / handler rend 0). C'est un vrai throw pendant l'init MFC.
+
 <!-- NOUVELLES ENTRÉES ICI (garder l'ordre chronologique, plus récent en bas) -->

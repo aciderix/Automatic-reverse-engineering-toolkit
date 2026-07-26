@@ -225,7 +225,8 @@ pub fn auto_main_entry(prog: &Program) -> Option<u64> {
 /// `prologue_scan` is set, also recover functions reached only indirectly by
 /// scanning executable sections for function prologues.
 pub fn analyze(prog: &Program, disasm: &Disassembler, prologue_scan: bool) -> AnalysisResult {
-    let (global, entries, jump_tables, prologue_only) = global_decode(prog, disasm, prologue_scan);
+    let (global, entries, jump_tables, prologue_only, cxx_conts) =
+        global_decode(prog, disasm, prologue_scan);
     let instruction_count = global.len();
 
     // Hot/cold splitting (gcc `-freorder-blocks-and-partition`) emits the cold
@@ -238,12 +239,21 @@ pub fn analyze(prog: &Program, disasm: &Disassembler, prologue_scan: bool) -> An
         .copied()
         .filter(|&a| prog.symbol_name(a).is_some_and(|n| n.contains(".cold")))
         .collect();
-    let boundary: BTreeSet<u64> = entries.difference(&cold).copied().collect();
+    // The function list: every entry except cold companions (which the parent absorbs).
+    let func_entries: BTreeSet<u64> = entries.difference(&cold).copied().collect();
+    // The truncation boundary drives where `collect_function` stops. A C++ catch
+    // **continuation** is a resume point *inside its establisher's body* (also reached by the
+    // establisher's normal control flow), so it must NOT truncate the establisher — exclude it
+    // from the boundary (like `.cold`) so the establisher absorbs the shared post-try tail as its
+    // own blocks, letting its interior `je`/`jne` into that tail resolve. The continuation is
+    // still built as its own function (it stays in `func_entries`) for the runtime EH-resume
+    // `aret_call`; duplicating the shared tail across both is sound (identical code).
+    let boundary: BTreeSet<u64> = func_entries.difference(&cxx_conts).copied().collect();
 
     // Functions are independent (everything they read — `global`, `entries`,
     // `jump_tables`, `prog` — is shared read-only), so build them in parallel.
     use rayon::prelude::*;
-    let entry_vec: Vec<u64> = boundary.iter().copied().collect();
+    let entry_vec: Vec<u64> = func_entries.iter().copied().collect();
     let mut functions: Vec<Function> = entry_vec
         .par_iter()
         .filter_map(|&entry| {
@@ -674,8 +684,20 @@ fn reg_imm_reaches_indirect_call(
 /// executes) and general (any MSVC-ABI C++ binary). At runtime the HLE `__CxxFrameHandler3`
 /// dispatch finds the catch, runs the funclet, and resumes the returned continuation
 /// (aret_seh_run), so both must exist as callable functions.
-fn cxx_eh_entries(prog: &Program, disasm: &Disassembler) -> Vec<u64> {
+///
+/// Returns `(entries, continuations)`. **Both** must be built as functions (the runtime
+/// `aret_call`s the continuation), but a **continuation** is a resume point *inside the
+/// establisher's own body* — the code after the try/catch, frequently also reached by the
+/// establisher's normal control flow (a forward `je`/`jne` to the shared post-try tail). If it
+/// acted as a function *boundary* it would truncate the establisher there, orphaning those
+/// interior branch targets (their `Jcc` cannot resolve → abort). So continuations are returned
+/// separately: `analyze` keeps them in the function list but **excludes them from the truncation
+/// boundary**, letting the establisher absorb the shared tail as its own blocks (a sound
+/// duplication — the standalone continuation function still exists for the EH-resume call). The
+/// funclets, reached only via EH dispatch, are real boundaries and stay in `entries`.
+fn cxx_eh_entries(prog: &Program, disasm: &Disassembler) -> (Vec<u64>, Vec<u64>) {
     let mut out = Vec::new();
+    let mut conts = Vec::new();
     // A C++ frame-handler thunk is `mov eax, &FuncInfo; jmp <__CxxFrameHandler[3]>`. Its jmp
     // target is an import (IAT, `FF25`) when the CRT is dynamically linked, or an internal
     // function (`E9 rel32`) when it is statically linked (the real 1990s binaries). We therefore
@@ -699,7 +721,7 @@ fn cxx_eh_entries(prog: &Program, disasm: &Disassembler) -> Vec<u64> {
                 let func_info =
                     u32::from_le_bytes([data[i + 1], data[i + 2], data[i + 3], data[i + 4]]) as u64;
                 if is_func_info(func_info) && is_jmp(sec.address + (i + 5) as u64) {
-                    parse_cxx_func_info(prog, disasm, func_info, &mut out);
+                    parse_cxx_func_info(prog, disasm, func_info, &mut out, &mut conts);
                 }
             }
             i += 1;
@@ -707,12 +729,20 @@ fn cxx_eh_entries(prog: &Program, disasm: &Disassembler) -> Vec<u64> {
     }
     out.sort_unstable();
     out.dedup();
-    out
+    conts.sort_unstable();
+    conts.dedup();
+    (out, conts)
 }
 
 /// Parse one MSVC C++ `FuncInfo` (`{magic, maxState, pUnwindMap, nTryBlocks, pTryBlockMap, …}`,
 /// dwords) → its catch funclets + their continuation targets, appended to `out`.
-fn parse_cxx_func_info(prog: &Program, disasm: &Disassembler, fi: u64, out: &mut Vec<u64>) {
+fn parse_cxx_func_info(
+    prog: &Program,
+    disasm: &Disassembler,
+    fi: u64,
+    out: &mut Vec<u64>,
+    conts: &mut Vec<u64>,
+) {
     let magic = match prog.read_u32(fi) {
         Some(m) => m,
         None => return,
@@ -753,7 +783,7 @@ fn parse_cxx_func_info(prog: &Program, disasm: &Disassembler, fi: u64, out: &mut
             if handler != 0 && prog.is_executable(handler) {
                 out.push(handler);
                 if let Some(cont) = cxx_funclet_continuation(prog, disasm, handler) {
-                    out.push(cont);
+                    conts.push(cont);
                 }
             }
         }
@@ -793,15 +823,26 @@ fn global_decode(
     prog: &Program,
     disasm: &Disassembler,
     prologue_scan: bool,
-) -> (BTreeMap<u64, Insn>, BTreeSet<u64>, HashMap<u64, Vec<u64>>, BTreeSet<u64>) {
+) -> (
+    BTreeMap<u64, Insn>,
+    BTreeSet<u64>,
+    HashMap<u64, Vec<u64>>,
+    BTreeSet<u64>,
+    BTreeSet<u64>,
+) {
     let mut global: BTreeMap<u64, Insn> = BTreeMap::new();
     let mut entries: BTreeSet<u64> = prog.seed_functions().into_iter().collect();
     // C++ exception handling: recover catch funclets + their catch-continuation targets from
     // the binary's own EH metadata (sound, general — see cxx_eh_entries). Reached by no direct
     // call and by no prologue/data-pointer scan, but the program provably transfers to them.
-    for va in cxx_eh_entries(prog, disasm) {
-        entries.insert(va);
+    // Continuations are tracked separately: they must be built as functions (the runtime resumes
+    // them via aret_call) but must NOT act as truncation boundaries (they are resume points
+    // inside the establisher's own body) — analyze() applies that distinction.
+    let (cxx_funclets, cxx_conts_vec) = cxx_eh_entries(prog, disasm);
+    for va in cxx_funclets.iter().chain(cxx_conts_vec.iter()) {
+        entries.insert(*va);
     }
+    let cxx_conts: BTreeSet<u64> = cxx_conts_vec.into_iter().collect();
     let mut jump_tables: HashMap<u64, Vec<u64>> = HashMap::new();
     if entries.is_empty() && prog.is_executable(prog.entry) {
         entries.insert(prog.entry);
@@ -1179,10 +1220,10 @@ fn global_decode(
         .filter(|i| i.flow == Flow::Call)
         .filter_map(|i| i.target)
         .collect();
-    entries.retain(|e| !jt_targets.contains(e) || call_targets.contains(e));
+    entries.retain(|e| !jt_targets.contains(e) || call_targets.contains(e) || cxx_conts.contains(e));
     prologue_only.retain(|e| !jt_targets.contains(e));
 
-    (global, entries, jump_tables, prologue_only)
+    (global, entries, jump_tables, prologue_only, cxx_conts)
 }
 
 /// Resolve every static jump table reachable in `global` to a fixpoint, decoding
