@@ -4965,4 +4965,27 @@ Détail : **70 §6** (roadmap). Résumé :
   brick-B-sur-vrai-MFC** (dispatch à travers un `_except_handler4` lifté du CRT statique) — multi-session, comme anticipé (doc 70 §5.0.4).
   **Borné ici** : les deux murs tractables de la session (relocalisation `_EH_prolog3` + split de continuation) sont corrigés et vérifiés.
 
+### 2026-07-26 — [EH] **✅ Throw MFC = `CUserException` non gérée (limite headless) ; dispatch C++ corrigé (ne s'arrête que sur un catch), abort « unhandled » propre et typé**
+- **Type lancé décodé** (ThrowInfo `0x880fa8` → CatchableTypeArray → TypeDescriptor) : **`CUserException`** (`.PAVCUserException@@`,
+  dérive de CSimpleException→CException→CObject). MFC lance `CUserException` via `AfxThrowUserException` pour **abandonner une
+  opération après avoir notifié l'utilisateur** (chemin `AfxMessageBox`→abort). En headless (MessageBox HLE rend -1, 272 imports
+  COM/OLE/GUI absents), l'init MFC **échoue et throw**. `sub_6d9a17` (le throw) ≈ `AfxThrowUserException`.
+- **Chaîne `fs:[0]` au throw = 1 seule frame** (gdb) : le handler top-level **`_except_handler4`** du CRT statique de WinMerge
+  (`0x4ac555` : stub hotpatch `mov edi,edi` → push args+cookie+scopetable → `_except_handler4_common`), `prev=0xffffffff`. **Aucun
+  catch C++ intermédiaire** ⇒ exception **réellement non gérée** dans notre exécution (= la limite headless-GUI, pas un bug de lift).
+- **Fix général & sound (`runtime/aret_hle/aret_hle.c`)** : `aret_cxx_dispatch` **ne s'arrête plus** quand un handler *retourne* 0.
+  Rationale : dans la recherche phase-1 d'un throw C++, **seul un catch transfère le contrôle (longjmp) et ne revient jamais** ; tout
+  handler qui **retourne** (quelle que soit sa disposition) n'a pas attrapé → on **continue** de marcher la chaîne. L'ancien
+  `if(handler==0) return 0` faisait qu'un `_except_handler4` lifté du CRT (rendant 0) **stoppait** la recherche → `aret_CxxThrowException`
+  retournait → chute dans le `int3` *unreachable* du `_CxxThrowException` noreturn. Désormais : chaîne épuisée → **abort « unhandled C++
+  exception » propre**, **typé** (`aret_cxx_thrown_name` décode le nom depuis la ThrowInfo). Message WinMerge : `unhandled C++ exception
+  (type .PAVCUserException@@, ThrowInfo 0x00880fa8)` au lieu de `int3`. **Général** (tout binaire C++ EH), **sound** (un catch longjmpe
+  toujours ; les fixtures ne rendent jamais 0 par un handler).
+- **Portes** : **ehdiff 6/6** (catches transfèrent toujours), difftest **272/272**, transpile hash **`19acad982194bf07` inchangé** (change
+  runtime, pas lift), winediff : à confirmer.
+- **⇒ Bilan WinMerge (session)** : 3 murs francs — (1) corruption `fs:[0]` = `_EH_prolog3_GS` non reconnu **[corrigé]**, (2) split
+  d'établisseur par une continuation de catch **[corrigé]**, (3) throw `CUserException` non géré = **limite headless-MFC** (abort propre
+  désormais). WinMerge traverse tout le démarrage CRT + une **grande partie de l'init statique MFC** avant l'échec headless. Aller
+  au-delà = la surface **COM/OLE/GUI/ressources** (endgame M7-GUI, multi-session). Les briques EH (B/C) sont prouvées sur du **vrai MFC**.
+
 <!-- NOUVELLES ENTRÉES ICI (garder l'ordre chronologique, plus récent en bas) -->

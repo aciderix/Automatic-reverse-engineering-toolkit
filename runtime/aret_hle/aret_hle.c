@@ -2977,7 +2977,8 @@ uint32_t __aret_gs(void) {
  * this code, so intercepting it here catches both the imported-`_CxxThrowException` and the
  * static-CRT cases with one path. */
 #define ARET_CXX_EH_CODE 0xE06D7363u
-static uint32_t aret_cxx_dispatch(uint32_t esp, uint32_t *rec);   /* fwd */
+static void aret_cxx_dispatch(uint32_t esp, uint32_t *rec);   /* fwd */
+static const char *aret_cxx_thrown_name(uint32_t pthrow);     /* fwd */
 uint32_t aret_RaiseException(uint32_t esp) {
     aret_teb_init();
     uint32_t code = arg(esp, 0), flags = arg(esp, 1);
@@ -3000,7 +3001,8 @@ uint32_t aret_RaiseException(uint32_t esp) {
      * imported RaiseException) is handled identically. Returns only if unhandled. */
     if (code == ARET_CXX_EH_CODE) {
         aret_cxx_dispatch(esp, rec);
-        fprintf(stderr, "aret: unhandled C++ exception (0x%08x)\n", (unsigned)rec[7]);
+        fprintf(stderr, "aret: unhandled C++ exception (type %s, ThrowInfo 0x%08x)\n",
+                aret_cxx_thrown_name(rec[7]), (unsigned)rec[7]);
         abort();
     }
     uint32_t ctx[200];                   /* a zeroed CONTEXT (defined, benign)  */
@@ -3281,7 +3283,7 @@ static void aret_cxx_global_unwind(uint32_t esp, uint32_t target) {
  * non-local transfer itself (never returns). Returns 0 if a handler continued execution, 1 if
  * the chain was exhausted with no catch (the caller then aborts — unhandled). Shared by the
  * imported `_CxxThrowException` shim and the `RaiseException(0xE06D7363)` path (static CRT). */
-static uint32_t aret_cxx_dispatch(uint32_t esp, uint32_t *rec) {
+static void aret_cxx_dispatch(uint32_t esp, uint32_t *rec) {
     uint32_t ctx[200]; memset(ctx, 0, sizeof ctx);
     uint32_t *teb = (uint32_t *)(uintptr_t)__aret_fs();
     uint32_t frame = teb[0];
@@ -3289,10 +3291,33 @@ static uint32_t aret_cxx_dispatch(uint32_t esp, uint32_t *rec) {
         uint32_t *f = (uint32_t *)(uintptr_t)frame;
         uint32_t hesp = esp - 0x80; uint32_t *cf = (uint32_t *)(uintptr_t)hesp;
         cf[1] = (uint32_t)(uintptr_t)rec; cf[2] = frame; cf[3] = (uint32_t)(uintptr_t)ctx; cf[4] = frame;
-        if (aret_cxx_call_handler(f[1], hesp) == 0) return 0;
+        /* Phase-1 search. A frame that *catches* transfers control by longjmp (the 0xB8
+         * __CxxFrameHandler3 path) and never returns here; any frame whose handler *returns*
+         * simply did not catch, so keep walking — whatever disposition it returned. (An SEH
+         * `_except_handler3/4` in the chain, e.g. the CRT top-level frame, returns a value; a
+         * software C++ throw has no valid ContinueExecution, so its return must not stop the
+         * search — otherwise a lifted CRT handler returning 0 would abort the search early and
+         * a genuinely-unhandled throw would fall through to the noreturn-throw `int3` instead
+         * of the clean "unhandled" report below.) */
+        (void)aret_cxx_call_handler(f[1], hesp);
         frame = f[0];
     }
-    return 1;   /* exhausted -> unhandled */
+    /* chain exhausted with no catch -> the throw is unhandled */
+}
+/* First thrown-type name from the ThrowInfo (for the unhandled diagnostic): ThrowInfo{+0xc:
+ * CatchableTypeArray} -> [count, CatchableType*...]; CatchableType{+4: TypeDescriptor};
+ * TypeDescriptor{+8: decorated name}. All in guest image memory. Best-effort — "?" if the
+ * chain doesn't hold up (we are aborting regardless). */
+static const char *aret_cxx_thrown_name(uint32_t pthrow) {
+    if (!pthrow) return "?";
+    uint32_t pCTA = *(const uint32_t *)(uintptr_t)(pthrow + 0xc);
+    if (!pCTA) return "?";
+    if (*(const uint32_t *)(uintptr_t)pCTA == 0) return "?";
+    uint32_t pCT = *(const uint32_t *)(uintptr_t)(pCTA + 4);
+    if (!pCT) return "?";
+    uint32_t pType = *(const uint32_t *)(uintptr_t)(pCT + 4);
+    if (!pType) return "?";
+    return (const char *)(uintptr_t)(pType + 8);
 }
 uint32_t aret_CxxThrowException(uint32_t esp) {
     aret_teb_init();
@@ -3300,8 +3325,9 @@ uint32_t aret_CxxThrowException(uint32_t esp) {
     uint32_t rec[20]; memset(rec, 0, sizeof rec);
     rec[0] = ARET_CXX_EH_CODE; rec[1] = 1u /*NONCONTINUABLE*/; rec[4] = 3u /*NumberParameters*/;
     rec[5] = 0x19930520u /*EH magic*/; rec[6] = pobj; rec[7] = pthrow;
-    if (aret_cxx_dispatch(esp, rec) == 0) return 0;
-    fprintf(stderr, "aret: unhandled C++ exception (0x%08x)\n", (unsigned)pthrow);
+    aret_cxx_dispatch(esp, rec);   /* a catch never returns (longjmp); returning here == unhandled */
+    fprintf(stderr, "aret: unhandled C++ exception (type %s, ThrowInfo 0x%08x)\n",
+            aret_cxx_thrown_name(pthrow), (unsigned)pthrow);
     abort();
     return 0;
 }
