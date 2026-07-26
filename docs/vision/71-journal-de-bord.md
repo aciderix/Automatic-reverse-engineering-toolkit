@@ -4817,4 +4817,20 @@ Détail : **70 §6** (roadmap). Résumé :
 - **⇒ La voie est prouvée ouverte** : redist MFC90 en main, ordinaux résolus, MFC liftable. Le dernier verrou est l'ingénierie
   d'échelle du pipeline multi-modules sur un vrai blob GUI complet (à mener en session focalisée).
 
+### 2026-07-25 — [EMIT] **✅ Verrou d'échelle multi-modules LEVÉ (chunk par octets) — WinMerge+MFC90 compile en ELF natif et TOURNE jusqu'à l'init MFC**
+- **Cause racine mesurée** : `emit_split` chunkait par **nombre de fonctions** (`chunk_size`/chunk). Les fonctions MFC sont si
+  grosses qu'un chunk devenait une TU de **43 Mo / 462k lignes** (`chunk_49.c`) que **gcc -O0 n'arrive pas à compiler** (bloque ;
+  189/199 `.o` faits, 2 `cc` qui tournent sans fin). Ce n'était **ni OOM ni analyse** (13 Go libres, émission OK) — purement la
+  **compilation C** d'une TU géante.
+- **Fix général & correctness-neutre** : cap par **octets** (`MAX_CHUNK_BYTES = 4 Mo`) en plus du cap par compte. Plus gros chunk
+  **43 Mo → 4,6 Mo**. Une fonction seule > cap reste seule dans son chunk (inévitable ; ici max ~1,5 Mo, bien en-dessous). Petits
+  binaires = un seul chunk (octets ≪ cap) ⇒ **hash `19acad982194bf07` inchangé**.
+- **✅ Résultat mesuré** : `WinMergeU.exe --with-dll mfc90u.dll` **transpile + compile les 228 objets + linke un ELF natif de 141 Mo**
+  en ~40 s (avant : illimité). Le binaire **tourne** : passe le démarrage CRT **et l'init MFC** (mfc90u lifté appelé), puis abort sur
+  `indirect call to unrecovered 0x1111c718` = un pointeur **calculé/garbage** provenant probablement des **272 imports COM/GUI non
+  implémentés** (weak-stub → pointeur bidon appelé). ⇒ **le pipeline endgame M7-GUI fonctionne bout-en-bout** ; le mur restant =
+  la **surface COM/OLE + GUI** (HLE), pas l'échelle.
+- **Reste** : (a) les imports COM/OLE/GUI (CoGetClassObject… 272) — data-driven, oracle Wine ; (b) le cas 4-modules (+msvcr90/p90)
+  qui émettait 0 fichier = bug distinct à diagnostiquer (le 2-modules, lui, marche). Portes du fix chunking : à confirmer.
+
 <!-- NOUVELLES ENTRÉES ICI (garder l'ordre chronologique, plus récent en bas) -->
