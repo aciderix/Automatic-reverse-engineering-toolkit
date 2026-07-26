@@ -676,38 +676,21 @@ fn reg_imm_reaches_indirect_call(
 /// (aret_seh_run), so both must exist as callable functions.
 fn cxx_eh_entries(prog: &Program, disasm: &Disassembler) -> Vec<u64> {
     let mut out = Vec::new();
-    // IAT slots of the C++ frame handler import(s) (`__CxxFrameHandler`, `…Handler3`).
-    let handler_slots: BTreeSet<u64> = prog
-        .imports
-        .iter()
-        .filter(|(_, n)| n.contains("CxxFrameHandler"))
-        .map(|(&a, _)| a)
-        .collect();
-    if handler_slots.is_empty() {
-        return out;
-    }
-    // Does the code at `addr` reach — in at most two `jmp` hops (`E9 rel32` then a final
-    // `FF25 [IAT]`, or `FF25 [IAT]` directly) — a jump through a C++ frame-handler IAT slot?
-    let targets_handler = |start: u64| -> bool {
-        let mut addr = start;
-        for _ in 0..2 {
-            let b = match prog.read_from(addr) {
-                Some(b) if b.len() >= 6 => b,
-                _ => return false,
-            };
-            if b[0] == 0xE9 {
-                let rel = i32::from_le_bytes([b[1], b[2], b[3], b[4]]) as i64;
-                addr = (addr as i64 + 5 + rel) as u64;
-            } else if b[0] == 0xFF && b[1] == 0x25 {
-                let iat = u32::from_le_bytes([b[2], b[3], b[4], b[5]]) as u64;
-                return handler_slots.contains(&iat);
-            } else {
-                return false;
-            }
-        }
-        false
+    // A C++ frame-handler thunk is `mov eax, &FuncInfo; jmp <__CxxFrameHandler[3]>`. Its jmp
+    // target is an import (IAT, `FF25`) when the CRT is dynamically linked, or an internal
+    // function (`E9 rel32`) when it is statically linked (the real 1990s binaries). We therefore
+    // identify the thunk *structurally* — by its FuncInfo operand (first dword = an EH magic
+    // 0x19930520/21/22) plus the trailing jmp — so both cases are recovered without depending on
+    // the handler being imported. (The magic + jmp shape is specific; a stray `mov eax,imm`
+    // whose imm coincidentally addresses those bytes is vanishingly unlikely, and parse_cxx_func_info
+    // re-checks the magic before touching the tables.)
+    let is_func_info = |imm: u64| -> bool {
+        matches!(prog.read_u32(imm), Some(m) if m & 0xffff_ff00 == 0x1993_0500)
     };
-    // Scan every executable section for a handler thunk `B8 <FuncInfo> <jmp -> handler>`.
+    let is_jmp = |addr: u64| -> bool {
+        matches!(prog.read_from(addr),
+                 Some(b) if b.len() >= 2 && (b[0] == 0xE9 || (b[0] == 0xFF && b[1] == 0x25)))
+    };
     for sec in prog.sections.iter().filter(|s| s.executable) {
         let data = &sec.data;
         let mut i = 0usize;
@@ -715,7 +698,7 @@ fn cxx_eh_entries(prog: &Program, disasm: &Disassembler) -> Vec<u64> {
             if data[i] == 0xB8 {
                 let func_info =
                     u32::from_le_bytes([data[i + 1], data[i + 2], data[i + 3], data[i + 4]]) as u64;
-                if targets_handler(sec.address + (i + 5) as u64) {
+                if is_func_info(func_info) && is_jmp(sec.address + (i + 5) as u64) {
                     parse_cxx_func_info(prog, disasm, func_info, &mut out);
                 }
             }

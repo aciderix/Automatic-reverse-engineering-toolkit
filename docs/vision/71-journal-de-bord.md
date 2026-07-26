@@ -4712,4 +4712,20 @@ Détail : **70 §6** (roadmap). Résumé :
   aujourd'hui le thunk par la cible d'import ; il faut les faire détecter le thunk `mov eax,&FuncInfo(magic valide); jmp <interne>`
   par la **magie du FuncInfo** plutôt que par l'import) → puis faire tourner un vrai binaire bout-en-bout (les autres murs).
 
+### 2026-07-25 — [EH][ANALYSIS] **CRT-EH statique — côté handler : détection du thunk par la MAGIE FuncInfo (import-indépendant)**
+- **`cxx_eh_entries` généralisé** : le thunk handler `mov eax,&FuncInfo; jmp <__CxxFrameHandler>` est désormais reconnu
+  **structurellement** — opérande `B8` pointant sur un FuncInfo (1er dword = magie EH `0x19930520/21/22`) **+** jmp qui suit
+  (`E9` interne = CRT statique, `FF25` import = CRT dynamique). Plus de dépendance à l'import du handler ⇒ les funclets/continuations/
+  destructeurs se récupèrent **aussi quand `__CxxFrameHandler` est lié statiquement** (vrais binaires 1990s). Rétro-compatible :
+  fixtures (handler importé) toujours **6/6** (le thunk pointe toujours un FuncInfo valide).
+- **Validé sur données réelles** : `WZ32.DLL` (CRT statique) → **58 thunks EH détectés** (≈ « 66 régions » du README) ; le DLL
+  transpile (973 fn, 961 liftées) sans explosion. Non-EH : le scan est gaté sur magie+jmp ⇒ zéro faux positif (hash inchangé,
+  difftest/winediff confirmés).
+- **⇒ RECONNAISSANCE CRT-EH statique COMPLÈTE (thrower + handler)** : côté thrower via `RaiseException(0xE06D7363)`, côté handler
+  via la détection par magie. Le HLE route déjà le thunk `0xB8` vers `aret_CxxFrameHandler3` (bypass du handler interne).
+- **Reste pour le driver réel bout-en-bout** (chantier multi-sessions, non fixturable) : (a) gate `uses_seh` élargi au cas
+  **entièrement** statique (aujourd'hui il voit l'import `__CxxFrameHandler*` ; pour une CRT 100 % statique, le faire déclencher
+  sur la présence de thunks EH) — non validable sans exécuter un vrai binaire ; (b) faire tourner un vrai binaire jusqu'à l'EH
+  (tous les autres murs : imports GUI, appels indirects…). Base fixturée = **complète et bit-identique Wine** (6/6).
+
 <!-- NOUVELLES ENTRÉES ICI (garder l'ordre chronologique, plus récent en bas) -->
