@@ -3492,6 +3492,39 @@ static void aret_hw_fault(int sig, siginfo_t *si, void *uctx) {
     /* Map the host signal to the NT exception code Windows would raise. */
     uint32_t code = (sig == SIGFPE) ? 0xC0000094u   /* STATUS_INTEGER_DIVIDE_BY_ZERO */
                                     : 0xC0000005u;  /* STATUS_ACCESS_VIOLATION       */
+
+    /* Resume-loop guard (soundness): a handler that returns ExceptionContinueExecution
+     * makes us retry the faulting instruction — correct when the handler actually fixed
+     * the cause (e.g. committed a guard page). But if the SAME instruction keeps faulting,
+     * the "fix" is not working and we would spin forever: a *silent hang*, which is worse
+     * than a loud stop (§0 — fail loud, never silent). This happens when a handler
+     * mis-reports a hard fault as resumable — notably an unimplemented `_except_handler4_common`
+     * (weak stub → returns 0 = ExceptionContinueExecution) sitting on the SEH chain over a
+     * genuine access violation. Detect no-progress (same faulting host PC N times running)
+     * and abort with the address instead of hanging. A real fix-and-resume moves the PC on,
+     * so the counter resets; only a true loop trips it. */
+    {
+        /* Keyed on the faulting address (si_addr) — always present in siginfo, unlike the
+         * host PC (REG_EIP needs _GNU_SOURCE, undefined here). A `-1` sentinel means "no
+         * fault yet" so even a NULL deref (si_addr == 0) is tracked correctly; the retried
+         * instruction re-faults at the same address every time, so the count climbs. */
+        static uintptr_t s_last_addr = (uintptr_t)-1;
+        static int s_same = 0;
+        uintptr_t addr = si ? (uintptr_t)si->si_addr : (uintptr_t)-2;
+        if (addr == s_last_addr) {
+            if (++s_same >= 16) {
+                fprintf(stderr,
+                        "aret: hardware fault %#x at %p keeps re-faulting without progress "
+                        "(ExceptionContinueExecution loop) — aborting instead of hanging\n",
+                        (unsigned)code, si ? si->si_addr : (void *)0);
+                abort();
+            }
+        } else {
+            s_last_addr = addr;
+            s_same = 0;
+        }
+    }
+
     uint32_t rec[20];
     memset(rec, 0, sizeof(rec));
     rec[0] = code;                       /* ExceptionCode  */

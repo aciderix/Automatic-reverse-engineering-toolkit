@@ -5044,4 +5044,20 @@ Détail : **70 §6** (roadmap). Résumé :
   MFC** » puis bute sur ce **bug de lift-ABI** (esi entrant). Les 3 fixes EH + les 4 shims HLE ont chacun fait avancer le driver, tous
   vérifiés vs Wine. Le prochain verrou est **lift-correctness** (le vrai « reste » du blob MFC 40k-fn), pas EH/imports.
 
+### 2026-07-26 — [SOUNDNESS] **✅ I7 : une faute matérielle non résolue n'est plus un hang silencieux mais un abort BRUYANT (garde anti-boucle de reprise)**
+- **Mécanisme du « hang » (précisé)** : store à NULL (bug I6 `esi=this=0`) → SIGSEGV → `aret_hw_fault` parcourt `fs:[0]` → trouve le frame
+  `_except_handler4` du CRT → notre `_except_handler4_common` **non implémenté** (stub faible → **rend 0 = ExceptionContinueExecution**) →
+  le dispatcher **réexécute l'instruction fautive** → refaute → **boucle infinie**. Le garde de ré-entrance (`depth>8`) ne se déclenchait
+  pas car `depth--` à chaque reprise. Résultat = **hang silencieux** (18 s+ sans sortie) — le pire mode d'échec (§0 : échouer bruyamment).
+- **Fix (`aret_hw_fault`)** : garde anti-no-progrès **keyé sur l'adresse fautive `si_addr`** (toujours présente dans `siginfo` ; `REG_EIP`
+  nécessite `_GNU_SOURCE`, **non défini** ici — 1ʳᵉ tentative PC-based était un no-op, corrigée). Sentinelle `-1` = « pas encore de faute »
+  (gère le NULL-deref `si_addr==0`). Même adresse **16×** de suite ⇒ **abort bruyant** avec code+adresse. Une vraie reprise qui **corrige**
+  la cause avance (adresse suivante différente) ⇒ compteur remis à 0, jamais de faux positif ; seule une vraie boucle le déclenche.
+- **✅ Vérifié** : WinMerge affiche désormais `aret: hardware fault 0xc0000005 at (nil) keeps re-faulting without progress
+  (ExceptionContinueExecution loop) — aborting instead of hanging` — **loud + diagnostique** (pointe le NULL = le bug I6), au lieu de
+  boucler. `seh_hwfault` (faute **attrapée** → `r=42`) **inchangé** (une faute gérée avance, ne boucle pas). Portes : difftest **272/272**,
+  ehdiff **6/6**, transpile hash **inchangé** (runtime-only).
+- ⇒ **I7 fait** (filet soundness indépendant). Le bug de fond reste **I6** (threader `esi/edi/ebx` callee-saved live-in) — chantier cœur
+  dédié, désormais **signalé bruyamment** au lieu de hanguer.
+
 <!-- NOUVELLES ENTRÉES ICI (garder l'ordre chronologique, plus récent en bas) -->

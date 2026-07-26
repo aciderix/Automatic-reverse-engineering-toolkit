@@ -279,4 +279,12 @@ affiché. On priorise par la donnée.
   la **lift-correctness** (registres/ABI), pas l'EH ni les imports (traités). Confirme aussi que le **traceur I1** aurait directement
   montré la boucle de faute (item d'infra toujours prioritaire pour les divergences non nommées).
 
+- **2026-07-26 (I7 — ✅ FAIT)** — Filet soundness : une faute matérielle non résolue qui bouclait en silence (handler rendant
+  ExceptionContinueExecution sans corriger la cause — ici `_except_handler4_common` non implémenté → 0) **aborte désormais bruyamment**
+  (`aret_hw_fault` : garde no-progrès keyé sur `si_addr`, seuil 16). WinMerge : le « hang » devient un abort typé pointant le NULL (le bug
+  I6). Portes vertes (difftest 272/272, ehdiff 6/6, hash inchangé, `seh_hwfault` toujours attrapé). **Reste I6** (threader esi/edi/ebx
+  callee-saved live-in) = le vrai fix du store-NULL, chantier cœur dédié (mappé : `ssa/mod.rs` liste reg-param, `build.rs`
+  internal_call_args, `structured.rs` sig, `builder/mod.rs` emit_dispatch, `aret_call` .h + sites, backends). Fait proprement en session
+  focalisée (hash rebaseline + portes complètes).
+
 <!-- NOUVELLES LIGNES D'AVANCEMENT ICI (plus récent en bas) -->
