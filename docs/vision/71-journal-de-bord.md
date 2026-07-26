@@ -5001,4 +5001,24 @@ Détail : **70 §6** (roadmap). Résumé :
   Confirme aussi un **oracle GUI bout-en-bout** utilisable (Wine+Xvfb+capture), et que WinMerge est un **bon driver** (pas une impasse).
 - Détail méthode + plan d'industrialisation : nouveau **doc 81**.
 
+### 2026-07-26 — [HLE][I5] **✅ Cause de la `CUserException` WinMerge trouvée & corrigée : 4 imports HLE manquants — WinMerge franchit l'init et avance (nouveau mur = hang MFC)**
+- **Diagnostic sans traceur** (les impressions `unimplemented import` d'ARET ont suffi — I5 data-driven) : avant le throw, **5** imports
+  touchés, dont le 5ᵉ (`_except_handler4_common`) est une **conséquence** (worker SEH appelé *pendant* le dispatch). Les **4 causes** :
+  `_malloc_crt` (allocateur CRT — le stub faible rendait **NULL** ⇒ 1ʳᵉ alloc MFC échoue), `RegisterClipboardFormatW`, `memcpy_s`,
+  `PathFindExtensionW`.
+- **Oracle décisif** : `wine WinMergeU.exe` (+ redist) **ouvre la fenêtre** ⇒ ce ne sont pas des murs durs, juste des retours HLE
+  incorrects. **4 shims implémentés, vérifiés bit-identiques Wine** (`bench/winecorpus/crt_secure_path.c` : `memcpy_s` Annex-K
+  `0/ERANGE=34+dest zéroée/EINVAL=22`, `PathFindExtensionA/W` sémantique shlwapi Wine verbatim `. après reset '\\'/' '`,
+  `RegisterClipboardFormatA/W` contrat d'atome `[0xC000,0xFFFF]` stable/unique — réutilise l'allocateur de `RegisterWindowMessage`).
+  `_malloc_crt` family (`malloc/calloc/realloc/free _crt`) = host malloc.
+- **✅ Effet mesuré** : la `CUserException` **disparaît**, WinMerge **franchit l'init** et **tourne** (18 s+ sans abort) — avance dans
+  l'init statique MFC bien plus loin (`main→sub_864ff5→sub_864eda→sub_864caf→aret_initterm→sub_8800ed→sub_6abb49→sub_6ac573→sub_6ac51f`).
+- **Nouveau mur (borné, à pivoter) : HANG** — backtrace **identique** à t=6/10/14 s ⇒ **boucle infinie** dans un ctor global mfc90u
+  (`sub_6ac51f`/`sub_6ac573`, ce dernier établit un frame SEH `_EH_prolog3`). Spin-wait sur une condition qui ne change jamais en
+  headless, **possible interaction** avec `_except_handler4_common` non implémenté (rend 0). Prochain incrément I5/I4.
+- **Piège d'infra confirmé** : le runtime est `include_str!`'d dans le binaire aret (`builder/mod.rs`) ⇒ **`cargo build` obligatoire**
+  après toute édition de `runtime/aret_hle/*.c` (sinon l'ancien runtime est ré-embarqué — j'ai perdu un cycle là-dessus).
+- **Portes** : difftest **272/272**, transpile hash **`19acad982194bf07` inchangé** (runtime-only), fixture **bit-identique Wine**
+  (manuel + CRLF-normalisé), winediff : à confirmer (en cours).
+
 <!-- NOUVELLES ENTRÉES ICI (garder l'ordre chronologique, plus récent en bas) -->

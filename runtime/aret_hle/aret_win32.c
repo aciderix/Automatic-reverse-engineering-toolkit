@@ -3480,6 +3480,42 @@ uint32_t aret_RegisterWindowMessageW(uint32_t esp) {
     char buf[128]; u32_w2n((const uint16_t *)WP(0), buf, sizeof buf);
     return u32_reg_win_msg(buf);
 }
+/* RegisterClipboardFormatA/W(name) -> UINT. A process-unique clipboard-format id in
+ * the global-atom range [0xC000, 0xFFFF], identical for equal names — the same
+ * contract as RegisterWindowMessage, so share its allocator (Windows draws both from
+ * the one global atom table). The weak stub returned 0 (= failure), which MFC treats
+ * as a fatal init error. */
+uint32_t aret_RegisterClipboardFormatA(uint32_t esp) { return u32_reg_win_msg(WCS(0)); }
+uint32_t aret_RegisterClipboardFormatW(uint32_t esp) {
+    char buf[128]; u32_w2n((const uint16_t *)WP(0), buf, sizeof buf);
+    return u32_reg_win_msg(buf);
+}
+/* PathFindExtensionA/W(path) -> pointer to the last extension's '.' in path, or to
+ * the terminating NUL if there is none. Reproduces Wine's shlwapi verbatim: scanning
+ * forward, a '\\' or ' ' resets the candidate (an extension cannot cross a component
+ * boundary or a space), a '.' records it. Returns a pointer INTO the caller's buffer. */
+uint32_t aret_PathFindExtensionA(uint32_t esp) {
+    uint32_t pv = WU(0);
+    const char *p = (const char *)(uintptr_t)pv;
+    if (!p) return pv;
+    const char *last = NULL;
+    for (; *p; p++) {
+        if (*p == '\\' || *p == ' ') last = NULL;
+        else if (*p == '.') last = p;
+    }
+    return (uint32_t)(uintptr_t)(last ? last : p);   /* p is at the terminating NUL */
+}
+uint32_t aret_PathFindExtensionW(uint32_t esp) {
+    uint32_t pv = WU(0);
+    const uint16_t *p = (const uint16_t *)(uintptr_t)pv;
+    if (!p) return pv;
+    const uint16_t *last = NULL;
+    for (; *p; p++) {
+        if (*p == (uint16_t)'\\' || *p == (uint16_t)' ') last = NULL;
+        else if (*p == (uint16_t)'.') last = p;
+    }
+    return (uint32_t)(uintptr_t)(last ? last : p);
+}
 /* ExitWindowsEx(uFlags, dwReason) -> BOOL. We never log the user off / shut the
  * host down (sound: a transpiled app must not affect the real session); report
  * success so the app proceeds to its own teardown. Not oracle-compared (a real

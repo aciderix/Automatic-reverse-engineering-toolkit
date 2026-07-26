@@ -657,6 +657,35 @@ uint32_t aret_memmove(uint32_t esp) {
     return (uint32_t)(uintptr_t)d;
 }
 
+/* MSVC CRT internal allocator family (`_malloc_crt`/`_calloc_crt`/`_realloc_crt`/
+ * `_free_crt`, msvcrNN): identical to the public malloc family but routed through
+ * the CRT's private heap during startup. Host malloc — the weak stub returned NULL,
+ * which makes the CRT/MFC startup fail its first allocation and abort. */
+uint32_t aret_malloc_crt(uint32_t esp)  { return (uint32_t)(uintptr_t)malloc(arg(esp, 0)); }
+uint32_t aret_calloc_crt(uint32_t esp)  { return (uint32_t)(uintptr_t)calloc(arg(esp, 0), arg(esp, 1)); }
+uint32_t aret_realloc_crt(uint32_t esp) { return (uint32_t)(uintptr_t)realloc((void *)(uintptr_t)arg(esp, 0), arg(esp, 1)); }
+uint32_t aret_free_crt(uint32_t esp)    { free((void *)(uintptr_t)arg(esp, 0)); return 0; }
+
+/* memcpy_s(dst, destsz, src, count) -> errno_t (C11 Annex K / MSVC). Bounded copy:
+ * validates the destination is large enough before copying; on a violation it zeroes
+ * the whole destination (when it can) and returns an error code. EINVAL=22, ERANGE=34
+ * (MSVC values). A no-op weak stub (returning 0 without copying) left MFC reading
+ * uninitialised data — a silent wrong; this reproduces the real contract. */
+uint32_t aret_memcpy_s(uint32_t esp) {
+    void *dst = (void *)(uintptr_t)arg(esp, 0);
+    uint32_t destsz = arg(esp, 1);
+    const void *src = (const void *)(uintptr_t)arg(esp, 2);
+    uint32_t count = arg(esp, 3);
+    if (count == 0) return 0;
+    if (!dst) return 22;                       /* EINVAL: no destination */
+    if (!src || destsz < count) {              /* invalid source, or would overflow dst */
+        memset(dst, 0, destsz);
+        return src ? 34u : 22u;                /* ERANGE (too small) : EINVAL (null src) */
+    }
+    memcpy(dst, src, count);
+    return 0;
+}
+
 uint32_t aret_strlen(uint32_t esp) {
     return (uint32_t)strlen((const char *)(uintptr_t)arg(esp, 0));
 }

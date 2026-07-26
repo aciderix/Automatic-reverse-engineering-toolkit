@@ -261,4 +261,13 @@ affiché. On priorise par la donnée.
   priorisée posée (I1 traceur en tête). Prochain pas proposé : **I1**, puis **I5** piloté
   par I1.
 
+- **2026-07-26 (I5, incrément 1)** — **Oracle Wine posé** (`wine WinMergeU.exe` + redist → fenêtre WinMerge ouverte : driver tractable,
+  pas une impasse). **Cause de la `CUserException` trouvée data-driven** (les `unimplemented import` d'ARET suffisent, sans traceur) : 4
+  imports HLE manquants (`_malloc_crt`, `RegisterClipboardFormatW`, `memcpy_s`, `PathFindExtensionW`). **Implémentés + vérifiés
+  bit-identiques Wine** (`winecorpus/crt_secure_path.c`). ⇒ WinMerge **franchit l'init statique MFC** et tourne. **Nouveau mur** : hang
+  (boucle infinie) dans un ctor global mfc90u — prochain incrément. **Leçon d'infra** : runtime `include_str!`'d ⇒ `cargo build`
+  obligatoire après édition `runtime/*.c`. **Valide la méthode I5** (combler les gaps HLE par la donnée, chacun prouvé vs Wine).
+  ⇒ Le **traceur I1** reste utile pour le hang (voir où il boucle), mais l'incrément 1 a été craqué sans lui — priorité I1 confirmée
+  pour les divergences **non nommées** (comme ce hang).
+
 <!-- NOUVELLES LIGNES D'AVANCEMENT ICI (plus récent en bas) -->
