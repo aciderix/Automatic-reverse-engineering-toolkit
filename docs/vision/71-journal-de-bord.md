@@ -4890,4 +4890,37 @@ Détail : **70 §6** (roadmap). Résumé :
   `fs:[0]` obsolète. Cycle ~4 min ×N — chasse ciblée, à mener frais. Le pipeline endgame M7-GUI (scale/EH/ordinaux) est, lui,
   **fonctionnel** ; ce dernier verrou est un bug de justesse isolable.
 
+### 2026-07-26 — [EH][ABI] **✅ VERROU fs:[0] de WinMerge RÉSOLU — `_EH_prolog3_GS` non reconnu (relocalisation esp non propagée) ; fix général, WinMerge franchit l'init MFC**
+- **Chasse robuste (watchpoint matériel gdb, pas N rebuilds HLE)** — la « solution robuste et plus intelligente » demandée. Trois passes décisives sur le binaire natif WinMerge+mfc90u :
+  1. **Watchpoint sur `teb[0]`** (toutes les écritures fs:[0] + `info symbol $pc`) : la **dernière** écriture avant le throw est
+     `sub_8674c7+806` posant `fs:[0]=0x1111c6fc` (un slot **de pile**, pas un heap — mon affinage précédent « objet heap » était faux :
+     0x1111c6fc ∈ [StackLimit 0x1101c800, StackBase 0x1111c800]).
+  2. **Args cdecl le long de la chaîne** (binaire **32-bit** ⇒ args sur la pile, `uint64` = **8 o** chacun) : `sub_8674c7` est appelé
+     **une seule fois**, par `sub_6acd6a`, avec `__esp=0x1111c704`, `v2(handler)=0x0086f42d` (un **vrai** thunk `__CxxFrameHandler3`).
+     Il bâtit le nœud SEH à `esp-8=0x1111c6fc`, `node[+4]=handler=0x86f42d` — **bien formé à l'établissement**.
+  3. **Watchpoint sur `node+4` (0x1111c700)** — 3 écritures : `#2 =0x86f42d` par `sub_8674c7+345` (établissement, **correct**) ;
+     `#3 =0x1111c718` par **`sub_6a20fd+190`** (le ctor qui throw) qui **écrase** le handler avec un pointeur de pile *avant* de throw ;
+     puis le throw lit ce handler corrompu → `aret_call(0x1111c718)` → abort. **Décisif.**
+- **Cause racine exacte** (désassemblé à la vraie base rebase **0x650000**, calculée via le Security Cookie du Load Config) :
+  `sub_8674c7` = **`_EH_prolog3_GS`** (helper CRT MSVC standard, /GS, C++ EH), qui **relocalise esp** : `push eax(handler); push fs:[0];
+  lea eax,[esp+0xc]; sub esp,[esp+0xc]; …; mov ebp,eax; …; lea eax,[ebp-0xc]; mov fs:[0],eax; ret` — installe le nœud SEH à `esp-8` et
+  laisse esp/ebp relocalisés. ARET **possède déjà** la machinerie (`frame_setup_helper_body` **inline** `_EH_prolog`/`_chkstk` pour
+  propager la relocalisation esp que le modèle `__esp`-par-valeur ne peut pas transporter), **mais** son détecteur ne reconnaissait que
+  `lea ebp,[esp+K]` **direct** — il **ratait** la forme `_EH_prolog3` (`lea eax,[esp+K]; mov ebp,eax` via un **temp**). Non inliné, la
+  relocalisation esp ne se propageait pas au caller `sub_6acd6a` → ses frames en aval (dont `sub_6a20fd`) **chevauchaient** le nœud SEH →
+  `node+4` (handler) écrasé → `fs:[0]` pointant un nœud corrompu → le throw (réel, MFC) trouve un handler garbage → abort. **Une classe
+  entière** : tout binaire MSVC C++ à CRT statique (/GS) utilise `_EH_prolog3(_catch)_GS`.
+- **Fix (général, doctrine-pure, `src/ir/build.rs`)** : `frame_setup_helper_body` suit désormais aussi la forme `lea R,[esp+K] (K>0); … ;
+  mov ebp,R` (temp → ebp) en plus du `lea ebp,[esp+K]` direct. Réutilise **tout** l'inliner existant (`inline_frame_helper`). **Sûr par
+  construction** : inliner un helper **branch-free terminé par `ret`** = exécuter son corps exact dans la SSA du caller (sémantique
+  préservée) ; le gate `saw_rewrite` ne fait que **limiter** quels helpers on inline (pas de bloat des leaf-calls), et l'inliner **refuse**
+  (fallback call normal) si un insn du corps ne lifte pas (pas d'`Asm` opaque). Le drop des temps clobbés évite tout faux-match.
+- **✅ Résultat mesuré** : WinMerge+mfc90u **franchit le mur `0x1111c718`** — l'init statique MFC (ctors globaux, `_CxxThrowException`)
+  passe, `fs:[0]` reste sain. Il avance dans du **code neuf** (`main→sub_864ff5→sub_864eda→sub_85fd18`) et bute sur un **mur de
+  récupération distinct** : `jne short 0x0085fd5a` **non lifté** (cible non récupérée = data-en-code / partial-asm, la surface « 2956
+  partial-asm » du blob, orthogonale à l'EH). **Borner puis pivoter** : c'est le prochain mur, plus profond.
+- **Portes** : difftest **272/272**, transpile-diff **4/4** hash **`19acad982194bf07` inchangé** (fixtures sans `_EH_prolog3` ⇒
+  byte-identique), funcdiff/winediff : à confirmer (en cours). Le fix est **gaté** (n'affecte que les call-sites matchant le nouvel
+  idiome) ⇒ nul effet sur les binaires sans `_EH_prolog3`.
+
 <!-- NOUVELLES ENTRÉES ICI (garder l'ordre chronologique, plus récent en bas) -->

@@ -45,6 +45,13 @@ fn frame_setup_helper_body(prog: &Program, disasm: &Disassembler, entry: u64) ->
     let mut body: Vec<Insn> = Vec::new();
     let mut addr = entry;
     let mut saw_rewrite = false;
+    // Registers currently holding `esp+K` (K>0) via `lea R,[esp+K]` — a frame
+    // pointer being computed *above* esp, into the caller's pushed frame. The
+    // classic `_EH_prolog` does `lea ebp,[esp+K]` directly; the `_EH_prolog3`
+    // family (`_EH_prolog3_GS`/`_EH_prolog3_catch_GS`, MSVC static-CRT C++ with
+    // /GS) instead routes it through a temp — `lea eax,[esp+0xc]; …; mov ebp,eax`
+    // — so we follow the temp to the `mov ebp,R` to recognise the same rewrite.
+    let mut frame_regs: Vec<Register> = Vec::new();
     for _ in 0..48 {
         let insn = disasm.decode_at(prog, addr)?;
         let next = insn.next_addr();
@@ -57,14 +64,34 @@ fn frame_setup_helper_body(prog: &Program, disasm: &Disassembler, entry: u64) ->
             _ => return None,
         }
         let r = &insn.raw;
-        if r.mnemonic() == Mnemonic::Lea
-            && matches!(r.op0_register(), Register::EBP | Register::RBP)
+        let is_lea_esp_pos = r.mnemonic() == Mnemonic::Lea
             && r.op1_kind() == OpKind::Memory
             && matches!(r.memory_base(), Register::ESP | Register::RSP)
             && r.memory_index() == Register::None
-            && (r.memory_displacement64() as i64) > 0
-        {
-            saw_rewrite = true;
+            && (r.memory_displacement64() as i64) > 0;
+        if is_lea_esp_pos {
+            match r.op0_register() {
+                // Direct `lea ebp,[esp+K]` — the classic `_EH_prolog`/`_SEH_prolog`.
+                Register::EBP | Register::RBP => saw_rewrite = true,
+                // `lea R,[esp+K]` into a temp — remember it for a later `mov ebp,R`.
+                dst if dst != Register::None => frame_regs.push(dst),
+                _ => {}
+            }
+        } else {
+            // `mov ebp, R` where R still holds `esp+K`: the `_EH_prolog3` idiom
+            // installs the caller-frame pointer through a temp register.
+            if r.mnemonic() == Mnemonic::Mov
+                && matches!(r.op0_register(), Register::EBP | Register::RBP)
+                && frame_regs.contains(&r.op1_register())
+            {
+                saw_rewrite = true;
+            }
+            // A write (not a `push`, which only reads) to a tracked temp drops it,
+            // so `lea eax,[esp+K]; xor eax,ebp; mov ebp,eax` never false-matches.
+            if r.mnemonic() != Mnemonic::Push && r.op0_kind() == OpKind::Register {
+                let d = r.op0_register();
+                frame_regs.retain(|&x| x != d);
+            }
         }
         body.push(insn);
         addr = next;

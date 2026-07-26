@@ -293,6 +293,11 @@ recompilabilité **100 %** · WASM **7/7**.
 - **stdcall pop sur `call reg`** (import chargé en registre puis appelé).
 - **Helpers ABI MSVC à réécriture de frame** : `_EH_prolog` **inliné** au site
   d'appel ; `_chkstk`/`_alloca` modélisés `esp -= eax` (détectés par `xchg esp,eax`).
+  **Élargi (2026-07-26) à la famille `_EH_prolog3(_catch)_GS`** (CRT statique MSVC C++ /GS) : elles relocalisent esp via un **temp**
+  (`lea eax,[esp+K]; mov ebp,eax`, K>0), pas `lea ebp,[esp+K]` direct — `frame_setup_helper_body` suit le temp → `mov ebp,R`. Non
+  reconnue, la relocalisation esp ne se propageait pas et les frames en aval **écrasaient le nœud SEH** posé par le helper
+  (handler `node+4` corrompu) → `fs:[0]` obsolète → un throw C++ **réel** (MFC) tombait sur un handler garbage → abort. **Driver = WinMerge2.14.0/MFC90**
+  (franchit désormais l'init statique MFC). Inliner un helper branch-free/`ret` = sémantique préservée ; gaté (nul effet hors `_EH_prolog3`).
 - **`___chkstk_ms` (GCC/mingw) = registres préservés** (`is_chkstk_probe_fn` → mask de clobber vide dans
   `compute_call_clobbers`) : sonde de guard-pages pure (save/restore ecx+eax, esp inchangé). Le write-scan
   marquait sinon ecx clobbé (push/pop), perdant la longueur d'un `memset` posée en ecx (idiome alloca
