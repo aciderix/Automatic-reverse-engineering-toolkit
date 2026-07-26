@@ -4773,4 +4773,19 @@ Détail : **70 §6** (roadmap). Résumé :
   CPUID correctement détecté. **À valider cpudiff vs Unicorn** (positions de bits + valeur des bits non suivis dans le seed
   Unicorn) — correctness-critique, à faire en focalisé, pas à l'arrache. C'est le prochain incrément lifter concret.
 
+### 2026-07-25 — [LIFT] **✅ `pushfd`/`popfd` liftés (modèle shadow-EFLAGS) — bit-exact Unicorn, idiome CPUID inclus ; débloque le démarrage CRT de WinMerge**
+- **Implémenté** (`ir/lift.rs`) : `pushfd` réassemble EFLAGS = `(shadow & ~0xCD7) | 0x2 | drapeaux_suivis@positions` ; `popfd`
+  redistribue la valeur poppée dans les 7 drapeaux **et** le **shadow** (`RegId(121)`, pseudo-registre entier comme `fsw`, init 0 =
+  seed cpudiff/Unicorn). Le shadow porte les bits non-suivis (IF, **ID bit21**…) au travers du couple push/pop.
+- **Validé bit-exact vs Unicorn** (cpudiff, l'oracle) : `pushfd`/`popfd` ajoutés au `seq_pool` → `sequence_random_matches_unicorn`
+  (4000 compositions random, regs+drapeaux+**page scratch** = la valeur EFLAGS poussée) **OK**, et `sequence_corpus` **OK** avec 2
+  séquences curatées ajoutées : (a) `add;pushfd;sub;popfd` (round-trip des drapeaux), (b) **l'idiome CPUID du CRT MSVC**
+  `pushfd;pop eax;xor eax,0x200000;push;popfd;pushfd;pop ecx` — ecx doit porter le bit21 basculé, ce qui ne marche **que** grâce au
+  shadow. Le piège identifié en amont est donc couvert et **prouvé**.
+- **Effet mesuré** : WinMerge **franchit le mur `pushfd`** du démarrage CRT (avance ensuite sur `_encode_pointer`/`_decode_pointer`/
+  `__dllonexit` = imports faible-stubbés). Hash transpile `19acad982194bf07` **inchangé** (les 4 fixtures difftest_transpile
+  n'utilisent pas pushfd → byte-identiques). Portes difftest/funcdiff/winediff : à confirmer.
+- **Reste WinMerge** : lot d'imports HLE (CRT sécurité `_encode/_decode_pointer` = passthrough sound ; `__dllonexit` ; puis les
+  148 GUI/COM) pour tourner plus loin.
+
 <!-- NOUVELLES ENTRÉES ICI (garder l'ordre chronologique, plus récent en bas) -->

@@ -2062,6 +2062,17 @@ fn seq_corpus() -> Vec<Vec<Vec<u8>>> {
         vec![vec![0x55], vec![0x89, 0xe5], vec![0x83, 0xec, 0x08], vec![0xc9]],
         // add esp, 4 ; push [esp]  (esp raised, then esp-relative read)
         vec![vec![0x83, 0xc4, 0x04], vec![0xff, 0x34, 0x24]],
+        // add eax,ecx ; pushfd ; sub eax,ecx ; popfd  — the flags are set, saved, clobbered,
+        // then restored: the final flags must equal the add's (validates the pushfd/popfd
+        // round-trip of the tracked flags through the stack).
+        vec![vec![0x01, 0xc8], vec![0x9c], vec![0x29, 0xc8], vec![0x9d]],
+        // The MSVC CRT CPUID probe: pushfd ; pop eax ; xor eax,0x200000 ; push eax ; popfd ;
+        // pushfd ; pop ecx — toggles EFLAGS.ID (bit 21) and reads it back. ecx must carry the
+        // toggled bit, which only works if the shadow round-trips the untracked EFLAGS bits.
+        vec![
+            vec![0x9c], vec![0x58], vec![0x35, 0x00, 0x00, 0x20, 0x00],
+            vec![0x50], vec![0x9d], vec![0x9c], vec![0x59],
+        ],
     ]
 }
 
@@ -2132,6 +2143,8 @@ fn seq_pool() -> Vec<Vec<u8>> {
         vec![0x8f, 0x44, 0x24, 0x08], // pop [esp+8]
         vec![0x8f, 0x45, 0x00],       // pop [ebp]
         vec![0x66, 0x58],             // pop ax
+        vec![0x9c],                   // pushfd  (EFLAGS -> stack; value must match Unicorn)
+        vec![0x9d],                   // popfd   (stack -> flags + shadow)
         vec![0xc9],                   // leave
         // --- esp/ebp/edi-relative loads & stores (address must match exactly) ---
         vec![0x8b, 0x44, 0x24, 0x08], // mov eax, [esp+8]

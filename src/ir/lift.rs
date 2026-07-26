@@ -597,6 +597,56 @@ fn read_flag(k: FlagKind) -> Expr {
     Expr::Read(Location::Flag(k))
 }
 
+/// Shadow EFLAGS pseudo-register (integer, like the x87 status word `fsw`): carries the bits
+/// ARET does not model individually (IF, TF, ID, …) *across* a `pushfd`/`popfd` pair, so an
+/// idiom that toggles an untracked bit round-trips faithfully — chiefly the MSVC CRT's CPUID
+/// probe, which flips EFLAGS.ID (bit 21) via pushfd/pop/xor 0x200000/push/popfd and checks
+/// whether it stuck. Initialised to 0 (matches the cpudiff/Unicorn seed's untracked bits).
+fn eflags_shadow() -> Location {
+    Location::Reg(RegId(121))
+}
+
+/// The EFLAGS bits `pushfd` materialises directly, and `popfd` feeds back: the reserved bit 1
+/// (always 1) plus the seven tracked flags {CF=0, PF=2, AF=4, ZF=6, SF=7, DF=10, OF=11}.
+const EFLAGS_OWNED_MASK: i128 = 0xCD7;
+
+/// The 32-bit value `pushfd` stores: the untracked bits carried in the shadow, the reserved
+/// bit 1, and the tracked flags placed at their EFLAGS bit positions.
+fn assemble_eflags() -> Expr {
+    use FlagKind::*;
+    let bit = |k: FlagKind, b: i128| {
+        bin(BinOp::Shl, bin(BinOp::And, read_flag(k), konst(1)), konst(b))
+    };
+    let tracked = bin(
+        BinOp::Or,
+        bin(BinOp::Or, bin(BinOp::Or, bit(Cf, 0), bit(Pf, 2)), bin(BinOp::Or, bit(Af, 4), bit(Zf, 6))),
+        bin(BinOp::Or, bin(BinOp::Or, bit(Sf, 7), bit(Df, 10)), bit(Of, 11)),
+    );
+    let shadow_kept = bin(
+        BinOp::And,
+        Expr::Read(eflags_shadow()),
+        konst(!EFLAGS_OWNED_MASK & 0xffff_ffff),
+    );
+    bin(BinOp::Or, bin(BinOp::Or, shadow_kept, konst(0x2)), tracked)
+}
+
+/// Distribute a popped 32-bit EFLAGS value into the tracked flags and the shadow (which keeps
+/// the whole value; `assemble_eflags` masks the owned bits back out on the next push).
+fn distribute_eflags(v: Expr) -> Vec<Stmt> {
+    use FlagKind::*;
+    let getb = |b: i128| bin(BinOp::And, bin(BinOp::Shr, v.clone(), konst(b)), konst(1));
+    vec![
+        set_flag(Cf, getb(0)),
+        set_flag(Pf, getb(2)),
+        set_flag(Af, getb(4)),
+        set_flag(Zf, getb(6)),
+        set_flag(Sf, getb(7)),
+        set_flag(Df, getb(10)),
+        set_flag(Of, getb(11)),
+        Stmt::Set { dst: eflags_shadow(), expr: v },
+    ]
+}
+
 /// Logical negation of a 0/1 flag expression.
 fn lnot(e: Expr) -> Expr {
     Expr::Binary(BinOp::Eq, Box::new(e), Box::new(konst(0)))
@@ -2441,6 +2491,26 @@ pub fn lift(insn: &Insn, bits: u32) -> Vec<Stmt> {
                 }
                 out
             }
+        }
+
+        // `pushfd` / `popfd` — save/restore the 32-bit EFLAGS. ARET tracks flags
+        // individually, so pushfd re-assembles them (plus the shadow's untracked bits) and
+        // popfd distributes back. The shadow makes the CPUID EFLAGS.ID probe round-trip.
+        Mnemonic::Pushfd => {
+            let sp = Location::Reg(RegId(4));
+            vec![
+                Stmt::Set { dst: sp.clone(), expr: bin(BinOp::Sub, Expr::Read(sp.clone()), konst(4)) },
+                Stmt::Store { addr: Expr::Read(sp), value: assemble_eflags(), ty: Ty::int(32) },
+            ]
+        }
+        Mnemonic::Popfd => {
+            let sp = Location::Reg(RegId(4));
+            let t = Location::Temp((insn.address as u32).wrapping_mul(2).wrapping_add(7));
+            let load = Expr::Load { addr: Box::new(Expr::Read(sp.clone())), ty: Ty::int(32) };
+            let mut out = vec![Stmt::Set { dst: t.clone(), expr: load }];
+            out.extend(distribute_eflags(Expr::Read(t)));
+            out.push(Stmt::Set { dst: sp.clone(), expr: bin(BinOp::Add, Expr::Read(sp), konst(4)) });
+            out
         }
 
         Mnemonic::Call => {
