@@ -4662,4 +4662,18 @@ Détail : **70 §6** (roadmap). Résumé :
   bit-identique Wine** (throw/catch, destructeurs, multi-frames). Binaires réels disponibles : scratchpad `wz/` (WZ32.DLL v1 66
   régions, WZSEPE32.EXE v1 2 régions).
 
+### 2026-07-25 — [EH] **Brick B — liaison du paramètre catch rendue générale & sound (taille réelle + ajustement de base)**
+- **Faille de soundness trouvée à l'auto-revue** (avant de bâtir plus loin) : la liaison du param catch **par valeur** copiait
+  **seulement le premier mot** (`*slot = *(uint32_t*)pObject`). Correct pour les fondamentaux et POD 1-mot (toutes les fixtures
+  passaient), mais pour une **classe multi-mots attrapée par valeur** → seuls les 4 premiers octets copiés, le reste = garbage =
+  **faux présenté comme correct** (viole §0). De même, un catch d'une **classe de base** avec ajustement de pointeur (`PMD.mdisp`)
+  n'était pas appliqué.
+- **Fix général & sound** : `aret_cxx_catchable_match` retourne désormais la **CatchableType** appariée (qui porte
+  `PMD{mdisp,pdisp,vdisp}`, `sizeOrOffset`, `copyFunction`). Liaison : `src = pObject + mdisp` (ajustement vers le sous-objet de
+  base) ; par référence → pointeur ajusté ; par valeur trivadmissible → `memcpy(slot, src, size)` (taille réelle) ; **copy-ctor
+  non trivial** (`copyFunction != 0`) ou **base virtuelle** (`pdisp != -1`) → **abort bruyant** (jamais copié faux).
+- **Oracle** : `bench/eh/throw_byval.cpp` (`struct E{int a;int b;}` attrapée **par valeur**, 8 o) — Wine `r=49`, ARET **identique**
+  (l'ancien code aurait donné `a`+garbage). ehdiff **5/5**.
+- **Portes** : hash transpile `19acad982194bf07` **inchangé** (gaté), ehdiff **5/5**, difftest/winediff (confirmés). Committé + poussé.
+
 <!-- NOUVELLES ENTRÉES ICI (garder l'ordre chronologique, plus récent en bas) -->

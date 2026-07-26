@@ -3283,18 +3283,18 @@ uint32_t aret_CxxThrowException(uint32_t esp) {
     abort();
     return 0;
 }
-/* Does the thrown object (its CatchableTypeArray) match a catch whose TypeDescriptor is
- * pCatchType? A NULL pCatchType is catch(...). Match = the catch type's mangled name
- * equals one of the thrown object's catchable-type names (covers exact type + bases,
- * which the compiler already enumerates in the CatchableTypeArray). */
-static int aret_cxx_type_matches(uint32_t pCatchType, const uint32_t *cta) {
-    if (pCatchType == 0) return 1;
+/* Find the thrown object's CatchableType matching a catch whose TypeDescriptor is pCatchType,
+ * by mangled name — the CatchableTypeArray enumerates the exact type + every base the object
+ * can be caught as. Returns the matching CatchableType VA (holds the size / copy-function /
+ * this-displacement needed to bind the catch parameter), or 0 if none. (catch(...) — a NULL
+ * pCatchType — is handled by the caller: it matches any and binds no object.) */
+static uint32_t aret_cxx_catchable_match(uint32_t pCatchType, const uint32_t *cta) {
     const char *cname = (const char *)(uintptr_t)(pCatchType + 8);
     int n = (int)cta[0];
     for (int i = 0; i < n; i++) {
         uint32_t pct = cta[1 + i];
         uint32_t ctd = ((const uint32_t *)(uintptr_t)pct)[1];        /* CatchableType.pType */
-        if (!strcmp(cname, (const char *)(uintptr_t)(ctd + 8))) return 1;
+        if (!strcmp(cname, (const char *)(uintptr_t)(ctd + 8))) return pct;
     }
     return 0;
 }
@@ -3344,11 +3344,23 @@ uint32_t aret_CxxFrameHandler3(uint32_t esp) {
         for (uint32_t h = 0; h < nCatch; h++) {
             const uint32_t *ht = (const uint32_t *)(uintptr_t)(pH + h * 16u); /* HandlerType */
             uint32_t adj = ht[0], pCatchType = ht[1]; int dispObj = (int)ht[2]; uint32_t handlerVA = ht[3];
-            if (!aret_cxx_type_matches(pCatchType, cta)) continue;
-            if (dispObj) {                                           /* bind the catch parameter */
+            uint32_t matchCT;
+            if (pCatchType == 0) matchCT = 0;                        /* catch(...) — matches any, no object */
+            else if (!(matchCT = aret_cxx_catchable_match(pCatchType, cta))) continue;
+            if (dispObj && matchCT) {                                /* bind the catch parameter */
                 uint32_t *slot = (uint32_t *)(uintptr_t)(ebp + (uint32_t)dispObj);
-                if (adj & 0x08u) *slot = pObject;                    /* catch by reference: the pointer */
-                else *slot = *(const uint32_t *)(uintptr_t)pObject;  /* by value: the object's first word (fundamental) */
+                /* CatchableType {properties, pType, PMD{mdisp,pdisp,vdisp}, sizeOrOffset, copyFn}
+                 * (dwords). PMD adjusts the thrown pointer to the caught (base) subobject. */
+                const uint32_t *ct = (const uint32_t *)(uintptr_t)matchCT;
+                int32_t mdisp = (int32_t)ct[2], pdisp = (int32_t)ct[3];
+                uint32_t sz = ct[5], copyFn = ct[6];
+                if (pdisp != -1)                                     /* virtual-base adjustment */
+                    aret_unmodelled("C++ catch: virtual-base object adjustment not modelled");
+                uint32_t src = pObject + (uint32_t)mdisp;            /* this-adjust to the base subobject */
+                if (adj & 0x08u) *slot = src;                        /* by reference: the (adjusted) pointer */
+                else if (copyFn != 0)                                /* by value with a non-trivial copy ctor */
+                    aret_unmodelled("C++ catch by value: copy constructor not modelled");
+                else memcpy(slot, (const void *)(uintptr_t)src, sz); /* trivially copyable: copy size bytes */
             }
             /* Phase 2: global-unwind the frames between the throw and here (their destructors),
              * then unwind this frame to the try's low state (its destructors), set the state to
