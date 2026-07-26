@@ -4876,4 +4876,18 @@ Détail : **70 §6** (roadmap). Résumé :
   teb[0] devient l'objet, remonter à la fonction fautive. C'est un bug de complétude/justesse de lift sur le blob 40k-fonctions —
   le dernier verrou du endgame M7-GUI. Ni EH, ni échelle : **complétude de récup/lift sur MFC massif**.
 
+### 2026-07-25 — [EH] **Affinage : `fs:[0]` = l'objet lancé, tout aggloméré au SOMMET de la pile → chaîne SEH obsolète/parasite**
+- **Trace bornes de pile + min-esp** (aret_call `g_aret_min_esp`, diag retiré) : `fs0=1111c6fc esp=1111c6f4 StackBase=1111c800
+  StackLimit=1101c800 min_esp_seen=1111c714 used_at_throw=268 min_used=236`. ⇒ l'objet, la « frame » SEH et `esp` sont **tous
+  dans les 268 octets sous le sommet de pile**, et **`fs:[0]` pointe l'objet lancé** (frame=pobj, handler=pobj+0x1c). (min-esp ne
+  voit que les appels **indirects** — signal partiel — mais confirme l'agglomération au sommet.)
+- **Mécanisme (précisé)** : `fs:[0]` (teb[0], tête de chaîne SEH) est un **pointeur obsolète/parasite** — soit un SEH-establish
+  antérieur (`mov fs:[0],&reg`) **non défait au retour** (fs:[0] reste sur un slot de pile ensuite **réutilisé** pour l'objet
+  d'exception), soit une **écriture parasite** dans le TEB par une fonction mal-liftée. Ni EH, ni échelle, ni appels indirects :
+  **justesse de lift qui corrompt la tête de chaîne SEH** dans le blob MFC 40k-fn.
+- **Prochain pas §2 focalisé (session dédiée)** : instrumenter **toutes** les écritures `fs:[0]` (rendu du Store fs dans
+  structured.rs) + un garde d'intégrité sur teb[0] à chaque `aret_call`, pour capturer **la** fonction qui laisse/pose le
+  `fs:[0]` obsolète. Cycle ~4 min ×N — chasse ciblée, à mener frais. Le pipeline endgame M7-GUI (scale/EH/ordinaux) est, lui,
+  **fonctionnel** ; ce dernier verrou est un bug de justesse isolable.
+
 <!-- NOUVELLES ENTRÉES ICI (garder l'ordre chronologique, plus récent en bas) -->
