@@ -4851,4 +4851,19 @@ Détail : **70 §6** (roadmap). Résumé :
   pas §2** : déterminer réel vs spurious (idéalement comparer à WinMerge sous Wine, mais GUI+display requis), puis corriger. C'est un
   sous-chantier EH-sur-vrai-MFC focalisé.
 
+### 2026-07-25 — [EH][RECOV] **Trace décisive : le mur WinMerge = corruption d'état machine amont (esp/frame garbage), PAS un bug EH**
+- **Trace `fs:[0]` au throw** (aret_cxx_dispatch, gaté `TEH`) : `throw pobj=1111c6fc pthrow=880ea0 fs0=1111c6fc` puis
+  `frame=1111c6fc prev=8ae1e0 handler=1111c718 lead=00`. ⇒ **`fs:[0] == pobj == 0x1111c6fc`** et `handler == pobj+0x1c`.
+  `0x1111c6fc` est **au-dessus de tous les modules** (0x400000–0x9c2000) = **adresse garbage**. `prev=0x8ae1e0` pointe, lui, dans
+  mfc90u rebasé (frame réelle).
+- **Conclusion (mesurée) : brick B fait le bon travail** — il dispatche un throw dont les entrées (objet, chaîne `fs:[0]`) sont
+  **déjà garbage**. La frame SEH et l'objet lancé sont à une adresse corrompue ⇒ **corruption d'état machine EN AMONT** (un `esp`/
+  frame parti en vrille pendant l'init MFC), pas un défaut du C++ EH. Le garbage handler `0x1111c718` est un **symptôme**.
+- **Source probable, mesurée** : le blob complet = **39833 fonctions, 2956 partial-asm (non liftées → abort), 85 appels directs non
+  résolus**. Une de ces fonctions non-liftées/non-résolues, appelée pendant l'init MFC, **corrompt `esp`/la pile** (retour sans
+  maintenir esp, ou état bidon) → tout en aval (frame SEH, objet) atterrit en garbage.
+- **⇒ Le vrai dernier verrou du endgame M7-GUI = la COMPLÉTUDE de lift/récup sur le blob MFC massif** (réduire les 2956 partial-asm
+  + 85 appels non résolus qui corrompent l'état), pas l'EH ni l'échelle. Chantier de debug ciblé sur binaire 40k-fonctions
+  (multi-sessions) : isoler LA fonction fautive (bisection : quel appel juste avant l'init corrompt esp). Trace retirée (diagnostic).
+
 <!-- NOUVELLES ENTRÉES ICI (garder l'ordre chronologique, plus récent en bas) -->
