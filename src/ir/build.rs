@@ -768,6 +768,18 @@ pub(crate) fn has_callee_pops() -> bool {
     CALLEE_POPS.with(|c| !c.borrow().is_empty())
 }
 
+/// Every installed callee-pop entry (`VA -> bytes popped`), sorted by VA. Feeds the
+/// runtime `__aret_callee_pop` table so an *indirect* call resolves its pop at run
+/// time — covers both internal `ret N` functions AND __stdcall imports called
+/// through their IAT slot (`mov reg,[iat]; call reg`), which would otherwise pop 0.
+pub(crate) fn callee_pops_all() -> Vec<(u64, u16)> {
+    CALLEE_POPS.with(|c| {
+        let mut v: Vec<(u64, u16)> = c.borrow().iter().map(|(&va, &n)| (va, n)).collect();
+        v.sort_by_key(|(va, _)| *va);
+        v
+    })
+}
+
 /// Scan every recovered function for a terminal `ret N` (`ret imm16`, opcode
 /// `C2` — the unambiguous callee-pops-args encoding) and map its entry to N.
 /// Plain `ret` (`C3`, N=0) and non-returning functions are omitted, so only

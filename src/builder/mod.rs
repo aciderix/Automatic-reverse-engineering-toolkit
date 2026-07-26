@@ -524,14 +524,11 @@ fn emit_dispatch(internal: &[u64], host: &[(u64, String)], iat: &[(u64, String)]
     // `call`, the lifted code raises esp by `__aret_callee_pop(target_va)` (see
     // ir::build::callee_pop_adjust) — without which esp drifts N low per call
     // (a real BusyBox `cksum` crash on the indirectly dispatched CRC handler).
-    let mut pops: Vec<(u64, u16)> = internal
-        .iter()
-        .filter_map(|&va| {
-            let n = crate::ir::build::callee_pop_bytes(va);
-            (n > 0).then_some((va, n))
-        })
-        .collect();
-    pops.sort_by_key(|(va, _)| *va);
+    // Every callee-pop entry (internal `ret N` functions AND __stdcall imports
+    // reachable through their IAT slot), so an indirect call resolves its pop at
+    // runtime. Built from the installed map, not just `internal`, so import slots
+    // are covered (see set_callee_pops in transpile()).
+    let pops: Vec<(u64, u16)> = crate::ir::build::callee_pops_all();
     if pops.is_empty() {
         s.push_str("uint32_t __aret_callee_pop(uint32_t va){ return aret_delay_pop(va); }\n");
     } else {
@@ -972,7 +969,24 @@ pub fn transpile(
     // function (which pops its own stack args) must raise the caller's esp by N,
     // or esp drifts N low per call (BusyBox `cksum` crashes on the indirectly
     // called FAST_FUNC CRC handler). Empty unless the program has such a function.
-    ir::build::set_callee_pops(ir::build::compute_callee_pops(funcs));
+    let mut callee_pops = ir::build::compute_callee_pops(funcs);
+    // A __stdcall *import* called INDIRECTLY through its IAT slot (`mov reg,[iat];
+    // call reg`, common in MFC/COM) resolves its pop at runtime via the slot's VA —
+    // but the runtime pop table only knew internal `ret N` functions, so the slot
+    // popped 0 and esp drifted N low per call. Map each import slot to its stdcall
+    // `@N`, keyed on the IAT VA (the value an indirect target evaluates to). A
+    // *direct* `call [iat]` is unaffected (its pop is modelled inline by name), and
+    // an import that is only ever called directly never has its slot VA looked up.
+    // (WinMerge/MFC90: `GetSysColor(idx)` @4 cached in a loop → esp drift → a later
+    // SEH-frame local `[esp+0x30]` aliased a stale pushed 0xe → SIGSEGV.)
+    for (&va, name) in &prog.imports {
+        if let Some(n) = ir::stdcall_pops::stdcall_pop_bytes(name) {
+            if n > 0 {
+                callee_pops.entry(va).or_insert(n as u16);
+            }
+        }
+    }
+    ir::build::set_callee_pops(callee_pops);
 
     std::fs::create_dir_all(out_dir)
         .with_context(|| format!("failed to create {}", out_dir.display()))?;

@@ -300,4 +300,16 @@ affiché. On priorise par la donnée.
   0 régression. ⇒ Les deux chantiers cœur signalés (I6+I7) sont **faits et vérifiés**. Prochain mur MFC = un accès `[ptr+0xe]` (lift
   distinct, plus profond) — data-driven au coup par coup, ou traceur I1 pour accélérer.
 
+- **2026-07-26 (I5, incrément 2 — mur `0xe` résolu, cause GÉNÉRALE)** — Le mur `0xc0000005 at 0xe` (`sub_7924d5`, mfc90u) diagnostiqué
+  **first-hand** (C lifté + watchpoint matérielle gdb sur l'adresse exacte, la version *sound* de la « capture directe de l'instruction
+  corruptrice » — pas l'heuristique petite-valeur, écartée §1.4/règle §0). Cause : **un import `__stdcall` appelé indirectement via son slot
+  IAT** (`GetSysColor@4`, `mov reg,[iat]; call reg` en boucle) ne poppait pas ses args (`__aret_callee_pop`=0 sur la VA IAT) ⇒ **dérive
+  esp** ⇒ un local SEH `[esp+0x30]` aliasait un vieux `push 0xe`. **Fix général** (`builder`/`build.rs`) : fusionner les slots d'import
+  stdcall (`@N` de `stdcall_pops`) dans la table de callee-pop, keyés sur la VA IAT ; `aret_poptab` bâtie de la carte complète. **Additif**
+  (indirect vers non-import → pop 0 → inchangé). Portes : difftest 272/272, hash **inchangé**, cpudiff 5/0, funcdiff 0 div, winediff (en
+  cours). **Effet** : WinMerge dépasse le mur et avance jusqu'à un **nouveau** mur sound (`mov [mem], ss`, instruction non liftée). Détail
+  71 (2026-07-26 [ABI][LIFT]). ⇒ Confirme la **méthode I5 data-driven** : chaque dig révèle le suivant, et la watchpoint ciblée suffit
+  souvent (le traceur I1 reste l'accélérateur pour les divergences non localisées). Débloque un **idiome général** (MFC/COM/VB, appels
+  d'API indirects).
+
 <!-- NOUVELLES LIGNES D'AVANCEMENT ICI (plus récent en bas) -->

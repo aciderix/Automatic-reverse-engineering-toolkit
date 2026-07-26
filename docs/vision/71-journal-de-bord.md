@@ -5118,4 +5118,35 @@ Détail : **70 §6** (roadmap). Résumé :
   (buffer par-fiber = extension multi-thread). ⇒ Prochain : l'appliquer au mur `0xe` de WinMerge (voir quelle fonction pose
   `obj+0x30 = 0xe`), puis dérouler le mop-up MFC accéléré.
 
+### 2026-07-26 — [ABI][LIFT] **✅ Le mur `0xe` de WinMerge RÉSOLU : un import `__stdcall` appelé INDIRECTEMENT via son slot IAT ne poppait pas ses args (dérive esp) — fix général**
+- **Diagnostic (gdb first-hand, sans traceur — le C lifté + 4 runs gdb ciblés ont suffi)** : la faute `mov (%eax),%ebx eax=0xe` à
+  `sub_7924d5+27459` (mfc90u lifté) était le **check d'établissement SEH injecté** `frame = *[esp+0x30]; if (frame!=-1 && frame!=0 &&
+  *frame==fs:[0]) setjmp` lisant un **local de frame** `[esp+0x30]` qui **aliasait un slot de pile obsolète** contenant `0xe`. **fs:[0]
+  était sain** (`0x11b045ec`, pas 0xe) — l'hypothèse « fs:[0] corrompu » écartée par la mesure.
+- **Chaîne de cause (décisive)** : une watchpoint matérielle sur l'adresse exacte (`0x11b0458c`, déterministe) a capté le writer = un
+  **`push 0xe`** (arg d'appel) à `sub_7924d5+12317`. Le lifté : `sub_7924d5` cache les couleurs système dans une boucle
+  `push idx; call *(0x651950); store this+off` (~14×). `*(0x651950)` = le **slot IAT de `GetSysColor`** (self-token → `aret_call` →
+  `aret_GetSysColor`). `GetSysColor` est **`__stdcall` (@4)** mais `__aret_callee_pop(0x651950)` rendait **0** ⇒ esp dérive **-4 par
+  appel** ⇒ après la boucle, le local SEH `[esp+0x30]` pointe sur un vieux `push 0xe` ⇒ `*frame = *(0xe)` faute.
+- **Cause racine (GÉNÉRALE, pas per-binaire)** : la table runtime `__aret_callee_pop` (`aret_poptab`) n'était bâtie que des **fonctions
+  internes `ret N`** ; un import `__stdcall` appelé **indirectement** (`mov reg,[iat]; call reg`, idiome MFC/COM courant) évalue vers la
+  **VA du slot IAT**, absente de la table → pop 0 → dérive. Un `call [iat]` **direct** modélise son pop **par nom** (inchangé) ; seul
+  l'indirect passait par la table runtime.
+- **Fix** (`builder/mod.rs` + `ir/build.rs`) : à `set_callee_pops`, on **fusionne** dans la carte des pops chaque slot d'import dont le nom
+  a un `@N` connu (`stdcall_pops::stdcall_pop_bytes`), keyé sur la **VA IAT** (`.or_insert` ⇒ un pop interne gagne toute collision ; les VA
+  IAT (.idata) et internes (.text) sont disjointes de toute façon). `aret_poptab` est désormais bâtie de la **carte complète**
+  (`callee_pops_all()`), pas seulement des internes. `has_callee_pops()` s'ouvre correctement dès qu'il y a un import stdcall.
+- **Sûr / additif** : un appel indirect vers une cible **non-import** (fonction cdecl interne, vraie vtable) rend toujours 0 ⇒ **aucun
+  ajustement** ⇒ comportement inchangé. Seuls les appels indirects atterrissant sur un slot d'import stdcall reçoivent le pop **correct**.
+- **✅ Effet WinMerge** : le mur `0xe` **disparaît**. WinMerge **avance nettement plus loin** dans l'init MFC (nouvelle branche
+  `main→sub_864ff5→sub_864eda→sub_85fd18→sub_6abb2b→…`) et **abort proprement (sound)** sur un **nouveau** mur distinct : instruction non
+  liftée `mov [0x8b5200], ss` (store d'un registre segment `mov r/m16, Sreg`, opcode `8C` — gap de lift séparé, incrément futur).
+- **Portes toutes vertes** : difftest **272/272**, transpile hash **`19acad982194bf07` INCHANGÉ** (les 4 fixtures n'appellent pas d'import
+  stdcall en indirect ⇒ byte-identique), **cpudiff 5/0** (`*_matches_unicorn` + `preserves_semantics`), **funcdiff 20558 scored / 0
+  divergence**, winediff (en cours). ⇒ correctness-neutre sur tout le décompile/lift, additif, et **débloque un idiome général** (tout
+  binaire appelant un import stdcall indirectement — MFC/COM/VB, vtables d'API).
+- **Note testabilité** : pas de fixture minimale committée (le pattern `mov reg,[iat]; call reg` sur un stdcall exige un vrai PE Win32 ;
+  mingw i686 émet plutôt des `call [iat]` directs). Vérif = portes complètes (0 dommage) + WinMerge bout-en-bout (le mur disparaît, la
+  cause `GetSysColor@4` prouvée par watchpoint). Une fixture inline-asm reste possible si un jour un binaire mingw expose le pattern.
+
 <!-- NOUVELLES ENTRÉES ICI (garder l'ordre chronologique, plus récent en bas) -->
