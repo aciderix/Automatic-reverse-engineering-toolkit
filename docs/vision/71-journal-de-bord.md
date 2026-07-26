@@ -5021,4 +5021,27 @@ Détail : **70 §6** (roadmap). Résumé :
 - **Portes** : difftest **272/272**, transpile hash **`19acad982194bf07` inchangé** (runtime-only), fixture **bit-identique Wine**
   (manuel + CRLF-normalisé), winediff : à confirmer (en cours).
 
+### 2026-07-26 — [LIFT][ABI] **Mur suivant WinMerge classifié : registre callee-saved (`esi`=`this`) entrant non threadé → store NULL → SIGSEGV réarmé en boucle (le « hang »)**
+- **Ce n'est pas un hang, c'est une boucle de SIGSEGV** (gdb) : à `sub_6ac51f+243`, `movl $0x658a7c,(%eax)` avec **`eax` invalide**.
+  Dans le C : `*(uint32_t*)(v7) = 0x658a7c` où **`v7` est un local `=0` jamais assigné** ⇒ store à NULL. `0x658a7c` (rebasé) =
+  `0x789e8a7c` = un **pointeur de vtable** ⇒ `sub_6ac51f` est un **constructeur**.
+- **Désassemblage réel** : `mov edi,edi; push ebp; mov ebp,esp; push [ebp+8]; lea ecx,[esi+0xc]; movl [esi],vtable; call ctor; and
+  [esi+4],0; movb [esi+8],0; mov eax,esi; ret 4`. ⇒ **`this` arrive dans `ESI`** (registre **callee-saved**), lu **sans être sauvé
+  d'abord** = une valeur d'ENTRÉE. C'est une convention **d'aide optimisée MSVC/MFC** (façon `__fastcall`, objet dans un registre
+  non-volatil), pas un thiscall standard (`this` en `ecx`).
+- **Cause racine (lift-ABI, générale)** : ARET thread `esp` (par valeur) et `ebp` (reg-param callee-saved) à travers les appels, **mais
+  pas `esi`/`edi`/`ebx`** — en code standard ceux-ci sont save/restore (locaux), ils ne portent jamais de donnée **du** caller. Ici
+  `sub_6ac51f` lit `esi` **entrant** comme donnée ⇒ ARET le voit à 0 ⇒ `this=0` ⇒ store NULL ⇒ SIGSEGV. Le **handler de faute**
+  (`aret_hw_fault`) route vers SEH, ne trouve pas de vrai handler qui reprend, et **réexécute l'instruction fautive** → **boucle de
+  faute infinie** (silencieuse = le « hang » observé 18 s+ sans sortie).
+- **Deux items pour la suite** (chantier focalisé dédié, PAS en fin de longue session — changement de modèle cœur, risque de régression
+  élevé) : **(1) [LIFT-ABI] threader les registres callee-saved (`esi`/`edi`/`ebx`) utilisés en live-in** (lus avant écriture/sauvegarde)
+  comme `ebp` — étendre le jeu de reg-params + `aret_call`. Général (tout helper MSVC optimisé à objet-en-registre). Portes complètes
+  obligatoires (difftest/cpudiff/funcdiff/winediff — touche le cœur). **(2) [SOUNDNESS] une faute matérielle sans handler qui reprend
+  doit aborter BRUYAMMENT**, pas réarmer la même instruction à l'infini (un hang silencieux est un mauvais mode d'échec ; détecter la
+  re-faute au même PC → abort). Item (2) est un filet indépendant et moins risqué.
+- **⇒ Bilan WinMerge (session)** : de « abort `CUserException` en init » à « **tourne à travers une grande partie des ctors globaux
+  MFC** » puis bute sur ce **bug de lift-ABI** (esi entrant). Les 3 fixes EH + les 4 shims HLE ont chacun fait avancer le driver, tous
+  vérifiés vs Wine. Le prochain verrou est **lift-correctness** (le vrai « reste » du blob MFC 40k-fn), pas EH/imports.
+
 <!-- NOUVELLES ENTRÉES ICI (garder l'ordre chronologique, plus récent en bas) -->

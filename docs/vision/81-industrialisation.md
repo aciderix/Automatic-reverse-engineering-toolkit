@@ -270,4 +270,13 @@ affiché. On priorise par la donnée.
   ⇒ Le **traceur I1** reste utile pour le hang (voir où il boucle), mais l'incrément 1 a été craqué sans lui — priorité I1 confirmée
   pour les divergences **non nommées** (comme ce hang).
 
+- **2026-07-26 (I5, incrément 1 — suite : mur suivant classifié)** — Après les 4 shims, WinMerge **tourne à travers une grande partie
+  des ctors globaux MFC** puis « hang ». **Classifié (gdb) = boucle de SIGSEGV** : un ctor (`sub_6ac51f`) reçoit `this` dans **`esi`
+  (registre callee-saved)** — convention d'aide optimisée MSVC — mais ARET ne **thread pas** `esi/edi/ebx` entrants ⇒ `this=0` ⇒ store
+  NULL ⇒ faute réarmée en boucle. **Deux nouveaux chantiers** (voir 71) : **[I6 LIFT-ABI]** threader les callee-saved utilisés en live-in
+  (comme `ebp`) — changement de modèle cœur, portes complètes, **session focalisée dédiée** ; **[I7 SOUNDNESS]** une faute sans handler
+  qui reprend doit **aborter bruyamment** (pas de hang silencieux) — filet indépendant, moins risqué. ⇒ Le vrai « reste » du blob MFC est
+  la **lift-correctness** (registres/ABI), pas l'EH ni les imports (traités). Confirme aussi que le **traceur I1** aurait directement
+  montré la boucle de faute (item d'infra toujours prioritaire pour les divergences non nommées).
+
 <!-- NOUVELLES LIGNES D'AVANCEMENT ICI (plus récent en bas) -->
