@@ -111,7 +111,12 @@ mal diagnostiquée**. Bilan :
 > Chaque chantier : **problème → proposition (améliorée) → conformité → coût/risque →
 > oracle → statut**. Statuts : ⬜ à faire · 🚧 engagé · ✅ fait.
 
-### I1 — Traceur d'exécution intégré (ring buffer) ⬜ **[reco n°1]**
+### I1 — Traceur d'exécution intégré (ring buffer) ✅ **FAIT (2026-07-26)** **[reco n°1]**
+> **Livré** : `ARET_TRACE=1` (env) préfixe chaque fonction d'un `aret_trace_push(va, esp, eax,ecx,edx,ebp,esi,edi,ebx)` (codegen gaté,
+> `emit::set_trace`) ; ring buffer `aret_trace_buf[65536]` (`aret_hle.c`), dump des ~400 dernières entrées sur `aret_unmodelled`/faute non
+> gérée/boucle I7. **Off par défaut = byte-identique** (hash `19acad982194bf07` inchangé, difftest 272/272, ehdiff 6/6). Vérifié sur une
+> fixture crash. C'est l'accélérateur du mop-up lift-correctness MFC (voir la chaîne d'appels + registres menant à un crash en 1 run).
+
 - **Problème.** Les bugs des gros binaires = *instruction fautive → corruption d'état →
   crash 1000 instructions plus loin*. gdb voit le crash, pas la cause. (Vécu cette
   session : 3 runs de watchpoints gdb pour remonter à `_EH_prolog3`.)

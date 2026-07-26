@@ -986,6 +986,10 @@ pub fn transpile(
     // Inject the SEH setjmp only when the program uses _except_handler3 (__try/__except),
     // so every other program's lifted code stays byte-identical.
     emit::set_seh_active(uses_seh(prog));
+    // Execution trace (doc 81 §I1): `ARET_TRACE=1` prefixes each function with an entry
+    // record (VA + esp + regs) dumped by the runtime on a crash, to reconstruct the call
+    // chain leading to a late corruption. Off by default → default build byte-identical.
+    emit::set_trace(std::env::var_os("ARET_TRACE").is_some());
     // Partition recovered functions at the host/translate frontier and make it
     // *structural*: a host-backed function (libm/CRT/glue recognized by symbol) is
     // NOT translated — its body would be dead for direct calls (redirected to the

@@ -644,6 +644,23 @@ thread_local! {
     /// __try/__except can transfer to its __except block, while every other program stays
     /// byte-identical (no injection, no marker). Off by default.
     static SEH_ACTIVE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+
+    /// Execution-trace mode (`--trace`, doc 81 §I1): when on, each function's body is
+    /// prefixed with an `aret_trace_push(va, esp, regs…)` recording its entry into an
+    /// in-memory ring buffer, dumped by the runtime only on `aret_unmodelled`/an
+    /// unhandled fault. A diagnostic build for tracking late corruptions to their cause
+    /// (the call chain + register state leading to the crash). Off by default so the
+    /// default product is byte-identical (no push calls emitted). Purely additive.
+    static TRACE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Enable/disable execution-trace emission (`--trace`) for the current thread.
+pub fn set_trace(on: bool) {
+    TRACE.with(|c| c.set(on));
+}
+
+pub(crate) fn trace_enabled() -> bool {
+    TRACE.with(|c| c.get())
 }
 
 /// Enable/disable shared machine-stack emission for the current thread.

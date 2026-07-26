@@ -184,6 +184,17 @@ pub fn emit_function(func: &IrFunction, forward: &mut BTreeSet<u64>, with_params
     if let Some(fd) = frame_decls(&f, with_params) {
         let _ = writeln!(out, "{}", fd);
     }
+    // Execution trace (`--trace`, doc 81 §I1): record this function's entry — VA, esp and
+    // the threaded register params (eax,ecx,edx,ebp,esi,edi,ebx) — into the runtime ring
+    // buffer, dumped on a crash/unmodelled to reconstruct the call chain + register state
+    // leading there. Emitted only when tracing is on, so the default build is unchanged.
+    if with_params && super::shared_stack() && super::trace_enabled() {
+        let mut args = format!("0x{:x}u, (uint32_t)__esp", f.entry);
+        for v in &f.reg_params {
+            let _ = write!(args, ", (uint32_t)v{}", v);
+        }
+        let _ = writeln!(out, "    aret_trace_push({});", args);
+    }
     let entry = s.entry;
     s.emit_seq(entry, Ctx::root(), 1);
     // Emit any block not reached by structural traversal (e.g. switch cases,

@@ -5100,4 +5100,22 @@ Détail : **70 §6** (roadmap). Résumé :
 - **Acquis session** : WinMerge est passé de « abort dès l'init » à « traverse tout le CRT + une longue série de ctors globaux MFC »
   (7 incréments vérifiés, dont 2 changements de modèle cœur I6+I7). Portes toutes vertes. Le reste = mop-up (I1 pour l'accélérer).
 
+### 2026-07-26 — [INFRA] **✅ I1 : traceur d'exécution (ring buffer, `ARET_TRACE=1`) — l'accélérateur du mop-up lift-correctness**
+- **Quoi** : un **ring buffer en mémoire** (`aret_trace_buf[65536]`) qui enregistre **à chaque entrée de fonction** son état complet
+  (`va, esp` + les 7 registres threadés `eax,ecx,edx,ebp,esi,edi,ebx` — gratuit, ce sont les params). **Dump uniquement sur un chemin de
+  crash** (`aret_unmodelled`, faute matérielle non gérée, boucle de reprise I7) → les ~400 dernières entrées = la **chaîne d'appels + l'état
+  registre** menant au crash. Zéro I/O sur le chemin chaud.
+- **Comment (codegen gaté)** : ARET transpile vers du C, il n'interprète pas ⇒ le traceur est **émis par le backend** (`structured.rs`
+  préfixe chaque corps d'`aret_trace_push(va, esp, regs…)`), **seulement** si `ARET_TRACE` est dans l'environnement
+  (`builder/mod.rs` → `emit::set_trace`, flag thread-local comme `shared_stack`). Runtime : `aret_trace_push`/`aret_trace_dump`
+  (`aret_hle.c`), déclarés dans `aret_hle.h`.
+- **Off par défaut = byte-identique** : sans `ARET_TRACE`, **aucun** `aret_trace_push` émis ⇒ transpile hash **`19acad982194bf07`
+  INCHANGÉ**, difftest **272/272**, ehdiff **6/6** (les hooks dans `aret_hw_fault` no-op si `head==0`). Purement additif.
+- **✅ Vérifié** : fixture crash minimale (`inner→mid→main`, deref `0xe`) avec `ARET_TRACE=1` → dump la **chaîne d'appels avec l'état
+  registre** de chaque frame (ex. `sub_40151c eax=0x3 esi=… ebp=…`). Exactement l'outil pour remonter une valeur garbage à sa source en
+  **1 run** au lieu d'un dig gdb par bug.
+- **Usage** : `ARET_TRACE=1 aret <exe> --mode transpile --out-dir OUT --run` → au crash, la trace s'imprime. Mono-fiber pour l'instant
+  (buffer par-fiber = extension multi-thread). ⇒ Prochain : l'appliquer au mur `0xe` de WinMerge (voir quelle fonction pose
+  `obj+0x30 = 0xe`), puis dérouler le mop-up MFC accéléré.
+
 <!-- NOUVELLES ENTRÉES ICI (garder l'ordre chronologique, plus récent en bas) -->

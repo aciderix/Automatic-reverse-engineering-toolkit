@@ -2329,9 +2329,46 @@ void aret_unimpl(const char *name) {
 /* Reached an instruction the lifter could not model: fail loud rather than
  * silently substitute a no-op (which would be a wrong result presented as
  * correct). The address/text pinpoints what to model next. */
+/* ---- Execution trace (doc 81 §I1) -------------------------------------------------
+ * A lock-free in-memory ring buffer recording each lifted function's entry (VA + esp +
+ * the threaded register params). Populated only in a `--trace` build (the emitter
+ * prefixes each body with `aret_trace_push`); dumped only on a crash path
+ * (aret_unmodelled / an unhandled hardware fault). No I/O on the hot path, off by
+ * default → the normal product is unaffected. The dump reconstructs the call chain and
+ * register state leading to a late corruption — the accelerator for the MFC
+ * lift-correctness mop-up. Mono-fiber for now (a per-fiber buffer is the multi-thread
+ * extension); the head is a plain counter — a torn write at a crash only garbles one
+ * old row. */
+#define ARET_TRACE_N 65536u
+struct aret_trace_ent { uint32_t va, esp, eax, ecx, edx, ebp, esi, edi, ebx; };
+static struct aret_trace_ent aret_trace_buf[ARET_TRACE_N];
+static uint32_t aret_trace_head = 0;
+void aret_trace_push(uint32_t va, uint32_t esp, uint32_t eax, uint32_t ecx, uint32_t edx,
+                     uint32_t ebp, uint32_t esi, uint32_t edi, uint32_t ebx) {
+    struct aret_trace_ent *e = &aret_trace_buf[aret_trace_head & (ARET_TRACE_N - 1u)];
+    e->va = va; e->esp = esp; e->eax = eax; e->ecx = ecx; e->edx = edx;
+    e->ebp = ebp; e->esi = esi; e->edi = edi; e->ebx = ebx;
+    aret_trace_head++;
+}
+void aret_trace_dump(void) {
+    if (aret_trace_head == 0) return;
+    uint32_t n = aret_trace_head < ARET_TRACE_N ? aret_trace_head : ARET_TRACE_N;
+    if (n > 400u) n = 400u;   /* the recent tail is what matters near a crash */
+    fprintf(stderr, "=== ARET execution trace (last %u function entries, newest last) ===\n", n);
+    for (uint32_t k = 0; k < n; k++) {
+        uint32_t idx = aret_trace_head - n + k;
+        struct aret_trace_ent *e = &aret_trace_buf[idx & (ARET_TRACE_N - 1u)];
+        fprintf(stderr,
+                "  sub_%x esp=%#x eax=%#x ecx=%#x edx=%#x ebp=%#x esi=%#x edi=%#x ebx=%#x\n",
+                e->va, e->esp, e->eax, e->ecx, e->edx, e->ebp, e->esi, e->edi, e->ebx);
+    }
+    fprintf(stderr, "=== end trace ===\n");
+}
+
 void aret_unmodelled(const char *insn) {
     fprintf(stderr, "ARET: reached an unmodelled instruction: %s\n", insn);
     fprintf(stderr, "ARET: aborting — translation is incomplete here; refusing to guess.\n");
+    aret_trace_dump();
     abort();
 }
 
@@ -3517,6 +3554,7 @@ static void aret_hw_fault(int sig, siginfo_t *si, void *uctx) {
                         "aret: hardware fault %#x at %p keeps re-faulting without progress "
                         "(ExceptionContinueExecution loop) — aborting instead of hanging\n",
                         (unsigned)code, si ? si->si_addr : (void *)0);
+                aret_trace_dump();
                 abort();
             }
         } else {
@@ -3564,6 +3602,7 @@ static void aret_hw_fault(int sig, siginfo_t *si, void *uctx) {
      * the default disposition so the process dies with the real signal. */
     fprintf(stderr, "aret: unhandled hardware exception %#x at %p\n",
             (unsigned)code, si ? si->si_addr : (void *)0);
+    aret_trace_dump();
     signal(sig, SIG_DFL);
     depth--;
 }
