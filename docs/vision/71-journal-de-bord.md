@@ -4788,4 +4788,17 @@ Détail : **70 §6** (roadmap). Résumé :
 - **Reste WinMerge** : lot d'imports HLE (CRT sécurité `_encode/_decode_pointer` = passthrough sound ; `__dllonexit` ; puis les
   148 GUI/COM) pour tourner plus loin.
 
+### 2026-07-25 — [RECOV][HLE] **WinMerge : traverse tout le démarrage CRT → bute sur la frontière `mfc90u.dll` (884 imports par ordinal)**
+- **Après pushfd/popfd + shims CRT** (`_encode_pointer`/`_decode_pointer` passthrough sound, `__dllonexit`→atexit), WinMerge
+  **traverse tout l'init CRT** (plus aucun import CRT non implémenté). Nouveau mur, bien plus profond : `indirect call to unrecovered
+  0x80000471` = un **import par ordinal non résolu** (`0x80000000 | ord 0x471`).
+- **Source mesurée** : l'ordinal vient de **`mfc90u.dll`** — WinMerge lie la CRT **statiquement** (d'où mes 869 magies EH) mais lie
+  **MFC dynamiquement** : **884 fonctions MFC importées par ordinal**. Résoudre = besoin de la **table d'export de `mfc90u.dll`**
+  (ordinal→fonction), puis lifter le DLL (`--with-dll`, doc 80 §1.2 « endgame M7-GUI ») ou shimmer MFC.
+- **Blocage honnête** : `mfc90u.dll` **n'est pas dispo** (ni dans le zip WinMerge, ni sur le système — c'est le redist MFC90). Sans
+  lui, l'exécution de WinMerge s'arrête à cette frontière. ⇒ pour faire **tourner** WinMerge (et donc voir l'EH C++ **se déclencher**,
+  pas seulement être reconnu), il faut **le redist MFC90** (`mfc90u.dll` + `msvcr90.dll`/`msvcp90.dll` éventuels).
+- **Ce que WinMerge a déjà prouvé** (sans tourner jusqu'au bout) : reconnaissance EH statique **868/869** sur MFC90 réel, récup
+  **9573 fn** (indirects résolus), et il a piloté deux vrais incréments généraux : **pushfd/popfd** (validé Unicorn) + shims CRT.
+
 <!-- NOUVELLES ENTRÉES ICI (garder l'ordre chronologique, plus récent en bas) -->
