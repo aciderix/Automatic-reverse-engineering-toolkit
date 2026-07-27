@@ -300,16 +300,18 @@ affiché. On priorise par la donnée.
   0 régression. ⇒ Les deux chantiers cœur signalés (I6+I7) sont **faits et vérifiés**. Prochain mur MFC = un accès `[ptr+0xe]` (lift
   distinct, plus profond) — data-driven au coup par coup, ou traceur I1 pour accélérer.
 
-- **2026-07-26 (I5, incrément 2 — mur `0xe` résolu, cause GÉNÉRALE)** — Le mur `0xc0000005 at 0xe` (`sub_7924d5`, mfc90u) diagnostiqué
-  **first-hand** (C lifté + watchpoint matérielle gdb sur l'adresse exacte, la version *sound* de la « capture directe de l'instruction
-  corruptrice » — pas l'heuristique petite-valeur, écartée §1.4/règle §0). Cause : **un import `__stdcall` appelé indirectement via son slot
-  IAT** (`GetSysColor@4`, `mov reg,[iat]; call reg` en boucle) ne poppait pas ses args (`__aret_callee_pop`=0 sur la VA IAT) ⇒ **dérive
-  esp** ⇒ un local SEH `[esp+0x30]` aliasait un vieux `push 0xe`. **Fix général** (`builder`/`build.rs`) : fusionner les slots d'import
-  stdcall (`@N` de `stdcall_pops`) dans la table de callee-pop, keyés sur la VA IAT ; `aret_poptab` bâtie de la carte complète. **Additif**
-  (indirect vers non-import → pop 0 → inchangé). Portes : difftest 272/272, hash **inchangé**, cpudiff 5/0, funcdiff 0 div, winediff (en
-  cours). **Effet** : WinMerge dépasse le mur et avance jusqu'à un **nouveau** mur sound (`mov [mem], ss`, instruction non liftée). Détail
-  71 (2026-07-26 [ABI][LIFT]). ⇒ Confirme la **méthode I5 data-driven** : chaque dig révèle le suivant, et la watchpoint ciblée suffit
-  souvent (le traceur I1 reste l'accélérateur pour les divergences non localisées). Débloque un **idiome général** (MFC/COM/VB, appels
-  d'API indirects).
+- **2026-07-26 (I5, incrément 2 — mur `0xe` : cause racine prouvée, 1er fix reverté, fix propre borné)** — Le mur `0xc0000005 at 0xe`
+  (`sub_7924d5`, mfc90u) diagnostiqué **first-hand** (C lifté + watchpoint matérielle gdb sur l'adresse exacte — la version *sound* de la
+  « capture directe de l'instruction corruptrice », pas l'heuristique petite-valeur écartée §1.4/règle §0). **Cause prouvée** : un import
+  `__stdcall` (`GetSysColor@4`) appelé **register-indirect CROSS-block** (`v39 = *(iat)` un bloc ; `call v39` en boucle d'autres blocs) ne
+  poppait pas ses args (`__aret_callee_pop`=0 sur la VA du slot ; la passe de nommage `held` est remise à zéro par bloc) ⇒ **dérive esp** ⇒ un
+  local SEH `[esp+0x30]` aliasait un vieux `push 0xe`. **1er fix** (ajouter les slots d'import à `__aret_callee_pop`) **REVERTÉ** : régressait
+  `comctl32_imagelist` (lifting DLL) par **double-pop** in-block (le filet runtime `callee_pop_adjust` + le pop statique existant) puis, après
+  retrait du statique, **sous-pop** des slots **fusionnés** multi-modules → interaction trop large avec le chemin lifting-DLL. **Code reverté**
+  (`688bee0`), branche re-correcte, 0 régression. **Leçon d'industrialisation** : un changement de callee-pop touche **3 mécanismes** (pop
+  statique in-block, filet runtime, pop par nom) **+** la résolution d'imports multi-modules → **lancer winediff (fixtures DLL-lifting) AVANT
+  de conclure** ; difftest/cpudiff/funcdiff ne l'attrapent pas (pas d'imports). **Fix propre borné** (prochain incrément) : étendre la seule
+  passe `held` au cross-block **sûr** (registres import-invariants, single-def depuis un slot) — sans toucher le filet runtime ni le
+  lifting-DLL ; validé par comctl32_imagelist **+** winediff complet **+** WinMerge. Détail 71 (2026-07-26 [ABI][LIFT]).
 
 <!-- NOUVELLES LIGNES D'AVANCEMENT ICI (plus récent en bas) -->

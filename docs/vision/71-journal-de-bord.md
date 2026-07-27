@@ -5118,35 +5118,39 @@ Détail : **70 §6** (roadmap). Résumé :
   (buffer par-fiber = extension multi-thread). ⇒ Prochain : l'appliquer au mur `0xe` de WinMerge (voir quelle fonction pose
   `obj+0x30 = 0xe`), puis dérouler le mop-up MFC accéléré.
 
-### 2026-07-26 — [ABI][LIFT] **✅ Le mur `0xe` de WinMerge RÉSOLU : un import `__stdcall` appelé INDIRECTEMENT via son slot IAT ne poppait pas ses args (dérive esp) — fix général**
+### 2026-07-26 — [ABI][LIFT] **Mur `0xe` de WinMerge : CAUSE RACINE trouvée (callee-pop d'un import `__stdcall` appelé indirectement, cross-block) — 1er fix REVERTÉ (régressait le lifting DLL), fix propre borné**
 - **Diagnostic (gdb first-hand, sans traceur — le C lifté + 4 runs gdb ciblés ont suffi)** : la faute `mov (%eax),%ebx eax=0xe` à
   `sub_7924d5+27459` (mfc90u lifté) était le **check d'établissement SEH injecté** `frame = *[esp+0x30]; if (frame!=-1 && frame!=0 &&
   *frame==fs:[0]) setjmp` lisant un **local de frame** `[esp+0x30]` qui **aliasait un slot de pile obsolète** contenant `0xe`. **fs:[0]
   était sain** (`0x11b045ec`, pas 0xe) — l'hypothèse « fs:[0] corrompu » écartée par la mesure.
-- **Chaîne de cause (décisive)** : une watchpoint matérielle sur l'adresse exacte (`0x11b0458c`, déterministe) a capté le writer = un
-  **`push 0xe`** (arg d'appel) à `sub_7924d5+12317`. Le lifté : `sub_7924d5` cache les couleurs système dans une boucle
-  `push idx; call *(0x651950); store this+off` (~14×). `*(0x651950)` = le **slot IAT de `GetSysColor`** (self-token → `aret_call` →
-  `aret_GetSysColor`). `GetSysColor` est **`__stdcall` (@4)** mais `__aret_callee_pop(0x651950)` rendait **0** ⇒ esp dérive **-4 par
-  appel** ⇒ après la boucle, le local SEH `[esp+0x30]` pointe sur un vieux `push 0xe` ⇒ `*frame = *(0xe)` faute.
-- **Cause racine (GÉNÉRALE, pas per-binaire)** : la table runtime `__aret_callee_pop` (`aret_poptab`) n'était bâtie que des **fonctions
-  internes `ret N`** ; un import `__stdcall` appelé **indirectement** (`mov reg,[iat]; call reg`, idiome MFC/COM courant) évalue vers la
-  **VA du slot IAT**, absente de la table → pop 0 → dérive. Un `call [iat]` **direct** modélise son pop **par nom** (inchangé) ; seul
-  l'indirect passait par la table runtime.
-- **Fix** (`builder/mod.rs` + `ir/build.rs`) : à `set_callee_pops`, on **fusionne** dans la carte des pops chaque slot d'import dont le nom
-  a un `@N` connu (`stdcall_pops::stdcall_pop_bytes`), keyé sur la **VA IAT** (`.or_insert` ⇒ un pop interne gagne toute collision ; les VA
-  IAT (.idata) et internes (.text) sont disjointes de toute façon). `aret_poptab` est désormais bâtie de la **carte complète**
-  (`callee_pops_all()`), pas seulement des internes. `has_callee_pops()` s'ouvre correctement dès qu'il y a un import stdcall.
-- **Sûr / additif** : un appel indirect vers une cible **non-import** (fonction cdecl interne, vraie vtable) rend toujours 0 ⇒ **aucun
-  ajustement** ⇒ comportement inchangé. Seuls les appels indirects atterrissant sur un slot d'import stdcall reçoivent le pop **correct**.
-- **✅ Effet WinMerge** : le mur `0xe` **disparaît**. WinMerge **avance nettement plus loin** dans l'init MFC (nouvelle branche
-  `main→sub_864ff5→sub_864eda→sub_85fd18→sub_6abb2b→…`) et **abort proprement (sound)** sur un **nouveau** mur distinct : instruction non
-  liftée `mov [0x8b5200], ss` (store d'un registre segment `mov r/m16, Sreg`, opcode `8C` — gap de lift séparé, incrément futur).
-- **Portes toutes vertes** : difftest **272/272**, transpile hash **`19acad982194bf07` INCHANGÉ** (les 4 fixtures n'appellent pas d'import
-  stdcall en indirect ⇒ byte-identique), **cpudiff 5/0** (`*_matches_unicorn` + `preserves_semantics`), **funcdiff 20558 scored / 0
-  divergence**, winediff (en cours). ⇒ correctness-neutre sur tout le décompile/lift, additif, et **débloque un idiome général** (tout
-  binaire appelant un import stdcall indirectement — MFC/COM/VB, vtables d'API).
-- **Note testabilité** : pas de fixture minimale committée (le pattern `mov reg,[iat]; call reg` sur un stdcall exige un vrai PE Win32 ;
-  mingw i686 émet plutôt des `call [iat]` directs). Vérif = portes complètes (0 dommage) + WinMerge bout-en-bout (le mur disparaît, la
-  cause `GetSysColor@4` prouvée par watchpoint). Une fixture inline-asm reste possible si un jour un binaire mingw expose le pattern.
+- **Chaîne de cause (décisive, prouvée)** : une watchpoint matérielle sur l'adresse exacte (`0x11b0458c`, déterministe) a capté le writer =
+  un **`push 0xe`** (arg d'appel) à `sub_7924d5+12317`. Le lifté : `sub_7924d5` cache les couleurs système dans une boucle
+  `push idx; call v39; store this+off` (~14×) où **`v39 = *(0x651950)`** = le **slot IAT de `GetSysColor`** (`__stdcall` @4). Le pattern est
+  **register-indirect CROSS-block** (le load de `v39` est dans un bloc, les `call v39` dans la boucle d'autres blocs). `__aret_callee_pop`
+  rend **0** pour la VA du slot ⇒ esp dérive **-4/appel** ⇒ le local SEH `[esp+0x30]` finit par pointer un vieux `push 0xe` ⇒ `*frame=*(0xe)`.
+- **Cause racine (GÉNÉRALE)** : un import `__stdcall` appelé **register-indirect à travers les blocs** (`mov reg,[iat]` dans un bloc ; `call
+  reg` dans un autre) n'est ni nommé ni poppé : la passe de nommage (`name_calls`/`held`, `build.rs` ~650) **remet `held` à zéro par bloc**
+  (le threading en ordre-de-stockage laissait fuiter un mapping périmé), et le filet runtime `__aret_callee_pop` ne connaissait **pas** les
+  slots d'import → pop 0 → dérive. Le cas **in-block** est déjà couvert (pop statique `stdcall_pop_for_regcall`) ; le cas **`call [abs]`
+  direct** aussi (par nom). Seul le **register-indirect cross-block** driftait (le vrai bug de WinMerge).
+- **1er fix tenté, puis REVERTÉ** (`40137b7`) : ajouter les slots d'import stdcall à `__aret_callee_pop` (table runtime). **Régression
+  mesurée** : `bench/winecorpus/comctl32_imagelist` (lifting DLL comctl32) **cassait** (`indirect call to unrecovered 0x50441c`) — parce que
+  `callee_pop_adjust` applique **déjà** le filet runtime à **tout** appel indirect, et le pop statique in-block **aussi** ⇒ **DOUBLE POP** sur
+  les appels in-block de comctl32. Retirer le pop statique (2ᵉ essai) a inversé le problème : les slots d'import **fusionnés** de comctl32
+  (résolus par `merge_modules`, absents de `prog.imports` tels quels) rendaient 0 ⇒ **sous-pop** ⇒ faute `0xc`. ⇒ **interaction complexe avec
+  le chemin lifting-DLL** (multi-modules) : approche trop large. **Revert du code** (retour à `688bee0`), comctl32_imagelist **re-vert**
+  (6 lignes correctes). Portes du 1er fix (avant découverte de la régression) : difftest 272/272, hash inchangé, cpudiff 5/0, funcdiff 0 div —
+  **mais winediff a révélé la régression comctl32** (d'où l'importance de la porte winediff pour un changement touchant le dispatch d'import).
+- **⇒ Leçon** : un changement du callee-pop **interagit avec 3 mécanismes existants** (pop statique in-block `stdcall_pop_for_regcall`, filet
+  runtime `callee_pop_adjust`→`__aret_callee_pop`, pop par nom `call [abs]`) **et** avec la résolution d'imports **multi-modules** du lifting
+  DLL. Le filet runtime `has_callee_pops`/`callee_pop_adjust` est **déjà** appliqué à tout indirect → y ajouter les imports **double-poppe**
+  l'in-block. **winediff (fixtures DLL-lifting) est la porte qui l'attrape** — la lancer AVANT de conclure sur un changement d'ABI/import.
+- **Fix propre borné (prochain incrément, à vérifier winediff COMPLET inclus)** : ne PAS toucher le filet runtime ni le lifting DLL. Étendre la
+  seule passe de nommage `held` au **cross-block SÛR** : pré-scanner la fonction pour les registres **import-invariants** (assignés
+  **exactement** depuis un unique slot d'import, jamais réécrits ailleurs — cas de `v39`), seeder `held` de ces invariants à l'entrée de chaque
+  bloc → le pop statique in-block existant couvre alors le cross-block **sans** double-pop ni impact multi-modules. Sûr par construction
+  (invariant = pas de mapping périmé possible). Chaque essai **doit** passer comctl32_imagelist **et** winediff complet **et** WinMerge.
+- **Acquis** : la cause du mur `0xe` est **prouvée** (register-indirect stdcall-import cross-block), le fix est **cadré et borné**, et la
+  branche est **revenue à un état correct** (aucune régression). Le mur `0xe` reste ouvert mais parfaitement caractérisé.
 
 <!-- NOUVELLES ENTRÉES ICI (garder l'ordre chronologique, plus récent en bas) -->

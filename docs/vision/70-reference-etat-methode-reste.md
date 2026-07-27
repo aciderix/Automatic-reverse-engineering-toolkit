@@ -282,12 +282,11 @@ recompilabilité **100 %** · WASM **7/7**.
   i686), mesurés depuis les imports de **7za** (`ReadFile@20`/`WriteFile@20`/`Heap*`/`Virtual*`/
   `CreateFileW@28`/`RaiseException@16`/`RtlUnwind@16`…). Bénéfice **mesuré** : funcdiff **16,6k→18,4k**
   scorées (0 div — ces lifts, jadis skippés derrière imports, désormais **prouvés corrects**).
-  **Import stdcall appelé INDIRECTEMENT (2026-07-26)** : un `mov reg,[iat]; call reg` (idiome MFC/COM/VB, vtables d'API)
-  évalue vers la **VA du slot IAT**, jadis absente de la table runtime `__aret_callee_pop` → **pop 0 → dérive esp** (un
-  `call [iat]` *direct* modélise déjà son pop par nom). Fix : à `set_callee_pops`, fusionner chaque slot d'import stdcall
-  (`@N` de `stdcall_pops`) dans la carte, keyé sur la VA IAT ; `aret_poptab` bâtie de la carte complète (`callee_pops_all`).
-  **Additif** (indirect vers non-import → pop 0 → inchangé ; hash inchangé). Débloqua **WinMerge/MFC90** : `GetSysColor@4`
-  caché en boucle dérivait esp → un local SEH `[esp+0x30]` aliasait un vieux `push` → faute `0xe` (cf. 71 2026-07-26 [ABI][LIFT]).
+  **⚠️ Trou connu (WinMerge, 2026-07-26)** : un import stdcall appelé **register-indirect cross-block** (`v39=*(iat)` dans un
+  bloc ; `call v39` dans un autre) dérive esp (`held` remis à zéro par bloc, `__aret_callee_pop` ne connaît pas les slots
+  d'import). Cause **prouvée** (mur `0xe` de mfc90u, `GetSysColor@4`), fix simple (table runtime) **reverté** car il régresse
+  le lifting-DLL (double-pop in-block comctl32). Fix propre borné = étendre la passe `held` au cross-block invariant. Cf. 71
+  (2026-07-26 [ABI][LIFT]).
 - **Imports par ORDINAL résolus** (`src/ir/ordinal_imports.rs`, 2026-07-17) : un import sans nom (`0x80000000|ord`
   dans l'IAT) était **skippé** par le loader → l'appel indirect abortait sur la valeur opaque. Désormais `(dll, ordinal)`
   → nom d'export via une table **vérité-terrain** ; le routage par-nom (shim) prend le relais. `COMCTL32` extrait
