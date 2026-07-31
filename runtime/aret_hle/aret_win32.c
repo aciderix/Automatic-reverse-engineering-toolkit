@@ -990,6 +990,35 @@ uint32_t aret_GetUserDefaultLCID(uint32_t esp)       { (void)esp; return 0x0409;
 uint32_t aret_GetSystemDefaultLCID(uint32_t esp)     { (void)esp; return 0x0409; }
 uint32_t aret_GetUserDefaultUILanguage(uint32_t esp) { (void)esp; return 0x0409; }
 uint32_t aret_SetThreadLocale(uint32_t esp)          { (void)esp; return 0x0409; }
+/* ConvertDefaultLocale(LCID) -> LCID: replaces the "default" pseudo-LCIDs with a
+ * concrete one. MEASURED against Wine by sweeping the WHOLE 16-bit LCID space, which is
+ * what decided the shape of this shim:
+ *   - the five default LCIDs (0 NEUTRAL, 0x400 USER, 0x800 SYSTEM, 0xC00 CUSTOM_DEFAULT,
+ *     0x1000 CUSTOM_UNSPECIFIED) all resolve to the user locale — 0x0409 here, matching
+ *     the invariant GetThreadLocale/GetUserDefaultLCID already publish just above;
+ *   - a NEUTRAL sublang (0) does NOT simply become sublang 1: the sweep found ~40
+ *     exceptions, e.g. Chinese 0x0004 -> 0x0804 and 0x000a -> 0x0c0a. It is a TABLE,
+ *     not a rule.
+ *   - even a non-neutral sublang is not universally pass-through: 33 of 64449 remap
+ *     (0x641a -> 0x201a, 0x0460 -> 0x1000, alternate sorts and script variants).
+ * Those tables are Wine's locale database — ENVIRONMENTAL, version-dependent data, in
+ * the sense of the EnumFontFamilies rule (70 §4.5): model the CONTRACT, do not embed the
+ * DATA. So only the five defaults are answered; everything else ABORTS soundly rather
+ * than shipping a rule the sweep proved wrong. */
+uint32_t aret_ConvertDefaultLocale(uint32_t esp) {
+    uint32_t lcid = w32_arg(esp, 0);
+    if (lcid == 0x0000 || lcid == 0x0400 || lcid == 0x0800 ||
+        lcid == 0x0c00 || lcid == 0x1000)
+        return 0x0409;
+    {
+        char m[96];
+        snprintf(m, sizeof m,
+                 "ConvertDefaultLocale(%#x): only the default LCIDs are modelled "
+                 "(the rest is Wine's locale table, not a rule)", lcid);
+        aret_unmodelled(m);
+    }
+    return 0;
+}
 /* PeekNamedPipe(h, buf, size, *read, *avail, *left): CLI tools call it to see
  * whether stdin has data / is a pipe. Our handle is a POSIX fd; use FIONREAD for
  * the available-byte count. Non-pipe fds (a file/tty) fail as on Windows. A true

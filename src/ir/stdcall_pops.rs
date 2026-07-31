@@ -72,6 +72,7 @@ static TABLE: &[(&str, u32)] = &[
     ("CompareFileTime", 8),
     ("CompareStringA", 24),
     ("CompareStringW", 24),
+    ("ConvertDefaultLocale", 4),
     ("CopyIcon", 4),
     ("CopyImage", 20),
     ("CopyRect", 8),
