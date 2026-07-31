@@ -5251,6 +5251,26 @@ Détail : **70 §6** (roadmap). Résumé :
   sous la frame) ne puisse pas les écraser.
 - **Portes** : `winecorpus/gdi_enumfonts.c` **identique à Wine** (contrat + invariants en **booléens**, jamais en compteurs — un compte
   serait le nombre de polices installées, donc machine-dépendant) ; difftest **272/272** ; `table_is_sorted` OK ; transpile hash
-  **`19acad982194bf07` inchangé** ; winediff complet + WinMerge (en cours).
+  **`19acad982194bf07` inchangé** ; **winediff 180/181 → 181/182** (`ok gdi_enumfonts`, seul rouge = `gdi_uifont` environnemental).
+
+### 2026-07-26 — [HLE-CRT][I5] **✅ `_wcsicoll`/`wcscoll` — « collate » ne veut PAS dire linguistique : mesuré ORDINAL en locale C (+ trou `setlocale` documenté)**
+- **Mur** : après l'énumération de polices, WinMerge appelle `_wcsicoll`.
+- **Le piège évité (le cœur de l'incrément)** : le nom dit *collate*, donc le réflexe est de brancher sur la machinerie de **sort-keys
+  linguistiques** déjà en place (`lstrcmpiW`/`CompareStringW`, §4.5). **La mesure dit l'inverse** : en locale **« C »** — celle où est un
+  programme **avant** tout `setlocale` — msvcrt collationne **ORDINALEMENT**. `_wcsicoll` ≡ `_wcsicmp` et `wcscoll` ≡ `wcscmp`, **13/13 cas
+  identiques**, et **différents de `lstrcmpiW`** précisément sur les cas discriminants : `readme` vs `read-me` (**+1** ordinal contre **-1**
+  linguistique), `~` vs `a` (**+1** contre **-1**), `O'Brien` vs `OBrien` (**-1** contre **+1**). Brancher sur le linguistique aurait donc
+  produit l'ordre **inverse** sur exactement les cas pour lesquels cette machinerie existe — un faux silencieux.
+- **Implémentation** : `aret_wcsicoll` = `aret_wcsicmp`, `aret_wcscoll` = `aret_wcscmp` (deux lignes, mais **prouvées**).
+- **Fixture** `winecorpus/crt_wcscoll.c` : chaque ligne imprime le résultat de la fonction **à côté** de la réponse ordinale **et** de la
+  réponse linguistique (`lstrcmpiW`), sur les paires **choisies pour discriminer** — donc toute régression qui rebrancherait sur le
+  linguistique saute aux yeux. Signe seulement (la magnitude d'un compare CRT n'est pas spécifiée). **Identique à Wine**.
+- **⚠️ Trou de soundness trouvé au passage (documenté, PAS corrigé)** : `aret_setlocale` rend **`"C"` pour n'importe quelle locale demandée**
+  au lieu de **NULL** (échec) sur celles qu'on ne modélise pas. La valeur implémentée ici est donc **juste pour la locale C**, mais rien ne
+  garantit qu'on y est : un programme qui sélectionne une vraie locale puis collationne diverge **en silence**. Consigné en **70 §P1bis**
+  avec le fix propre (accepter `NULL`/`"C"`/`"POSIX"`, abort sound sinon) et la précaution : `""` est courant ⇒ **mesurer le corpus d'abord**
+  (porte winediff complète) avant de trancher. Ne pas corriger à la volée en fin d'incrément.
+- **Portes** : fixture **identique Wine** ; difftest **272/272** ; transpile hash **`19acad982194bf07` inchangé** (runtime-only) ; winediff
+  complet + WinMerge en cours.
 
 <!-- NOUVELLES ENTRÉES ICI (garder l'ordre chronologique, plus récent en bas) -->

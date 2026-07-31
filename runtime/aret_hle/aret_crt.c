@@ -833,6 +833,26 @@ uint32_t aret_wcsnicmp(uint32_t esp) {
     }
     return 0;
 }
+/* _wcsicoll / wcscoll — the LOCALE-collating wide compares. MEASURED against Wine's
+ * msvcrt in the default ("C") locale, which is the locale a program has before it
+ * calls setlocale: they are plain ORDINAL compares, identical to _wcsicmp / wcscmp
+ * respectively (`winecorpus/crt_wcscoll.c`).
+ *
+ * This is worth stating because the intuitive wiring is wrong: `coll` suggests the
+ * linguistic sort-key machinery behind lstrcmpiW/CompareStringW, and routing them
+ * there would DIVERGE on exactly the cases that machinery exists for — measured
+ * `_wcsicoll("readme","read-me") = +1` where `lstrcmpiW` gives -1, likewise "~" vs
+ * "a" and "O'Brien" vs "OBrien".
+ *
+ * Caveat, stated honestly: under a REAL non-C locale these would collate
+ * differently, and `aret_setlocale` currently reports "C" for every request instead
+ * of refusing the ones it cannot model — so a program that selects e.g. a French
+ * locale and then collates would silently get C-locale ordering. That is a
+ * pre-existing gap in setlocale, not one introduced here; it is recorded in doc 70
+ * §5 rather than papered over. */
+uint32_t aret_wcsicoll(uint32_t esp) { return aret_wcsicmp(esp); }
+uint32_t aret_wcscoll(uint32_t esp) { return aret_wcscmp(esp); }
+
 uint32_t aret_wcschr(uint32_t esp) {
     const uint16_t *s = (const uint16_t *)(uintptr_t)a32(esp, 0);
     uint16_t c = (uint16_t)a32(esp, 1);

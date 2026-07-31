@@ -191,7 +191,7 @@ bash bench/wallsweep.sh <dir1> [dir2…]  # AGRÈGE --mode walls sur un corpus :
 
 ### État régression (référence — doit rester vert)
 difftest **272/272** · transpile-diff **4/4** (H=`19acad982194bf07`) · winediff
-**180/181** (le seul rouge = `gdi_uifont`, **environnemental** : fontconfig i386, orthogonal au code) · **ehdiff 6/6** (SEH `seh_except`
+**181/182** (le seul rouge = `gdi_uifont`, **environnemental** : fontconfig i386, orthogonal au code) · **ehdiff 6/6** (SEH `seh_except`
 + C++ `throw_catch`/`throw_dtor`/`throw_across`/`throw_byval`/`throw_static` — throw/catch, destructeur d'unwind, multi-frames, catch-by-value, CRT statique — bit-identiques Wine) · cpudiff vert (per-instruction + séquences génératives) · funcdiff corpus **0 divergence** (lift **~20,6k** scorées /
 **~20k appels** — **imports (stubs `@N` + `@0` scalaires) + appels indirects résolus + intrinsèques mémoire host-backés (memmove/memcpy)** ; scratch sous-esp exclu ; opt ~10k scorées) · SMT **11/11** · in-place **3/3** · magicdiv **2³²** ·
 recompilabilité **100 %** · WASM **7/7**.
@@ -835,6 +835,15 @@ agrégats, jointures, index, CTE, window, IN) :
 *Reste (mesure future)* : passer le `gauntlet/score.sh` complet + le sweep sqlite
 sur le build mingw pour re-mesurer la surface (FTS/RTREE non balayés → abort sound
 s'ils butent).
+
+### P1bis — ⚠️ **Trou de soundness connu : `setlocale` accepte tout et rend `"C"`** (trouvé 2026-07-26, non corrigé)
+`aret_setlocale` (`aret_hle.c`) renvoie **`"C"` quelle que soit la locale demandée**, au lieu de rendre **NULL** (= échec) pour celles
+qu'on ne modélise pas. Un programme qui fait `setlocale(LC_ALL, "French")` croit donc avoir changé de locale alors qu'on reste en C ⇒ tout
+ce qui en dépend (**collation** `_wcsicoll`/`wcscoll`, formats de nombres/dates, casse non-ASCII) diverge **en silence** — exactement le
+mode d'échec que le §0 interdit. Trouvé en mesurant `_wcsicoll` (ordinal en locale C, cf. §4.5) : la valeur implémentée est **juste pour la
+locale C**, mais rien ne garantit qu'on y est. **Fix propre** : accepter `NULL` (requête), `"C"` et `"POSIX"` → `"C"` ; **abort sound** sur
+toute autre locale (y compris `""`, qui demande la locale système). ⚠️ À faire avec la porte winediff complète : `""` est courant et
+certains binaires du corpus peuvent l'appeler — mesurer d'abord combien, puis trancher (abort vs modéliser la locale système).
 
 ### P2 — Robustesse x87 : joins ambigus + transcendantales ⇒ **QUALITÉ, pas correction** (MESURÉ 2026-07-10)
 **Mesure décisive (règle « vérifier si le filet runtime est actif AVANT de conclure ») :**

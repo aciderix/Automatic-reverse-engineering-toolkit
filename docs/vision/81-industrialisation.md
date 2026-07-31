@@ -351,4 +351,14 @@ affiché. On priorise par la donnée.
   terrain** (`nm` sur l'import-lib mingw) — la classe de bug qui faisait dériver esp. Portes : fixture identique Wine, difftest 272/272,
   hash inchangé, `table_is_sorted` OK. Détail 71.
 
+- **2026-07-26 (I5, incrément 6 — `_wcsicoll`/`wcscoll` : le nom ment, la mesure tranche)** — Cas d'école pour la règle « mesurer, ne pas
+  déduire ». Le nom *collate* pointe vers la machinerie de **sort-keys linguistiques** qu'on possède déjà ; la mesure montre qu'en locale
+  **C** (celle d'avant tout `setlocale`) msvcrt collationne **ORDINALEMENT** — `_wcsicoll` ≡ `_wcsicmp`, `wcscoll` ≡ `wcscmp` — et que le
+  brancher sur le linguistique aurait donné l'ordre **inverse** sur `readme/read-me`, `~/a`, `O'Brien/OBrien`, soit exactement les cas qui
+  justifient cette machinerie. **Technique de fixture réutilisable** : imprimer, sur des paires **choisies pour discriminer**, le résultat de
+  la fonction **à côté** des deux réponses candidates (ordinale et linguistique) — le test devient alors une **preuve de la sémantique**, pas
+  seulement une non-régression. **Trou de soundness trouvé et consigné sans le corriger à la volée** (70 §P1bis) : `setlocale` accepte
+  n'importe quelle locale et rend `"C"` au lieu de NULL ⇒ la valeur C-locale n'est garantie par rien ; fix cadré + précaution (`""` est
+  courant ⇒ mesurer le corpus avant de trancher). Portes : fixture identique Wine, difftest 272/272, hash inchangé. Détail 71.
+
 <!-- NOUVELLES LIGNES D'AVANCEMENT ICI (plus récent en bas) -->
