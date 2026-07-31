@@ -268,6 +268,14 @@ recompilabilité **100 %** · WASM **7/7**.
   + **les transcendantales brutes** `fsin/fcos/fptan/fpatan/fyl2x/f2xm1/fscale/fsincos`
   (`__x87rt_2xm1`/… ) — **8/8 vérifiées bit-identiques à Wine** (2026-07-10, fixture
   inline-asm `winecorpus/x87_transcendental.c`, non host-backée ⇒ prouve le filet).
+- **Frontière statique/runtime x87 : un `call` avec pile NON VIDE ⇒ bail (2026-07-26)**. La passe de profondeur
+  *supposait* « la pile x87 est vide aux appels » (commentaire d'origine) : vrai en code compilé normal, **faux** pour
+  les helpers CRT prenant leur argument dans `st(0)` — **`_ftol2`/`_ftol`**, soit **tout cast `(__int64)` d'un flottant**
+  en MSVC. Un appelant **statique** laissait alors la valeur dans une locale SSA pendant que l'appelé, bailé en **mode
+  runtime**, lisait la pile runtime **vide** (le pont existe pour le RETOUR — `__aret_x87_ret` — pas pour l'ARGUMENT).
+  Fix = **vérifier l'hypothèse** (§0.4) : `sp > 0` à un `call` ⇒ bail vers le filet runtime ⇒ appelant et appelé
+  partagent **une** pile et s'accordent par construction. Conservateur (le `sp>0` à un call est le cas rare du helper).
+  Débloqua le mur x87 de **WinMerge** (`sub_791ebc` → `_ftol2`). Hash **inchangé**. Cf. 71 (2026-07-26 [X87][LIFT]).
 - **Transcendantes = libm host-backed** (pow/sin/cos/exp/log/fmod/atan2… via
   `crt_symbol`/nom/FLIRT) → on branche la vraie libm au lieu de lifter du x87 dense.
   Cause racine du double-`sin` corrigée (helpers effacent **C2**).

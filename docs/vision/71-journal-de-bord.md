@@ -5330,4 +5330,34 @@ Détail : **70 §6** (roadmap). Résumé :
   courant de WinMerge (`sub_867436`) et sur tous les futurs. Le §0 exige un arrêt **bruyant** ; un arrêt bruyant qui ne dit
   pas pourquoi respecte la lettre et rate l'intention.
 
+### 2026-07-26 — [X87][LIFT] **✅ « la pile x87 est vide aux appels » était une HYPOTHÈSE, pas une preuve — le mur x87 de WinMerge tombe**
+
+- **Trouvé grâce au diagnostic de l'incrément 8** (le garde muet ne l'aurait pas permis) : `UNDERFLOW, st(0) demandé à
+  profondeur 0` — la pile FPU modélisée est **vide** et quelque chose lit son sommet.
+- **Chaîne** : `sub_791ebc` → `sub_867400` → `sub_867436`. Identification du callee par son corps :
+  `fld st(0)`, `fstp [esp+0x18]`, `fistp qword [esp+0x10]`, `fild qword`, comparaison, retour **edx:eax 64 bits** —
+  c'est **`_ftol2`**, la conversion *float → `__int64`* de MSVC, **dont l'argument arrive dans `st(0)`, poussé par
+  l'appelant** (`sub_867400` en est le dispatcher : teste le flag SSE2 en `0x8ba200`, ses **deux** branches lisent la
+  pile x87 runtime). C'est ce que génère **tout cast `(__int64)` d'un flottant** en code MSVC.
+- **CAUSE RACINE** : `sub_791ebc` calcule sa valeur en **x87 STATIQUE** (`__x87_ild32`/`__x87_add`/`__x87_div` = valeurs
+  SSA, locales C) — **0 appel `__x87rt_*`** — puis appelle `_ftol2` qui, lui, a bailé et tourne sur le **filet runtime**.
+  La valeur reste dans une locale C de l'appelant ; la pile runtime est vide. **Les deux mécanismes x87 ne communiquent
+  pas dans le sens ARGUMENT** (le sens RETOUR, lui, a bien son pont : `__aret_x87_ret`/`__x87rt_pushret`).
+- **L'hypothèse fautive, en toutes lettres dans le code** : le commentaire de la passe de profondeur disait *« the x87 ABI
+  keeps the stack otherwise empty across calls, so this single push is the only adjustment a call needs »*. Vrai pour du
+  code compilé normal, **faux** pour les helpers CRT qui prennent leur argument dans `st(0)`. Une hypothèse non vérifiée
+  au cœur d'une zone correctness-critique = exactement ce que le **§0.4** interdit.
+- **Fix (3 lignes de logique)** : **vérifier l'hypothèse au lieu de la supposer** — un `call`/`call` indirect atteint avec
+  `sp > 0` (pile modélisée **non vide**) ⇒ **bail** de toute la fonction vers le filet runtime. Alors appelant **et**
+  appelé partagent **une seule** pile et s'accordent **par construction**. **Conservateur et sound** : dans du vrai code
+  compilé la pile x87 *est* vide aux appels, donc `sp > 0` ici est le cas rare du helper, pas le chemin courant.
+- **Effet mesuré** : `sub_791ebc` bascule de **statique (0 op)** à **runtime (121 `__x87rt_`)** ; WinMerge **franchit
+  entièrement le mur x87** et avance jusqu'au **chargement de polices GDI**, puis bute sur un mur **différent et plus
+  profond** : `mov [0x8b5200], ss` (store de registre de segment, non lifté ⇒ abort correct).
+- **Portes** : difftest **272/272**, transpile 4/4 **hash `19acad982194bf07` inchangé** (aucune fixture ne fait de cast
+  `(__int64)` flottant), cpudiff, funcdiff, winediff.
+- **Leçon réutilisable** : chercher dans le code les **commentaires qui affirment une invariante d'ABI** — ce sont des
+  hypothèses non vérifiées en puissance. Celle-ci était écrite noir sur blanc depuis le début et tenait tant qu'aucun
+  binaire ne convertissait un flottant en `__int64`.
+
 <!-- NOUVELLES ENTRÉES ICI (garder l'ordre chronologique, plus récent en bas) -->

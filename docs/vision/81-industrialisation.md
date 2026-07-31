@@ -386,4 +386,16 @@ affiché. On priorise par la donnée.
   **Leçon transverse** : « arrêt bruyant » (§0) et « arrêt diagnostique » ne sont pas la même chose — un abort muet respecte la
   lettre de la règle et en rate l'intention. Détail 71.
 
+- **2026-07-26 (incrément 9 — le mur x87 de WinMerge : une hypothèse d'ABI non vérifiée, trouvée grâce au diagnostic de
+  l'incrément 8)** — Boucle vertueuse : le garde x87 rendu **diagnostique** dit immédiatement `UNDERFLOW, st(0) à profondeur 0`,
+  ce qui pointe la chaîne `sub_791ebc → _ftol2` en un run. **Cause** : la passe de profondeur x87 *supposait*, commentaire à
+  l'appui, que « la pile x87 est vide aux appels » — faux pour `_ftol2` (**tout cast `(__int64)` d'un flottant** en MSVC), dont
+  l'argument **arrive dans `st(0)`**. L'appelant statique laissait la valeur en locale SSA, l'appelé runtime lisait une pile
+  vide : les deux mécanismes x87 **n'ont de pont que dans le sens RETOUR**. **Fix = vérifier l'hypothèse au lieu de la supposer**
+  (§0.4) : `call` avec pile non vide ⇒ bail vers le filet runtime ⇒ une seule pile partagée, accord par construction.
+  Conservateur, hash **inchangé**. **Effet** : WinMerge franchit le mur x87 et avance jusqu'au **chargement de polices GDI**,
+  mur suivant = `mov [mem], ss` (instruction non liftée). **Leçon d'industrialisation** : les **commentaires qui affirment une
+  invariante d'ABI** sont des hypothèses non vérifiées en puissance — à auditer systématiquement dans les zones
+  correctness-critiques. Détail 71.
+
 <!-- NOUVELLES LIGNES D'AVANCEMENT ICI (plus récent en bas) -->

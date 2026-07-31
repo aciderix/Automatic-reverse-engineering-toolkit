@@ -1302,6 +1302,27 @@ fn x87_depth_pass(
                 }
                 continue;
             }
+            // ...and here is that assumption, VERIFIED instead of taken on faith
+            // (§0.4 "rien de prouvé = rien de deviné"). A call reached with a
+            // non-empty modelled stack means the callee may consume st(0) as an
+            // ARGUMENT — the MSVC `_ftol2`/`_ftol` family (every `(__int64)`cast of
+            // a float) does exactly that. Static mode would then leave the value in
+            // an SSA local while the callee, which bailed to the runtime net,
+            // reads the runtime stack and finds it EMPTY: an underflow abort at
+            // best, and the two x87 mechanisms silently disagreeing at worst.
+            // Bailing hands the whole function to the runtime net, so caller and
+            // callee share one stack and agree by construction. Conservative: real
+            // compiled code keeps the x87 stack empty across calls, so `sp > 0`
+            // here is the rare helper-call case, not the common path.
+            if sp > 0
+                && matches!(
+                    ins.flow_control(),
+                    iced_x86::FlowControl::Call | iced_x86::FlowControl::IndirectCall
+                )
+            {
+                x87dbg(func.entry, insn.address, "call with non-empty x87 stack (callee may consume st(0))");
+                return Err(X87Bail);
+            }
             if !is_x87(ins) {
                 continue;
             }
