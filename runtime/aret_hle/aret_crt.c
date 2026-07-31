@@ -851,6 +851,46 @@ uint32_t aret_wcscpy_s(uint32_t esp) {
     return 0;
 }
 
+/* strncpy_s / wcsncpy_s (dest, size, src, count) — bounded copy of at most `count`
+ * characters. MEASURED against Wine at BOTH widths, which mattered: the two previous
+ * secure-CRT families each had a narrow/wide asymmetry, and this one has NONE. So
+ * "the widths differ" is not a rule either — each family has to be measured.
+ *   - size 0 (or dest NULL): EINVAL(22), destination untouched;
+ *   - src NULL: EINVAL(22), destination emptied;
+ *   - count 0: SUCCESS(0) with the destination emptied — not an error;
+ *   - count >= strlen(src): stops at the source NUL, no error;
+ *   - dest too small: ERANGE(34), having copied what fitted, then d[0] = 0;
+ *   - count == (size_t)-1 (_TRUNCATE): truncates to size-1 and KEEPS the result,
+ *     returning 80 (STRUNCATE) — a distinct code, and the only failing case whose
+ *     output is meant to be used. */
+#define ARET_NCPY_S_BODY(TYPE)                                                     \
+    TYPE *d = (TYPE *)(uintptr_t)a32(esp, 0);                                      \
+    uint32_t size = a32(esp, 1);                                                   \
+    const TYPE *s = (const TYPE *)(uintptr_t)a32(esp, 2);                          \
+    uint32_t count = a32(esp, 3);                                                  \
+    if (!d || size == 0) return 22;                                                \
+    if (!s) { d[0] = 0; return 22; }                                               \
+    int trunc = (count == 0xffffffffu);                                            \
+    uint32_t n = 0;                                                                \
+    while (s[n] && (trunc || n < count)) n++;      /* chars the source can give */ \
+    if (n + 1 <= size) {                                                           \
+        for (uint32_t i = 0; i < n; i++) d[i] = s[i];                              \
+        d[n] = 0;                                                                  \
+        return 0;                                                                  \
+    }                                                                              \
+    if (trunc) {                                   /* keep what fits, report 80 */ \
+        for (uint32_t i = 0; i + 1 < size; i++) d[i] = s[i];                       \
+        d[size - 1] = 0;                                                           \
+        return 80;                                                                 \
+    }                                                                              \
+    for (uint32_t i = 0; i < size && i < n; i++) d[i] = s[i];                      \
+    d[0] = 0;                                      /* copied, then emptied      */ \
+    return 34;
+
+uint32_t aret_strncpy_s(uint32_t esp) { ARET_NCPY_S_BODY(uint8_t) }
+uint32_t aret_wcsncpy_s(uint32_t esp) { ARET_NCPY_S_BODY(uint16_t) }
+#undef ARET_NCPY_S_BODY
+
 uint32_t aret_wcscmp(uint32_t esp) {
     const uint16_t *a = (const uint16_t *)(uintptr_t)a32(esp, 0);
     const uint16_t *b = (const uint16_t *)(uintptr_t)a32(esp, 1);
