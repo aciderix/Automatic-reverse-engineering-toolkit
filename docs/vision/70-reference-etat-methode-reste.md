@@ -191,7 +191,7 @@ bash bench/wallsweep.sh <dir1> [dir2…]  # AGRÈGE --mode walls sur un corpus :
 
 ### État régression (référence — doit rester vert)
 difftest **272/272** · transpile-diff **4/4** (H=`19acad982194bf07`) · winediff
-**178/179** (le seul rouge = `gdi_uifont`, **environnemental** : fontconfig i386, orthogonal au code) · **ehdiff 6/6** (SEH `seh_except`
+**180/181** (le seul rouge = `gdi_uifont`, **environnemental** : fontconfig i386, orthogonal au code) · **ehdiff 6/6** (SEH `seh_except`
 + C++ `throw_catch`/`throw_dtor`/`throw_across`/`throw_byval`/`throw_static` — throw/catch, destructeur d'unwind, multi-frames, catch-by-value, CRT statique — bit-identiques Wine) · cpudiff vert (per-instruction + séquences génératives) · funcdiff corpus **0 divergence** (lift **~20,6k** scorées /
 **~20k appels** — **imports (stubs `@N` + `@0` scalaires) + appels indirects résolus + intrinsèques mémoire host-backés (memmove/memcpy)** ; scratch sous-esp exclu ; opt ~10k scorées) · SMT **11/11** · in-place **3/3** · magicdiv **2³²** ·
 recompilabilité **100 %** · WASM **7/7**.
@@ -565,6 +565,14 @@ recompilabilité **100 %** · WASM **7/7**.
   GET inconnus ⇒ **abort sound** (jamais un pvParam non écrit relu = faux silencieux). Débloque `ARTLANT` (avance au
   rendu de texte GDI). Gardé `winecorpus/user32_spi.c` (valeurs display-indépendantes + round-trip stateful,
   bit-identique Wine ; le workarea env-dépendant testé hors oracle bit-exact).
+  **+ `SPI_GETNONCLIENTMETRICS` (0x29, 2026-07-26)** — métriques non-client + les **5 polices shell** lues par tout framework au
+  démarrage (mur réel de l'init GUI **MFC/WinMerge**). **A et W traités séparément** (`LOGFONTA` 60 o ≠ `LOGFONTW` 92 — le shim W
+  renvoyait vers A, donc écrivait aux mauvais offsets) ; le layout vient du champ **`cbSize`** de l'appelant (pas `uiParam`), taille
+  pré-Vista (340/500) acceptée en laissant `iPaddedBorderWidth` **intact**, taille inconnue ⇒ FALSE **sans écrire**. Valeurs **mesurées**
+  (⚠️ **non dérivables** de `GetSystemMetrics` : Wine rend `SM_CYCAPTION` 26 vs `iCaptionHeight` 25). Gardé `winecorpus/user32_ncm.c` —
+  **dump de tous les octets bruts sur tampon poisonné**, qui seul révèle que le chemin **A** n'écrit le nom de police que jusqu'au NUL
+  (queue du tableau **laissée intacte**, dernier octet forcé à 0) là où **W** zéro-remplit. **+ `wcscat_s`** (CRT, 7 cas mesurés,
+  `crt_wcscat_s.c`).
 - **`GetClassInfo(Ex)A/W`** (2026-07-17) : le registre de classes stocke désormais **tous** les champs
   `WNDCLASS(EX)` (style, cbClsExtra/WndExtra, hInstance, hIcon, hCursor, hbrBackground, menu, hIconSm) à
   l'enregistrement → `GetClassInfo` les rend **verbatim** (round-trip register→query exact, atome non-nul en retour ;
@@ -801,7 +809,8 @@ résidu qui abort restera l'**obfusqué/fait-main/VM-packé** (indécidable, §9
      continuation de catch, dispatch C++ typé, 4 shims HLE, **I6** esi/edi/ebx threadés, **I7** abort bruyant, **I1** traceur, **dataflow
      MUST des registres porteurs d'import**). Mur courant = **surface GUI/HLE** (`SystemParametersInfoA` action `0x29`, `wcscat_s`),
      traité **data-driven** au coup par coup (chantier **I5** du doc 81), chacun vérifié vs Wine. ⇒ le blocage n'est **plus** l'EH ni le
-     lift-correctness : c'est la **couverture d'API**.
+     lift-correctness : c'est la **couverture d'API**. ✅ **1ʳᵉ vague comblée (2026-07-26)** : `SPI_GETNONCLIENTMETRICS` (+`wcscat_s`),
+     **bit-identiques Wine** — mur suivant = **`EnumFontFamiliesW`** (API à callback).
   5. **win32k `NtGdi*`/`NtUser*`** — **différé** (inutile tant qu'on ne lifte pas gdi32/user32 eux-mêmes ; notre HLE les
      couvre). Priorité basse, sur demande de la mesure seulement.
 

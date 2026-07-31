@@ -5192,4 +5192,34 @@ Détail : **70 §6** (roadmap). Résumé :
   dont winediff qui exerce le lifting-DLL) **+** WinMerge bout-en-bout (le mur disparaît ; la cause `GetSysColor@4` avait été prouvée par
   watchpoint matérielle).
 
+### 2026-07-26 — [HLE-WIN32][I5] **✅ `SPI_GETNONCLIENTMETRICS` + `wcscat_s` — les 2 API de l'init GUI MFC, bit-identiques Wine (mesurées, pas déduites)**
+- **Contexte** : après le fix du mur `0xe` (entrée précédente), WinMerge atteint l'**init GUI de MFC** et bute sur ces deux API. Traitement
+  **I5 data-driven** : mesurer sous Wine → reproduire à l'octet près → fixture de garde.
+- **`SPI_GETNONCLIENTMETRICS` (action `0x29`)** — remplit `NONCLIENTMETRICS` (métriques non-client + les **5 polices shell** que tout
+  framework lit au démarrage). **Trois pièges que la mesure a attrapés** et qu'une implémentation « raisonnable » aurait tous ratés :
+  1. **A et W n'ont PAS le même layout** (`LOGFONTA` 60 o vs `LOGFONTW` 92 o) — or `aret_SystemParametersInfoW` **renvoyait simplement vers
+     la version A** ⇒ il aurait écrit aux **mauvais offsets** (faux silencieux). Les deux chemins sont désormais séparés (`u32_spi(esp, wide)`).
+  2. C'est le **champ `cbSize`** du **caller** qui sélectionne le layout, **pas `uiParam`** (mesuré : `uiParam=0` marche quand même). La
+     taille **pré-Vista** (340/500) doit laisser `iPaddedBorderWidth` **INTACT** ; une taille inconnue rend **FALSE sans rien écrire**.
+  3. Les valeurs **ne se déduisent pas** de notre `GetSystemMetrics` : Wine rend `SM_CYCAPTION`=**26** vs `iCaptionHeight`=**25**,
+     `SM_CYMENU`=**19** vs `iMenuHeight`=**18**, `SM_CYSMCAPTION`=**18** vs `iSmCaptionHeight`=**17**. Les dériver = divergence silencieuse.
+     Valeurs retenues (mesurées) : border 1, scroll 17/17, caption 18/**25**, smcaption 17/17, menu 18/18, padded 0 ; polices toutes
+     **Tahoma**, `lfWeight`=400, `lfCharSet`=1, `lfHeight`=**-13** (caption) / **-11** (les 4 autres).
+  - **La fixture compare TOUS les octets bruts** sur un tampon pré-rempli d'un **motif poison** — c'est ce qui a attrapé le dernier détail,
+    invisible autrement : dans le chemin **A**, Wine n'écrit le nom de police **que jusqu'au NUL** et **laisse le reste du tableau tel que
+    l'appelant l'avait**, en ne forçant que le **DERNIER** élément à 0 ; le chemin **W**, lui, **zéro-remplit** toute la queue. (Mécanique :
+    A convertit le nom W→ANSI et n'écrit que la longueur convertie.) Les deux formes sont reproduites ⇒ **aucun memset global** du tampon.
+- **`wcscat_s`** — les **7 cas mesurés** : `destsz==0` ⇒ EINVAL(22) destination **INTACTE** (≠ vidée) ; `src==NULL` ⇒ EINVAL(22) + `dest[0]=0` ;
+  dest non terminée dans `destsz` ⇒ ERANGE(34) + `dest[0]=0` ; débordement ⇒ ERANGE(34) + `dest[0]=0` **mais les éléments déjà copiés restent
+  écrasés** (effet réel visible, reproduit au lieu d'être idéalisé) ; ajustement exact (NUL sur le dernier élément) ⇒ **succès**.
+- **Portes** : `winecorpus/user32_ncm.c` **+** `crt_wcscat_s.c` **bit-identiques Wine** (`ok` tous deux en winediff) ; **`user32_spi` toujours
+  OK** (le plus exposé au refactor A/W) ; difftest **272/272** ; transpile hash **`19acad982194bf07` inchangé** (runtime-only) ; **winediff
+  178/179 → 180/181** (les 2 nouvelles fixtures passent, seul rouge = `gdi_uifont` **environnemental**).
+- **✅ Effet WinMerge** : franchit les deux murs et **avance dans l'énumération de polices** — nouveau mur = **`EnumFontFamiliesW`**
+  (import non implémenté ; son stub faible rend 0, ce qui mène ensuite à un gap de lift statique `je short 0x00867436`). ⇒ prochain
+  incrément I5 : `EnumFontFamilies(Ex)W` (API à **callback** — rappelle du code lifté avec `LOGFONT`/`TEXTMETRIC`, plus substantielle).
+- **Note d'infra (piège rencontré)** : un `pkill -9 -f '\.exe'` antérieur avait tué `wineboot` en cours d'initialisation et **corrompu le
+  prefix Wine** (`drive_c` absent ⇒ `wine: could not load kernel32.dll`). Réparation : `rm -rf ~/.wine && wineboot -i`. ⚠️ Ne jamais
+  `pkill` large pendant qu'un oracle Wine tourne. (Corollaire déjà connu : ne pas toucher Xvfb pendant winediff.)
+
 <!-- NOUVELLES ENTRÉES ICI (garder l'ordre chronologique, plus récent en bas) -->

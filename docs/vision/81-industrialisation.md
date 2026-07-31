@@ -326,4 +326,16 @@ affiché. On priorise par la donnée.
   0x29`. ⇒ **Le driver bascule du lift-correctness vers la surface GUI/HLE** = exactement le périmètre **I5**, désormais data-driven au coup
   par coup (chaque API comblée vérifiée vs Wine). Détail 71 (2026-07-26 [ABI][LIFT] ✅).
 
+- **2026-07-26 (I5, incrément 4 — 2 API de l'init GUI MFC comblées, bit-identiques Wine)** — Première application de la méthode I5 **après** la
+  bascule vers la surface GUI/HLE : `SPI_GETNONCLIENTMETRICS` (action `0x29`) et `wcscat_s`, **mesurées sous Wine puis reproduites à l'octet
+  près** (jamais déduites). Trois pièges attrapés **par la mesure seule** : (a) **A et W n'ont pas le même layout** (`LOGFONTA` 60 o vs
+  `LOGFONTW` 92) alors que le shim W **renvoyait vers A** ⇒ mauvais offsets (faux silencieux évité) ; (b) c'est **`cbSize`**, pas `uiParam`,
+  qui choisit le layout, et la taille pré-Vista doit laisser `iPaddedBorderWidth` **intact** ; (c) les valeurs **ne se dérivent pas** de notre
+  `GetSystemMetrics` (Wine : `SM_CYCAPTION`=26 mais `iCaptionHeight`=25). **Leçon d'oracle réutilisable** : la fixture compare **tous les
+  octets bruts** sur un tampon **pré-rempli d'un motif poison** — c'est la seule raison pour laquelle le comportement « le chemin A n'écrit le
+  nom de police que jusqu'au NUL et laisse la queue du tableau intacte (sauf le dernier octet), alors que W zéro-remplit » a été vu. **À
+  généraliser** : pour toute API qui remplit une structure, poison + dump brut, sinon on valide un sous-ensemble et on laisse passer des
+  divergences. Portes : 2 fixtures bit-identiques, `user32_spi` non régressée, difftest 272/272, hash inchangé, winediff complet. **Effet** :
+  WinMerge franchit les deux murs et avance jusqu'à **`EnumFontFamiliesW`** (API à **callback** → prochain incrément). Détail 71.
+
 <!-- NOUVELLES LIGNES D'AVANCEMENT ICI (plus récent en bas) -->
