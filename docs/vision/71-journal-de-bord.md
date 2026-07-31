@@ -5222,4 +5222,35 @@ Détail : **70 §6** (roadmap). Résumé :
   prefix Wine** (`drive_c` absent ⇒ `wine: could not load kernel32.dll`). Réparation : `rm -rf ~/.wine && wineboot -i`. ⚠️ Ne jamais
   `pkill` large pendant qu'un oracle Wine tourne. (Corollaire déjà connu : ne pas toucher Xvfb pendant winediff.)
 
+### 2026-07-26 — [HLE-WIN32][GUI][I5] **✅ `EnumFontFamilies(A/W)` — énumération de polices à CALLBACK (contrat bit-identique Wine ; liste = environnementale, assumée)**
+- **Mur** : après les métriques non-client, WinMerge appelle `EnumFontFamiliesW` (ce que fait tout sélecteur de police). Le stub faible
+  rendait 0 **sans appeler le callback** ⇒ « aucune police » ⇒ le programme partait ensuite dans un chemin qui butait sur un gap de lift.
+- **Ce qui est EXACT vs ce qui est ENVIRONNEMENTAL** (la distinction structurante ici, doc 70 §4.5 / 72 §4.5) : la **liste** des familles et
+  leurs métriques dépendent des polices installées (**399 familles** ici — et c'est **tout aussi environnemental sous Wine**) ⇒ **jamais
+  bit-comparées**. Le **contrat**, lui, est déterministe et **reproduit exactement** :
+  - un callback qui rend **0 ARRÊTE** l'énumération immédiatement **et la fonction retourne ce 0** (piège réel : ce n'est pas un compte) ;
+  - une famille inexistante ⇒ **zéro callback** et retour **1** ;
+  - `lpszFamily == NULL` ⇒ tout énumérer, retour **1** ; A et W se comportent pareil.
+- **Données réelles, pas inventées** : la liste vient de **fontconfig** (la source que Wine utilise sous Linux), dédupliquée et **triée**
+  (l'ordre de fontconfig n'est pas déterministe) ; les métriques de chaque face sont calculées par les **mêmes formules déjà vérifiées
+  bit-exactes** que `GetTextMetrics` — `u32_fill_textmetric` a été **refactorisée** en `u32_tm_from_face(face, ascent, descent, …)` pour être
+  réutilisée telle quelle. Une famille dont le fichier ne charge pas / sans table OS/2 est **sautée** plutôt que rapportée avec des métriques
+  inventées.
+- **Piège mesuré (aurait été un faux silencieux)** : `lfPitchAndFamily` ≠ `tmPitchAndFamily` — **pour toutes les polices** (mesuré : lf
+  `0x22` vs tm `0x27`). Ils partagent le **nibble de famille FF_\*** mais les bits bas diffèrent : le **LOGFONT** porte la *demande de pas*
+  (`VARIABLE_PITCH`=2 / `FIXED_PITCH`=1), le **TEXTMETRIC** porte les drapeaux `TMPF_*` (fixed-pitch/vector/truetype). Ma 1ʳᵉ version copiait
+  l'un dans l'autre ⇒ les deux auraient été égaux, **divergence invisible sans la mesure**. Corrigé : `lf.pf = (tm.pf & 0xf0) | (fixe ? 1 : 2)`.
+- **`@N` : vérité terrain, pas déduction** — `EnumFontFamilies` **manquait** à `stdcall_pops` (or c'est exactement la classe de bug qui
+  faisait dériver esp, cf. entrée précédente). Décorations lues dans l'**import-lib mingw** (`nm libgdi32.a`) : `EnumFontFamiliesA/W@16`,
+  `EnumFontFamiliesExA/W@20` — les 4 ajoutées (table triée, test `table_is_sorted` vert).
+- **Gate FreeType élargi** (`builder/mod.rs`) : `EnumFontFamilies(Ex)A/W` déclenche désormais `-DARET_HAVE_FREETYPE` (l'énumération lit
+  fontconfig et mesure avec FreeType, même socle que le texte). Sans lui l'implé abortait *sound* — c'est ce qui a produit `calls=0` au
+  1ᵉʳ essai, symptôme diagnostiqué et corrigé.
+- **Callback dans le lifté** : même mécanique que `u32_call_wndproc` (frame stdcall posée sous esp, `aret_call`). Les deux structures
+  (`LOGFONT`+`TEXTMETRIC`) sont placées **entre l'esp de l'appelant et la frame du callback**, pour que la pile du callback (qui descend
+  sous la frame) ne puisse pas les écraser.
+- **Portes** : `winecorpus/gdi_enumfonts.c` **identique à Wine** (contrat + invariants en **booléens**, jamais en compteurs — un compte
+  serait le nombre de polices installées, donc machine-dépendant) ; difftest **272/272** ; `table_is_sorted` OK ; transpile hash
+  **`19acad982194bf07` inchangé** ; winediff complet + WinMerge (en cours).
+
 <!-- NOUVELLES ENTRÉES ICI (garder l'ordre chronologique, plus récent en bas) -->

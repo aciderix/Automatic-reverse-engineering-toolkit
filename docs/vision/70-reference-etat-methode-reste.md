@@ -573,6 +573,16 @@ recompilabilité **100 %** · WASM **7/7**.
   **dump de tous les octets bruts sur tampon poisonné**, qui seul révèle que le chemin **A** n'écrit le nom de police que jusqu'au NUL
   (queue du tableau **laissée intacte**, dernier octet forcé à 0) là où **W** zéro-remplit. **+ `wcscat_s`** (CRT, 7 cas mesurés,
   `crt_wcscat_s.c`).
+- **`EnumFontFamilies(A/W)` (2026-07-26, 1ʳᵉ API à CALLBACK du chantier GUI)** : énumère les familles installées en rappelant un callback
+  **lifté** (`aret_call`, frame stdcall comme `u32_call_wndproc` ; les structures `LOGFONT`+`TEXTMETRIC` sont posées **entre l'esp appelant
+  et la frame du callback**, hors d'atteinte de la pile du callback). **Séparation clé** : le **contrat** est déterministe et **bit-identique
+  Wine** (callback rendant 0 ⇒ arrêt immédiat **et retour 0** ; famille inexistante ⇒ 0 callback + retour 1 ; A ≡ W) ; la **liste** des
+  familles et leurs métriques sont **environnementales** (399 ici, autant sous Wine) ⇒ **non bit-comparées**. Données **réelles** : liste
+  depuis **fontconfig** (source de Wine), triée/dédupliquée ; métriques par les **formules déjà vérifiées** de `GetTextMetrics`
+  (`u32_tm_from_face`, extraite de `u32_fill_textmetric`) ; famille non chargeable ⇒ **sautée**, jamais de métriques inventées. ⚠️ **Mesuré** :
+  `lfPitchAndFamily` **≠** `tmPitchAndFamily` toujours (lf `0x22` vs tm `0x27` — même nibble FF_*, bits bas = pas demandé vs `TMPF_*`).
+  `@N` (`@16`/Ex `@20`) ajoutés à `stdcall_pops` depuis l'import-lib mingw. Gardé `winecorpus/gdi_enumfonts.c` (invariants en **booléens**,
+  jamais de compteur machine-dépendant).
 - **`GetClassInfo(Ex)A/W`** (2026-07-17) : le registre de classes stocke désormais **tous** les champs
   `WNDCLASS(EX)` (style, cbClsExtra/WndExtra, hInstance, hIcon, hCursor, hbrBackground, menu, hIconSm) à
   l'enregistrement → `GetClassInfo` les rend **verbatim** (round-trip register→query exact, atome non-nul en retour ;

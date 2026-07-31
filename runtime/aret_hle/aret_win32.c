@@ -6810,12 +6810,13 @@ uint32_t aret_GetTabbedTextExtentW(uint32_t esp) {
 /* Fill a TEXTMETRIC{A,W} for the DC's selected font, every field matching Wine
  * (formulas mined + verified against GetTextMetrics across DejaVu/Liberation at
  * several sizes). `wide` selects the W layout (WCHAR char fields at +44). */
-static int u32_fill_textmetric(int d, int wide, uint32_t out) {
 #ifdef ARET_HAVE_FREETYPE
-    if (!out) return 0;
-    int ascent, descent;
-    FT_Face f = u32_dc_font(d, &ascent, &descent);
-    if (!f) return 0;
+/* Fill a TEXTMETRIC{A,W} from an already-resolved, already-sized face. Split out of
+ * u32_fill_textmetric so the font ENUMERATION can reuse the very same (Wine-verified)
+ * formulas on a face it resolved itself, instead of inventing metrics for a font it
+ * did not measure. */
+static int u32_tm_from_face(FT_Face f, int ascent, int descent, int italic,
+                            int wide, uint32_t out) {
     TT_OS2 *os2 = (TT_OS2 *)FT_Get_Sfnt_Table(f, FT_SFNT_OS2);
     TT_HoriHeader *hh = (TT_HoriHeader *)FT_Get_Sfnt_Table(f, FT_SFNT_HHEA);
     FT_Fixed ys = f->size->metrics.y_scale, xs = f->size->metrics.x_scale;
@@ -6835,8 +6836,6 @@ static int u32_fill_textmetric(int d, int wide, uint32_t out) {
         default: fam = 0x20; break;                       /* FF_SWISS (Wine's default for unclassified) */
     }
     uint8_t pf = (uint8_t)(0x06 /*TMPF_VECTOR|TMPF_TRUETYPE*/ | (FT_IS_FIXED_WIDTH(f) ? 0 : 0x01) | fam);
-    int fi = gdi_idx(g_gdi[d].sel_font);
-    uint8_t italic = (fi >= 0 && g_gdi[fi].lf_italic) ? 1 : 0;
     int32_t *L = (int32_t *)(uintptr_t)out;
     L[0]=H; L[1]=ascent; L[2]=descent; L[3]=IL; L[4]=EL; L[5]=ave; L[6]=maxw; L[7]=weight;
     L[8]=0; L[9]=96; L[10]=96;                            /* overhang, digitized aspect X/Y */
@@ -6847,15 +6846,161 @@ static int u32_fill_textmetric(int d, int wide, uint32_t out) {
     } else {
         uint16_t *W = (uint16_t *)(uintptr_t)(B + 44);
         W[0]=30; W[1]=255; W[2]=31; W[3]=32;
-        B[52]=italic; B[53]=0; B[54]=0; B[55]=pf; B[56]=0;
+        B[52]=(uint8_t)italic; B[53]=0; B[54]=0; B[55]=pf; B[56]=0;
     }
     return 1;
+}
+#endif
+
+static int u32_fill_textmetric(int d, int wide, uint32_t out) {
+#ifdef ARET_HAVE_FREETYPE
+    if (!out) return 0;
+    int ascent, descent;
+    FT_Face f = u32_dc_font(d, &ascent, &descent);
+    if (!f) return 0;
+    int fi = gdi_idx(g_gdi[d].sel_font);
+    int italic = (fi >= 0 && g_gdi[fi].lf_italic) ? 1 : 0;
+    return u32_tm_from_face(f, ascent, descent, italic, wide, out);
 #else
     (void)d; (void)wide; (void)out; aret_unimpl("GetTextMetrics: FreeType not linked"); return 0;
 #endif
 }
 uint32_t aret_GetTextMetricsA(uint32_t esp) { int d = gdi_idx(WU(0)); return (d >= 0 && u32_fill_textmetric(d, 0, WU(1))) ? 1 : 0; }
 uint32_t aret_GetTextMetricsW(uint32_t esp) { int d = gdi_idx(WU(0)); return (d >= 0 && u32_fill_textmetric(d, 1, WU(1))) ? 1 : 0; }
+
+/* EnumFontFamilies(A/W)(hdc, lpszFamily, lpProc, lParam) -> int.
+ *
+ * Enumerates the installed font families, invoking a LIFTED stdcall callback
+ * `proc(const LOGFONT*, const TEXTMETRIC*, DWORD FontType, LPARAM)` per family. Real
+ * GUI apps use it to populate a font picker (the wall real MFC/WinMerge hits after
+ * its non-client metrics).
+ *
+ * WHAT IS EXACT vs WHAT IS ENVIRONMENTAL (doc 70 §4.5 / doc 72 §4.5). The *contract*
+ * is deterministic and is reproduced exactly — verified against Wine by
+ * `winecorpus/gdi_enumfonts.c`:
+ *   - a callback returning 0 STOPS the enumeration immediately, and the function
+ *     returns that 0 (not the number enumerated);
+ *   - a family that does not exist yields ZERO callbacks and still returns 1;
+ *   - enumerating everything (lpszFamily == NULL) returns 1.
+ * The *set* of families, and their metrics, are environment-dependent (they come from
+ * the host's installed fonts — 399 families here) exactly as they are under Wine, so
+ * they are NOT bit-compared: the list is taken from fontconfig (the same source Wine
+ * uses on Linux) and each face's metrics are computed by the SAME Wine-verified
+ * formulas as GetTextMetrics (u32_tm_from_face) on the real font file. A family whose
+ * file cannot be loaded or measured is skipped rather than reported with invented
+ * metrics. */
+#ifdef ARET_HAVE_FREETYPE
+static int u32_str_ci_eq(const char *a, const char *b) {
+    while (*a && *b && ((*a | 0x20) == (*b | 0x20))) { a++; b++; }
+    return !*a && !*b;
+}
+static int u32_cmp_family(const void *a, const void *b) {
+    return strcmp(*(const char *const *)a, *(const char *const *)b);
+}
+/* One enumerated family: fill LOGFONT + TEXTMETRIC in guest memory and call back.
+ * Returns the callback's value, or 1 to keep going when the face is unusable. */
+static uint32_t u32_enum_one(uint32_t esp, const char *family, uint32_t proc,
+                             uint32_t lparam, int wide, uint32_t lf, uint32_t tm) {
+    char path[256];
+    if (!ft_resolve_face(family, 0, 0, path, sizeof path)) return 1;
+    FT_Face f = ft_get_face(path);
+    if (!f) return 1;
+    TT_OS2 *os2 = (TT_OS2 *)FT_Get_Sfnt_Table(f, FT_SFNT_OS2);
+    if (!os2 || os2->version == 0xFFFF) return 1;   /* no metrics -> do not report it */
+    /* Size the face the way u32_dc_font does for a cell height, at the reference
+     * height below, so the reported metrics are the face's real ones. */
+    const int ref_height = 16;
+    int upm = f->units_per_EM ? f->units_per_EM : 2048;
+    int cell = os2->usWinAscent + os2->usWinDescent;
+    int ppem = cell ? (int)(((long)ref_height * upm + cell / 2) / cell) : ref_height;
+    if (ppem <= 0) ppem = 1;
+    if (FT_Set_Pixel_Sizes(f, 0, (FT_UInt)ppem) != 0) return 1;
+    FT_Fixed ys = f->size->metrics.y_scale;
+    int ascent  = (int)((FT_MulFix(os2->usWinAscent, ys) + 32) >> 6);
+    int descent = (int)((FT_MulFix(os2->usWinDescent, ys) + 32) >> 6);
+    if (!u32_tm_from_face(f, ascent, descent, 0, wide, tm)) return 1;
+    /* LOGFONT{A,W}: only the fields an enumeration defines; the face name is the
+     * family, and the pitch/family byte mirrors the TEXTMETRIC's. */
+    uint8_t *L = (uint8_t *)(uintptr_t)lf;
+    memset(L, 0, wide ? 92u : 60u);
+    *(int32_t *)(L + 0) = ascent + descent;                 /* lfHeight (cell)     */
+    *(int32_t *)(L + 16) = (int32_t)os2->usWeightClass;     /* lfWeight            */
+    /* lfPitchAndFamily and tmPitchAndFamily are NOT the same byte (measured: Wine
+     * reports lf 0x22 vs tm 0x27 for every proportional TrueType face). They share
+     * the FF_* family nibble, but the low bits differ: the LOGFONT carries the
+     * pitch request (VARIABLE_PITCH 2 / FIXED_PITCH 1) while the TEXTMETRIC carries
+     * TMPF_* flags (fixed-pitch/vector/truetype). Copying one into the other would
+     * be a silent divergence, so derive the LOGFONT byte from the family nibble. */
+    uint8_t tm_pf = ((uint8_t *)(uintptr_t)tm)[wide ? 55 : 51];
+    L[27] = (uint8_t)((tm_pf & 0xf0) | (FT_IS_FIXED_WIDTH(f) ? 1u : 2u));
+    for (unsigned i = 0; family[i] && i < 31; i++) {
+        if (wide) *(uint16_t *)(L + 28 + 2 * i) = (uint16_t)(unsigned char)family[i];
+        else L[28 + i] = (uint8_t)family[i];
+    }
+    uint32_t frame = (lf - 64) & ~15u;                       /* below the structs  */
+    uint32_t *fr = (uint32_t *)(uintptr_t)frame;
+    fr[0] = 0; fr[1] = lf; fr[2] = tm; fr[3] = 4 /*TRUETYPE_FONTTYPE*/; fr[4] = lparam;
+    (void)esp;
+    return (uint32_t)aret_call(proc, frame, 0, 0, 0, 0, 0, 0, 0);
+}
+#endif
+
+static uint32_t u32_enum_font_families(uint32_t esp, const char *want, uint32_t proc,
+                                       uint32_t lparam, int wide) {
+#ifdef ARET_HAVE_FREETYPE
+    if (!proc) return 1;
+    if (!ft_ensure()) { aret_unimpl("EnumFontFamilies: FreeType/fontconfig init failed"); return 0; }
+    /* The two guest structures live between the caller's esp and the callback's
+     * frame, so the callback's own stack (which grows below that frame) cannot
+     * clobber them. */
+    uint32_t lf = (esp - 256) & ~15u, tm = lf + 128;
+    FcPattern *pat = FcPatternCreate();
+    FcObjectSet *os = FcObjectSetBuild(FC_FAMILY, (char *)0);
+    FcFontSet *fs = (pat && os) ? FcFontList(NULL, pat, os) : NULL;
+    uint32_t ret = 1;
+    if (fs) {
+        /* Deduplicate and sort, so the enumeration order is deterministic for a
+         * given set of installed fonts (fontconfig's own order is not). */
+        char **fam = (char **)calloc((size_t)fs->nfont, sizeof(char *));
+        int n = 0;
+        for (int i = 0; fam && i < fs->nfont; i++) {
+            FcChar8 *s = NULL;
+            if (FcPatternGetString(fs->fonts[i], FC_FAMILY, 0, &s) != FcResultMatch || !s) continue;
+            if (want && !u32_str_ci_eq((const char *)s, want)) continue;
+            int dup = 0;
+            for (int j = 0; j < n; j++) if (strcmp(fam[j], (const char *)s) == 0) { dup = 1; break; }
+            if (!dup) fam[n++] = strdup((const char *)s);
+        }
+        if (fam) {
+            qsort(fam, (size_t)n, sizeof(char *), u32_cmp_family);
+            for (int i = 0; i < n; i++) {
+                if (ret) ret = u32_enum_one(esp, fam[i], proc, lparam, wide, lf, tm);
+                free(fam[i]);
+            }
+            free(fam);
+        }
+        FcFontSetDestroy(fs);
+    }
+    if (os) FcObjectSetDestroy(os);
+    if (pat) FcPatternDestroy(pat);
+    return ret;
+#else
+    (void)esp; (void)want; (void)proc; (void)lparam; (void)wide;
+    aret_unimpl("EnumFontFamilies: FreeType not linked");
+    return 0;
+#endif
+}
+uint32_t aret_EnumFontFamiliesA(uint32_t esp) {
+    const char *want = WCS(1);
+    return u32_enum_font_families(esp, (want && want[0]) ? want : NULL, WU(2), WU(3), 0);
+}
+uint32_t aret_EnumFontFamiliesW(uint32_t esp) {
+    char buf[128];
+    const uint16_t *w = (const uint16_t *)(uintptr_t)WU(1);
+    const char *want = NULL;
+    if (w && w[0]) { u32_w2n(w, buf, sizeof buf); want = buf; }
+    return u32_enum_font_families(esp, want, WU(2), WU(3), 1);
+}
 
 /* ---- DC attributes ---- */
 uint32_t aret_SetTextColor(uint32_t esp) { int d = gdi_idx(WU(0)); if (d < 0) return 0xFFFFFFFFu; uint32_t p = g_gdi[d].text_color; g_gdi[d].text_color = WU(1) & 0xFFFFFFu; return p; }

@@ -338,4 +338,17 @@ affiché. On priorise par la donnée.
   divergences. Portes : 2 fixtures bit-identiques, `user32_spi` non régressée, difftest 272/272, hash inchangé, winediff complet. **Effet** :
   WinMerge franchit les deux murs et avance jusqu'à **`EnumFontFamiliesW`** (API à **callback** → prochain incrément). Détail 71.
 
+- **2026-07-26 (I5, incrément 5 — `EnumFontFamilies`, 1ʳᵉ API à CALLBACK du chantier)** — Énumération de polices : le callback lifté est
+  rappelé par famille (même mécanique que `u32_call_wndproc`). **Apport méthodologique** : c'est la première API du chantier dont la **sortie
+  est franchement environnementale** (399 familles installées — autant sous Wine), d'où la règle appliquée ici et **à réutiliser** :
+  *séparer le CONTRAT (déterministe, bit-comparé) de la DONNÉE (environnementale, non comparée)*. Le fixture n'assert que des **booléens et
+  invariants** (callback rendant 0 ⇒ arrêt immédiat **et retour 0** ; famille inexistante ⇒ 0 callback + retour 1 ; A ≡ W) — **jamais un
+  compteur**, qui serait le nombre de polices de la machine. La donnée reste **réelle** : liste depuis **fontconfig** (source de Wine),
+  métriques via les **formules déjà vérifiées** de `GetTextMetrics` (`u32_fill_textmetric` refactorisée en `u32_tm_from_face`), famille non
+  chargeable **sautée** plutôt que rapportée avec des métriques inventées. **Piège attrapé par la mesure** : `lfPitchAndFamily` ≠
+  `tmPitchAndFamily` **toujours** (lf `0x22` vs tm `0x27` : même nibble FF_*, bits bas différents) — ma 1ʳᵉ version copiait l'un dans
+  l'autre, divergence invisible sans mesure. **`@N` manquants** (`EnumFontFamilies*` absents de `stdcall_pops`) ajoutés depuis la **vérité
+  terrain** (`nm` sur l'import-lib mingw) — la classe de bug qui faisait dériver esp. Portes : fixture identique Wine, difftest 272/272,
+  hash inchangé, `table_is_sorted` OK. Détail 71.
+
 <!-- NOUVELLES LIGNES D'AVANCEMENT ICI (plus récent en bas) -->

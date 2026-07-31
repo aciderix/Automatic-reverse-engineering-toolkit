@@ -1326,6 +1326,10 @@ pub fn transpile(
             // A program that creates fonts renders text — its native controls (BUTTON…)
             // paint their captions internally even if it never calls DrawText directly.
             | "CreateFontA" | "CreateFontW" | "CreateFontIndirectA" | "CreateFontIndirectW"
+            // Enumerating the installed families reads them through fontconfig and
+            // measures each face with FreeType (same stack as the text path).
+            | "EnumFontFamiliesA" | "EnumFontFamiliesW"
+            | "EnumFontFamiliesExA" | "EnumFontFamiliesExW"
             // A dialog maps dialog-units to pixels via its font's metrics (base units,
             // Wine's GdiGetCharDimensions) — needs FreeType to measure that font. This
             // covers both MapDialogRect and the dialog creators (a DS_SETFONT dialog
