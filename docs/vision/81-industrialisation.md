@@ -111,7 +111,13 @@ mal diagnostiquée**. Bilan :
 > Chaque chantier : **problème → proposition (améliorée) → conformité → coût/risque →
 > oracle → statut**. Statuts : ⬜ à faire · 🚧 engagé · ✅ fait.
 
-### I1 — Traceur d'exécution intégré (ring buffer) ✅ **FAIT (2026-07-26)** **[reco n°1]**
+### I1 — Traceur d'exécution intégré (ring buffer) ✅ **FAIT (2026-07-26)** · 🔧 **affûté sur le terrain** **[reco n°1]**
+> **Affûtage 2026-07-26** : le dump était plafonné à **400** lignes alors que le ring en garde **65536** — l'entrée d'une
+> grosse fonction MFC (~600 appels) tombait hors fenêtre, donc l'info **existait mais restait invisible**. Ajout de
+> **`ARET_TRACE_DUMP=N`** (0 = tout le ring). A permis de ramener le mur /GS de WinMerge à une dérive esp de **4 octets
+> exactement**, en **un run**. **Prochaine amélioration ciblée** : journaliser aussi l'esp **au RETOUR** de chaque appel —
+> le traceur ne voit que les entrées, si bien qu'une dérive se **mesure** mais ne se **localise** pas encore ; avec les
+> retours, l'appel fautif serait désigné directement.
 > **Livré** : `ARET_TRACE=1` (env) préfixe chaque fonction d'un `aret_trace_push(va, esp, eax,ecx,edx,ebp,esi,edi,ebx)` (codegen gaté,
 > `emit::set_trace`) ; ring buffer `aret_trace_buf[65536]` (`aret_hle.c`), dump des ~400 dernières entrées sur `aret_unmodelled`/faute non
 > gérée/boucle I7. **Off par défaut = byte-identique** (hash `19acad982194bf07` inchangé, difftest 272/272, ehdiff 6/6). Vérifié sur une

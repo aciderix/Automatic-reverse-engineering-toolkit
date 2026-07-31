@@ -5390,4 +5390,27 @@ Détail : **70 §6** (roadmap). Résumé :
   de 4 (pop manquant ou en trop). ⚠️ Piège rencontré : un `break sub_XXX` gdb tombe **après** le prologue hôte, donc
   `$esp+4` n'est **pas** l'argument `__esp` modélisé — les valeurs lues ainsi (`0x1`, `0x5`) sont du bruit.
 
+### 2026-07-26 — [INFRA][ABI] **I1 braqué sur le mur /GS : `ARET_TRACE_DUMP=N`, et la dérive ramenée à EXACTEMENT 4 octets**
+
+- **Réponse à « les techniques du 81 aident-elles ? » : oui, I1 est précisément l'outil.** Le traceur enregistre
+  `aret_trace_push(va, **esp**, eax, ecx, edx, ebp, esi, edi, ebx)` à **chaque entrée de fonction** — donc pour une
+  dérive esp il suffit de comparer l'esp d'entrée d'une fonction à celui de son épilogue.
+- **Un affûtage a été nécessaire (et il est réutilisable)** : le dump était plafonné à **400** lignes alors que le ring
+  en garde **65536**. `sub_791ebc` fait ~600 appels, donc **son entrée tombait hors fenêtre** — l'information existait,
+  seul l'affichage la cachait. Ajout de **`ARET_TRACE_DUMP=N`** (0 = tout le ring). C'est exactement le « outils qui
+  fabriquent les outils » du 81 §0 : le diagnostic était bloqué par une constante, pas par un manque de donnée.
+- **Mesure obtenue en un run** : `sub_791ebc` entre à `esp=0x120ce5fc` ⇒ prologue `v22 = ((esp−4) & ~7) −4 −4 −4 −0x478`
+  = **0x120ce174**. La dernière entrée de trace donne l'épilogue : `sub_864955 esp=0x120ce16c` ⇒ **v609 = 0x120ce170**.
+  ⇒ **DÉRIVE = 4 OCTETS EXACTEMENT** (esp final **plus bas** de 4 : un push non dépilé / un pop manquant).
+  ⚠️ **Erreur d'arithmétique corrigée en cours de route** : une première lecture donnait `0x1004` (4100) — je lisais
+  l'esp d'un **run précédent** dont la base de pile différait. La trace doit être lue **dans le run où l'on calcule**.
+- **`_ftol2` MIS HORS DE CAUSE** (les incréments 7 et 9 touchent cet appel, donc il fallait le vérifier) : `0x867400`
+  et `0x867436` sont **absents de `aret_poptab`** = pop 0 = cdecl, ce qui est **correct** pour `_ftol2` (argument en
+  `st(0)`, aucun argument pile). Le tail call conditionnel et la bascule x87 ne créent donc pas cette dérive.
+- **Reste à faire** (session dédiée) : identifier lequel des ~597 appels de `sub_791ebc` perd 4 octets. Le traceur ne
+  journalise que les **entrées**, pas les retours ⇒ **amélioration I1 suivante, ciblée et évidente** : journaliser aussi
+  l'esp **au retour** de chaque appel (ou le couple entrée/sortie), ce qui rendrait la dérive **directement localisable**
+  au lieu de demander une bissection. C'est la suite naturelle du chantier I1.
+- **Portes** (changement runtime confiné à `aret_trace_dump`, chemin crash uniquement) : difftest, hash transpile, winediff.
+
 <!-- NOUVELLES ENTRÉES ICI (garder l'ordre chronologique, plus récent en bas) -->

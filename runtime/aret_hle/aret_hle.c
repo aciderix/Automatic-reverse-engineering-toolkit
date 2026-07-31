@@ -2353,7 +2353,16 @@ void aret_trace_push(uint32_t va, uint32_t esp, uint32_t eax, uint32_t ecx, uint
 void aret_trace_dump(void) {
     if (aret_trace_head == 0) return;
     uint32_t n = aret_trace_head < ARET_TRACE_N ? aret_trace_head : ARET_TRACE_N;
-    if (n > 400u) n = 400u;   /* the recent tail is what matters near a crash */
+    /* The recent tail is what matters near a crash, so 400 is the default. But an
+     * esp drift is diagnosed by comparing a function's ENTRY esp with the esp at
+     * its epilogue, and a big MFC function can make thousands of calls in between —
+     * its entry then falls outside a 400-row window even though the ring (65536)
+     * still holds it. `ARET_TRACE_DUMP=N` widens the window to reach it; 0 means
+     * dump everything the ring has. */
+    uint32_t cap = 400u;
+    { const char *s = getenv("ARET_TRACE_DUMP");
+      if (s && *s) { unsigned long v = strtoul(s, NULL, 0); cap = (v == 0) ? ARET_TRACE_N : (uint32_t)v; } }
+    if (n > cap) n = cap;
     fprintf(stderr, "=== ARET execution trace (last %u function entries, newest last) ===\n", n);
     for (uint32_t k = 0; k < n; k++) {
         uint32_t idx = aret_trace_head - n + k;
