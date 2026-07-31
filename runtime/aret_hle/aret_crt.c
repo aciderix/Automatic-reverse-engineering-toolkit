@@ -753,6 +753,34 @@ uint32_t aret_wcscat(uint32_t esp) {
     while ((*d++ = *s++)) {}
     return (uint32_t)(uintptr_t)r;
 }
+/* wcscat_s(dest, destsz, src) -> errno_t. Annex K / MSVC secure append, with the
+ * exact msvcrt behaviour MEASURED against Wine (7 cases, `winecorpus/crt_wcscat_s.c`):
+ *   - destsz == 0 or dest == NULL      -> EINVAL(22), destination left UNTOUCHED;
+ *   - src == NULL                      -> EINVAL(22), dest[0] = 0;
+ *   - no terminator within destsz      -> ERANGE(34), dest[0] = 0;
+ *   - result would not fit             -> ERANGE(34), dest[0] = 0 — note the copy has
+ *     already written as much as fitted, so those elements ARE clobbered (observable,
+ *     and reproduced here rather than idealised away);
+ *   - otherwise append and return 0 (an exact fit, NUL landing on the last element,
+ *     succeeds).
+ * Windows wchar_t is 16-bit, so this walks uint16_t units (as the wcs* shims above). */
+uint32_t aret_wcscat_s(uint32_t esp) {
+    uint16_t *d = (uint16_t *)(uintptr_t)a32(esp, 0);
+    uint32_t size = a32(esp, 1);
+    const uint16_t *s = (const uint16_t *)(uintptr_t)a32(esp, 2);
+    if (!d || size == 0) return 22;            /* EINVAL — destination untouched */
+    if (!s) { d[0] = 0; return 22; }           /* EINVAL — destination emptied   */
+    uint32_t i = 0;
+    while (i < size && d[i]) i++;
+    if (i == size) { d[0] = 0; return 34; }    /* ERANGE — dest not terminated    */
+    for (;;) {
+        if (i == size) { d[0] = 0; return 34; } /* ERANGE — no room for the NUL   */
+        d[i] = *s;
+        if (!*s) return 0;
+        i++; s++;
+    }
+}
+
 uint32_t aret_wcscmp(uint32_t esp) {
     const uint16_t *a = (const uint16_t *)(uintptr_t)a32(esp, 0);
     const uint16_t *b = (const uint16_t *)(uintptr_t)a32(esp, 1);

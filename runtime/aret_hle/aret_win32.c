@@ -3686,9 +3686,80 @@ uint32_t aret_GetWindowTextLengthW(uint32_t esp) { return aret_GetWindowTextLeng
  * silent — and a no-op SET would diverge from a later GET. Values match GetSystemMetrics
  * (virtual 1024x768 screen invariant, doc 72 4.5). */
 static int g_u32_screensave_active = 1;   /* SPI_{GET,SET}SCREENSAVEACTIVE, Wine default 1 */
-uint32_t aret_SystemParametersInfoA(uint32_t esp) {
+
+/* SPI_GETNONCLIENTMETRICS (0x29) -> NONCLIENTMETRICS{A,W}. The non-client metrics and
+ * the five shell fonts MFC (and every framework that themes its own UI) reads at
+ * start-up. Values are the classic display-independent defaults, MEASURED from Wine
+ * (`winecorpus/user32_ncm.c`) rather than derived: note they do NOT all match our
+ * GetSystemMetrics (Wine reports SM_CYCAPTION 26 vs iCaptionHeight 25, SM_CYMENU 19 vs
+ * iMenuHeight 18), so deriving them would have been a silent divergence.
+ *
+ * The A and W structures differ (LOGFONTA is 60 bytes, LOGFONTW 92), so the two shims
+ * cannot share a filler — hence the `wide` parameter. The size comes from the caller's
+ * `cbSize` FIELD, not from uiParam (measured: uiParam=0 still works). Both the modern
+ * size (344/504, with iPaddedBorderWidth) and the pre-Vista one (340/500, without) are
+ * accepted; with the latter iPaddedBorderWidth is left UNTOUCHED, as Wine does. Any
+ * other size returns FALSE and writes nothing. */
+static void u32_ncm_font(uint8_t *p, int wide, int32_t height) {
+    /* LOGFONT{A,W}: lfHeight, lfWidth, lfEscapement, lfOrientation, lfWeight (LONG),
+     * then 8 BYTEs, then lfFaceName[32] (chars or WCHARs). All zero but the three
+     * fields Wine sets: height, weight 400 (FW_NORMAL) and charset 1 (DEFAULT_CHARSET).
+     *
+     * Face-name tail, MEASURED (the A and W paths genuinely differ in Wine): the W path
+     * copies the whole array, so the bytes after the terminator are ZERO; the A path
+     * converts the name and writes only up to the terminator, leaving the REST OF THE
+     * CALLER'S BUFFER UNTOUCHED — except the LAST element of the array, which it forces
+     * to NUL (the usual "guarantee termination" safety). Zero-filling the whole tail in
+     * the A case would be a visible divergence (caught here by a poison-filled fixture
+     * buffer), so reproduce both shapes exactly. */
+    static const char face[] = "Tahoma";
+    memset(p, 0, 28);                  /* the numeric and byte fields */
+    *(int32_t *)(p + 0) = height;      /* lfHeight  */
+    *(int32_t *)(p + 16) = 400;        /* lfWeight = FW_NORMAL */
+    p[23] = 1;                         /* lfCharSet = DEFAULT_CHARSET */
+    if (wide) memset(p + 28, 0, 64);   /* lfFaceName[32] WCHARs, tail zeroed */
+    else p[28 + 31] = 0;               /* A: only the last element is forced to NUL */
+    for (unsigned i = 0; i <= sizeof face - 1; i++) {  /* incl. the NUL */
+        if (wide) *(uint16_t *)(p + 28 + 2 * i) = (uint16_t)(unsigned char)face[i];
+        else p[28 + i] = (uint8_t)face[i];
+    }
+}
+static uint32_t u32_get_ncm(uint32_t pv, int wide) {
+    if (!pv) return 0;
+    uint8_t *p = (uint8_t *)(uintptr_t)pv;
+    const uint32_t lf = wide ? 92u : 60u;          /* sizeof LOGFONT{W,A}            */
+    const uint32_t full = 4 + 20 + lf + 8 + lf + 8 + lf + lf + lf + 4; /* 344 / 504  */
+    uint32_t cb = *(uint32_t *)p;                  /* the caller's cbSize field      */
+    if (cb != full && cb != full - 4) return 0;    /* unknown layout -> FALSE, no write */
+    /* Every field is written explicitly — deliberately NOT a blanket memset of the
+     * caller's buffer: cbSize keeps the caller's value, and the A face-name tails must
+     * stay untouched (see u32_ncm_font). Writing only what Wine writes keeps this
+     * byte-identical to the oracle. */
+    int32_t *iv = (int32_t *)p;
+    iv[1] = 1;                                     /* iBorderWidth     */
+    iv[2] = 17;                                    /* iScrollWidth     */
+    iv[3] = 17;                                    /* iScrollHeight    */
+    iv[4] = 18;                                    /* iCaptionWidth    */
+    iv[5] = 25;                                    /* iCaptionHeight   */
+    uint32_t o = 24;
+    u32_ncm_font(p + o, wide, -13);                /* lfCaptionFont    */
+    o += lf;
+    *(int32_t *)(p + o) = 17; o += 4;              /* iSmCaptionWidth  */
+    *(int32_t *)(p + o) = 17; o += 4;              /* iSmCaptionHeight */
+    u32_ncm_font(p + o, wide, -11); o += lf;       /* lfSmCaptionFont  */
+    *(int32_t *)(p + o) = 18; o += 4;              /* iMenuWidth       */
+    *(int32_t *)(p + o) = 18; o += 4;              /* iMenuHeight      */
+    u32_ncm_font(p + o, wide, -11); o += lf;       /* lfMenuFont       */
+    u32_ncm_font(p + o, wide, -11); o += lf;       /* lfStatusFont     */
+    u32_ncm_font(p + o, wide, -11); o += lf;       /* lfMessageFont    */
+    if (cb == full) *(uint32_t *)(p + o) = 0;      /* iPaddedBorderWidth (modern size) */
+    return 1;
+}
+
+static uint32_t u32_spi(uint32_t esp, int wide) {
     uint32_t action = w32_arg(esp, 0), ui = w32_arg(esp, 1), pv = w32_arg(esp, 2);
     switch (action) {
+    case 0x0029: return u32_get_ncm(pv, wide);  /* SPI_GETNONCLIENTMETRICS */
     case 0x0030:  /* SPI_GETWORKAREA -> RECT{0,0,W,H} (no taskbar reserved) */
         if (pv) { int32_t *r = (int32_t *)(uintptr_t)pv;
                   r[0] = 0; r[1] = 0; r[2] = U32_SCREEN_W; r[3] = U32_SCREEN_H; }
@@ -3702,13 +3773,16 @@ uint32_t aret_SystemParametersInfoA(uint32_t esp) {
     case 0x0026: if (pv) *(int32_t *)(uintptr_t)pv = 0; return 1; /* SPI_GETDRAGFULLWINDOWS */
     case 0x0068: if (pv) *(int32_t *)(uintptr_t)pv = 3; return 1; /* SPI_GETWHEELSCROLLLINES */
     default: {
-        char m[64]; snprintf(m, sizeof m, "SystemParametersInfoA: unmodelled action %#x", action);
+        char m[64];
+        snprintf(m, sizeof m, "SystemParametersInfo%c: unmodelled action %#x",
+                 wide ? 'W' : 'A', action);
         aret_unmodelled(m);
         return 0;
     }
     }
 }
-uint32_t aret_SystemParametersInfoW(uint32_t esp) { return aret_SystemParametersInfoA(esp); }
+uint32_t aret_SystemParametersInfoA(uint32_t esp) { return u32_spi(esp, 0); }
+uint32_t aret_SystemParametersInfoW(uint32_t esp) { return u32_spi(esp, 1); }
 
 uint32_t aret_GetSystemMetrics(uint32_t esp) {
     switch (WI(0)) {
