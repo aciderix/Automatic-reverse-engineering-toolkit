@@ -374,4 +374,16 @@ affiché. On priorise par la donnée.
   « PE build: »** — des échecs de **build**, pas de comportement ; toujours qualifier la *nature* d'un FAIL (`df -h`) avant de crier à la
   régression. Détail 71.
 
+- **2026-07-26 (incrément 8 — le garde x87 était sound mais MUET ; il diagnostique désormais)** — Suite directe de l'item de
+  soundness relevé à l'incrément 7. `__x87rt_at`/`__x87rt_psh` trappaient par `__builtin_trap()` nu : conforme au §0 sur le fond
+  (arrêt, pas de lecture périmée) mais **non diagnostique** — et surtout le trap tue le process **stdout encore bufferisé**, donc
+  un run très avancé **paraît n'avoir rien produit** (la fausse piste vécue sur WinMerge). Mesuré avant/après : ancien = **zéro
+  sortie**, exit 132 ; nouveau = sortie du programme **préservée** + `x87 runtime stack UNDERFLOW … requested st(0) at depth 0`,
+  exit 134. Fix = `aret_x87_stack_error` (flush stdout **d'abord**, puis op/index/profondeur, puis dump de trace I1, puis abort),
+  déclarée **`noreturn`** (sinon le compilateur rend atteignable l'accès hors bornes qui suit — on aurait troqué un chemin terminé
+  contre de l'UB). **Zéro dépendance de lien nouvelle**, vérifié avant d'écrire : `__x87rt_s`/`__x87rt_p` vivent déjà dans le
+  runtime HLE. Portes : difftest 272/272, hash inchangé, **winediff 182/183** (la porte qui compte : changement de runtime).
+  **Leçon transverse** : « arrêt bruyant » (§0) et « arrêt diagnostique » ne sont pas la même chose — un abort muet respecte la
+  lettre de la règle et en rate l'intention. Détail 71.
+
 <!-- NOUVELLES LIGNES D'AVANCEMENT ICI (plus récent en bas) -->

@@ -109,6 +109,9 @@ uint64_t aret_call(uint32_t va, uint64_t esp, uint64_t a, uint64_t c, uint64_t d
 void aret_trace_push(uint32_t va, uint32_t esp, uint32_t eax, uint32_t ecx, uint32_t edx,
                      uint32_t ebp, uint32_t esi, uint32_t edi, uint32_t ebx);
 void aret_trace_dump(void);
+/* Runtime x87 stack under/overflow: flush stdout, report op/index/depth, dump the
+ * trace, abort. Same loud failure as the old bare trap, but diagnostic. */
+void aret_x87_stack_error(const char *op, int i, int depth) __attribute__((noreturn));
 
 /* Bytes of stack arguments the internal function at code VA `va` pops on return
  * (`ret N`, the __stdcall/FAST_FUNC callee-pops-args ABI); 0 for cdecl/unknown.

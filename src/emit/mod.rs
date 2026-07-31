@@ -369,8 +369,19 @@ pub(crate) const FLOAT_HELPERS: &str = concat!(
     // the runtime stack is inconsistent (e.g. a value an unrecognised callee left
     // in st(0) was never pushed) — TRAP rather than read stale data, keeping the
     // fallback SOUND (correct, or a loud abort; never silently wrong).
-    "static inline long double* __x87rt_at(int i){int k=__x87rt_p-1-i;if(k<0||k>=16)__builtin_trap();return &__x87rt_s[k];}\n",
-    "static inline void __x87rt_psh(long double v){if(__x87rt_p<0||__x87rt_p>=16)__builtin_trap();__x87rt_s[__x87rt_p++]=v;}\n",
+    //
+    // The abort routes through `aret_x87_stack_error` rather than a bare
+    // `__builtin_trap` so the failure is diagnostic as well as loud: it flushes
+    // stdout (a bare trap discards the buffered output, making a run that got far
+    // look like it produced nothing), names the op and the depth, and dumps the
+    // execution trace. No new link dependency — `__x87rt_s`/`__x87rt_p` are already
+    // defined in the HLE runtime, so anything reaching this path links it.
+    // Declared noreturn: `__builtin_trap` was, so without it the compiler would
+    // consider the out-of-range access after the call reachable — the guard must
+    // terminate the path exactly as before, not merely abort at runtime.
+    "extern void aret_x87_stack_error(const char*,int,int) __attribute__((noreturn));\n",
+    "static inline long double* __x87rt_at(int i){int k=__x87rt_p-1-i;if(k<0||k>=16)aret_x87_stack_error(\"st(i) access\",i,__x87rt_p);return &__x87rt_s[k];}\n",
+    "static inline void __x87rt_psh(long double v){if(__x87rt_p<0||__x87rt_p>=16)aret_x87_stack_error(\"push\",-1,__x87rt_p);__x87rt_s[__x87rt_p++]=v;}\n",
     "static inline uint64_t __x87rt_ld32(uint64_t a){__x87rt_psh((long double)*(float*)(uintptr_t)a);return 0;}\n",
     "static inline uint64_t __x87rt_ld64(uint64_t a){__x87rt_psh((long double)*(double*)(uintptr_t)a);return 0;}\n",
     "static inline uint64_t __x87rt_ld80(uint64_t a){__x87rt_psh(*(long double*)(uintptr_t)a);return 0;}\n",

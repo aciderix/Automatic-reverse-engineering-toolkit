@@ -256,7 +256,13 @@ recompilabilité **100 %** · WASM **7/7**.
   `__aret_x87_ret`.
 - **Filet runtime** (`__x87rt_*`, incrément 1, SOUND) : quand la passe statique
   **bail**, les ops FPU s'exécutent contre une **pile FPU runtime** (correcte par
-  construction, bornée → `__builtin_trap` sur under/overflow). Gaté transpile-only,
+  construction, bornée → abort sur under/overflow). ⚠️ Cet abort était **muet**
+  (`__builtin_trap` nu) jusqu'au **2026-07-26** : il tuait le process **stdout bufferisé**,
+  donc un run très avancé **paraissait n'avoir rien produit** (fausse piste vécue sur
+  WinMerge). Il route désormais sur **`aret_x87_stack_error`** — `fflush(stdout)` d'abord,
+  puis op/index/profondeur (UNDERFLOW vs OVERFLOW), puis dump de trace I1, puis `abort` ;
+  déclarée `noreturn` (sinon l'accès hors bornes suivant redevient atteignable = UB).
+  L'arrêt est inchangé, seule la valeur diagnostique est ajoutée. Gaté transpile-only,
   purement additif. Couvre load/store/const/arith/fxch/fabs/fchs/fsqrt/frndint/
   fldcw + **compare `fcom/fucom st(i)`** (fix récent : lire `op_count()-1`, pas ST0)
   + **les transcendantales brutes** `fsin/fcos/fptan/fpatan/fyl2x/f2xm1/fscale/fsincos`

@@ -5300,4 +5300,34 @@ Détail : **70 §6** (roadmap). Résumé :
   `wmg_out*`) ⇒ un winediff entier a rendu **104 FAIL « PE build: »/« dlltool: »/« windres: »** — **échecs de BUILD, pas de comportement**.
   Toujours vérifier la *nature* d'un FAIL avant de conclure à une régression : ici `df -h` suffisait. Nettoyage puis re-run.
 
+### 2026-07-26 — [X87][SOUNDNESS] **✅ Le garde de pile x87 runtime était SOUND mais MUET — il diagnostique désormais avant d'aborter**
+
+- **Le constat** (relevé en butant dessus avec WinMerge) : `__x87rt_at`/`__x87rt_psh` gardent la pile FPU modélisée par un
+  `__builtin_trap()` **nu**. Le contrat §0 est respecté sur le fond — une pile incohérente **trappe** au lieu de lire un slot
+  périmé — mais l'échec est **non diagnostique** de deux façons, dont la seconde est un vrai piège :
+  1. **Aucun message** : rien ne dit *quoi* a débordé (quelle op, quelle profondeur, quel index).
+  2. **La sortie du programme est PERDUE** : le trap tue le process avec `stdout` encore **bufferisé**. Un run qui avait en
+     fait progressé très loin **paraît n'avoir rien produit du tout** — ce qui envoie chercher un échec précoce fantôme.
+     C'est exactement ce qui m'est arrivé sur WinMerge (« aucune sortie » ⇒ fausse piste).
+- **Preuve avant/après** (harnais `x87t` : `printf` puis underflow, stdout dans un **pipe** = pleinement bufferisé) :
+  - **ancien** (`__builtin_trap` nu) → **AUCUNE sortie**, exit **132** (SIGILL). Le `printf` du programme est perdu.
+  - **nouveau** → `PROGRAM OUTPUT BEFORE THE FAULT` **préservé**, puis
+    `ARET: x87 runtime stack UNDERFLOW in st(i) access: requested st(0) at depth 0 (slot -1)` + l'explication, exit **134**.
+- **Le fix** : `aret_x87_stack_error(op, i, depth)` (runtime HLE) — **`fflush(stdout)` D'ABORD** (préserver la preuve de
+  jusqu'où on est allé), puis nommer op/index/profondeur (UNDERFLOW vs OVERFLOW distingués), puis `aret_trace_dump()`
+  (la trace I1 si `ARET_TRACE=1`), puis `abort()`. **L'abort ne bouge pas** : seule la valeur diagnostique est ajoutée.
+- **Deux points techniques qui rendent le changement sûr** :
+  - **`__attribute__((noreturn))` obligatoire** : `__builtin_trap` l'est. Sans ça, le compilateur considère l'accès **hors
+    bornes** placé après l'appel comme atteignable — on aurait remplacé un chemin terminé par un chemin UB. La sémantique
+    reste **exactement** l'ancienne.
+  - **Zéro nouvelle dépendance de lien** : vérifié **avant** d'écrire le code — `__x87rt_s`/`__x87rt_p` sont **déjà définis
+    dans `aret_hle.c`**, donc tout programme atteignant ce garde lie déjà le runtime HLE. (Le commentaire de `__ix_diverr`
+    rappelle que `__builtin_trap` était choisi pour n'avoir **aucune** dépendance de bibliothèque — la question méritait
+    d'être tranchée par la mesure, pas supposée.)
+- **Portes** : difftest **272/272**, transpile **4/4** hash **`19acad982194bf07` inchangé**, **winediff 182/183** (seul rouge
+  `gdi_uifont`, environnemental) — la porte qui compte ici, puisque c'est un changement de **runtime** touchant tout programme.
+- **Portée** : ne débloque rien en soi (l'abort reste un abort) — c'est un **investissement de diagnostic** sur le mur x87
+  courant de WinMerge (`sub_867436`) et sur tous les futurs. Le §0 exige un arrêt **bruyant** ; un arrêt bruyant qui ne dit
+  pas pourquoi respecte la lettre et rate l'intention.
+
 <!-- NOUVELLES ENTRÉES ICI (garder l'ordre chronologique, plus récent en bas) -->

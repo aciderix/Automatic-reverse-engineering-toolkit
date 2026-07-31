@@ -2391,6 +2391,37 @@ int __x87rt_p;
 int __x87rt_rc;
 unsigned short __x87rt_sw;
 
+/* Runtime x87 stack under/overflow. The guard itself is old and SOUND (§0: an
+ * inconsistent stack traps rather than reading a stale slot); what was missing is
+ * that it was MUTE — a bare __builtin_trap gives no reason, and, worse, kills the
+ * process with stdout still buffered, so the program's output up to that point is
+ * LOST. A run that had in fact progressed a long way then looks like it produced
+ * nothing at all, which sends the reader hunting for a phantom early failure.
+ *
+ * So: flush stdout FIRST (preserve the evidence of how far it got), then say which
+ * op faulted at what depth, then dump the trace and abort exactly as before. The
+ * abort is unchanged — this only makes the existing loud failure diagnostic.
+ *
+ * `depth` is the live __x87rt_p; `i` is the st(i) index requested (-1 for a push,
+ * which has no index). A negative depth means the model popped more than it pushed
+ * (a value an unrecognised callee consumed); depth >= 16 means genuine overflow. */
+__attribute__((noreturn))
+void aret_x87_stack_error(const char *op, int i, int depth) {
+    fflush(stdout);
+    fprintf(stderr, "ARET: x87 runtime stack %s in %s: ",
+            depth < 0 || (i >= 0 && depth - 1 - i < 0) ? "UNDERFLOW" : "OVERFLOW", op);
+    if (i >= 0) {
+        fprintf(stderr, "requested st(%d) at depth %d (slot %d)\n", i, depth, depth - 1 - i);
+    } else {
+        fprintf(stderr, "push at depth %d\n", depth);
+    }
+    fprintf(stderr, "ARET: the modelled FPU stack is inconsistent — most likely an "
+                    "unrecognised callee left/consumed a value in st(0) that the model "
+                    "never saw. Refusing to read a stale slot.\n");
+    aret_trace_dump();
+    abort();
+}
+
 /* ------------------------------------------------------------------ */
 /* setjmp/longjmp support.                                            */
 /*                                                                    */
