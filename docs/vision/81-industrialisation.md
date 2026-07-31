@@ -426,4 +426,18 @@ affiché. On priorise par la donnée.
   sans qualifier la **nature** des adresses — même piège que les « 104 FAIL » winediff qui étaient des échecs de build.
   Bénéfice net : deux pistes éliminées proprement (l'appel virtuel suspecté est dans une branche **jamais exécutée**). Échafaudage de diagnostic **retiré** (§0.2 « zéro effet quand désactivé »). Détail 71.
 
+- **2026-07-26 (✅ mur /GS RÉSOLU — le callee-pop ne traversait pas les tail calls ; validation de bout en bout de la chaîne I1)**
+  — `compute_callee_pops` ne lisait que les `ret N` du corps : une fonction terminée par `jmp <cible>` (thunk MSVC, idiome
+  omniprésent) sortait à **pop 0** alors que l'appelant doit honorer le pop de la **cible**. Mesuré : `0x6d96d0 → jmp
+  0x6bad9d` (0 au lieu de 4) ⇒ `sub_791ebc` finit **4 octets bas** ⇒ échec du cookie /GS. Fix = arêtes de tail call +
+  propagation en **point fixe**. Portes de la zone à haut risque toutes vertes, **dont les 15 fixtures de lifting-DLL**
+  (`comctl32_imagelist` incluse — celle qui avait attrapé le revert précédent). WinMerge passe le /GS et avance jusqu'à un
+  mur **HLE** simple (`SystemParametersInfoW` action `0x1002`) : **le driver rebascule du lift vers la surface API**.
+  **Enseignement d'outillage (le plus réutilisable)** : la chaîne qui a produit ce diagnostic est faite d'incréments ajoutés
+  cette session — garde x87 diagnostique → `ARET_TRACE_DUMP=N` → constat que **la dérive esp est STATIQUE** (esp par valeur
+  ⇒ figée dans le C) → **instrumentation directe du C généré** (sondes par **numéro de ligne**, recompilation d'un seul
+  chunk + relink des `.o` existants). Ce dernier outil est le bon niveau pour toute dérive esp future : il donne une
+  timeline sans ambiguïté, là où gdb (l'`__esp` modélisé ≠ `$esp` hôte), la remontée arrière (boucles) et les marqueurs de
+  trace par callee (**10 sites** pour un même appelé) échouent tous. Détail 71.
+
 <!-- NOUVELLES LIGNES D'AVANCEMENT ICI (plus récent en bas) -->

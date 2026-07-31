@@ -315,6 +315,13 @@ recompilabilité **100 %** · WASM **7/7**.
   ordinaux ABI-stables). Ex. `COMCTL32 #17 = InitCommonControls` (le vrai mur de `itiem95.exe`, CD 1997 → avance à
   `DialogBoxIndirectParamA`). Inconnu ⇒ non résolu (abort sound). Gardé `winecorpus/comctl32_ordinal.{c,def}`
   (import forcé par ordinal via dlltool, bit-identique Wine).
+- **Callee-pop PROPAGÉ À TRAVERS UN TAIL CALL (2026-07-26)** : `compute_callee_pops` ne lisait que les `ret N` du **corps**,
+  donc une fonction dont le retour est `jmp <autre fonction>` (thunk MSVC : ajustement `this`, forwarder, wrapper) sortait
+  à **pop 0** — alors que l'appelant doit honorer le pop de la **cible** (c'est son `ret N` qui rend la main). Tout appelant
+  d'un tel thunk laissait donc esp N octets bas **en silence**. Fix = arêtes de tail call (dernier `jmp` sortant vers
+  l'entrée d'une fonction **récupérée**) + propagation en **point fixe** (les thunks s'enchaînent), cible inconnue ⇒ pas
+  d'arête. Débloqua le mur **/GS de WinMerge** (`0x6d96d0 → jmp 0x6bad9d` : 0 au lieu de 4 ⇒ dérive esp de 4 ⇒ échec du
+  cookie). Hash **inchangé**, **15 fixtures lifting-DLL vertes**. Cf. 71 (2026-07-26 [ABI][LIFT] ✅).
 - **tail-`jmp [import]`/`jmp reg`** reçoit **esp+4** (l'adresse de retour est encore
   sur la pile — TLS/Fls/encoded-ptr, l_alloc→realloc).
 - **stdcall pop sur `call reg`** (import chargé en registre puis appelé).

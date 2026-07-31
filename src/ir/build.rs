@@ -838,6 +838,48 @@ pub fn compute_callee_pops(funcs: &[&Function]) -> HashMap<u64, u16> {
             m.insert(f.entry, pop);
         }
     }
+    // A function whose return is a TAIL CALL (`jmp <other function>`) has no `ret N`
+    // of its own on that path, so the body scan above yields 0 — yet the ABI pop the
+    // CALLER must honour is the one the tail-call TARGET performs, since that target's
+    // `ret N` is what finally returns to the caller. Missing this makes every caller
+    // of a stdcall/thiscall thunk leave esp N bytes low, silently, for the rest of the
+    // function. Measured on WinMerge: `sub_6d96d0` ends in `jmp sub_6bad9d` (pop 4) and
+    // was modelled as popping 0, which is exactly the 4-byte drift its caller
+    // `sub_791ebc` then failed its /GS cookie check on.
+    //
+    // Propagated to a fixpoint because thunks chain. `max` matches the multiple-`ret N`
+    // rule above. Only edges to a RECOVERED function entry are followed — an unknown
+    // target teaches us nothing and must not be guessed at (§0.4).
+    let entries: std::collections::HashSet<u64> = funcs.iter().map(|f| f.entry).collect();
+    let mut tail: Vec<(u64, u64)> = Vec::new();
+    for f in funcs {
+        for b in f.blocks.values() {
+            let Some(ins) = b.insns.last().map(|i| &i.raw) else { continue };
+            if ins.mnemonic() != iced_x86::Mnemonic::Jmp {
+                continue;
+            }
+            let t = ins.near_branch_target();
+            // Leaves this function (not an internal block) and lands on another
+            // recovered function's entry: that is the tail call.
+            if t != 0 && t != f.entry && !f.blocks.contains_key(&t) && entries.contains(&t) {
+                tail.push((f.entry, t));
+            }
+        }
+    }
+    for _ in 0..16 {
+        let mut changed = false;
+        for &(from, to) in &tail {
+            let Some(&tp) = m.get(&to) else { continue };
+            let cur = m.get(&from).copied().unwrap_or(0);
+            if tp > cur {
+                m.insert(from, tp);
+                changed = true;
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
     m
 }
 
