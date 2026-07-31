@@ -420,10 +420,10 @@ affiché. On priorise par la donnée.
   méthode important découvert au passage** : dans le modèle *shared-stack*, `esp` est passé **par valeur** et l'esp de
   l'appelant après un appel est calculé **statiquement** ⇒ une dérive esp n'est **pas** un phénomène d'exécution, elle est
   **figée dans le C généré**. Journaliser l'esp au retour n'apprendrait donc rien : la chaîne se remonte **statiquement**
-  (`v609 ← … ← v22`), ce qui a directement désigné un **appel virtuel** comme suspect. **Trouvaille générale (le vrai
-  livrable)** : `__aret_callee_pop` rend **0** indifféremment pour une fonction **récupérée cdecl** (0 **prouvé**) et pour une
-  **adresse inconnue** (0 **deviné**) — violation du §0.4, et mécanisme silencieux de dérive esp. Mesuré : 1095 ratés/run, 60
-  VAs, **55 non récupérées**. Fix cadré + précautions au 70 §P1ter (zone à haut risque : winediff obligatoire, mesurer le
-  corpus avant l'abort strict). Échafaudage de diagnostic **retiré** (§0.2 « zéro effet quand désactivé »). Détail 71.
+  (`v609 ← … ← v22`), ce qui a directement désigné un **appel virtuel** comme suspect. **Hypothèse `__aret_callee_pop` posée puis CORRIGÉE par la mesure** : les 55 VAs « non
+  récupérées » sont des **slots IAT** (677 déclarés), où rendre 0 est **voulu par le design** (§4.3, c'est ce qui évite le
+  double-pop) — **pas** un trou de soundness, **zéro instance nuisible**. Leçon : j'avais tiré une cause d'un **compteur**
+  sans qualifier la **nature** des adresses — même piège que les « 104 FAIL » winediff qui étaient des échecs de build.
+  Bénéfice net : deux pistes éliminées proprement (l'appel virtuel suspecté est dans une branche **jamais exécutée**). Échafaudage de diagnostic **retiré** (§0.2 « zéro effet quand désactivé »). Détail 71.
 
 <!-- NOUVELLES LIGNES D'AVANCEMENT ICI (plus récent en bas) -->

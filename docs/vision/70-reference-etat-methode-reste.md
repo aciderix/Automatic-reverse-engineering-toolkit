@@ -869,15 +869,16 @@ locale C**, mais rien ne garantit qu'on y est. **Fix propre** : accepter `NULL` 
 toute autre locale (y compris `""`, qui demande la locale système). ⚠️ À faire avec la porte winediff complète : `""` est courant et
 certains binaires du corpus peuvent l'appeler — mesurer d'abord combien, puis trancher (abort vs modéliser la locale système).
 
-### P1ter — ⚠️ **Trou de soundness connu : `__aret_callee_pop` devine cdecl sur une adresse INCONNUE** (trouvé 2026-07-26, non corrigé)
-La table runtime ne stocke que les pops **non nuls**, donc `__aret_callee_pop` rend **0** aussi bien pour (1) une fonction
-**récupérée et cdecl** — où 0 est **prouvé** — que pour (2) une **adresse inconnue** (non récupérée, donnée, cible indirecte
-non résolue) — où 0 est une **devinette**, contraire au **§0.4**. Si la cible réelle est `__stdcall`/`__thiscall` à `ret N`,
-**esp dérive en silence** (la famille de bugs la plus coûteuse : cksum, 7za, mur `0xe`). **Mesuré** sur WinMerge : 1095 ratés
-de table / run, **60 VAs distinctes dont 55 ne sont pas des fonctions récupérées**. **Fix cadré** : émettre **toutes** les
-fonctions récupérées (pop 0 compris) pour que « absent » signifie **inconnu**, puis trancher le comportement sur inconnu.
-⚠️ Zone à **haut risque** (un 1ᵉʳ fix callee-pop a déjà été reverté pour double-pop sur le lifting-DLL) : **winediff complet
-obligatoire**, et **mesurer le corpus avant** de choisir l'abort strict. Cf. 71 (2026-07-26 [ABI][SOUNDNESS]).
+### P1ter — `__aret_callee_pop` : « inconnu » vs « cdecl prouvé » (nuance mesurée 2026-07-26 — **PAS le bug qu'on croyait**)
+Première lecture (fausse) : « 55 VAs non récupérées reçoivent un pop deviné à 0 ». **Mesure de contrôle** : ces VAs sont des
+**slots IAT** (677 déclarés dans la plage `0x651xxx` de WinMerge) — et le §4.3 dit que le design **repose** sur
+`__aret_callee_pop` rendant **0 sur un slot d'import** (c'est ce qui évite le double-pop : le pop statique in-block fournit
+`@N` une seule fois). Donc **0 y est voulu et correct**, pas une devinette. ⇒ **aucune instance mesurée de nuisance.**
+Ce qui subsiste, en théorie et sans cas observé : la table ne stockant que les pops **non nuls**, « absent » ne distingue pas
+« récupérée et cdecl » (0 **prouvé**) de « adresse vraiment inconnue, ni fonction ni slot IAT » (0 **deviné**). À **ne pas**
+traiter spéculativement : zone à haut risque (un 1ᵉʳ fix callee-pop a été reverté pour double-pop sur le lifting-DLL), et
+**aucun binaire ne l'exige aujourd'hui**. Rouvrir seulement si une mesure exhibe une VA de ce troisième type.
+Cf. 71 (2026-07-26 [ABI][SOUNDNESS], entrée **corrigée**).
 
 ### P2 — Robustesse x87 : joins ambigus + transcendantales ⇒ **QUALITÉ, pas correction** (MESURÉ 2026-07-10)
 **Mesure décisive (règle « vérifier si le filet runtime est actif AVANT de conclure ») :**

@@ -5413,32 +5413,26 @@ Détail : **70 §6** (roadmap). Résumé :
   au lieu de demander une bissection. C'est la suite naturelle du chantier I1.
 - **Portes** (changement runtime confiné à `aret_trace_dump`, chemin crash uniquement) : difftest, hash transpile, winediff.
 
-### 2026-07-26 — [ABI][SOUNDNESS] **`__aret_callee_pop` CONFOND « cdecl prouvé » et « adresse inconnue » — trou de soundness général (mesuré, non corrigé)**
+### 2026-07-26 — [ABI][SOUNDNESS] **`__aret_callee_pop` : hypothèse posée puis ⚠️ CORRIGÉE par la mesure — ce n'était pas un trou**
 
-- **Contexte** : en traquant la dérive esp de 4 octets de `sub_791ebc`, le suspect naturel est l'**appel virtuel**
-  `v673 = __aret_callee_pop(*(uint32_t*)(v671+0x38c)); v674 = aret_call(...); v678 = v665 + v673;` — si le pop rendu
-  est 0 alors qu'il devrait valoir 4, esp finit exactement 4 trop bas (le signe et l'ampleur mesurés).
-- **Mesure** (instrumentation temporaire du chemin de raté de table, retirée depuis) : **1095 ratés** dans un run,
-  sur **60 VAs distinctes** — dont **5 seulement sont des fonctions récupérées** ; les **55 autres ne sont pas des
-  fonctions récupérées du tout** (plage `0x651xxx` contiguë, profil de table/données).
-- **⚠️ LE TROU, GÉNÉRAL ET INDÉPENDANT DE CE BUG** : `__aret_callee_pop` rend **0** dans **deux** situations que
-  rien ne distingue —
-  1. **fonction récupérée, absente de la table parce qu'elle est cdecl** ⇒ 0 est **PROUVÉ correct** (la table ne
-     stocke que les pops non nuls) ;
-  2. **adresse inconnue** (non récupérée, donnée, cible indirecte non résolue) ⇒ 0 est une **DEVINETTE**.
-  Le cas 2 est exactement ce que le **§0.4** interdit (« rien de prouvé = rien de deviné ») : une cible dont on ne
-  sait rien se voit attribuer la convention cdecl, et si elle est en réalité `__stdcall`/`__thiscall` à `ret N`,
-  **esp dérive en silence** — la famille de bugs la plus coûteuse du projet (cksum, 7za, mur `0xe`, et probablement
-  celui-ci). Le commentaire du header le dit d'ailleurs sans en tirer la conséquence : « 0 for cdecl/**unknown** ».
-- **Fix cadré (NON fait — demande sa propre session)** : distinguer les deux cas, par exemple en émettant dans la
-  table **toutes** les fonctions récupérées (pop 0 inclus) pour que « absent » signifie **inconnu**, puis décider du
-  comportement sur inconnu — **abort sound** (strict) ou compteur diagnostique. ⚠️ **Changement de callee-pop = zone
-  à haut risque** : la leçon du 2026-07-26 (1ᵉʳ fix reverté, régression `comctl32_imagelist` par double-pop) impose
-  **winediff complet avec les fixtures de lifting-DLL AVANT de conclure** ; difftest/cpudiff/funcdiff ne l'attrapent
-  pas. Et l'abort strict casserait probablement beaucoup de binaires d'un coup ⇒ **mesurer le corpus d'abord**
-  (combien de VAs inconnues, sur combien de binaires), exactement comme pour la dette `setlocale` (§P1bis).
-- **Statut de la dérive de `sub_791ebc`** : le mécanisme est **plausible et cadré**, **pas prouvé** — il reste à
-  montrer que l'un de ces ratés est bien sur le chemin fautif. L'échafaudage de diagnostic a été **retiré** (un appel
-  sur chemin chaud violerait le « zéro effet quand désactivé » du 81 §0.2).
-
-<!-- NOUVELLES ENTRÉES ICI (garder l'ordre chronologique, plus récent en bas) -->
+- **Hypothèse initiale (publiée, puis corrigée)** : en traquant la dérive esp de 4 o de `sub_791ebc`, j'ai instrumenté les
+  ratés de la table de callee-pop → **1095 ratés / run, 60 VAs distinctes, dont 55 « non récupérées »** — et j'en ai conclu
+  trop vite à un trou de soundness général (0 deviné sur adresse inconnue, §0.4).
+- **⚠️ MESURE DE CONTRÔLE — L'HYPOTHÈSE EST FAUSSE** : ces VAs sont des **slots IAT** (`aret_iat.c` en déclare **677** dans
+  la plage `0x651xxx` de WinMerge). Or le **§4.3 documente que le design REPOSE** sur `__aret_callee_pop` rendant **0 sur un
+  slot d'import** — c'est exactement ce qui **évite le double-pop** (le pop statique in-block fournit `@N` **une seule
+  fois**). **0 y est donc voulu et correct.** Les 5 VAs restantes sont de vraies fonctions récupérées : absentes de la table
+  = **cdecl**, 0 correct également. ⇒ **zéro instance nuisible mesurée.**
+- **Ce qui subsiste (théorique, aucun cas observé)** : « absent de la table » ne distingue pas « récupérée et cdecl » (0
+  **prouvé**) d'une adresse d'un **troisième type** — ni fonction récupérée, ni slot IAT. **À ne pas traiter
+  spéculativement** : zone à haut risque (un 1ᵉʳ fix callee-pop a été reverté pour double-pop sur le lifting-DLL) et **aucun
+  binaire ne l'exige**. Rouvrir seulement si une mesure exhibe une VA de ce troisième type. Cf. 70 §P1ter (réécrit).
+- **Leçon (la vraie valeur de l'entrée)** : j'ai publié une cause à partir d'un **compteur** (« 55 non récupérées ») sans
+  qualifier la **nature** des adresses comptées. Le compteur était juste, l'interprétation fausse. C'est le **même piège**
+  que le winediff à « 104 FAIL » qui étaient des échecs de *build* : **toujours qualifier la nature d'un signal avant d'en
+  tirer une cause** — et à plus forte raison avant de toucher une zone à haut risque.
+- **Bénéfice net malgré tout** : deux pistes **éliminées proprement** pour la dérive de `sub_791ebc` — (a) l'appel virtuel
+  suspecté est dans une branche **jamais exécutée** (`sub_6ae472` n'apparaît **pas une seule fois** dans la trace) ; (b) les
+  ratés de pop sont **voulus**. La dérive est donc ailleurs, et le périmètre de recherche est réduit d'autant.
+- **Piste restante, cadrée** : la chaîne esp exécutée donne `v555 = v514 + v515 + v531` et `v555 = 0x120ce160` (mesuré) ;
+  il reste à remonter `v514` (statiquement, sans rebuild — la dérive est **figée dans le C**).
