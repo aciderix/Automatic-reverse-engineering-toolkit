@@ -5288,7 +5288,7 @@ Détail : **70 §6** (roadmap). Résumé :
 - **ADDITIF PAR CONSTRUCTION (la propriété qui rend le changement sûr)** : ce bras ne capture **que** des cas qui tombaient juste en dessous
   dans l'`Asm`/abort. Autrement dit il ne peut **que** transformer un abort en code modélisé — **aucun programme qui marche aujourd'hui ne
   change de comportement**. Confirmé par la mesure : **transpile hash `19acad982194bf07` INCHANGÉ**.
-- **Portes toutes vertes** : difftest **272/272**, hash **inchangé**, **cpudiff 5/0**, **funcdiff 20558 scored / 0 divergence**, winediff.
+- **Portes toutes vertes** : difftest **272/272**, hash **inchangé**, **cpudiff 5/0**, **funcdiff 20558 scored / 0 divergence**, **winediff 182/183** (seul rouge = `gdi_uifont` environnemental ; les 6 fixtures comctl32 du lifting-DLL passent — celles qui avaient attrapé la tentative callee-pop revertée).
 - **✅ Effet WinMerge (preuve positive, backtrace gdb)** : `sub_867400` **appelle réellement** `sub_867436` (frames #3→#2) — le `je` est
   désormais un vrai tail call conditionnel. WinMerge **avance dans `sub_867436`** et bute sur un **mur NOUVEAU et indépendant** : le garde de
   la **pile x87 runtime** (`__x87rt_ldi`→`__x87rt_at`→**`ud2`** = le `__builtin_trap` documenté §4.2 sur under/overflow).
