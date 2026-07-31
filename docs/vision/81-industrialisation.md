@@ -314,4 +314,16 @@ affiché. On priorise par la donnée.
   passe `held` au cross-block **sûr** (registres import-invariants, single-def depuis un slot) — sans toucher le filet runtime ni le
   lifting-DLL ; validé par comctl32_imagelist **+** winediff complet **+** WinMerge. Détail 71 (2026-07-26 [ABI][LIFT]).
 
+- **2026-07-26 (I5, incrément 3 — ✅ mur `0xe` RÉSOLU proprement ; WinMerge atteint l'init GUI de MFC)** — Après le revert, fix repris **au bon
+  endroit** : pas le filet runtime (qui double-poppait), mais la passe qui suit les registres porteurs d'import, jusque-là **remise à zéro par
+  bloc**. Nouveau `block_entry_imports()` = **dataflow MUST** sur le CFG (meet = **intersection** aux jointures ⇒ un mapping ne survit que si
+  **tous** les chemins s'accordent ; init **optimiste** ⇒ survit au back-edge d'une boucle ; racine ancrée par **adresse** ⇒ robuste au bloc
+  d'entrée qui est lui-même en-tête de boucle ; nommage **après** convergence ; repli = ancien comportement). **Pas de double-pop** : la table
+  runtime reste inchangée (rend 0 sur les slots d'import) donc le pop statique in-block fournit `@N` **une seule fois** — et **zéro impact
+  multi-modules** (la cause de la régression précédente). **Portes** : **winediff 178/179, 0 FAIL** (la porte qui avait attrapé la régression),
+  **comctl32_imagelist MATCH**, difftest 272/272, hash **inchangé**, cpudiff/funcdiff. **Effet** : WinMerge **dépasse** le `0xe`, traverse les
+  ctors globaux MFC et **atteint l'init GUI** (`wcscat_s`, `SystemParametersInfoA`), puis **abort sound** sur `SystemParametersInfoA action
+  0x29`. ⇒ **Le driver bascule du lift-correctness vers la surface GUI/HLE** = exactement le périmètre **I5**, désormais data-driven au coup
+  par coup (chaque API comblée vérifiée vs Wine). Détail 71 (2026-07-26 [ABI][LIFT] ✅).
+
 <!-- NOUVELLES LIGNES D'AVANCEMENT ICI (plus récent en bas) -->

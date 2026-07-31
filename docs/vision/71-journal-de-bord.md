@@ -5153,4 +5153,42 @@ Détail : **70 §6** (roadmap). Résumé :
 - **Acquis** : la cause du mur `0xe` est **prouvée** (register-indirect stdcall-import cross-block), le fix est **cadré et borné**, et la
   branche est **revenue à un état correct** (aucune régression). Le mur `0xe` reste ouvert mais parfaitement caractérisé.
 
+### 2026-07-26 — [ABI][LIFT] **✅ Mur `0xe` RÉSOLU proprement : dataflow MUST des registres porteurs d'import (cross-block) — WinMerge atteint l'init GUI de MFC**
+- **Le bon endroit** (≠ 1ʳᵉ tentative, revertée) : ne PAS toucher au filet runtime (`__aret_callee_pop`) ni au lifting-DLL — corriger la
+  **seule passe trop faible**, celle qui suit les registres porteurs d'un pointeur d'import (`held`, `build.rs`). Elle était **remise à zéro
+  par bloc** : un `mov reg,[iat]` dans un bloc et un `call reg` dans un autre ⇒ appel **ni nommé ni poppé** ⇒ dérive esp de `@N`/appel.
+- **Fix : `block_entry_imports()`** = **dataflow MUST avant** sur le CFG, qui calcule la carte `registre → import` **prouvée** en entrée de
+  chaque bloc :
+  - **meet = INTERSECTION** sur les prédécesseurs → un mapping ne survit que là où **tous** les chemins s'accordent sur le **même** import.
+    C'est ce qui rend le cross-block **sound** et exclut précisément le piège documenté (`PeekMessageA` nommé `GetModuleHandleA`) qui avait
+    fait abandonner le threading « en ordre de stockage ».
+  - **transfert** = la fonction déjà utilisée en intra-bloc (`update_import_regs`) : tue le mapping sur toute autre écriture, sur les
+    **clobbers ecx/edx** que le lifter émet à **chaque** appel (`lift.rs` : `Set{reg, Undef}`), et sur un `Asm` opaque. **Exhaustif** :
+    `Set` est la **seule** écriture de registre pré-SSA (vérifié sur l'enum `Stmt`) ⇒ aucune écriture ne peut échapper au kill.
+  - **init optimiste** (`None` = pas encore calculé, ne contribue à aucun meet) ⇒ un mapping établi **avant** une boucle **survit au
+    back-edge** (exactement la forme de WinMerge : load hors boucle, `call reg` dans la boucle). Une init pessimiste (vide) aurait donné le
+    plus petit point fixe et **raté** ce cas.
+  - **racine ancrée par ADRESSE** (`func.entry`), pas par « sans prédécesseur » : quand le bloc d'entrée **est lui-même un en-tête de
+    boucle** (forme réelle, cf. split pre-header SSA §4.1) il a un prédécesseur, et le semer depuis ce seul back-edge serait **faux**. La
+    racine est épinglée à la carte **vide** (rien de supposé sur les registres venant de l'appelant) — et intersecter vide avec le back-edge
+    reste vide, donc c'est aussi **exact**.
+  - **terminaison** : une carte ne fait que **rétrécir** une fois calculée (domaine fini registres × imports) ; borne défensive `4n+16`
+    dont le repli (tout-vide) **est exactement l'ancien comportement**. Le nommage ne tourne **qu'après** convergence (jamais sur un état
+    intermédiaire).
+- **Pourquoi pas de double-pop (le piège de la 1ʳᵉ tentative)** : le filet runtime `callee_pop_adjust` s'applique déjà à tout appel indirect,
+  mais `__aret_callee_pop` **ignore** les slots d'import ⇒ rend **0**. Le pop statique in-block (`stdcall_pop_for_regcall`) ajoute `@N`.
+  Total = `@N` **exactement**, pour l'in-block **comme** pour le cross-block désormais couvert. Aucun changement de la table runtime ⇒ **zéro
+  impact sur la résolution d'imports multi-modules** du lifting-DLL (la cause de la régression précédente).
+- **✅ Portes TOUTES vertes** : **winediff 178/179, 0 FAIL** (= la référence exacte ; seul non-pass = `gdi_uifont` **environnemental**) — **la
+  porte qui avait attrapé la régression précédente** ; **`comctl32_imagelist` MATCH** (les 6 lignes, testé en direct) ; difftest **272/272** ;
+  transpile hash **`19acad982194bf07` INCHANGÉ** ; cpudiff + funcdiff (voir ci-dessous).
+- **✅ Effet WinMerge (preuve positive)** : le mur `0xe` **disparaît**. WinMerge franchit toute la série de ctors globaux MFC **et atteint
+  l'init GUI de MFC** — il appelle maintenant `wcscat_s` et `SystemParametersInfoA` — puis **abort proprement (sound)** sur
+  `SystemParametersInfoA: unmodelled action 0x29` (« refusing to guess », §0). ⇒ le driver est passé du **lift-correctness** à la **surface
+  GUI/HLE** (= le chantier **I5** du doc 81, data-driven : combler l'action SPI + `wcscat_s`, chacun vérifié vs Wine).
+- **Note testabilité** : pas de fixture minimale committée — le pattern (`mov reg,[iat]` puis `call reg` **dans un autre bloc**, sur un
+  stdcall) est produit par MSVC optimisé, pas par mingw i686 (qui émet des `call [iat]` directs). Vérif = **portes complètes** (0 dommage,
+  dont winediff qui exerce le lifting-DLL) **+** WinMerge bout-en-bout (le mur disparaît ; la cause `GetSysColor@4` avait été prouvée par
+  watchpoint matérielle).
+
 <!-- NOUVELLES ENTRÉES ICI (garder l'ordre chronologique, plus récent en bas) -->

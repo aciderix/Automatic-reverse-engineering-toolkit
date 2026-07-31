@@ -638,18 +638,20 @@ pub fn build_ir(prog: &Program, func: &Function) -> IrFunction {
     // calls through them too. The tracking is a simple forward scan invalidated
     // on reassignment / opaque `Asm`.
     //
-    // `held` is RESET per block: it is a straight-line forward scan, valid only
-    // within a basic block. Threading it across blocks in storage order (which is
-    // NOT execution/dataflow order) leaked a stale `reg -> importA` mapping into a
-    // later block that actually loaded `importB` into that register, mis-resolving
-    // its `call reg` to the wrong shim (e.g. a message loop's PeekMessageA rendered
-    // as GetModuleHandleA). A register-held import call spanning a block boundary is
-    // therefore left as an indirect call: at runtime it dispatches through the IAT
-    // slot's self-token (correct shim) and gets its @N via __aret_callee_pop (which
-    // knows import IAT slots) — sound, just not statically named.
+    // Within a block this is a straight-line forward scan; across blocks it is
+    // seeded with what `block_entry_imports` PROVES holds on entry (a MUST
+    // dataflow, intersection at joins). Threading the map in storage order —
+    // which is NOT execution order — was unsound: it leaked a stale
+    // `reg -> importA` mapping into a later block that actually loaded `importB`,
+    // mis-resolving its `call reg` to the wrong shim (a message loop's
+    // PeekMessageA rendered as GetModuleHandleA). The dataflow keeps a mapping
+    // only where every path agrees, which fixes the cross-block case (the cached
+    // `call reg` now gets both its name and, above all, its `@N` pop) without
+    // that hazard.
     {
-        for b in &mut blocks {
-            let mut held: std::collections::HashMap<Location, String> = std::collections::HashMap::new();
+        let entry_imports = block_entry_imports(&blocks, prog, func.entry);
+        for (bi, b) in blocks.iter_mut().enumerate() {
+            let mut held: HeldImports = entry_imports[bi].clone();
             let mut out: Vec<Stmt> = Vec::with_capacity(b.stmts.len());
             for mut s in std::mem::take(&mut b.stmts) {
                 // A `call reg` through a register that holds a __stdcall import
@@ -2015,6 +2017,78 @@ fn stdcall_pop_for_regcall(s: &Stmt, held: &HeldImports) -> Option<u32> {
         Stmt::Switch { value, .. } => in_expr(value, held),
         _ => None,
     }
+}
+
+/// The register → import-name map that provably holds on ENTRY to each block.
+///
+/// Compilers load an import's IAT slot into a callee-saved register once and then
+/// `call reg` repeatedly from *other* blocks (the MSVC/MFC idiom: a cached
+/// `GetSysColor@4` called from a colour-caching loop). A per-block forward scan
+/// cannot see that load, so such a call stayed unnamed and — the real damage —
+/// **unpopped**: its `@N` stack args leaked, drifting esp by N per call until a
+/// later SEH-frame local aliased a stale pushed value (WinMerge/MFC90's `0xe`
+/// fault).
+///
+/// Threading the map in *storage* order is unsound (it leaks a stale
+/// `reg -> importA` mapping into a block that actually loads importB, mis-naming
+/// e.g. a message loop's `PeekMessageA` as `GetModuleHandleA`), so this computes
+/// it properly: a forward **MUST** dataflow over the CFG where the meet is
+/// **intersection** over predecessors — a mapping survives only where every path
+/// into the block agrees on the same import — and the transfer is the same
+/// straight-line scan used within a block (`update_import_regs`, which kills a
+/// register on any other write, on the ecx/edx clobbers the lifter emits at every
+/// call, and on an opaque `Asm`). Blocks start *optimistic* (`None` = not yet
+/// computed, contributing nothing to a meet) so a mapping established before a
+/// loop survives the back edge; once computed a map only ever shrinks, so the
+/// fixpoint terminates. Naming runs only after convergence.
+fn block_entry_imports(blocks: &[Block], prog: &Program, entry: u64) -> Vec<HeldImports> {
+    let n = blocks.len();
+    let mut outs: Vec<Option<HeldImports>> = vec![None; n];
+    let mut ins: Vec<HeldImports> = vec![HeldImports::new(); n];
+    // The function's entry block is the dataflow ROOT and always starts empty —
+    // nothing is assumed about registers coming from the caller. It is matched by
+    // address, not by "has no predecessor": when the entry block is itself a loop
+    // header (a real shape, cf. the SSA pre-header split) it *does* have one, and
+    // seeding the root from that back edge alone would be unsound. Intersecting
+    // the empty root map with any back edge stays empty, so this is also exact.
+    let root = blocks.iter().position(|b| b.addr == entry).unwrap_or(0);
+    // Maps only shrink once computed, so this converges; the cap is a defensive
+    // bound whose fallback (all-empty) is exactly the previous per-block
+    // behaviour — sound, just less precise. Never use a mid-fixpoint state.
+    let cap = 4 * n + 16;
+    for _ in 0..cap {
+        let mut changed = false;
+        for i in 0..n {
+            let mut acc: Option<HeldImports> =
+                (i == root || blocks[i].pred.is_empty()).then(HeldImports::new);
+            for &p in &blocks[i].pred {
+                if i == root {
+                    break; // root is pinned to the empty map (see above)
+                }
+                let Some(po) = outs[p as usize].as_ref() else { continue };
+                acc = Some(match acc {
+                    None => po.clone(),
+                    Some(a) => a.into_iter().filter(|(k, v)| po.get(k) == Some(v)).collect(),
+                });
+            }
+            // No computed predecessor yet (not reached in this round): leave it
+            // for a later round rather than pretending it starts empty.
+            let Some(cur_in) = acc else { continue };
+            let mut m = cur_in.clone();
+            for s in &blocks[i].stmts {
+                update_import_regs(s, prog, &mut m);
+            }
+            if outs[i].as_ref() != Some(&m) {
+                outs[i] = Some(m);
+                changed = true;
+            }
+            ins[i] = cur_in;
+        }
+        if !changed {
+            return ins;
+        }
+    }
+    vec![HeldImports::new(); n]
 }
 
 /// Address of a `call [abs]` slot: matches `Load { addr: Const(a) }` (an indirect

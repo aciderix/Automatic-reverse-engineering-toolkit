@@ -282,11 +282,18 @@ recompilabilité **100 %** · WASM **7/7**.
   i686), mesurés depuis les imports de **7za** (`ReadFile@20`/`WriteFile@20`/`Heap*`/`Virtual*`/
   `CreateFileW@28`/`RaiseException@16`/`RtlUnwind@16`…). Bénéfice **mesuré** : funcdiff **16,6k→18,4k**
   scorées (0 div — ces lifts, jadis skippés derrière imports, désormais **prouvés corrects**).
-  **⚠️ Trou connu (WinMerge, 2026-07-26)** : un import stdcall appelé **register-indirect cross-block** (`v39=*(iat)` dans un
-  bloc ; `call v39` dans un autre) dérive esp (`held` remis à zéro par bloc, `__aret_callee_pop` ne connaît pas les slots
-  d'import). Cause **prouvée** (mur `0xe` de mfc90u, `GetSysColor@4`), fix simple (table runtime) **reverté** car il régresse
-  le lifting-DLL (double-pop in-block comctl32). Fix propre borné = étendre la passe `held` au cross-block invariant. Cf. 71
-  (2026-07-26 [ABI][LIFT]).
+  **Import stdcall appelé register-indirect CROSS-BLOCK ✅ (2026-07-26)** : `mov reg,[iat]` dans un bloc et `call reg` dans un
+  autre (MSVC optimisé : import mis en cache dans un registre callee-saved, appelé en boucle) n'était **ni nommé ni poppé** ⇒
+  dérive esp de `@N`/appel (mur `0xe` de WinMerge/mfc90u : `GetSysColor@4` en boucle ⇒ un local SEH `[esp+0x30]` aliasait un
+  vieux `push`). Fix = **`block_entry_imports`** (`ir/build.rs`) : **dataflow MUST** sur le CFG donnant la carte
+  `registre → import` **prouvée** en entrée de bloc — **meet = intersection** (un mapping ne survit que si **tous** les chemins
+  s'accordent ⇒ exclut le piège « PeekMessageA nommé GetModuleHandleA »), transfert = le scan intra-bloc existant (tue sur
+  écriture, sur les clobbers ecx/edx émis à chaque appel, sur `Asm`), **init optimiste** (survit au back-edge d'une boucle),
+  **racine ancrée par adresse** (robuste au bloc d'entrée en-tête de boucle), nommage **après** convergence, repli = ancien
+  comportement. **Pas de double-pop** : la table runtime reste inchangée (0 sur un slot d'import), le pop statique in-block
+  fournit `@N` une seule fois ⇒ **zéro impact sur le lifting-DLL multi-modules**. ⚠️ Une tentative antérieure *via la table
+  runtime* a été **revertée** (elle double-poppait ⇒ cassait `comctl32_imagelist`) — **toujours passer winediff** pour un
+  changement d'ABI/import. Cf. 71 (2026-07-26 [ABI][LIFT] ✅).
 - **Imports par ORDINAL résolus** (`src/ir/ordinal_imports.rs`, 2026-07-17) : un import sans nom (`0x80000000|ord`
   dans l'IAT) était **skippé** par le loader → l'appel indirect abortait sur la valeur opaque. Désormais `(dll, ordinal)`
   → nom d'export via une table **vérité-terrain** ; le routage par-nom (shim) prend le relais. `COMCTL32` extrait
