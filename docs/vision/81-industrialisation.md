@@ -398,4 +398,15 @@ affiché. On priorise par la donnée.
   invariante d'ABI** sont des hypothèses non vérifiées en puissance — à auditer systématiquement dans les zones
   correctness-critiques. Détail 71.
 
+- **2026-07-26 (mur suivant classifié + ⭐ un oracle gratuit découvert)** — WinMerge atteint le chargement de polices GDI puis
+  abort sur `mov [mem], ss` dans **`__report_gsfailure`** (MSVC /GS). L'instruction non liftée n'est pas le problème : c'est le
+  **chemin d'échec du cookie**. **Découverte structurelle à exploiter** : lifté, le cookie /GS se réduit à
+  `esp_épilogue == esp_prologue` (prologue : `[frame] = cookie ^ esp` ; épilogue : relecture ^ esp) ⇒ **tout binaire MSVC /GS
+  embarque un détecteur de dérive esp gratuit à chaque épilogue protégé** — précisément la famille de bugs la plus coûteuse
+  d'ARET. Atteindre `__report_gsfailure` **prouve** une dérive esp dans l'appelant. Modèle /GS vérifié correct (4 checks sur 5
+  passent). Mur = dérive esp réelle dans `sub_791ebc`, **classifié et cadré**, non résolu : session dédiée (`-O0 -g` ou
+  watchpoint matérielle sur le slot du cookie, méthode déjà éprouvée sur le mur `0xe`). **Honnêteté** : code nouvellement
+  atteignable, donc « préexistant ou non » n'est **pas** testé — les portes (funcdiff 20558/0 div) disent qu'il n'y a pas de
+  régression, mais c'est un raisonnement, pas une mesure directe. Détail 71.
+
 <!-- NOUVELLES LIGNES D'AVANCEMENT ICI (plus récent en bas) -->

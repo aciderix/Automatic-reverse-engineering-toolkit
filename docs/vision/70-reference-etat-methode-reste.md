@@ -840,7 +840,11 @@ résidu qui abort restera l'**obfusqué/fait-main/VM-packé** (indécidable, §9
      MUST des registres porteurs d'import**). Mur courant = **surface GUI/HLE** (`SystemParametersInfoA` action `0x29`, `wcscat_s`),
      traité **data-driven** au coup par coup (chantier **I5** du doc 81), chacun vérifié vs Wine. ⇒ le blocage n'est **plus** l'EH ni le
      lift-correctness : c'est la **couverture d'API**. ✅ **1ʳᵉ vague comblée (2026-07-26)** : `SPI_GETNONCLIENTMETRICS` (+`wcscat_s`),
-     **bit-identiques Wine** — mur suivant = **`EnumFontFamiliesW`** (API à callback).
+     **bit-identiques Wine**. Puis (2026-07-26) `EnumFontFamilies` (callback), `_wcsicoll`/`wcscoll`, le **tail call
+     conditionnel** (`jcc <fonction>`), le **garde x87 rendu diagnostique**, et la **frontière statique/runtime x87**
+     (`call` avec pile non vide ⇒ bail) qui fait tomber le mur x87. **État : WinMerge atteint le chargement de polices
+     GDI.** Mur courant = **échec du cookie /GS dans `sub_791ebc` = dérive esp** (classifié, non résolu ; le modèle /GS
+     est correct — 4 checks sur 5 passent). Prochaine étape = `-O0 -g` ou watchpoint sur le slot du cookie.
   5. **win32k `NtGdi*`/`NtUser*`** — **différé** (inutile tant qu'on ne lifte pas gdi32/user32 eux-mêmes ; notre HLE les
      couvre). Priorité basse, sur demande de la mesure seulement.
 
@@ -1195,6 +1199,13 @@ la **vitesse** change.
 - **Vérifier la config du binaire cible avant de présumer un bug** : Lua semblait
   tronquer le 64-bit → `string.packsize("j")=4` prouve `LUA_32BITS` (comportement
   correct). Toujours confirmer.
+- **⭐ LE COOKIE /GS EST UN DÉTECTEUR DE DÉRIVE ESP GRATUIT (2026-07-26)**. Lifté, le contrôle /GS de MSVC se réduit
+  à `esp_épilogue == esp_prologue` : le prologue écrit `cookie ^ esp` dans le frame, l'épilogue relit et re-XOR avec
+  esp — ça ne passe que si esp est revenu à l'identique. ⇒ **tout binaire MSVC /GS embarque, à chaque épilogue
+  protégé, un test de la famille de bugs la plus coûteuse d'ARET** (esp-drift : cksum, 7za, mur `0xe`). Atteindre
+  `__report_gsfailure` **prouve** une dérive esp dans la fonction appelante — signal bien plus fort qu'un sweep
+  statique, et gratuit. Vérifier au passage que le modèle tient (compter les checks qui **passent** : sur WinMerge,
+  4 sur 5) avant d'accuser le lift.
 - **funcdiff `0 divergence` ≠ pas de bug** : ça dit *où il n'est pas* (lift brut des
   fonctions scorées sain). Les bugs profonds sont dans les fonctions **skippées**
   (derrière imports) ou **en aval** (SSA/opt — couvert par l'opt-diff).

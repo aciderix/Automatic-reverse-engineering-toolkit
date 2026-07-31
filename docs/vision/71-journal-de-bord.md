@@ -5360,4 +5360,34 @@ Détail : **70 §6** (roadmap). Résumé :
   hypothèses non vérifiées en puissance. Celle-ci était écrite noir sur blanc depuis le début et tenait tant qu'aucun
   binaire ne convertissait un flottant en `__int64`.
 
+### 2026-07-26 — [ABI][LIFT] **Mur WinMerge suivant CLASSIFIÉ : échec du cookie /GS dans `sub_791ebc` = DÉRIVE ESP (+ un oracle gratuit découvert)**
+
+- **Symptôme** : après la chute du mur x87, WinMerge atteint le chargement de polices GDI puis abort sur
+  `mov [0x8b5200], ss` — **site unique** (les milliers d'`outs`/`ins`/`push cs` sont le bruit connu de données
+  décodées en code). La fonction contenante `sub_864955` capture **tous** les registres + **les six registres de
+  segment** + EFLAGS vers un bloc global, gardée par un test sur `*0x8ad018` : c'est
+  **`__security_check_cookie`/`__report_gsfailure`** (MSVC /GS). L'instruction non liftée n'est donc **pas le
+  problème** — c'est le **chemin d'échec** qu'on n'aurait pas dû atteindre.
+- **⭐ DÉCOUVERTE STRUCTURELLE RÉUTILISABLE — le cookie /GS lifté EST un contrôle d'invariance d'`esp`.** Dans le C
+  généré, le prologue de `sub_791ebc` fait `[v22+0x470] = cookie ^ v22` et l'épilogue relit `[v609+0x470] ^ v609`.
+  Le test ne passe donc **que si `v609 == v22`**, c'est-à-dire **si esp à l'épilogue == esp au prologue**.
+  ⇒ **Tout binaire MSVC /GS embarque un détecteur de dérive esp gratuit**, placé par le compilateur à chaque
+  épilogue protégé. C'est exactement la famille de bugs la plus coûteuse d'ARET (famille esp-drift : cksum, 7za,
+  mur `0xe`), et on vient de découvrir qu'on dispose d'un **oracle par-fonction** pour elle, sans rien instrumenter.
+  **À exploiter** : un binaire /GS qui atteint `__report_gsfailure` **prouve** une dérive esp dans la fonction
+  appelante — meilleur signal que n'importe quel sweep statique.
+- **Le modèle /GS est CORRECT** (mesuré, pas supposé) : `__security_check_cookie` est appelé **5 fois** dans ce run,
+  **4 passent**. Seule `sub_791ebc` échoue. Ce n'est donc pas un défaut de modélisation du cookie mais une **vraie
+  dérive esp** localisée.
+- **Statut / honnêteté** : la dérive est dans du code **nouvellement atteignable** (avant l'incrément 9 on abortait
+  plus tôt, dans `_ftol2`). **Non testé** : savoir si elle préexistait ou non — c'était inatteignable. Les portes
+  disent qu'il n'y a pas de régression (funcdiff **20558 scorées / 0 divergence**, qui couvre précisément la
+  justesse de lift/esp ; cpudiff 6/6 ; winediff 182/183), et l'incrément 9 ne touche **que** le choix du mécanisme
+  x87, pas la modélisation d'esp — mais c'est un raisonnement, pas une mesure.
+- **Prochaine étape cadrée** (session dédiée, méthode déjà éprouvée sur le mur `0xe`) : recompiler le C généré en
+  **`-O0 -g`** (tip §7) **ou** poser une **watchpoint matérielle** sur le slot du cookie `[v22+0x470]`, remonter à
+  l'écriture/au call qui décale esp. `sub_791ebc` est une grosse fonction MFC ; le décalage attendu est un multiple
+  de 4 (pop manquant ou en trop). ⚠️ Piège rencontré : un `break sub_XXX` gdb tombe **après** le prologue hôte, donc
+  `$esp+4` n'est **pas** l'argument `__esp` modélisé — les valeurs lues ainsi (`0x1`, `0x5`) sont du bruit.
+
 <!-- NOUVELLES ENTRÉES ICI (garder l'ordre chronologique, plus récent en bas) -->
