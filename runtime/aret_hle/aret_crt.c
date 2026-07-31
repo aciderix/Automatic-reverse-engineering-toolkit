@@ -811,6 +811,46 @@ uint32_t aret_wcslwr_s(uint32_t esp) { ARET_LWR_S_BODY(uint16_t, 'A', 'Z',  32, 
 uint32_t aret_wcsupr_s(uint32_t esp) { ARET_LWR_S_BODY(uint16_t, 'a', 'z', -32, 1) }
 #undef ARET_LWR_S_BODY
 
+/* strcpy_s / wcscpy_s — bounded copy. MEASURED against Wine's msvcrt (the statically
+ * linked mingw version was checked to agree, and the exe does import msvcrt's, ordinal
+ * 1084 — worth confirming, since mingw supplies its own body for some secure-CRT names
+ * and one would then be measuring mingw rather than the oracle).
+ *   - dst NULL, or size 0: EINVAL(22), destination untouched;
+ *   - src NULL: EINVAL(22), destination EMPTIED (d[0] = 0);
+ *   - too small for src + NUL: ERANGE(34) — note 34 here, where the _strlwr_s family
+ *     answers 22 for its own too-small case; the codes are per-family, not global;
+ *   - ⚠️ and the too-small case is NOT symmetric across widths: the narrow version has
+ *     already copied the characters that fit before emptying (`00 69 58 65 44` for
+ *     size 5), while the wide version copies NOTHING and only zeroes d[0]. Measured on
+ *     both; this is the second width asymmetry in this area, after size==0 in the
+ *     _strlwr_s family. */
+uint32_t aret_strcpy_s(uint32_t esp) {
+    uint8_t *d = (uint8_t *)(uintptr_t)a32(esp, 0);
+    uint32_t size = a32(esp, 1);
+    const uint8_t *s = (const uint8_t *)(uintptr_t)a32(esp, 2);
+    if (!d || size == 0) return 22;
+    if (!s) { d[0] = 0; return 22; }
+    for (uint32_t i = 0; i < size; i++) {
+        d[i] = s[i];
+        if (!s[i]) return 0;
+    }
+    d[0] = 0;                    /* copied what fitted, then emptied — measured */
+    return 34;
+}
+
+uint32_t aret_wcscpy_s(uint32_t esp) {
+    uint16_t *d = (uint16_t *)(uintptr_t)a32(esp, 0);
+    uint32_t size = a32(esp, 1);
+    const uint16_t *s = (const uint16_t *)(uintptr_t)a32(esp, 2);
+    if (!d || size == 0) return 22;
+    if (!s) { d[0] = 0; return 22; }
+    uint32_t n = 0;
+    while (s[n]) n++;
+    if (n + 1 > size) { d[0] = 0; return 34; }   /* nothing copied — measured */
+    for (uint32_t i = 0; i <= n; i++) d[i] = s[i];
+    return 0;
+}
+
 uint32_t aret_wcscmp(uint32_t esp) {
     const uint16_t *a = (const uint16_t *)(uintptr_t)a32(esp, 0);
     const uint16_t *b = (const uint16_t *)(uintptr_t)a32(esp, 1);
