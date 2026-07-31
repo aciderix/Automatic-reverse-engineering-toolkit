@@ -3545,6 +3545,33 @@ uint32_t aret_PathFindExtensionW(uint32_t esp) {
     }
     return (uint32_t)(uintptr_t)(last ? last : p);
 }
+/* PathFindFileNameA/W(path) -> pointer INTO path, at the file-name component.
+ * MEASURED against Wine, and the rule the measurements imply is not the obvious one:
+ * a separator (`\\`, `/` or `:`) only counts when the character AFTER it exists and is
+ * not itself `\\` or `/`. That single condition is what produces every observed answer —
+ *   "C:\\dir\\sub\\file.txt" -> "file.txt"      (last real separator)
+ *   "C:\\dir\\"             -> "dir\\"          (the TRAILING separator does not count)
+ *   "C:\\"                 -> "C:\\"           (whole string, not the empty tail)
+ *   "\\\\srv\\share\\f.dat"  -> "f.dat"         (the UNC's leading `\\\\` does not count)
+ *   "a/b/c.txt"          -> "c.txt"         (forward slashes count)
+ *   "C:file.txt"         -> "file.txt"      (a bare `:` counts)
+ * A naive "return after the last separator" gets the trailing-separator and bare-root
+ * cases wrong and would answer "" for both. NULL in, NULL out. */
+#define ARET_PFFN_BODY(TYPE)                                                        \
+    uint32_t pv = WU(0);                                                            \
+    const TYPE *p = (const TYPE *)(uintptr_t)pv;                                    \
+    if (!p) return pv;                                                              \
+    const TYPE *last = p;                                                           \
+    for (; *p; p++)                                                                 \
+        if ((*p == (TYPE)'\\' || *p == (TYPE)'/' || *p == (TYPE)':') &&              \
+            p[1] && p[1] != (TYPE)'\\' && p[1] != (TYPE)'/')                         \
+            last = p + 1;                                                           \
+    return (uint32_t)(uintptr_t)last;
+
+uint32_t aret_PathFindFileNameA(uint32_t esp) { ARET_PFFN_BODY(char) }
+uint32_t aret_PathFindFileNameW(uint32_t esp) { ARET_PFFN_BODY(uint16_t) }
+#undef ARET_PFFN_BODY
+
 /* ExitWindowsEx(uFlags, dwReason) -> BOOL. We never log the user off / shut the
  * host down (sound: a transpiled app must not affect the real session); report
  * success so the app proceeds to its own teardown. Not oracle-compared (a real

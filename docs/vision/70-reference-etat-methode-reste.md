@@ -191,7 +191,7 @@ bash bench/wallsweep.sh <dir1> [dir2…]  # AGRÈGE --mode walls sur un corpus :
 
 ### État régression (référence — doit rester vert)
 difftest **272/272** · transpile-diff **4/4** (H=`19acad982194bf07`) · winediff
-**186/187** (le seul rouge = `gdi_uifont`, **environnemental** : fontconfig i386, orthogonal au code) · **ehdiff 6/6** (SEH `seh_except`
+**187/188** (le seul rouge = `gdi_uifont`, **environnemental** : fontconfig i386, orthogonal au code) · **ehdiff 6/6** (SEH `seh_except`
 + C++ `throw_catch`/`throw_dtor`/`throw_across`/`throw_byval`/`throw_static` — throw/catch, destructeur d'unwind, multi-frames, catch-by-value, CRT statique — bit-identiques Wine) · cpudiff vert (per-instruction + séquences génératives) · funcdiff corpus **0 divergence** (lift **~20,6k** scorées /
 **~20k appels** — **imports (stubs `@N` + `@0` scalaires) + appels indirects résolus + intrinsèques mémoire host-backés (memmove/memcpy)** ; scratch sous-esp exclu ; opt ~10k scorées) · SMT **11/11** · in-place **3/3** · magicdiv **2³²** ·
 recompilabilité **100 %** · WASM **7/7**.
@@ -308,6 +308,12 @@ recompilabilité **100 %** · WASM **7/7**.
   fournit `@N` une seule fois ⇒ **zéro impact sur le lifting-DLL multi-modules**. ⚠️ Une tentative antérieure *via la table
   runtime* a été **revertée** (elle double-poppait ⇒ cassait `comctl32_imagelist`) — **toujours passer winediff** pour un
   changement d'ABI/import. Cf. 71 (2026-07-26 [ABI][LIFT] ✅).
+- **⭐ AUDIT `stdcall_pops` (2026-07-26) — 37 `@N` manquants trouvés d'un coup** : croiser les **shims implémentés**
+  (`aret_<Nom>`, 1036), la **vérité terrain** (`nm` sur les import-libs mingw : 6100 symboles décorés `@N`) et le contenu
+  de la table. **790** shims sont des `__stdcall` prouvés, **35 n'avaient pas leur `@N`** = **35 dérives esp silencieuses
+  latentes** (`SysAllocString@4`/`SysFreeString@4` = tout COM/BSTR, `GetVersionExW@4`, `WriteConsoleA/W@20`, `TlsFree@4`,
+  `LockFile@20`…) ; +2 pour des imports appelés mais non implémentés (le pop est une propriété du **site d'appel**).
+  Invisible à difftest/cpudiff/funcdiff — **seul un vrai binaire la révèle**. **À faire tourner en test permanent** (I8).
 - **Imports par ORDINAL résolus** (`src/ir/ordinal_imports.rs`, 2026-07-17) : un import sans nom (`0x80000000|ord`
   dans l'IAT) était **skippé** par le loader → l'appel indirect abortait sur la valeur opaque. Désormais `(dll, ordinal)`
   → nom d'export via une table **vérité-terrain** ; le routage par-nom (shim) prend le relais. `COMCTL32` extrait

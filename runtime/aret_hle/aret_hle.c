@@ -1426,6 +1426,22 @@ uint32_t aret_GetProfileIntA(uint32_t esp) {
     if (!found) return (uint32_t)def;
     return (uint32_t)strtol(val, NULL, 10);
 }
+/* GetProfileIntW — wide twin of GetProfileIntA. MEASURED against Wine:
+ *   - a section/key that does not exist returns the CALLER'S DEFAULT (including 0);
+ *   - lpAppName == NULL returns 0, NOT the default — the two NULLs differ;
+ *   - lpKeyName == NULL returns the default.
+ * ⚠️ Wine's own win.ini is populated (`intl`/`iCountry` answers 1, not the default),
+ * so those readings are ENVIRONMENTAL and must not be modelled or oracle-compared —
+ * only sections proven absent belong in a fixture. Our win.ini simply does not exist,
+ * so every lookup misses and the default is returned, which is the contract above. */
+uint32_t aret_GetProfileIntW(uint32_t esp) {
+    uint32_t app = arg(esp, 0);
+    uint32_t key = arg(esp, 1);
+    uint32_t def = arg(esp, 2);
+    if (!app) return 0;
+    (void)key;
+    return def;
+}
 /* MoveFileA(existing, new) -> BOOL. POSIX rename (both paths translated). */
 /* GetShortPathNameA(long, short, cch) -> length. Linux has no 8.3 aliasing, so the
  * short path IS the long path (copied through). */
