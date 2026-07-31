@@ -5179,9 +5179,10 @@ Détail : **70 §6** (roadmap). Résumé :
   mais `__aret_callee_pop` **ignore** les slots d'import ⇒ rend **0**. Le pop statique in-block (`stdcall_pop_for_regcall`) ajoute `@N`.
   Total = `@N` **exactement**, pour l'in-block **comme** pour le cross-block désormais couvert. Aucun changement de la table runtime ⇒ **zéro
   impact sur la résolution d'imports multi-modules** du lifting-DLL (la cause de la régression précédente).
-- **✅ Portes TOUTES vertes** : **winediff 178/179, 0 FAIL** (= la référence exacte ; seul non-pass = `gdi_uifont` **environnemental**) — **la
-  porte qui avait attrapé la régression précédente** ; **`comctl32_imagelist` MATCH** (les 6 lignes, testé en direct) ; difftest **272/272** ;
-  transpile hash **`19acad982194bf07` INCHANGÉ** ; cpudiff + funcdiff (voir ci-dessous).
+- **✅ Portes TOUTES vertes (confirmées sur le binaire final)** : **winediff 178/179, 0 FAIL** (= la référence exacte ; seul non-pass =
+  `gdi_uifont` **environnemental**) — **la porte qui avait attrapé la régression précédente** ; **`comctl32_imagelist` MATCH** (les 6 lignes,
+  testé en direct) ; difftest **272/272** ; transpile hash **`19acad982194bf07` INCHANGÉ** ; **cpudiff 5/0** ; **funcdiff 20558 scored /
+  10808 opt, 0 divergence** (identique à la référence). ⇒ **correctness-neutre** sur tout le décompile/lift **et** sur l'axe OS-API.
 - **✅ Effet WinMerge (preuve positive)** : le mur `0xe` **disparaît**. WinMerge franchit toute la série de ctors globaux MFC **et atteint
   l'init GUI de MFC** — il appelle maintenant `wcscat_s` et `SystemParametersInfoA` — puis **abort proprement (sound)** sur
   `SystemParametersInfoA: unmodelled action 0x29` (« refusing to guess », §0). ⇒ le driver est passé du **lift-correctness** à la **surface

@@ -795,8 +795,13 @@ résidu qui abort restera l'**obfusqué/fait-main/VM-packé** (indécidable, §9
      `GetCursorPos`, implémentés+mesurés vs Wine) ; les 25 autres du listing statique sont derrière l'interaction (drag-drop/
      menu/impression), non atteints headless. Prouve la machinerie contrôles + le chemin de démarrage sur du réel shippé.
      Tire le reste (CreateDIBitmap, clip, DrawIcon, `DragQueryFileA`, `LoadMenuA`/accél., GrayString) **au fil des besoins**.
-  4. **MFC / VB40032** (le gros multiplicateur) — **gated sur l'EH C++** (`__CxxFrameHandler`, Levier 2, qu'on n'a pas) ;
-     un vrai binaire MFC = le **driver** qui force cette brique. Chantier dédié multi-sessions.
+  4. **MFC / VB40032** (le gros multiplicateur) — l'**EH C++** (`__CxxFrameHandler`) est **FAIT** (P3.10) et **prouvé sur du vrai MFC**.
+     🚧 **Driver = WinMerge 2.14.0 / MFC90** (~40k fn, lifté **avec** `mfc90u.dll`). **État 2026-07-26** : franchit tout le CRT, toute la
+     série de **ctors globaux MFC**, et **atteint l'init GUI de MFC** — 8 incréments vérifiés cette session (`_EH_prolog3_GS`,
+     continuation de catch, dispatch C++ typé, 4 shims HLE, **I6** esi/edi/ebx threadés, **I7** abort bruyant, **I1** traceur, **dataflow
+     MUST des registres porteurs d'import**). Mur courant = **surface GUI/HLE** (`SystemParametersInfoA` action `0x29`, `wcscat_s`),
+     traité **data-driven** au coup par coup (chantier **I5** du doc 81), chacun vérifié vs Wine. ⇒ le blocage n'est **plus** l'EH ni le
+     lift-correctness : c'est la **couverture d'API**.
   5. **win32k `NtGdi*`/`NtUser*`** — **différé** (inutile tant qu'on ne lifte pas gdi32/user32 eux-mêmes ; notre HLE les
      couvre). Priorité basse, sur demande de la mesure seulement.
 
