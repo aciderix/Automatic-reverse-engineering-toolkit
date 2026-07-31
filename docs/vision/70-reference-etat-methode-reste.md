@@ -191,7 +191,7 @@ bash bench/wallsweep.sh <dir1> [dir2…]  # AGRÈGE --mode walls sur un corpus :
 
 ### État régression (référence — doit rester vert)
 difftest **272/272** · transpile-diff **4/4** (H=`19acad982194bf07`) · winediff
-**183/184** (le seul rouge = `gdi_uifont`, **environnemental** : fontconfig i386, orthogonal au code) · **ehdiff 6/6** (SEH `seh_except`
+**184/185** (le seul rouge = `gdi_uifont`, **environnemental** : fontconfig i386, orthogonal au code) · **ehdiff 6/6** (SEH `seh_except`
 + C++ `throw_catch`/`throw_dtor`/`throw_across`/`throw_byval`/`throw_static` — throw/catch, destructeur d'unwind, multi-frames, catch-by-value, CRT statique — bit-identiques Wine) · cpudiff vert (per-instruction + séquences génératives) · funcdiff corpus **0 divergence** (lift **~20,6k** scorées /
 **~20k appels** — **imports (stubs `@N` + `@0` scalaires) + appels indirects résolus + intrinsèques mémoire host-backés (memmove/memcpy)** ; scratch sous-esp exclu ; opt ~10k scorées) · SMT **11/11** · in-place **3/3** · magicdiv **2³²** ·
 recompilabilité **100 %** · WASM **7/7**.
@@ -893,6 +893,14 @@ Ce qui subsiste, en théorie et sans cas observé : la table ne stockant que les
 traiter spéculativement : zone à haut risque (un 1ᵉʳ fix callee-pop a été reverté pour double-pop sur le lifting-DLL), et
 **aucun binaire ne l'exige aujourd'hui**. Rouvrir seulement si une mesure exhibe une VA de ce troisième type.
 Cf. 71 (2026-07-26 [ABI][SOUNDNESS], entrée **corrigée**).
+
+### P1quater — ⚠️ **`aret_GetProcAddress` renvoie TOUJOURS 0** (trouvé 2026-07-26, non corrigé)
+`aret_GetProcAddress(esp) { return 0; }`. Tout programme qui **lie une API à l'exécution** (le motif normal pour les API
+optionnelles, les chemins de compatibilité de version, les plugins) reçoit « fonction absente » et bascule sur son repli —
+**y compris pour des fonctions qu'on implémente réellement**. Ce n'est pas une valeur fausse (c'est « indisponible »), mais
+c'est une **divergence silencieuse** avec Wine qui change le chemin d'exécution. **Fix cadré** : résoudre les noms pour
+lesquels un shim existe (table nom → adresse d'un trampoline), 0 sinon. Bloque aussi les fixtures : une fixture ne peut pas
+tester par `GetProcAddress` une fonction que l'import-lib mingw n'expose pas (cas `_wcslwr_s` & co., cf. 71).
 
 ### P2 — Robustesse x87 : joins ambigus + transcendantales ⇒ **QUALITÉ, pas correction** (MESURÉ 2026-07-10)
 **Mesure décisive (règle « vérifier si le filet runtime est actif AVANT de conclure ») :**

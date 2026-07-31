@@ -781,6 +781,36 @@ uint32_t aret_wcscat_s(uint32_t esp) {
     }
 }
 
+/* _strlwr_s / _strupr_s / _wcslwr_s / _wcsupr_s — in-place case conversion with a
+ * buffer-size check. Behaviour MEASURED against Wine; three details are not guessable:
+ *   - a size too small for the string + its NUL: EINVAL **and** str[0] set to 0
+ *     (emptied), while the REST of the buffer keeps its previous contents;
+ *   - the failure code is 22 (EINVAL) in every failing case, including too-small;
+ *   - ⚠️ size == 0 does NOT behave the same at both widths: the narrow pair leaves the
+ *     buffer completely untouched, the wide pair still zeroes d[0]. Measured on all
+ *     four — it is a width difference, not a lower/upper one, and no amount of
+ *     reasoning would have produced it.
+ * Folding is ASCII-only, exact in the C locale — same footing as _wcsicmp (70 §4.5);
+ * ⚠️ cf. §P1bis: setlocale accepts any locale and answers "C", so nothing yet proves we
+ * are in it. */
+#define ARET_LWR_S_BODY(TYPE, LO, HI, DELTA, ZERO_ON_SIZE0)                        \
+    TYPE *d = (TYPE *)(uintptr_t)a32(esp, 0);                                      \
+    uint32_t size = a32(esp, 1);                                                   \
+    if (!d) return 22;                                                             \
+    if (size == 0) { if (ZERO_ON_SIZE0) d[0] = 0; return 22; }                     \
+    uint32_t n = 0;                                                                \
+    while (n < size && d[n]) n++;                                                  \
+    if (n == size) { d[0] = 0; return 22; }      /* EINVAL — emptied, rest kept */ \
+    for (uint32_t i = 0; i < n; i++)                                               \
+        if (d[i] >= (LO) && d[i] <= (HI)) d[i] = (TYPE)(d[i] + (DELTA));           \
+    return 0;
+
+uint32_t aret_strlwr_s(uint32_t esp) { ARET_LWR_S_BODY(uint8_t,  'A', 'Z',  32, 0) }
+uint32_t aret_strupr_s(uint32_t esp) { ARET_LWR_S_BODY(uint8_t,  'a', 'z', -32, 0) }
+uint32_t aret_wcslwr_s(uint32_t esp) { ARET_LWR_S_BODY(uint16_t, 'A', 'Z',  32, 1) }
+uint32_t aret_wcsupr_s(uint32_t esp) { ARET_LWR_S_BODY(uint16_t, 'a', 'z', -32, 1) }
+#undef ARET_LWR_S_BODY
+
 uint32_t aret_wcscmp(uint32_t esp) {
     const uint16_t *a = (const uint16_t *)(uintptr_t)a32(esp, 0);
     const uint16_t *b = (const uint16_t *)(uintptr_t)a32(esp, 1);
