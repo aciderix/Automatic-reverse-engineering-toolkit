@@ -415,4 +415,15 @@ affiché. On priorise par la donnée.
   atteignable, donc « préexistant ou non » n'est **pas** testé — les portes (funcdiff 20558/0 div) disent qu'il n'y a pas de
   régression, mais c'est un raisonnement, pas une mesure directe. Détail 71.
 
+- **2026-07-26 (I1 appliqué : la dérive mesurée, et un trou de soundness général mis au jour)** — Le traceur, une fois son
+  plafond de dump levé (`ARET_TRACE_DUMP=N`), ramène le mur /GS de WinMerge à **4 octets exactement** en un run. **Point de
+  méthode important découvert au passage** : dans le modèle *shared-stack*, `esp` est passé **par valeur** et l'esp de
+  l'appelant après un appel est calculé **statiquement** ⇒ une dérive esp n'est **pas** un phénomène d'exécution, elle est
+  **figée dans le C généré**. Journaliser l'esp au retour n'apprendrait donc rien : la chaîne se remonte **statiquement**
+  (`v609 ← … ← v22`), ce qui a directement désigné un **appel virtuel** comme suspect. **Trouvaille générale (le vrai
+  livrable)** : `__aret_callee_pop` rend **0** indifféremment pour une fonction **récupérée cdecl** (0 **prouvé**) et pour une
+  **adresse inconnue** (0 **deviné**) — violation du §0.4, et mécanisme silencieux de dérive esp. Mesuré : 1095 ratés/run, 60
+  VAs, **55 non récupérées**. Fix cadré + précautions au 70 §P1ter (zone à haut risque : winediff obligatoire, mesurer le
+  corpus avant l'abort strict). Échafaudage de diagnostic **retiré** (§0.2 « zéro effet quand désactivé »). Détail 71.
+
 <!-- NOUVELLES LIGNES D'AVANCEMENT ICI (plus récent en bas) -->
