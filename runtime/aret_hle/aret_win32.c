@@ -3772,6 +3772,38 @@ static uint32_t u32_spi(uint32_t esp, int wide) {
     case 0x0011: g_u32_screensave_active = (int)ui; return 1; /* SPI_SETSCREENSAVEACTIVE */
     case 0x0026: if (pv) *(int32_t *)(uintptr_t)pv = 0; return 1; /* SPI_GETDRAGFULLWINDOWS */
     case 0x0068: if (pv) *(int32_t *)(uintptr_t)pv = 3; return 1; /* SPI_GETWHEELSCROLLLINES */
+    /* The "UI effects" family (0x1000-0x1042): per-effect BOOLs every modern shell and
+     * framework queries at startup — MFC/WinMerge stops on SPI_GETMENUANIMATION (0x1002).
+     * Each writes exactly ONE 32-bit BOOL, proven by querying Wine through a poisoned
+     * buffer: only 4 bytes change, the rest keeps the poison. The values are NOT uniform
+     * and are not derivable from anything — they had to be measured one by one. */
+    case 0x1000:                                                  /* ACTIVEWINDOWTRACKING  */
+    case 0x1002:                                                  /* MENUANIMATION         */
+    case 0x1004:                                                  /* COMBOBOXANIMATION     */
+    case 0x1006:                                                  /* LISTBOXSMOOTHSCROLLING*/
+    case 0x100c:                                                  /* ACTIVEWNDTRKZORDER    */
+    case 0x100e:                                                  /* HOTTRACKING           */
+    case 0x1012:                                                  /* MENUFADE              */
+    case 0x1014:                                                  /* SELECTIONFADE         */
+    case 0x1016:                                                  /* TOOLTIPANIMATION      */
+    case 0x1018:                                                  /* TOOLTIPFADE           */
+    case 0x101a:                                                  /* CURSORSHADOW          */
+    case 0x1024: if (pv) *(int32_t *)(uintptr_t)pv = 0; return 1; /* DROPSHADOW            */
+    case 0x1008:                                                  /* GRADIENTCAPTIONS      */
+    case 0x100a:                                                  /* KEYBOARDCUES          */
+    case 0x1022:                                                  /* FLATMENU              */
+    case 0x1042: if (pv) *(int32_t *)(uintptr_t)pv = 1; return 1; /* CLIENTAREAANIMATION   */
+    /* Measured as REJECTED by Wine: FALSE with pvParam left untouched (the poison
+     * survives intact). Reporting "unavailable" is not a guessed value — the caller is
+     * told nothing was written, exactly as Wine tells it.
+     * The last-error behaviour is NOT uniform, and the difference is real: 0x102a and
+     * 0x1082 set ERROR_INVALID_SPI_VALUE, while 0x0042 fails without touching it at all.
+     * A first measurement missed this by not resetting the error before each query, so
+     * one action's 1439 leaked into the readings that followed — the fixture, which does
+     * reset, is what caught it. */
+    case 0x0042: return 0;                                        /* SHOWSOUNDS            */
+    case 0x102a:                                                  /* UIEFFECTS             */
+    case 0x1082: g_last_error = 1439 /*ERROR_INVALID_SPI_VALUE*/; return 0; /* MOUSEVANISH */
     default: {
         char m[64];
         snprintf(m, sizeof m, "SystemParametersInfo%c: unmodelled action %#x",

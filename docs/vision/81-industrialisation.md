@@ -440,4 +440,19 @@ affiché. On priorise par la donnée.
   timeline sans ambiguïté, là où gdb (l'`__esp` modélisé ≠ `$esp` hôte), la remontée arrière (boucles) et les marqueurs de
   trace par callee (**10 sites** pour un même appelé) échouent tous. Détail 71.
 
+- **2026-07-26 (I5 — famille SPI « UI effects » ; ⭐ et I4 devient exigé PAR LA MESURE)** — Mur `SystemParametersInfoW 0x1002`
+  (**SPI_GETMENUANIMATION**) traité **en famille** (§0.3) : les BOOLs par-effet interrogés au démarrage par tout shell/framework.
+  **Deux fois la mesure contredit l'intuition** : les valeurs **ne sont pas uniformes** (4 à 1, 12 à 0, non dérivables les unes
+  des autres) et les rejets **non plus** (`0x102a`/`0x1082` posent `ERROR_INVALID_SPI_VALUE`, `0x0042` échoue **sans** toucher
+  au last-error). **Piège d'oracle attrapé par la fixture** : ma 1ʳᵉ sonde ne remettait pas `SetLastError(0)` avant chaque
+  appel ⇒ le 1439 d'une action **fuyait** sur les suivantes et j'ai publié une conclusion fausse ; la fixture, qui remet à
+  zéro, l'a fait ressortir en winediff. **Règle à généraliser** : une sonde lisant un **état global** doit le **réinitialiser
+  avant chaque appel**, sinon elle mesure la rémanence. Technique du tampon **poisonné** + dump brut reconduite (prouve
+  qu'exactement un BOOL 32 bits est écrit ; un test relisant un `int` passerait sur un shim écrivant 8 octets ou aucun).
+  Portes : fixture identique Wine, **winediff 183/184**, difftest 272/272, hash inchangé.
+  **⭐ JALON** : WinMerge franchit le mur et réclame désormais **`_except_handler4_common`**. Le §I4 posait cette brique comme
+  « découplée de WinMerge, à planifier **quand un binaire l'exige** » — **c'est le cas maintenant**. La priorisation par la
+  donnée a tenu : I4 n'a pas été construit spéculativement (contre l'avis du document externe qui le mettait en #1), et il
+  arrive au moment où la mesure le réclame. Détail 71.
+
 <!-- NOUVELLES LIGNES D'AVANCEMENT ICI (plus récent en bas) -->

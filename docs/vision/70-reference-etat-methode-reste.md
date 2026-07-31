@@ -191,7 +191,7 @@ bash bench/wallsweep.sh <dir1> [dir2…]  # AGRÈGE --mode walls sur un corpus :
 
 ### État régression (référence — doit rester vert)
 difftest **272/272** · transpile-diff **4/4** (H=`19acad982194bf07`) · winediff
-**182/183** (le seul rouge = `gdi_uifont`, **environnemental** : fontconfig i386, orthogonal au code) · **ehdiff 6/6** (SEH `seh_except`
+**183/184** (le seul rouge = `gdi_uifont`, **environnemental** : fontconfig i386, orthogonal au code) · **ehdiff 6/6** (SEH `seh_except`
 + C++ `throw_catch`/`throw_dtor`/`throw_across`/`throw_byval`/`throw_static` — throw/catch, destructeur d'unwind, multi-frames, catch-by-value, CRT statique — bit-identiques Wine) · cpudiff vert (per-instruction + séquences génératives) · funcdiff corpus **0 divergence** (lift **~20,6k** scorées /
 **~20k appels** — **imports (stubs `@N` + `@0` scalaires) + appels indirects résolus + intrinsèques mémoire host-backés (memmove/memcpy)** ; scratch sous-esp exclu ; opt ~10k scorées) · SMT **11/11** · in-place **3/3** · magicdiv **2³²** ·
 recompilabilité **100 %** · WASM **7/7**.
@@ -600,6 +600,13 @@ recompilabilité **100 %** · WASM **7/7**.
   **dump de tous les octets bruts sur tampon poisonné**, qui seul révèle que le chemin **A** n'écrit le nom de police que jusqu'au NUL
   (queue du tableau **laissée intacte**, dernier octet forcé à 0) là où **W** zéro-remplit. **+ `wcscat_s`** (CRT, 7 cas mesurés,
   `crt_wcscat_s.c`).
+- **Famille SPI « UI EFFECTS » (`0x1000`-`0x1042`, 2026-07-26)** : les BOOLs par-effet que tout shell/framework interroge au
+  démarrage (mur MFC/WinMerge = `SPI_GETMENUANIMATION 0x1002`). **Valeurs non uniformes** (`GRADIENTCAPTIONS`/`KEYBOARDCUES`/
+  `FLATMENU`/`CLIENTAREAANIMATION` = 1, les 12 autres = 0) et **rejets non uniformes** (`0x102a`/`0x1082` → FALSE + err 1439 ;
+  `0x0042` → FALSE **sans** toucher au last-error) — tout **mesuré**, rien de dérivé. Chaque action écrit **exactement un BOOL
+  32 bits**, prouvé au tampon poisonné. ⚠️ Une 1ʳᵉ sonde sans `SetLastError(0)` avant chaque appel a fait **fuir** le 1439
+  d'une action sur les suivantes : une sonde qui lit un état global doit le **remettre à zéro avant chaque appel**. Gardé
+  `winecorpus/user32_spi_uieffects.c`.
 - **`EnumFontFamilies(A/W)` (2026-07-26, 1ʳᵉ API à CALLBACK du chantier GUI)** : énumère les familles installées en rappelant un callback
   **lifté** (`aret_call`, frame stdcall comme `u32_call_wndproc` ; les structures `LOGFONT`+`TEXTMETRIC` sont posées **entre l'esp appelant
   et la frame du callback**, hors d'atteinte de la pile du callback). **Séparation clé** : le **contrat** est déterministe et **bit-identique
