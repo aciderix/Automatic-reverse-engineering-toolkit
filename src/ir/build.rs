@@ -257,6 +257,12 @@ pub fn build_ir(prog: &Program, func: &Function) -> IrFunction {
     // gains from it — in decompile the `Asm` fallback runs the real x87 instruction
     // (correct), so replacing it there could only regress. Gated accordingly.
     let x87_rt = x87.is_none() && crate::emit::shared_stack();
+    // Taken edges of conditional jumps that LEAVE this function for another recovered
+    // one (`jcc other_func`). Each gets a synthetic block appended after the real ones
+    // that performs the tail call; collected here so its index is known while the
+    // branch is emitted. `(target, jcc block address)` — the second is only for the
+    // synthetic block's `addr`, which must not collide with a real block's.
+    let mut tail_targets: Vec<(u64, u64)> = Vec::new();
     // Does this function itself return an fp value (st(0))? Then store st(0) into
     // the fp return channel at each `ret`, so callers can recover it.
     let self_returns_fp = FP_RETURNING.with(|c| c.borrow().contains(&func.entry));
@@ -398,7 +404,7 @@ pub fn build_ir(prog: &Program, func: &Function) -> IrFunction {
         }
 
         // Internal successors (block indices), in CFG order.
-        let succ: Vec<u32> = blk
+        let mut succ: Vec<u32> = blk
             .successors
             .iter()
             .filter_map(|t| idx.get(t).copied())
@@ -416,6 +422,32 @@ pub fn build_ir(prog: &Program, func: &Function) -> IrFunction {
                         taken: BlockId(t),
                         fallthrough: BlockId(f),
                     }),
+                    // CONDITIONAL TAIL CALL: the taken edge leaves this function for
+                    // another recovered function, while the fallthrough stays inside
+                    // (`jcc other_func` — MSVC emits it to share a cold/common tail;
+                    // real case: WinMerge/mfc90u `sub_867400` opening on
+                    // `je sub_867436`). The unconditional `jmp` out of a function is
+                    // already modelled as a tail call below; this is the same thing
+                    // under a condition, so branch to a synthetic block that performs
+                    // it. Strictly ADDITIVE: this arm only takes over cases that
+                    // otherwise fell to the `Asm` abort just below, so no program that
+                    // works today changes behaviour.
+                    (None, Some(f))
+                        if blk
+                            .successors
+                            .first()
+                            .is_some_and(|&t| prog.is_executable(t)) =>
+                    {
+                        let target = blk.successors[0];
+                        let synth = (order.len() + tail_targets.len()) as u32;
+                        tail_targets.push((target, addr));
+                        succ.push(synth);
+                        stmts.push(Stmt::Branch {
+                            cond: cc_to_cond(jcc.raw.condition_code()),
+                            taken: BlockId(synth),
+                            fallthrough: BlockId(f),
+                        });
+                    }
                     _ => stmts.push(Stmt::Asm(jcc.text.clone())),
                 }
             }
@@ -613,6 +645,21 @@ pub fn build_ir(prog: &Program, func: &Function) -> IrFunction {
             addr,
             stmts,
             succ,
+            pred: Vec::new(),
+        });
+    }
+
+    // Synthetic tail-call blocks for `jcc other_func` (see the CondJump arm). Each is
+    // exactly the tail call the unconditional `jmp` case emits: `return f(args)`. They
+    // are appended AFTER every real block, so the indices reserved while branching are
+    // the ones they land on, and they are not in `idx` (which is built from the real
+    // block addresses only), so nothing else can accidentally target them.
+    for (n, &(target, from)) in tail_targets.iter().enumerate() {
+        blocks.push(Block {
+            id: (order.len() + n) as u32,
+            addr: from,
+            stmts: vec![Stmt::Return(Some(tail_call(CallTarget::Direct(target), bits)))],
+            succ: Vec::new(),
             pred: Vec::new(),
         });
     }

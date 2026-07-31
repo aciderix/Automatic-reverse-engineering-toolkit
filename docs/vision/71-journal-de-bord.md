@@ -5273,4 +5273,31 @@ Détail : **70 §6** (roadmap). Résumé :
 - **Portes** : fixture **identique Wine** ; difftest **272/272** ; transpile hash **`19acad982194bf07` inchangé** (runtime-only) ; winediff
   complet + WinMerge en cours.
 
+### 2026-07-26 — [LIFT] **✅ `jcc <autre_fonction>` = TAIL CALL CONDITIONNEL (au lieu d'un abort) — additif par construction**
+- **Mur** (le premier de WinMerge qui ne soit **plus** un import : la remontée d'API est terminée, il ne reste que du lift) :
+  `sub_867400` s'ouvre sur `je short 0x00867436`, et `0x867436` est **lui-même une fonction récupérée** (`sub_867436` est émise juste après).
+  La cible n'étant pas un bloc de la fonction courante, `idx.get()` rend `None` ⇒ **tout le `jcc` dégradait en `Stmt::Asm`** ⇒ abort.
+- **Le modèle existait déjà pour le cas inconditionnel** : un `jmp` qui sort de la fonction vers une adresse exécutable est lifté en
+  **tail call** (`return f(args)`). Un `jcc` qui sort, c'est la même chose **sous condition** — idiome MSVC classique pour partager une
+  queue commune/froide.
+- **Fix** (`ir/build.rs`) : quand l'arête **prise** sort vers une adresse exécutable et que la **chute** reste interne, on branche vers un
+  **bloc synthétique** ajouté après les blocs réels, contenant exactement le `Stmt::Return(tail_call(...))` du cas inconditionnel. Les
+  indices sont réservés au moment du branchement (`order.len() + n`), les blocs synthétiques sont appendus **avant** le calcul des
+  prédécesseurs (donc le CFG est cohérent), et ils **ne sont pas dans `idx`** (bâti sur les adresses des blocs réels) ⇒ rien d'autre ne peut
+  les cibler par accident.
+- **ADDITIF PAR CONSTRUCTION (la propriété qui rend le changement sûr)** : ce bras ne capture **que** des cas qui tombaient juste en dessous
+  dans l'`Asm`/abort. Autrement dit il ne peut **que** transformer un abort en code modélisé — **aucun programme qui marche aujourd'hui ne
+  change de comportement**. Confirmé par la mesure : **transpile hash `19acad982194bf07` INCHANGÉ**.
+- **Portes toutes vertes** : difftest **272/272**, hash **inchangé**, **cpudiff 5/0**, **funcdiff 20558 scored / 0 divergence**, winediff.
+- **✅ Effet WinMerge (preuve positive, backtrace gdb)** : `sub_867400` **appelle réellement** `sub_867436` (frames #3→#2) — le `je` est
+  désormais un vrai tail call conditionnel. WinMerge **avance dans `sub_867436`** et bute sur un **mur NOUVEAU et indépendant** : le garde de
+  la **pile x87 runtime** (`__x87rt_ldi`→`__x87rt_at`→**`ud2`** = le `__builtin_trap` documenté §4.2 sur under/overflow).
+- **⚠️ Observation soundness à traiter (prochain incrément candidat)** : ce garde `ud2` est **loud** (le process meurt) mais **muet** — aucun
+  message, et la sortie stdio bufferisée est **perdue** (d'où un run « sans aucune sortie », trompeur : ce n'est pas une absence de
+  progrès). Conforme au §0 sur le fond (pas de faux silencieux), mais **non diagnostique** : il devrait imprimer *quoi* a débordé (op,
+  profondeur) sur stderr **avant** de trapper, comme `aret_unmodelled`. Petit, sans risque, gros gain de diagnostic.
+- **Piège d'infra rencontré** : `/tmp` **plein** (plusieurs répertoires temporaires de 1,3 Go laissés par des runs de fixtures + les
+  `wmg_out*`) ⇒ un winediff entier a rendu **104 FAIL « PE build: »/« dlltool: »/« windres: »** — **échecs de BUILD, pas de comportement**.
+  Toujours vérifier la *nature* d'un FAIL avant de conclure à une régression : ici `df -h` suffisait. Nettoyage puis re-run.
+
 <!-- NOUVELLES ENTRÉES ICI (garder l'ordre chronologique, plus récent en bas) -->

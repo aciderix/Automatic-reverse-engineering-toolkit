@@ -324,6 +324,12 @@ recompilabilité **100 %** · WASM **7/7**.
   opérande mémoire explicite — élargi à `stack_pointer_increment()!=0` pour voir les écritures pile implicites).
 - **self tail-call** (`jmp func.entry`) = tail-call frais (pas une boucle) → passe
   correctement les registres-args mis à jour (whereSplit sqlite).
+- **`jcc <autre fonction>` = TAIL CALL CONDITIONNEL** (2026-07-26) : un saut conditionnel dont l'arête **prise** sort vers une
+  adresse exécutable (une autre fonction récupérée) pendant que la **chute** reste interne — idiome MSVC pour partager une queue
+  commune. La cible n'étant pas un bloc de la fonction, tout le `jcc` dégradait en `Asm`/**abort**. Désormais : branchement vers un
+  **bloc synthétique** portant exactement le `Return(tail_call(...))` du cas `jmp` sortant. **Additif par construction** — ce bras ne
+  reprend que des cas qui abortaient, donc aucun programme fonctionnel ne change (**hash inchangé**). Débloqua **WinMerge/mfc90u**
+  (`sub_867400` : `je sub_867436`), 1ᵉʳ mur non-import du driver. Cf. 71 (2026-07-26 [LIFT]).
 - **auto-main** : si l'entrée PE est un sas CRT et qu'un `main`/`_main` distinct
   existe, on démarre au main (frame cdecl synthétique argc/argv) ; `--entry`
   force l'entrée d'origine ; `_initterm` **dispatche réellement** la table d'init

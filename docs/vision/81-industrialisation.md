@@ -361,4 +361,17 @@ affiché. On priorise par la donnée.
   n'importe quelle locale et rend `"C"` au lieu de NULL ⇒ la valeur C-locale n'est garantie par rien ; fix cadré + précaution (`""` est
   courant ⇒ mesurer le corpus avant de trancher). Portes : fixture identique Wine, difftest 272/272, hash inchangé. Détail 71.
 
+- **2026-07-26 (incrément 7 — `jcc <fonction>` = tail call conditionnel ; fin de la remontée d'API sur WinMerge)** — **Jalon** : c'est le
+  premier mur de WinMerge qui n'est **plus un import** — la mop-up d'API est terminée, le reste est du **lift**. Un `jcc` dont la cible sort
+  vers une autre fonction récupérée dégradait en `Asm`/abort ; il est désormais lifté comme le `jmp` sortant l'était déjà — un **tail call**,
+  simplement **sous condition** (bloc synthétique portant le `Return(tail_call)`). **Propriété de sûreté à réutiliser** : le nouveau bras ne
+  capture **que** des cas qui tombaient dans l'abort juste en dessous ⇒ il ne peut que transformer un abort en code modélisé, **jamais**
+  changer un programme qui marche — vérifié par le **hash transpile inchangé**. C'est le profil de risque idéal pour toucher au cœur du
+  lifter (à opposer à I6/au callee-pop, qui eux modifiaient des chemins déjà exercés). Portes : difftest 272/272, hash inchangé, cpudiff 5/0,
+  funcdiff 0 div. **Effet** : WinMerge entre dans `sub_867436` et bute sur un mur **indépendant** — le garde de pile **x87 runtime** (`ud2`).
+  **Item de soundness relevé** : ce garde est loud mais **muet** (aucun message, stdio bufferisée perdue ⇒ run « sans sortie » trompeur) ;
+  il devrait diagnostiquer avant de trapper, comme `aret_unmodelled`. **Piège d'infra** : `/tmp` plein a produit **104 FAIL winediff
+  « PE build: »** — des échecs de **build**, pas de comportement ; toujours qualifier la *nature* d'un FAIL (`df -h`) avant de crier à la
+  régression. Détail 71.
+
 <!-- NOUVELLES LIGNES D'AVANCEMENT ICI (plus récent en bas) -->
