@@ -208,6 +208,14 @@ ARET_OBJCACHE=<dir> …       # emplacement (défaut $XDG_CACHE_HOME/aret/obj)
 ARET_OBJCACHE_MAX_MB=<n> …  # budget, éviction LRU en fin de build (défaut 4096)
 ```
 
+```bash
+# ORACLE WINDOWS (doc 81 §I10) — un VRAI Windows via GitHub Actions, PAS une porte :
+#   .github/workflows/windows-oracle.yml  (MSVC 32 bits, declenche au push sur bench/win*)
+#   bench/winoracle/wine_hashes.sh        (le MEME tableau nom/statut/sha256, cote Wine)
+# Usage : diffier les deux listes -> les fixtures dont l'empreinte differe SONT le constat ;
+# n'imprimer le detail complet que pour celles-la. Cf. bench/winoracle/README.md.
+```
+
 **Déterminisme (propriété acquise 2026-08-01)** : deux transpiles de la même commande produisent
 désormais des `.c` **bit-identiques** et le **même ELF**. Ce n'était pas le cas avant (un `HashMap`
 itéré au placement des φ, seedé aléatoirement par processus) et **aucune porte ne pouvait le voir**
@@ -648,6 +656,21 @@ recompilabilité **100 %** · WASM **7/7**.
   `lfPitchAndFamily` **≠** `tmPitchAndFamily` toujours (lf `0x22` vs tm `0x27` — même nibble FF_*, bits bas = pas demandé vs `TMPF_*`).
   `@N` (`@16`/Ex `@20`) ajoutés à `stdcall_pops` depuis l'import-lib mingw. Gardé `winecorpus/gdi_enumfonts.c` (invariants en **booléens**,
   jamais de compteur machine-dépendant).
+- **Famille shlwapi `Path*` COMPLÈTE côté lexical (2026-08-01, ~52 shims en 4 vagues, bit-identiques Wine)** :
+  racine (`IsUNC`/`IsRoot`/`IsRelative`/`SkipRoot`/`AddBackslash`/`RemoveBackslash`/`StripPath`/`RemoveFileSpec`),
+  combinaison (`Canonicalize`/`Combine`/`Append`), extensions & composants (`AddExtension`/`RemoveExtension`/
+  `RenameExtension`/`FindNextComponent`/`GetArgs`/`GetDriveNumber`/`IsFileSpec`/`IsUNCServerShare`/`StripToRoot`/
+  `IsSameRoot`), comparaison (`CommonPrefix`/`IsPrefix`/`IsUNCServer` — **tranchées par l'oracle Windows**), et
+  filesystem (`FileExists`/`IsDirectory`, dans `aret_hle.c` pour partager `translate_path`/`aret_attr_named`).
+  ⚠️ Contre-intuitions **mesurées** à ne pas « corriger » : `/` **n'est pas** un séparateur pour cette famille alors
+  qu'il l'est pour `PathFindFileName` ; un **espace** coupe la recherche d'extension (`"x.exe arg1 arg2"` n'a pas
+  d'extension) ; `PathIsDirectory` rend **0x10**, pas 1 ; `"C:"` → `"C:\"` mais `"C:a\..\b"` → `"\b"` (lecteur
+  **sans** séparateur = pas une racine) ; aucun cas spécial `\\?\`. Gardé par `win32_pathroot`/`pathcombine`/
+  `pathparts`/`pathexists`. Détail 71 (2026-08-01).
+- **`GetUserNameA/W`** (2026-08-01, advapi32) : nom depuis la **même source que Wine** (compte Unix), donc comparable
+  et non « environnemental » ; `*pcb` = taille requise **NUL compris** en succès **et** en échec ; tampon trop court ⇒
+  `ERROR_INSUFFICIENT_BUFFER` et tampon **intact** (aucun nom tronqué). Aucun nom disponible ⇒ **abort**, jamais un
+  substitut. Gardé `win32_username.c`.
 - **`GetClassInfo(Ex)A/W`** (2026-07-17) : le registre de classes stocke désormais **tous** les champs
   `WNDCLASS(EX)` (style, cbClsExtra/WndExtra, hInstance, hIcon, hCursor, hbrBackground, menu, hIconSm) à
   l'enregistrement → `GetClassInfo` les rend **verbatim** (round-trip register→query exact, atome non-nul en retour ;
@@ -1308,6 +1331,20 @@ la **vitesse** change.
 - **Pour toute fixture d'API `*_s` : vérifier à l'`objdump` qu'elle IMPORTE bien msvcrt.** mingw fournit ses **propres**
   corps pour plusieurs d'entre elles (`memmove_s`, `memcpy_s`, `_strupr_s`…) ⇒ sans `.def` forçant l'import, la fixture
   mesure **mingw des deux côtés** et ne garde **rien**. Mécanisme : `winecorpus/NOM.def` (cf. `crt_mem_s.def`).
+- **⭐ WINE SE TROMPE — RAREMENT, MAIS IL SE TROMPE (2026-08-01)**. La doctrine §1 notait la circularité
+  « Wine oracle *et* implémentation » comme un arbitrage théorique ; un runner **`windows-latest`** la rend
+  **mesurable**. Résultat sur les 4 premières fixtures passées au runner : **2 divergences** sur du comportement
+  **déjà livré et déjà vert** (`PathAddExtension(…, NULL)`, le code d'erreur de `PathFileExists`), plus un
+  **bug de Wine confirmé** (`PathIsUNCServerA` rend FAUX pour toute entrée, là où Windows fait `A ≡ W`). ⚠️ Deux
+  conséquences de méthode : (a) quand Windows tranche contre Wine, notre shim **diverge volontairement** de Wine et
+  la case correspondante **ne peut plus être gatée** en winediff — l'écrire dans l'en-tête de la fixture, sinon une
+  session future « corrigera » en réalignant sur le bug ; (b) le **résultat négatif compte** — gatées sur les mêmes
+  lignes, `PathCommonPrefix`/`PathIsPrefix` reviennent identiques, donc on sait **où** Wine suffit.
+- **Avant de croire un ROUGE de winediff, le relancer SEUL (2026-08-01)**. Signature à reconnaître : le côté
+  **ORACLE** est **vide** et ARET, lui, a produit sa sortie — ce n'est pas ARET qui se trompe, c'est Wine qui n'a
+  rien rendu sous charge. Vécu sur `comctl_loadbitmap` (init image-list) et `console_cp` (attache console), verts
+  seuls. Traitement : marqueur **`winecorpus/NOM.serial`** (les sérialiser), pas tolérer. Même famille que les
+  « 104 FAIL » qui étaient un `/tmp` plein : **toujours qualifier la NATURE d'un rouge avant d'en tirer une cause**.
 - **⭐ UN OUTIL DE VÉLOCITÉ BIEN CONSTRUIT EST UN ORACLE GRATUIT (2026-08-01)**. Le cache d'objets a été écrit pour
   aller plus vite ; sa **première** trouvaille a été un bug. Le mécanisme est général : le cache **prédit** un taux de
   réutilisation (rien n'a changé ⇒ tout doit être réutilisé), donc l'écart à cette prédiction est un **signal**. Ici :
@@ -1434,6 +1471,7 @@ la **vitesse** change.
 | **winediff** (Wine) | couverture **OS-API** bit-à-bit | `bench/winediff.sh` |
 | **DIB-hash** (Wine) | primitive **GDI** exacte (DIB mémoire hashé) | fixtures `gdi_*` dans winediff |
 | **écran virtuel** (Xvfb+SDL vs Wine) | **pipeline fenêtre→GDI→SDL** compose/affiche (qualitatif, cf. §7) | `import -window root` sur `:99` |
+| **ORACLE WINDOWS** (GitHub Actions, `windows-latest`) | le **vrai** contrat Win32 — casse la circularité « Wine vérifié contre Wine » (§1). **Pas une porte** : produit des mesures | `.github/workflows/windows-oracle.yml` + `bench/winoracle/wine_hashes.sh` |
 | **sweeps** (Wine, vrais binaires) | fonctionnel bout-en-bout | `sqlite_sweep`/`busybox_sweep`/`gauntlet/score` |
 | **Z3/SMT** | équivalence de réécritures | `bench/smt_rewrites.sh` |
 

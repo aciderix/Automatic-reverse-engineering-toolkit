@@ -252,6 +252,37 @@ mal diagnostiquée**. Bilan :
   différaient entre deux runs de la **même** commande). Invisible à toutes les portes existantes, parce que le hash
   transpile est **comportemental**. Corrigé (`IndexMap`), vérifié bit-identique sur `sqlite3.exe` **et sur WinMerge + 3 DLL (254/254 `.c`, ELF de 172 Mo)**. Détail 71.
 
+### I10 — Oracle **Windows réel** (GitHub Actions) ✅ **FAIT (2026-08-01)** · *idée utilisateur*
+- **Problème.** Toutes les portes comparent ARET à **Wine**. Le 70 §1 enregistre depuis toujours la faiblesse
+  honnête : *là où Wine est l'oracle **et** la référence, on vérifie Wine contre Wine*. C'était présenté comme un
+  arbitrage théorique.
+- **Proposition livrée.** `windows-latest` sur GitHub Actions = le **vrai Win32** contre lequel les binaires
+  d'origine ont été construits. `.github/workflows/windows-oracle.yml` (MSVC **32 bits** via `vcvars32`, donc ABI,
+  `wchar_t` et layouts identiques à la cible) + `bench/winoracle/` (sondes, `wine_hashes.sh`, README).
+- **Conformité §0.** ✅ **Ce n'est pas une porte** : elle produit des **mesures**, pas un rouge. Une divergence
+  Windows/Wine est un constat à instruire ; une porte qui rougit pour des raisons que personne ne doit corriger par
+  réflexe est **pire qu'aucune porte** (même principe que le rouge instable, 70 §7).
+- **Méthode d'échelle.** Comparaison du corpus **en deux temps** : empreinte `nom statut sha256` par fixture des
+  deux côtés (le runner, et `wine_hashes.sh` sous Wine) → les fixtures dont l'empreinte diffère **sont** le constat ;
+  détail complet imprimé **seulement** pour celles-là. Éligibilité **dupliquée à l'identique** des deux côtés, skips
+  **rapportés** (un ensemble qui rétrécit en silence ressemble à un problème qui disparaît).
+- **Rendement immédiat** — et c'est ce qui justifie le chantier :
+  1. **Le dépôt était inclonable sous Windows** (`:eoy`, `:` interdit par NTFS ⇒ checkout entier avorté). Invisible
+     depuis toujours car toutes les portes tournent sous Linux. **Le premier truc que l'oracle a mesuré, c'est le
+     projet lui-même.**
+  2. **2 divergences sur les 4 premières fixtures**, sur du comportement **déjà livré et déjà vert**
+     (`PathAddExtension(…, NULL)` ; code d'erreur de `PathFileExists`).
+  3. **Un bug de Wine confirmé** (`PathIsUNCServerA`) et **2 fonctions débloquées** que Wine ne pouvait pas trancher
+     (`PathCommonPrefix`/`PathIsPrefix`).
+  4. **Un résultat négatif utile** : gatées sur les mêmes lignes, `CommonPrefix`/`IsPrefix` sont identiques sous
+     Wine ⇒ Wine se trompe **rarement**, et on sait désormais **où**.
+- **Conséquence de porte à connaître.** Quand Windows tranche **contre** Wine, notre shim diverge volontairement de
+  Wine et la case **ne peut plus être gatée** en winediff. À écrire dans l'en-tête de la fixture, sinon une session
+  future « corrige » en réalignant sur le bug. Le mécanisme générique (divergence **déclarée et surveillée**, qui
+  rougit si Wine, Windows ou nous changeons) reste **à poser** — c'est le prochain incrément de ce chantier.
+- **Pièges d'infra.** Le workflow déclenche sur `paths:` (un commit hors de ces chemins ne relance rien) ;
+  `workflow_dispatch` par l'API répond **403** avec le jeton de session — le **push** est le déclencheur.
+
 ---
 
 ## 4. Oracles & outillage à ajouter (transverses)
@@ -494,5 +525,16 @@ affiché. On priorise par la donnée.
   hash transpile est **comportemental**. Corrigé (`IndexMap`), `sqlite3.exe` bit-identique sur deux transpiles.
   **Leçon d'industrialisation** : un outil de vélocité bien construit produit une **mesure**, et l'écart à cette mesure
   est un bug qu'aucune porte ne cherchait. Détail 71 (2026-08-01).
+
+- **2026-08-01 (I5 — famille `Path*` en 4 vagues ; ⭐ I10 — oracle Windows réel)** — Deux mouvements liés.
+  (1) **Bascule du « mur par mur » au « par famille »**, sur remarque de l'utilisateur et conformément au 70 §5.0
+  qu'on n'appliquait pas : ~52 shims `Path*` livrés en 4 vagues au lieu d'attendre que chacun devienne un mur, plus
+  `GetUserName`. Chaque vague = **une grille de mesure**, et la grille a été **élargie en cours de dérivation**
+  plutôt que raisonner par-dessus un trou (deux fois). Trois choses **non livrées volontairement** parce que la
+  mesure ne les prouvait pas — c'est le point de l'incrément, pas un manque. (2) **Oracle Windows** (§3 I10) :
+  la circularité du 70 §1 passe d'argument à **mesure**, avec un rendement immédiat (dépôt inclonable sous Windows,
+  2 divergences sur 4 fixtures, 1 bug de Wine, 2 fonctions débloquées, 1 résultat négatif utile).
+  **Leçon d'industrialisation** : un second oracle ne sert pas qu'à trancher les cas ouverts — il **audite les cas
+  qu'on croyait clos**, et ceux-là étaient verts.
 
 <!-- NOUVELLES LIGNES D'AVANCEMENT ICI (plus récent en bas) -->

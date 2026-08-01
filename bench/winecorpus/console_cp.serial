@@ -1,0 +1,2 @@
+Console attach is not reliable under concurrent Wine clients: under load the ORACLE
+produced no output at all. Passes alone; serialised rather than tolerated.

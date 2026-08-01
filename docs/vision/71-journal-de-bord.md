@@ -5545,3 +5545,128 @@ Détail : **70 §6** (roadmap). Résumé :
 - **Vérifié** : test dédié qui mesure les **deux sens** contre un vrai compilateur — un *warm lookup* sert des octets
   **identiques**, et un header modifié **rate**, avec la preuve que l'objet périmé aurait été **différent** ; plus le
   retour à l'ancien header qui re-touche l'entrée d'origine. + KAT SHA-256 + parsing des continuations `-MD`. 4/4.
+
+### 2026-08-01 — [HLE-WIN32][I5] **Famille shlwapi `Path*` : 4 vagues, ~52 shims, et le passage du « mur par mur » au « par famille »**
+
+- **Cible/symptôme** : après le levier-1 mesuré (entrée précédente), WinMerge enchaîne les murs `Path*` :
+  `PathAddBackslashW` → `GetUserNameW` → `PathAppendW` → `PathFileExistsW`. Traités d'abord un par un, puis —
+  **sur remarque de l'utilisateur, et conformément au 70 §5.0 Levier 0 qu'on n'appliquait pas** — en **vagues**.
+- **Vague 1 — racine** (`win32_pathroot.c`, 25 chemins × 8 fonctions × A/W) : `PathIsUNC`/`IsRoot`/`IsRelative`/
+  `SkipRoot`/`AddBackslash`/`RemoveBackslash`/`StripPath`/`RemoveFileSpec`. **4 réponses contredisent l'implémentation
+  évidente** : (a) `/` **n'est pas** un séparateur pour cette famille (`PathIsUNC("//srv/sh")`=FAUX) alors qu'il l'est
+  pour `PathFindFileName` **dans le même fichier** — incohérence réelle, ne pas « harmoniser » ; (b)
+  `PathIsRoot("\\srv\sh")`=VRAI mais `PathSkipRoot` de la même chaîne = NULL ; (c) **aucun cas spécial `\\?\`** — il
+  tombe de la règle « sauter deux composants » (`\\?\C:\x` → composants `?` et `C:` → racine à 7 ;
+  `\\?\UNC\srv\sh\f` → `?` et `UNC` → 8). J'avais écrit une branche `\\?\` à la main ; **la 2ᵉ ligne l'a tuée** ;
+  (d) `PathAddBackslash` sur 259 caractères **écrit quand même** (260 + NUL) : il déborde un tampon `MAX_PATH` au
+  lieu de refuser.
+- **Vague 2 — combinaison** (`win32_pathcombine.c`, 38 lignes) : `PathCanonicalize`/`PathCombine`/`PathAppend`, **un
+  seul incrément parce que c'est une seule implémentation** (Append défère à Combine qui canonicalise). Mesures
+  non déductibles : `"C:\a\."` **garde** son point final alors que `"\.\"` au milieu disparaît ; `"C:\a\...\b"` →
+  `"C:.\b"` ; `"C:"` → `"C:\"` (le backslash est ajouté **à la fin**) ; `"C:a\..\b"` → `"\b"` (un lecteur **sans**
+  séparateur n'est pas une racine : il est **perdu**) alors que `"C:\..\a"` → `"C:\a"` ; grimper dans un nom de
+  serveur UNC est **refusé** (`"\\srv\.."` → `"\\srv"`, seul le séparateur final tombe). ⚠️ **Deux points mesurés
+  plutôt que supposés, et j'allais me tromper sur les deux** : (1) j'allais **aborter** sur un `PathCombine` au-delà
+  de `MAX_PATH` comme « non modélisé » — la mesure dit NULL + destination mise à `""` ; (2) un 2ᵉ argument UNC ne
+  prend **pas** le chemin « racine du 1ᵉʳ + queue ».
+- **⭐ La fixture a attrapé une divergence invisible à la chaîne** : ma 1ʳᵉ canonicalisation travaillait **en place**
+  dans le tampon de l'appelant ; comme l'algorithme écrit puis recule, elle laissait des octets périmés **après le
+  NUL**. Wine n'y touche pas (son entrée A convertit via un tampon large et n'écrit que le résultat). Deux lignes
+  divergeaient sur **uniquement ces octets**. Construire en scratch puis copier corrige, et rend gratuitement sûr un
+  `dst == src` aliasé. **3ᵉ fois** que le couple *tampon empoisonné + dump brut* trouve ce que la chaîne visible cache.
+- **Vague 3 — extensions/composants** (`win32_pathparts.c`, 11 fonctions **prises en bloc**, vertes du 1ᵉʳ coup) :
+  tout pivote sur `PathFindExtension`, dont la moitié surprenante est qu'un **espace** réinitialise le candidat —
+  d'où `"x.exe arg1 arg2"` **sans extension** et un `PathAddExtension` qui appende à la ligne de commande entière.
+  Un point **initial** compte (`".hidden"` a déjà une extension) et un point **final** aussi (`"file."`).
+  `PathFindNextComponent` saute la **suite** de séparateurs (`"\\srv"` → 2, pas 1) ; `PathGetArgs` suit les
+  guillemets (`"\"a b\" c"` → 6) ; `PathIsUNCServerShare` veut **exactement un** séparateur et se moque de ce qui
+  suit ; `PathIsSameRoot` ignore la **casse** et ne compare que la racine. `PathStripToRoot` = la boucle de Wine
+  (retirer le file-spec jusqu'à être une racine) → **réutilise** les fonctions de la vague 1, donc les trois
+  s'accordent **par construction** au lieu de trois transcriptions séparées.
+- **Vague 4 — filesystem** (`win32_pathexists.c`) : `PathFileExists`/`PathIsDirectory`, placées dans `aret_hle.c`
+  près de `translate_path`/`aret_attr_named` pour partager **une seule** réponse à « que nomme ce chemin ».
+  **3 réponses qu'un simple wrapper `stat()` rate** : `PathIsDirectory` rend **`FILE_ATTRIBUTE_DIRECTORY` (0x10)**,
+  pas 1 (un `== TRUE` prend la mauvaise branche en silence) ; un **joker** est `ERROR_INVALID_NAME` (123), pas
+  « absent » ; le chemin **vide** est `ERROR_PATH_NOT_FOUND` (3) là où `stat("")` donne ENOENT (2), et un chemin
+  **NULL** rend FAUX **sans toucher** au last-error. La fixture **crée** ce qu'elle interroge puis le supprime et
+  ré-interroge, donc les réponses ne peuvent venir ni du contenu de l'hôte ni d'un cache.
+- **Méthode, deux fois** : grille **élargie en cours de dérivation** plutôt que raisonner par-dessus un trou — une
+  ligne `\\srv\` a tranché `PathIsUNCServerShare`, une paire ne différant que par la casse a tranché `PathIsSameRoot`.
+- **Non livré volontairement** (et c'est le point de l'incrément, pas un trou) : `PathIsUNCServer` (Wine se
+  contredit entre A et W) et `PathCommonPrefix`/`PathIsPrefix` (11 paires laissent la règle ambiguë) — **abort**
+  plutôt qu'une règle devinée. Tous deux **tranchés ensuite par l'oracle Windows** (entrée suivante).
+- **Vérifié** : 5 fixtures bit-identiques Wine, audit stdcall PASS (`@N` depuis les import-libs mingw, table 905),
+  hash `19acad982194bf07` inchangé. **Effet WinMerge** : 4 murs franchis dans la session.
+
+### 2026-08-01 — [HLE][SOUNDNESS] **`GetUserNameA/W` — et l'abort a payé dès le premier run**
+
+- **Fix** : le nom vient de la **même source que Wine** (le compte Unix de l'hôte), donc les deux moteurs lisent une
+  seule vérité et la fixture **compare le nom** au lieu de le sauter comme environnemental. Rien n'est inventé : si
+  l'hôte ne fournit aucun nom, on **aborte** au lieu de répondre un substitut plausible.
+- **⭐ Et c'est exactement ce qui a servi** : ma 1ʳᵉ version lisait `$USER`, puis `$LOGNAME`, puis `getlogin()` — ce
+  qui marche dans un shell interactif et **échoue dans le processus fils de winediff** (pas d'environnement, pas de
+  terminal). La fixture est revenue en **abort nommant la cause exacte**, au lieu d'une divergence silencieuse à
+  traquer. La correction est l'**ORDRE** des sources, pas seulement l'ensemble : la base **passwd d'abord**, comme Wine.
+- **Contrat de taille, mesuré sur tampon empoisonné** : `*pcb` = taille requise **NUL compris**, en succès **comme**
+  en échec ; un tampon trop court d'un seul caractère échoue avec `ERROR_INSUFFICIENT_BUFFER` et laisse le tampon
+  **totalement intact** (aucun nom tronqué écrit — seul le dump brut le prouve) ; demander exactement la taille
+  rapportée réussit. Octets pour A, caractères pour W.
+- **Chaque sonde remet le last-error à zéro d'abord** : ce n'est pas de la prudence gratuite, c'est le piège qui avait
+  produit une conclusion publiée fausse sur la famille SPI. Conçu pour ne pas se reproduire plutôt que redécouvert.
+
+### 2026-08-01 — [INFRA][ORACLE] **⭐ UN VRAI ORACLE WINDOWS (GitHub Actions) — la circularité du 70 §1 n'est plus un argument, elle est mesurée**
+
+- **Origine** : idée de l'utilisateur (« et départager via GitHub Actions ? »). Toutes les portes comparent ARET à
+  **Wine** ; le 70 §1 enregistre depuis toujours la faiblesse honnête *« si Wine est à la fois l'oracle et
+  l'implémentation, on vérifie Wine contre Wine »*. Un runner `windows-latest` **casse le cercle** : c'est le Win32
+  contre lequel les binaires d'origine ont été construits.
+- **Livré** : `.github/workflows/windows-oracle.yml` (MSVC **32 bits** via `vcvars32` — donc l'ABI, la largeur de
+  `wchar_t` et les layouts sont ceux qu'ARET vise) + `bench/winoracle/` (sondes + `wine_hashes.sh` + README).
+- **Choix de conception, délibérés** :
+  - **Ce n'est PAS une porte.** Elle produit des **mesures** (log + artefact) qu'une session lit puis encode. Une
+    divergence Windows/Wine est un **constat à instruire**, pas un rouge à faire taire — et une porte qui rougit
+    pour des raisons que personne ne doit corriger par réflexe est **pire qu'aucune porte**.
+  - Les sondes vivent dans `bench/winoracle/`, **pas** dans `winecorpus/`, précisément parce que winediff compare à
+    Wine et qu'ici **Wine est le suspect**.
+  - Comparaison du corpus **en deux temps** : une **empreinte** `nom statut sha256` par fixture (le runner) que
+    `wine_hashes.sh` reproduit **localement sous Wine** — les fixtures dont l'empreinte diffère **SONT** le constat ;
+    le détail complet n'est imprimé que pour celles-là. Les critères d'éligibilité sont **dupliqués à l'identique**
+    des deux côtés (sinon on diffe deux ensembles différents) et les **skips sont rapportés** : un ensemble qui
+    rétrécit en silence ressemblerait à un ensemble de problèmes qui rétrécit.
+- **⭐ Constat n°0, avant même de mesurer quoi que ce soit : le dépôt était INCLONABLE sous Windows.** Le checkout
+  meurt sur `error: invalid path ':eoy'` — un fichier **vide** nommé comme une coquille de redirection shell
+  (`2>:eoy`), commité par accident. NTFS réserve le `:` (flux alternatifs), donc git **abandonne tout le checkout**,
+  pas seulement cette entrée. Passé inaperçu parce que **toutes** les portes tournent sous Linux. *(Le retirer
+  demande `git rm ':(literal):eoy'` — un `':eoy'` nu est interprété comme de la magie de pathspec et ne matche rien.)*
+- **Constat n°1 — deux divergences sur les QUATRE premières fixtures**, sur du comportement **déjà livré** et
+  **déjà vert** :
+  - `PathAddExtension(chemin, NULL)` : Windows appende `.exe` et rend VRAI ; Wine rend FAUX sans rien changer.
+    MSDN documente le NULL comme signifiant `.exe` ⇒ **bug de Wine**, qu'ARET reproduit parce que Wine était le seul
+    oracle au moment de la vague 3.
+  - `PathFileExists("f.txt\")` : Windows pose `ERROR_DIRECTORY` (267), Wine `ERROR_PATH_NOT_FOUND` (3). Le booléen
+    est **identique** des deux côtés ; seul le code d'erreur diverge. ⚠️ Le mapping `ENOTDIR→3` est écrit à **trois
+    endroits** et alimente aussi `GetFileAttributes(Ex)A/W` : **portée potentiellement plus large, NON mesurée** —
+    hypothèse à trancher par la sonde, pas à affirmer.
+  - **Gravité honnête** : aucune des deux n'est de la classe que le §0 vise en premier (donnée fausse présentée comme
+    juste). La 1ʳᵉ rend un **échec** là où un succès était dû ⇒ casse **visiblement**. La 2ᵉ ne change qu'un code
+    d'erreur secondaire. **Ce qui compte n'est pas leur gravité, c'est le TAUX** : 2 sur 4 fixtures. Les suivantes
+    peuvent tomber dans une classe qui, elle, produit du faux silencieux (taille de structure, longueur retournée,
+    ordre de tri).
+- **Constat n°2 — les deux questions laissées ouvertes par la vague 3 sont tranchées** :
+  - `PathIsUNCServer` : Windows répond **A ≡ W** et donne raison au **W de Wine**. Le A de Wine rend FAUX pour
+    **toutes** les entrées ⇒ **bug confirmé**. Nos deux entrées implémentent la règle Windows (« préfixe `\\` et
+    aucun autre séparateur »). **Conséquence de porte** : notre A **diverge volontairement de Wine**, donc seule la
+    colonne **W** est comparable en winediff ; l'en-tête de la fixture le dit explicitement pour que personne ne
+    « corrige » plus tard en réalignant sur Wine — c'est précisément le piège qu'un oracle Wine-seul tend.
+  - `PathCommonPrefix` : il fallait des paires où les deux lectures candidates prédisent des nombres **différents** ;
+    l'ancienne grille n'avait que des paires où elles **coïncidaient**, d'où onze lignes qui ne prouvaient rien.
+    Règle Windows : chaînes identiques → **longueur entière** (`C:\a`/`C:\a` → 4) ; sinon index du dernier
+    séparateur commun, **exclu** (`C:\a\b`/`C:\a\c` → 4) ; **sauf** le séparateur de la racine de lecteur, conservé
+    (`C:\aa\b`/`C:\ab\b` → 3) ; et un UNC n'a **pas** cette exception (`\\s\h`/`\\s\i` → 3). `PathIsPrefix` en découle.
+  - **Résultat NÉGATIF utile** : gatées sur **exactement les mêmes paires** que le runner, ces deux fonctions
+    reviennent bit-identiques sous Wine ⇒ **Wine et Windows s'accordent** dessus. Sur toute la famille, la seule
+    divergence est `PathIsUNCServerA`. L'oracle Wine se trompe **rarement** — et on sait maintenant **où**.
+- **Piège d'infra à connaître** : le workflow déclenche sur `paths:`, donc le commit qui a *réellement* débloqué le
+  checkout (retrait de `:eoy`) n'a **rien relancé** ; il a fallu toucher une sonde. Et `workflow_dispatch` via l'API
+  répond **403** avec le jeton de session — le push reste le déclencheur.
+- **Vérifié** : run vert, 5 fichiers d'artefact, verdicts encodés, winediff `win32_pathparts` toujours bit-identique.

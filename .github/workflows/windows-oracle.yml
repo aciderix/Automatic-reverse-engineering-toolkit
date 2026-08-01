@@ -14,13 +14,21 @@
 #
 # Built 32-bit (vcvars32) because that is what ARET targets, so the ABI, the wchar_t
 # width and the structure layouts are the ones under test.
+#
+# Two outputs, deliberately:
+#   * the FINGERPRINT table — one `name status sha256` line per eligible fixture,
+#     which `bench/winoracle/wine_hashes.sh` reproduces under Wine so the two diff
+#     directly. This is how the whole corpus is compared without reading a hundred
+#     pages of log: the fixtures whose hashes differ ARE the finding.
+#   * the DETAIL of the hand-picked probes in bench/winoracle/, printed in full,
+#     because those exist precisely to be read.
 name: windows-oracle
 
 on:
   push:
     paths:
       - 'bench/winoracle/**'
-      - 'bench/winecorpus/win32_path*.c'
+      - 'bench/winecorpus/**'
       - '.github/workflows/windows-oracle.yml'
   workflow_dispatch:
 
@@ -30,31 +38,54 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Build and run the probes under real Win32 (32-bit)
+      - name: Build and run the hand-picked probes (full output)
         shell: cmd
         run: |
           for /f "usebackq tokens=*" %%i in (`"C:\Program Files (x86)\Microsoft Visual Studio\Installer\vswhere.exe" -latest -property installationPath`) do call "%%i\VC\Auxiliary\Build\vcvars32.bat"
           if errorlevel 1 exit /b 1
           mkdir out
-          rem The disputed probe: the questions Wine's answers do not settle.
           cl /nologo /W0 bench\winoracle\win32_pathdisputed.c shlwapi.lib /Fe:out\disputed.exe /Fo:out\ || exit /b 1
-          rem The gated fixtures, re-run against the real thing: anywhere their output
-          rem differs from the Wine run recorded in the repo, either Wine or our reading
-          rem of it is wrong, and that is worth knowing even when the gate is green.
-          cl /nologo /W0 bench\winecorpus\win32_pathroot.c    shlwapi.lib /Fe:out\pathroot.exe    /Fo:out\ || exit /b 1
-          cl /nologo /W0 bench\winecorpus\win32_pathcombine.c shlwapi.lib /Fe:out\pathcombine.exe /Fo:out\ || exit /b 1
-          cl /nologo /W0 bench\winecorpus\win32_pathparts.c   shlwapi.lib /Fe:out\pathparts.exe   /Fo:out\ || exit /b 1
-          cl /nologo /W0 bench\winecorpus\win32_pathexists.c  shlwapi.lib /Fe:out\pathexists.exe  /Fo:out\ || exit /b 1
-          rem `disputed` LAST: it is the section a session actually reads, and a job log is
-          rem read from the end.
-          for %%p in (pathroot pathcombine pathparts pathexists disputed) do (
-            echo ================ %%p ================
-            out\%%p.exe > out\%%p.windows.txt
-            type out\%%p.windows.txt
-          )
+          echo ================ disputed ================
+          out\disputed.exe > out\disputed.windows.txt
+          type out\disputed.windows.txt
+
+      - name: Fingerprint every eligible winecorpus fixture
+        shell: cmd
+        run: |
+          for /f "usebackq tokens=*" %%i in (`"C:\Program Files (x86)\Microsoft Visual Studio\Installer\vswhere.exe" -latest -property installationPath`) do call "%%i\VC\Auxiliary\Build\vcvars32.bat"
+          if errorlevel 1 exit /b 1
+          mkdir fp 2>nul
+          rem Eligibility must match bench/winoracle/wine_hashes.sh exactly, or the two
+          rem lists compare different sets. A fixture is skipped when the comparison
+          rem would measure the TOOLCHAIN rather than the API. Skips are REPORTED: a
+          rem silently shrinking set would look like a shrinking set of problems.
+          for %%f in (bench\winecorpus\*.c) do call :one "%%~nf"
+          goto :eof
+          :one
+          set n=%~1
+          echo %n%| findstr /e ".dll" >nul && goto :eof
+          if exist "bench\winecorpus\%n%.dll.c"   (echo %n% SKIP-companion-dll & goto :eof)
+          if exist "bench\winecorpus\%n%.rc"      (echo %n% SKIP-resource      & goto :eof)
+          if exist "bench\winecorpus\%n%.def"     (echo %n% SKIP-deffile       & goto :eof)
+          if exist "bench\winecorpus\%n%.withdll" (echo %n% SKIP-withdll       & goto :eof)
+          if exist "bench\winecorpus\%n%.nodisplay" (echo %n% SKIP-nodisplay   & goto :eof)
+          findstr /c:"__asm__" /c:"__attribute__" "bench\winecorpus\%n%.c" >nul && (echo %n% SKIP-gcc-only & goto :eof)
+          findstr /r "CreateWindow DialogBox CreateDialog" "bench\winecorpus\%n%.c" >nul && (echo %n% SKIP-gui & goto :eof)
+          cl /nologo /W0 "bench\winecorpus\%n%.c" user32.lib gdi32.lib advapi32.lib shell32.lib shlwapi.lib ole32.lib oleaut32.lib version.lib comctl32.lib winspool.lib /Fe:fp\%n%.exe /Fo:fp\ >nul 2>&1 || (echo %n% BUILD-FAIL & goto :eof)
+          pushd fp
+          if exist "..\bench\winecorpus\%n%.in" (%n%.exe < "..\bench\winecorpus\%n%.in" > %n%.txt 2>nul) else (%n%.exe > %n%.txt 2>nul)
+          popd
+          if not exist "fp\%n%.txt" (echo %n% RUN-FAIL & goto :eof)
+          rem CRLF is normalised away on both sides: the two toolchains differ on line
+          rem endings for reasons that have nothing to do with Win32 behaviour.
+          powershell -NoProfile -Command "$t=[IO.File]::ReadAllText('fp/%n%.txt') -replace \"`r\",''; $s=[IO.MemoryStream]::new([Text.Encoding]::UTF8.GetBytes($t)); $h=(Get-FileHash -InputStream $s -Algorithm SHA256).Hash.ToLower(); Write-Output ('%n% OK ' + $h)"
+          goto :eof
 
       - name: Publish the measurements
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: windows-oracle
-          path: out/*.windows.txt
+          path: |
+            out/*.windows.txt
+            fp/*.txt

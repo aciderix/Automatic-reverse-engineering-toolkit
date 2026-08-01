@@ -249,9 +249,18 @@ jobs="${WINEDIFF_JOBS:-$(nproc 2>/dev/null || echo 4)}"
 # 43 of 194 fixtures create a window, so the parallel win is kept for the other 151
 # while the flaky class is removed rather than tolerated — a gate that goes red at
 # random teaches you to ignore red, which is worse than a slow gate.
+# A `winecorpus/NAME.serial` marker forces a fixture into the serial set even when it
+# creates no window. Two were caught that way (comctl_loadbitmap, console_cp): under
+# load it was the ORACLE that produced no output at all, not ARET that answered wrong
+# — the same signature as the "104 FAILs" that were really a full /tmp. Each passes
+# alone. An explicit marker file is used rather than growing the regex, because the
+# reason differs per fixture (comctl32 image-list init, console attach) and a regex
+# would silently claim they are all the same kind of thing.
 gui=(); cli=()
 for n in "${names[@]}"; do
-  if grep -qE 'CreateWindow|DialogBox|CreateDialog' "$CORPUS/$n.c" 2>/dev/null; then
+  if [ -f "$CORPUS/$n.serial" ]; then
+    gui+=("$n")
+  elif grep -qE 'CreateWindow|DialogBox|CreateDialog' "$CORPUS/$n.c" 2>/dev/null; then
     gui+=("$n")
   else
     cli+=("$n")
