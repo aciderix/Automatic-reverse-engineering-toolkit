@@ -3679,6 +3679,137 @@ uint32_t aret_PathFindFileNameA(uint32_t esp) { ARET_PFFN_BODY(char) }
 uint32_t aret_PathFindFileNameW(uint32_t esp) { ARET_PFFN_BODY(uint16_t) }
 #undef ARET_PFFN_BODY
 
+/* shlwapi, the ROOT-AWARE lexical path family (wave 1). Eight functions that all
+ * turn on the same question — where does this path's root end — so they are derived
+ * and gated together: `winecorpus/win32_pathroot.c` sweeps ONE grid of 25 paths
+ * through all of them, in A and W, on a poisoned buffer with a raw dump. Every rule
+ * below reproduces all 25 measured rows; none of it is reasoned from the API docs,
+ * because several of the answers contradict the obvious reading:
+ *
+ *   - `/` is NOT a separator for this family. `PathIsUNC("//server/share")` is FALSE
+ *     and `PathIsRelative` of it is TRUE — even though `PathFindFileName`, three
+ *     lines above, *does* treat `/` as a separator. The inconsistency is real and
+ *     measured; do not "harmonise" it.
+ *   - `PathIsRoot("\\\\server\\share")` is TRUE while `PathSkipRoot` of the same string
+ *     is NULL: a share with no trailing backslash *is* a root, but there is nothing
+ *     past it to skip to.
+ *   - There is NO special case for the `\\\\?\\` extended prefix. It falls out of the
+ *     plain "skip two backslash-separated components" rule: in `\\\\?\\C:\\x` the
+ *     components are `?` and `C:`, which is why the root ends at 7, and in
+ *     `\\\\?\\UNC\\srv\\sh\\f` they are `?` and `UNC`, which is why it ends at 8. A
+ *     hand-written `\\\\?\\` case would have got the second one wrong.
+ *   - `PathAddBackslash` on a 259-character path DOES write, producing 260 characters
+ *     plus a NUL — it overflows a MAX_PATH buffer rather than refusing. Measured, and
+ *     reproduced: the caller's buffer contract is the caller's problem, and diverging
+ *     "for safety" would change behaviour the program may depend on.
+ */
+#define ARET_PATH_ROOT_FAMILY(TAG, TYPE)                                              \
+/* A root is: "\", a drive root "X:\" exactly, or a UNC prefix with at most ONE       \
+ * further separator anywhere in it. */                                               \
+static int u32_p_isroot_##TAG(const TYPE *p) {                                        \
+    if (!p || !*p) return 0;                                                          \
+    if (*p == (TYPE)'\\') {                                                           \
+        if (!p[1]) return 1;                                                          \
+        if (p[1] != (TYPE)'\\') return 0;                                             \
+        int seen = 0;                                                                 \
+        for (p += 2; *p; p++)                                                         \
+            if (*p == (TYPE)'\\') { if (seen) return 0; seen = 1; }                   \
+        return 1;                                                                     \
+    }                                                                                 \
+    return p[1] == (TYPE)':' && p[2] == (TYPE)'\\' && !p[3];                          \
+}                                                                                     \
+/* Past the root, or NULL. UNC = skip exactly two backslash-terminated components;    \
+ * otherwise a drive needs its separator ("C:" and "C:/dir" both have no root). */    \
+static const TYPE *u32_p_skiproot_##TAG(const TYPE *p) {                              \
+    if (!p) return 0;                                                                 \
+    if (p[0] == (TYPE)'\\' && p[1] == (TYPE)'\\') {                                   \
+        p += 2;                                                                       \
+        for (int c = 0; c < 2; c++) {                                                 \
+            while (*p && *p != (TYPE)'\\') p++;                                       \
+            if (*p != (TYPE)'\\') return 0;                                           \
+            p++;                                                                      \
+        }                                                                             \
+        return p;                                                                     \
+    }                                                                                 \
+    if (p[0] && p[1] == (TYPE)':' && p[2] == (TYPE)'\\') return p + 3;                \
+    return 0;                                                                         \
+}                                                                                     \
+/* First index a file-spec removal is allowed to truncate to: past a leading "\" or   \
+ * "\\", and past the last ":" (plus one separator if it follows). Protects the root  \
+ * — `PathRemoveFileSpec("\\\\server")` leaves "\\\\", not "\". */                        \
+static int u32_p_base_##TAG(const TYPE *p) {                                          \
+    int b = 0;                                                                        \
+    if (p[0] == (TYPE)'\\') { b = 1; if (p[1] == (TYPE)'\\') b = 2; }                 \
+    for (int i = 0; p[i]; i++)                                                        \
+        if (p[i] == (TYPE)':') { b = i + 1; if (p[b] == (TYPE)'\\') b++; }            \
+    return b;                                                                         \
+}                                                                                     \
+uint32_t aret_PathIsUNC##TAG(uint32_t esp) {                                          \
+    const TYPE *p = (const TYPE *)(uintptr_t)WU(0);                                   \
+    return p && p[0] == (TYPE)'\\' && p[1] == (TYPE)'\\';                             \
+}                                                                                     \
+uint32_t aret_PathIsRoot##TAG(uint32_t esp) {                                         \
+    return (uint32_t)u32_p_isroot_##TAG((const TYPE *)(uintptr_t)WU(0));              \
+}                                                                                     \
+uint32_t aret_PathIsRelative##TAG(uint32_t esp) {                                     \
+    const TYPE *p = (const TYPE *)(uintptr_t)WU(0);                                   \
+    if (!p || !*p) return 1;                                                          \
+    return !(p[0] == (TYPE)'\\' || p[1] == (TYPE)':');                                \
+}                                                                                     \
+uint32_t aret_PathSkipRoot##TAG(uint32_t esp) {                                       \
+    return (uint32_t)(uintptr_t)u32_p_skiproot_##TAG((const TYPE *)(uintptr_t)WU(0)); \
+}                                                                                     \
+/* Returns the NUL. An empty path is left empty (no backslash appended) and a path    \
+ * at or over MAX_PATH is refused with NULL — both measured. */                       \
+uint32_t aret_PathAddBackslash##TAG(uint32_t esp) {                                   \
+    TYPE *p = (TYPE *)(uintptr_t)WU(0);                                               \
+    if (!p) return 0;                                                                 \
+    int n = 0;                                                                        \
+    while (p[n]) n++;                                                                 \
+    if (n >= 260) return 0;                                                           \
+    if (n) { if (p[n - 1] != (TYPE)'\\') p[n++] = (TYPE)'\\'; p[n] = 0; }             \
+    return (uint32_t)(uintptr_t)(p + n);                                              \
+}                                                                                     \
+/* Returns the LAST CHARACTER of the path as it was on entry (not the NUL), and drops \
+ * a trailing backslash only when the path is not a root. */                          \
+uint32_t aret_PathRemoveBackslash##TAG(uint32_t esp) {                                \
+    TYPE *p = (TYPE *)(uintptr_t)WU(0);                                               \
+    if (!p) return 0;                                                                 \
+    int n = 0;                                                                        \
+    while (p[n]) n++;                                                                 \
+    TYPE *last = n ? p + n - 1 : p;                                                   \
+    if (!u32_p_isroot_##TAG(p) && *last == (TYPE)'\\') *last = 0;                     \
+    return (uint32_t)(uintptr_t)last;                                                 \
+}                                                                                     \
+/* Move the file-name component (same rule as PathFindFileName) to the front. */      \
+uint32_t aret_PathStripPath##TAG(uint32_t esp) {                                      \
+    TYPE *p = (TYPE *)(uintptr_t)WU(0);                                               \
+    if (!p) return 0;                                                                 \
+    TYPE *last = p;                                                                   \
+    for (TYPE *q = p; *q; q++)                                                        \
+        if ((*q == (TYPE)'\\' || *q == (TYPE)'/' || *q == (TYPE)':') &&               \
+            q[1] && q[1] != (TYPE)'\\' && q[1] != (TYPE)'/')                          \
+            last = q + 1;                                                             \
+    if (last != p) { int i = 0; do { p[i] = last[i]; } while (last[i++]); }           \
+    return 0;                                                                         \
+}                                                                                     \
+/* Truncate at the last backslash that lies at or after the protected base; if there  \
+ * is none, truncate to the base itself. TRUE iff anything was cut. */                \
+uint32_t aret_PathRemoveFileSpec##TAG(uint32_t esp) {                                 \
+    TYPE *p = (TYPE *)(uintptr_t)WU(0);                                               \
+    if (!p) return 0;                                                                 \
+    int b = u32_p_base_##TAG(p), cut = b, i;                                          \
+    for (i = b; p[i]; i++)                                                            \
+        if (p[i] == (TYPE)'\\') cut = i;                                              \
+    if (!p[cut]) return 0;                                                            \
+    p[cut] = 0;                                                                       \
+    return 1;                                                                         \
+}
+
+ARET_PATH_ROOT_FAMILY(A, char)
+ARET_PATH_ROOT_FAMILY(W, uint16_t)
+#undef ARET_PATH_ROOT_FAMILY
+
 /* ExitWindowsEx(uFlags, dwReason) -> BOOL. We never log the user off / shut the
  * host down (sound: a transpiled app must not affect the real session); report
  * success so the app proceeds to its own teardown. Not oracle-compared (a real

@@ -13,7 +13,10 @@
  *   - "\\\\server\\share"  the UNC root is two components deep, not one
  *   - "\\\\server"       an incomplete UNC has no root at all
  *   - "C:file"        drive-relative: neither absolute nor rooted
- *   - "//server/share" forward slashes are separators here too
+ *   - "//server/share" forward slashes: MEASURED not to be separators for this
+ *                     family, even though PathFindFileName does treat them as one
+ *   - "\\\\?\\…"         the extended-length prefix, in its drive and UNC forms
+ *   - "C:\\\\dir"       a doubled separator, which the root scan must not miscount
  *   - ""              the empty path, where several of these must not write
  *
  * Pointer-returning functions print the OFFSET into the caller's buffer, never the
@@ -35,12 +38,14 @@ static const char *const CASES_A[] = {
     "\\\\server\\share", "\\\\server\\share\\", "\\\\server\\share\\dir\\f.txt",
     "\\\\server", "\\\\", "\\", "\\dir\\f", "dir\\f", "..\\f",
     "C:file", "//server/share", "C:/dir/f", "\\\\?\\C:\\x",
+    "\\\\?\\", "\\\\?\\x", "\\\\?\\UNC\\srv\\sh\\f", "C:\\\\dir", "\\\\\\srv",
 };
 static const wchar_t *const CASES_W[] = {
     L"", L"a", L"C:", L"C:\\", L"C:\\dir", L"C:\\dir\\", L"C:\\dir\\file.txt",
     L"\\\\server\\share", L"\\\\server\\share\\", L"\\\\server\\share\\dir\\f.txt",
     L"\\\\server", L"\\\\", L"\\", L"\\dir\\f", L"dir\\f", L"..\\f",
     L"C:file", L"//server/share", L"C:/dir/f", L"\\\\?\\C:\\x",
+    L"\\\\?\\", L"\\\\?\\x", L"\\\\?\\UNC\\srv\\sh\\f", L"C:\\\\dir", L"\\\\\\srv",
 };
 #define NCASES ((int)(sizeof(CASES_A) / sizeof(CASES_A[0])))
 
