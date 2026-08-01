@@ -873,9 +873,12 @@ résidu qui abort restera l'**obfusqué/fait-main/VM-packé** (indécidable, §9
   **⚠️ PRÉ-REQUIS MESURABLE AVANT DE LIFTER (2026-08-01) — une builtin Wine peut n'être qu'un RELAIS.** Lifter **shlwapi**
   n'a **rien** débloqué : son export `PathAddBackslashW` est un `___wine_spec_imp_*` = `jmp *[IAT kernelbase]`, pas une
   implémentation ⇒ le mur **recule d'un module** au lieu de tomber. Test en une commande, avant de payer le lift :
-  `objdump -t <dll> | grep -c __wine_spec_imp_` rapporté aux exports nommés. Mesuré : comctl32 **0**/126, ole32 **0**/301,
-  comdlg32 **0**/28, oleaut32 3/418, shell32 4/362, kernelbase 2/1402 (= **la vraie couche d'implémentation**) — mais
-  advapi32 **196/582**, **shlwapi 198/362**, version 12/16 = **relais**. Fin de chaîne mesurée : kernelbase n'importe **que
+  **DEUX** commandes, pas une (règle corrigée 2026-08-01) : `objdump -t <dll> | grep -c __wine_spec_imp_` **ET**
+  `objdump -p <dll> | grep -c 'Forwarder RVA'` — thunks et forwarders sont deux mécanismes de réexport **distincts**,
+  et ne compter que les premiers classait **ole32** « implémente » alors qu'il a **133 forwarders/301** (dont
+  `CoGetMalloc`, vers combase). Mesuré : comctl32 0+31/126, comdlg32 0+0/28, oleaut32 3+0/418, shell32 4+36/362,
+  kernelbase 2+92/1402, **combase 0+0/345 (le vrai COM)**, mlang 0+0/14 — mais **ole32 0+133/301**,
+  **shlwapi 198+217/362**, advapi32 196+30/582, version 12+2/16 = **relais**. Fin de chaîne mesurée : kernelbase n'importe **que
   ntdll** (131 `Nt*` syscalls + 212 `Rtl*` + 74 divers) ⇒ la chaîne user-mode est **finie**, elle bute sur 131 syscalls NT
   (jumeau du mur win32k). ⇒ Une famille **pure et déterministe** (`Path*`/`Str*`) se comble au **shim HLE** (I5), pas en
   liftant kernelbase. Détail 71 (2026-08-01 [LIFT-DLL][INFRA]).

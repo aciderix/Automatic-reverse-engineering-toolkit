@@ -5670,3 +5670,71 @@ Détail : **70 §6** (roadmap). Résumé :
   checkout (retrait de `:eoy`) n'a **rien relancé** ; il a fallu toucher une sonde. Et `workflow_dispatch` via l'API
   répond **403** avec le jeton de session — le push reste le déclencheur.
 - **Vérifié** : run vert, 5 fichiers d'artefact, verdicts encodés, winediff `win32_pathparts` toujours bit-identique.
+
+### 2026-08-01 — [HLE-COM][I5] **1ʳᵉ interface COM (`CoGetMalloc`/`IMalloc`) — et le « mécanisme de vtable » n'existait pas**
+
+- **Mur** : après la famille `Path*`, WinMerge bute sur `ole32.CoGetMalloc` en delay-load. C'est le premier appel qui
+  rend une **VTABLE** que le programme appelle ensuite — le « mécanisme de vtable COM » que le 70 §5.0 cadrait comme
+  un chantier.
+- **Il n'y en avait pas.** Le résolveur delay-load distribue déjà des **VA synthétiques** (`DELAY_VA_BASE`) que
+  `aret_call` redispatche vers le HLE ; **une vtable, c'est neuf de ces VA**. Zéro machinerie nouvelle. Le chantier
+  annoncé était le problème du delay-load sous un autre visage.
+- **⚠️ La règle « thunk » du matin était INCOMPLÈTE, et elle m'aurait fait payer un lift inutile.** Elle comptait les
+  `__wine_spec_imp_` et classait `ole32` à **0 thunk = implémente**. Faux : `ole32` a **133 forwarders PE** sur 301
+  exports, et `ole32.CoGetMalloc` en est un, droit vers `combase`. **Thunks et forwarders sont deux mécanismes
+  distincts de réexport** ; la métrique n'en voyait qu'un. Table corrigée, deux colonnes :
+
+  | DLL | exports | thunks | forwarders | verdict |
+  |---|---|---|---|---|
+  | comctl32 | 126 | 0 | 31 | implémente |
+  | comdlg32 | 28 | 0 | 0 | implémente |
+  | oleaut32 | 418 | 3 | 0 | implémente |
+  | shell32 | 362 | 4 | 36 | implémente |
+  | kernelbase | 1402 | 2 | 92 | implémente |
+  | combase | 345 | 0 | 0 | implémente (le vrai COM) |
+  | **ole32** | 301 | **0** | **133** | **RELAIS (44 %)** |
+  | shlwapi | 362 | 198 | 217 | RELAIS |
+  | advapi32 | 582 | 196 | 30 | RELAIS |
+  | version | 16 | 12 | 2 | RELAIS |
+
+  ⇒ **la commande de contrôle devient** : `objdump -t X.dll | grep -c __wine_spec_imp_` **ET**
+  `objdump -p X.dll | grep -c 'Forwarder RVA'`, rapportés aux exports nommés.
+- **Décision mesurée** : `combase` traîne rpcrt4 (30), ucrtbase (22), kernel32 (55) **et une dépendance circulaire
+  vers ole32**. Contre ça, `IMalloc` = **9 méthodes** dont 3 déjà écrites (`CoTaskMemAlloc/Realloc/Free`). Écrit à la
+  main, sans hésitation.
+- **⭐ Trois lignes mesurées contredisent le contrat COM documenté** — la raison même de sonder plutôt que raisonner :
+  (a) `QueryInterface` **n'AddRef PAS** (trois QI réussis laissent le compteur à 1) — j'avais écrit l'AddRef **avant**
+  de mesurer, et j'ai ajouté une ligne à la sonde **parce que les lignes existantes ne le discriminaient pas** ;
+  (b) `QueryInterface` d'une interface non supportée rend `E_NOINTERFACE` et **ne touche pas** au paramètre de sortie
+  (COM exige de le mettre à NULL) ; (c) le compteur de références est **réel** (AddRef→2, Release→1) sur un singleton
+  jamais détruit. Résultat positif utile : un bloc `CoTaskMemAlloc` est **connu d'IMalloc** et libérable par lui —
+  **un seul allocateur**, pas deux.
+- **`GetSize`/`DidAlloc` : table latérale, pas en-tête de taille.** Deux raisons qui comptent toutes les deux : un
+  en-tête changerait le pointeur rendu par `CoTaskMemAlloc` (un programme qui le mélange avec `free()` corromprait),
+  et `DidAlloc` doit répondre pour un pointeur qu'on n'a **pas** alloué — y lire un en-tête, c'est déréférencer un
+  pointeur étranger, donc pouvoir fauter. La table ne lit **que sa propre mémoire** : un argument hostile obtient un
+  « non » correct, jamais un crash. ⚠️ La suppression **réinsère la chaîne de sondage derrière le trou**, sinon une
+  recherche ultérieure saute une entrée vivante et rend « pas à moi » pour de la mémoire à nous.
+- **Piège d'infra** : deux `struct` **anonymes** déclarées séparément sont des **types distincts** en C — nommer la
+  structure. Et trois chaînes de build avaient divergé (winediff, `wine_hashes.sh`, le workflow Windows) : seule ma
+  commande ad-hoc liait `uuid`. **Trois chaînes qui doivent s'accorder, c'est trois occasions de comparer autre chose.**
+- **Vérifié** : `winecorpus/win32_comalloc.c` bit-identique Wine, audit stdcall PASS, hash inchangé.
+
+### 2026-08-01 — [HLE-COM] **Mur suivant NOMMÉ : `CoCreateInstance` = MLang — et pourquoi l'échec « défini » aurait été faux**
+
+- L'abort disait `unimplemented import CALLED: CoCreateInstance` : **vrai et inutile**, puisque *quelle classe* est
+  toute la question. Rendu **diagnostique** (même leçon que le garde x87 : « bruyant » ≠ « diagnostique ») :
+  `CoCreateInstance class {CLSID} as {IID} (ctx N)`.
+- **Mesuré** : WinMerge demande `{275C23E2-3747-11D0-9FEA-00AA003F8646}` = **CLSID_MultiLanguage**, en
+  `{275C23E1-…}` = **IID_IMultiLanguage**, ctx 1 (INPROC_SERVER). ⇒ une classe **précise et bornée** (MLang, détection
+  et conversion de jeux de caractères), **pas** l'ouverture du registre COM complet.
+- **⚠️ Le piège évité** : renvoyer `REGDB_E_CLASSNOTREG` est un **échec défini**, donc apparemment éligible au canal
+  `aret_partial`. **Ce n'est pas sound ici** : sous Wine la classe **est** enregistrée et l'appel réussit ; répondre
+  « non enregistrée » pousserait le programme sur un chemin d'erreur **qu'il ne prend jamais** sur un vrai système —
+  une exécution différente présentée comme normale, soit exactement ce que le §0 interdit. **Habiller un faux
+  silencieux d'un HRESULT légitime ne le rend pas légitime.** Donc : abort, mais nommé.
+- **Prochain incrément, cadré et mesuré** : `mlang.dll` (builtin Wine) = **14 exports, 0 thunk, 0 forwarder** et
+  n'importe que gdi32 (9) / kernel32 (31) / ntdll (1) / ucrtbase (17) — le **candidat idéal du Levier 1** sous la
+  règle corrigée. Il exporte `DllGetClassObject`. Chemin : `CoCreateInstance` reconnaît le CLSID → appelle le
+  `DllGetClassObject` **lifté** → `IClassFactory::CreateInstance` **à travers la vtable liftée** (via `aret_call`,
+  comme le WNDPROC comctl32) → `Release`. Les deux étapes appellent du code **lifté**, mécanisme déjà prouvé.
