@@ -538,3 +538,21 @@ affiché. On priorise par la donnée.
   qu'on croyait clos**, et ceux-là étaient verts.
 
 <!-- NOUVELLES LIGNES D'AVANCEMENT ICI (plus récent en bas) -->
+
+- **2026-08-01 (I5 — ⭐ l'activation COM tourne sur du code LIFTÉ ; I10 — l'infra de l'oracle réparée sur deux points)**
+  — (1) `CoCreateInstance` sert désormais une classe **depuis une DLL liftée** de bout en bout (mlang :
+  `DllGetClassObject` lifté → `IClassFactory::CreateInstance` à travers la **vtable liftée** → méthodes de l'objet),
+  **sans aucune table de CLSID** : on demande à chaque module lifté qui exporte `DllGetClassObject` s'il sert la
+  classe, et celui qui ne la sert pas répond lui-même — donc c'est du **vrai code qui répond**, pas nous qui
+  devinons, et le mécanisme vaut pour toute DLL COM in-proc future. **La leçon d'industrialisation** : ce que le 70
+  §5.0 appelait « le mécanisme de vtable COM » n'a encore une fois **pas existé** ; ce qui manquait était une brique
+  d'une trentaine de lignes — publier au runtime les **exports** des DLL liftées, parce que le lifting liait
+  jusqu'ici les imports **statiques** (slot IAT) et que COM entre par une porte qui n'est dans **aucune** table
+  d'imports. Deux « gros chantiers » annoncés (vtables COM, puis celui-ci) se sont réduits à des briques d'un
+  après-midi : **une difficulté nommée dans une roadmap n'est pas une difficulté mesurée**.
+  (2) **I10 réparé sur deux points d'éligibilité** — l'étape « sondes » du workflow compile **tout `.c` de
+  `bench/winoracle`** (ajouter une sonde = ajouter un fichier ; une sonde cassée ne masque plus les autres), et
+  `wine_hashes.sh` **ignore le code de sortie** comme le runner le faisait déjà : `crt_assert` **meurt exprès**, et
+  les deux côtés étaient donc éligibles sur des règles différentes — précisément ce que le README interdit, et
+  invisible tant qu'on ne relit pas les deux implémentations côte à côte. **Trois cases** de
+  `TranslateCharsetInfo` mises en file pour le runner plutôt que tranchées par Wine seul.

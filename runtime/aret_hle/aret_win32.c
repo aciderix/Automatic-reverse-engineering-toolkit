@@ -6922,12 +6922,83 @@ static void u32_fmt_guid(char *out, const uint8_t *g) {
     out[o++] = '}';
     out[o] = 0;
 }
+/* IID_IClassFactory {00000001-0000-0000-C000-000000000046}, in memory order. */
+static const uint8_t u32_iid_classfactory[16] = {
+    0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0xC0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x46,
+};
+
 uint32_t aret_CoCreateInstance(uint32_t esp) {
-    char msg[160], c[48], i[48];
-    u32_fmt_guid(c, (const uint8_t *)(uintptr_t)WU(0));
-    u32_fmt_guid(i, (const uint8_t *)(uintptr_t)WU(3));
-    snprintf(msg, sizeof msg, "CoCreateInstance class %s as %s (ctx %u)",
-             c, i, (unsigned)WU(2));
+    uint32_t rclsid = WU(0), punk = WU(1), ctx = WU(2), riid = WU(3), ppv = WU(4);
+    if (!ppv) return 0x80004003u;                     /* E_POINTER */
+    *(uint32_t *)(uintptr_t)ppv = 0;                  /* COM: clear on every path */
+
+    /* THE ACTIVATION PATH, served entirely by LIFTED code.
+     *
+     * There is no CLSID table here, and there must not be one: which class a DLL
+     * implements is the DLL's own answer, and hard-coding it would be a per-binary
+     * patch (§0.3) that goes stale the moment the module changes. So we do what an
+     * in-proc COM loader does minus the registry: ask every lifted module that
+     * exports `DllGetClassObject` whether it serves this CLSID. A module that does
+     * not returns CLASS_E_CLASSNOTAVAILABLE, which is a real answer from real code,
+     * not a guess of ours.
+     *
+     * Both steps below run lifted: `DllGetClassObject` through the export table,
+     * then `IClassFactory::CreateInstance` through the module's OWN vtable, which
+     * lives in its rebased data and therefore holds VAs `aret_call` dispatches —
+     * the same mechanism as the comctl32 WNDPROC. Nothing about COM needed new
+     * machinery, exactly as `IMalloc` did not.
+     *
+     * Only in-proc contexts are attempted: CLSCTX_LOCAL_SERVER/REMOTE would mean
+     * launching another process, which is a sound failure elsewhere in the HLE and
+     * must not be silently downgraded to in-proc here. */
+    int asked = 0;
+    if (ctx & 0x3u) { /* INPROC_SERVER | INPROC_HANDLER */
+        const char *dll, *fn;
+        uint32_t va;
+        for (int k = 0; aret_lifted_export_iter(k, &dll, &fn, &va); k++) {
+            if (strcmp(fn, "DllGetClassObject") != 0) continue;
+            asked++;
+            /* stdcall frame below the caller's esp: [0] return slot, then args. */
+            uint32_t frame = (esp - 0x100) & ~15u;
+            uint32_t *fr = (uint32_t *)(uintptr_t)frame;
+            uint32_t cf = 0;
+            fr[0] = 0;
+            fr[1] = rclsid;
+            fr[2] = (uint32_t)(uintptr_t)u32_iid_classfactory;
+            fr[3] = (uint32_t)(uintptr_t)&cf;
+            uint32_t hr = (uint32_t)aret_call(va, frame, 0, 0, 0, 0, 0, 0, 0);
+            if (hr != 0 || !cf) continue;      /* this module does not serve it */
+
+            uint32_t vtbl = *(const uint32_t *)(uintptr_t)cf;
+            uint32_t create  = *(const uint32_t *)(uintptr_t)(vtbl + 3 * 4);
+            uint32_t release = *(const uint32_t *)(uintptr_t)(vtbl + 2 * 4);
+            fr[0] = 0;
+            fr[1] = cf;                        /* this */
+            fr[2] = punk;                      /* pUnkOuter (aggregation) */
+            fr[3] = riid;
+            fr[4] = ppv;
+            hr = (uint32_t)aret_call(create, frame, 0, 0, 0, 0, 0, 0, 0);
+            /* The factory is a separate object with its own lifetime; the caller
+             * only ever learns about the instance, so release it here or it leaks
+             * a reference that keeps the module pinned. */
+            fr[0] = 0;
+            fr[1] = cf;
+            (void)aret_call(release, frame, 0, 0, 0, 0, 0, 0, 0);
+            return hr;
+        }
+    }
+
+    /* Nobody served it. Still an abort naming what was asked for — and never
+     * REGDB_E_CLASSNOTREG, which is a DEFINED failure but not a sound one: on a
+     * real system the class IS registered, so answering "not registered" would run
+     * the program down an error path it never takes. */
+    char msg[224], c[48], i[48];
+    u32_fmt_guid(c, (const uint8_t *)(uintptr_t)rclsid);
+    u32_fmt_guid(i, (const uint8_t *)(uintptr_t)riid);
+    snprintf(msg, sizeof msg,
+             "CoCreateInstance class %s as %s (ctx %u); %d lifted module(s) offered "
+             "DllGetClassObject and none served it", c, i, (unsigned)ctx, asked);
     aret_unmodelled(msg);
     return 0x80004005u;   /* E_FAIL, never reached: aret_unmodelled aborts */
 }
@@ -9292,6 +9363,67 @@ uint32_t aret_GdiGetCodePage(uint32_t esp)    { (void)esp; return 1252; }
 uint32_t aret_DragDetect(uint32_t esp)        { (void)esp; return 0; }  /* no drag headless */
 uint32_t aret_GetKeyNameTextW(uint32_t esp)   { uint16_t *b = (uint16_t *)WP(1); if (b && WU(2)) b[0] = 0; return 0; }
 uint32_t aret_GetTextCharsetInfo(uint32_t esp){ (void)esp; return 0; }  /* ANSI_CHARSET */
+
+/* TranslateCharsetInfo(lpSrc, lpCs, dwFlags) — the charset <-> codepage <-> font
+ * signature table (gdi32). Reached through LIFTED mlang, which calls it while
+ * describing a code page.
+ *
+ * The table below is not derived, it is the **exhaustively swept** measurement:
+ * all 256 charset values, all 32 `fsCsb[0]` bits, and 46 code pages, each against
+ * Wine. That sweep is also what makes embedding a table legitimate here (doc 70
+ * §7): the data is version-dependent but **deterministic**, so the fixture covers
+ * every cell and a Wine change turns it red instead of rotting in silence.
+ *
+ * Contract, as measured — the parts that would have been guessed wrong:
+ *   - `fsUsb[4]` comes back **all zero**; only `fsCsb[0]` carries the bit.
+ *   - For TCI_SRCFONTSIG the source is a **pointer** to fsCsb, not a value, the
+ *     **lowest set bit wins** (bits 0+1 -> the bit-0 entry), and `fsCsb[1]` is
+ *     ignored entirely (0/0xffffffff in the high word -> FALSE).
+ *   - A bit with no entry (9-15, 22-25, 27-30) -> FALSE, and every rejection
+ *     leaves the caller's CHARSETINFO **completely untouched** (proven on a
+ *     poisoned buffer) and does **not** touch the last error.
+ *   - DEFAULT_CHARSET (1) is rejected even though ANSI_CHARSET (0) is accepted.
+ * ⚠️ TCI_SRCLOCALE returns FALSE because that is what Wine does (it is a FIXME
+ * there). It is a defined FAILURE, never a fabricated success, but it is the one
+ * cell of this family that Wine may not settle correctly — queued for the Windows
+ * oracle (bench/winoracle), like PathIsUNCServer was. */
+static const struct { uint32_t charset, acp; } u32_tci[32] = {
+    /* 0 */ { 0, 1252 },   /* ANSI       */ { 238, 1250 }, /* EASTEUROPE */
+            { 204, 1251 }, /* RUSSIAN    */ { 161, 1253 }, /* GREEK      */
+    /* 4 */ { 162, 1254 }, /* TURKISH    */ { 177, 1255 }, /* HEBREW     */
+            { 178, 1256 }, /* ARABIC     */ { 186, 1257 }, /* BALTIC     */
+    /* 8 */ { 163, 1258 }, /* VIETNAMESE */ { ~0u, 0 }, { ~0u, 0 }, { ~0u, 0 },
+    /*12 */ { ~0u, 0 }, { ~0u, 0 }, { ~0u, 0 }, { ~0u, 0 },
+    /*16 */ { 222, 874 },  /* THAI       */ { 128, 932 },  /* SHIFTJIS   */
+            { 134, 936 },  /* GB2312     */ { 129, 949 },  /* HANGUL     */
+    /*20 */ { 136, 950 },  /* CHINESEBIG5*/ { 130, 1361 }, /* JOHAB      */
+            { ~0u, 0 }, { ~0u, 0 },
+    /*24 */ { ~0u, 0 }, { ~0u, 0 }, { 254, 65001 }, /* UTF-8 */ { ~0u, 0 },
+    /*28 */ { ~0u, 0 }, { ~0u, 0 }, { ~0u, 0 }, { 2, 42 },      /* SYMBOL */
+};
+uint32_t aret_TranslateCharsetInfo(uint32_t esp) {
+    uint32_t src = WU(0), dst = WU(1), flags = WU(2);
+    int idx = -1;
+    if (flags == 1) {                       /* TCI_SRCCHARSET: src IS the charset */
+        for (int i = 0; i < 32; i++)
+            if (u32_tci[i].charset != ~0u && u32_tci[i].charset == src) { idx = i; break; }
+    } else if (flags == 2) {                /* TCI_SRCCODEPAGE: src IS the code page */
+        for (int i = 0; i < 32; i++)
+            if (u32_tci[i].charset != ~0u && u32_tci[i].acp == src) { idx = i; break; }
+    } else if (flags == 3) {                /* TCI_SRCFONTSIG: src POINTS to fsCsb */
+        uint32_t csb = *(const uint32_t *)(uintptr_t)src;
+        for (int i = 0; i < 32; i++)
+            if ((csb >> i) & 1u) { idx = (u32_tci[i].charset != ~0u) ? i : -1; break; }
+    }
+    if (idx < 0) return 0;                  /* destination left untouched: measured */
+    uint32_t *o = (uint32_t *)(uintptr_t)dst;
+    o[0] = u32_tci[idx].charset;
+    o[1] = u32_tci[idx].acp;
+    o[2] = o[3] = o[4] = o[5] = 0;          /* fsUsb[4] — zero under Wine */
+    o[6] = 1u << idx;                       /* fsCsb[0] */
+    o[7] = 0;                               /* fsCsb[1] */
+    return 1;
+}
 
 /* IsValidLocale(Locale, dwFlags): a locale is valid iff its primary language id is in the
  * MS-LCID assigned range [0x01,0x92] (MEASURED vs Wine: 0x09/0x0C/0x50/0x91/0x92 valid,

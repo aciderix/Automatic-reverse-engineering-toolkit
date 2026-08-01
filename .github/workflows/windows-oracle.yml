@@ -38,16 +38,24 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # Every .c in bench/winoracle is a probe: adding one is adding a FILE, not
+      # editing this workflow. A probe that fails to build or run is reported and
+      # the others still run — one broken probe must not hide the rest.
       - name: Build and run the hand-picked probes (full output)
         shell: cmd
         run: |
           for /f "usebackq tokens=*" %%i in (`"C:\Program Files (x86)\Microsoft Visual Studio\Installer\vswhere.exe" -latest -property installationPath`) do call "%%i\VC\Auxiliary\Build\vcvars32.bat"
           if errorlevel 1 exit /b 1
           mkdir out
-          cl /nologo /W0 bench\winoracle\win32_pathdisputed.c shlwapi.lib ole32.lib uuid.lib /Fe:out\disputed.exe /Fo:out\ || exit /b 1
-          echo ================ disputed ================
-          out\disputed.exe > out\disputed.windows.txt
-          type out\disputed.windows.txt
+          for %%f in (bench\winoracle\*.c) do call :probe "%%~nf"
+          goto :eof
+          :probe
+          set p=%~1
+          echo ================ %p% ================
+          cl /nologo /W0 "bench\winoracle\%p%.c" user32.lib gdi32.lib advapi32.lib shell32.lib shlwapi.lib ole32.lib oleaut32.lib uuid.lib version.lib /Fe:out\%p%.exe /Fo:out\ >nul 2>&1 || (echo %p% BUILD-FAIL & goto :eof)
+          out\%p%.exe > out\%p%.windows.txt 2>&1
+          type out\%p%.windows.txt
+          goto :eof
 
       - name: Fingerprint every eligible winecorpus fixture
         shell: cmd

@@ -153,6 +153,14 @@ pub struct Program {
     /// `DllMain(hinstance, DLL_PROCESS_ATTACH, 0)` so the DLL registers its
     /// window classes / inits its globals — empty unless DLLs were merged in.
     pub dll_inits: Vec<(u64, u64)>,
+    /// Named local exports of every merged DLL, as `(dll, export name, rebased VA)`
+    /// — the *runtime* view of what DLL lifting produced. The IAT routing above
+    /// binds the app's **static** imports; this is what lets the HLE reach an
+    /// export nobody imports statically, which is how in-proc COM works: the
+    /// class object is fetched by calling the module's `DllGetClassObject`, a
+    /// name only the COM activator ever asks for. Forwarded exports are excluded
+    /// (they are not code in this image). Empty unless DLLs were merged in.
+    pub dll_exports: Vec<(String, String, u64)>,
     pub sections: Vec<Section>,
     /// address -> symbol, sorted, used to name functions and resolve call targets.
     pub symbols: BTreeMap<u64, KnownSymbol>,
@@ -298,6 +306,7 @@ impl Program {
             image_base,
             exports,
             dll_inits: Vec::new(),
+            dll_exports: Vec::new(),
             sections,
             symbols,
             imports,
@@ -890,6 +899,20 @@ pub fn load_with_modules(primary_data: &[u8], dlls: &[(String, Vec<u8>)]) -> Res
         .iter()
         .filter(|m| m.init_entry != 0)
         .map(|m| (m.init_entry, m.hinstance))
+        .collect();
+    // Publish every merged DLL's named local exports for the runtime (see the
+    // `dll_exports` field): what the app imports statically is routed below, but
+    // COM activation reaches `DllGetClassObject` by NAME, never through an IAT.
+    primary.dll_exports = modules
+        .iter()
+        .flat_map(|m| {
+            m.exports.iter().filter_map(move |e| match (&e.name, &e.target) {
+                (Some(n), PeExportTarget::Address(va)) => {
+                    Some((m.name.clone(), n.clone(), *va))
+                }
+                _ => None,
+            })
+        })
         .collect();
     let resolved = resolve_module_imports(&primary.pe_imports, &modules);
     let ptr = primary.bitness.bits() as u64 / 8;

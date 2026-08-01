@@ -98,6 +98,14 @@ uint32_t aret_delay_pop(uint32_t va);
  * stdcall pop the static path uses. Lets the delay-load resolver reach the whole HLE
  * instead of a hard-coded list. */
 int aret_hle_shim_lookup(const char *fn, uint32_t (**shim)(uint32_t), uint16_t *pop);
+/* Also generated in aret_dispatch.c: the named exports of every LIFTED DLL, with the
+ * VA they were rebased to. DLL lifting binds what the app imports STATICALLY (the
+ * loader patches the IAT slot); this is the other direction — reaching lifted code by
+ * name for an entry point that appears in no import table. In-proc COM is exactly
+ * that: `CoCreateInstance` asks the module for its class object through
+ * `DllGetClassObject`. Empty (lookup -> 0) when no DLL was merged in. */
+int aret_lifted_export_iter(int i, const char **dll, const char **fn, uint32_t *va);
+uint32_t aret_lifted_export(const char *dll, const char *fn);
 
 /* No-op shim (returns 0) for recognized startup-glue functions (mingw/MSVC
  * global ctor/dtor runners, EH-frame registration, pseudo-relocator) we bind

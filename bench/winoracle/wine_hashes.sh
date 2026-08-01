@@ -45,8 +45,15 @@ for src in "$CORPUS"/*.c; do
   if [ -f "$CORPUS/$name.args" ]; then
     while IFS= read -r line || [ -n "$line" ]; do pargs+=("$line"); done < "$CORPUS/$name.args"
   fi
-  if ! (cd "$wd" && timeout 30 wine "$wd/$name.exe" "${pargs[@]}" <"$infile" \
-        >"$wd/out.txt" 2>/dev/null); then
+  # The EXIT STATUS is deliberately ignored, and the runner side ignores it too:
+  # a fixture is allowed to die on purpose. `crt_assert` proves that a violated
+  # assertion aborts, so a non-zero exit is its expected behaviour — treating that
+  # as a failure would drop the one fixture whose contract is to die, and would
+  # also make the two sides eligible on different rules (the runner only checks
+  # that an output file appeared). What matters is the bytes it printed.
+  (cd "$wd" && timeout 30 wine "$wd/$name.exe" "${pargs[@]}" <"$infile" \
+        >"$wd/out.txt" 2>/dev/null)
+  if [ ! -f "$wd/out.txt" ]; then
     echo "$name RUN-FAIL"; continue
   fi
   h=$(tr -d '\r' < "$wd/out.txt" | sha256sum | cut -c1-64)

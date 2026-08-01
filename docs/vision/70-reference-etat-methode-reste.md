@@ -224,7 +224,7 @@ sert désormais de **détecteur** : un warm build qui ne réutilise pas ~tout si
 
 ### État régression (référence — doit rester vert)
 difftest **272/272** · transpile-diff **4/4** (H=`19acad982194bf07`) · winediff
-**193/194** (le seul rouge = `gdi_uifont`, **environnemental** : fontconfig i386, orthogonal au code) · **ehdiff 6/6** (SEH `seh_except`
+**201/202** (le seul rouge = `gdi_uifont`, **environnemental** : fontconfig i386, orthogonal au code) · **ehdiff 6/6** (SEH `seh_except`
 + C++ `throw_catch`/`throw_dtor`/`throw_across`/`throw_byval`/`throw_static` — throw/catch, destructeur d'unwind, multi-frames, catch-by-value, CRT statique — bit-identiques Wine) · cpudiff vert (per-instruction + séquences génératives) · funcdiff corpus **0 divergence** (lift **~20,6k** scorées /
 **~20k appels** — **imports (stubs `@N` + `@0` scalaires) + appels indirects résolus + intrinsèques mémoire host-backés (memmove/memcpy)** ; scratch sous-esp exclu ; opt ~10k scorées) · SMT **11/11** · in-place **3/3** · magicdiv **2³²** ·
 recompilabilité **100 %** · WASM **7/7**.
@@ -671,6 +671,24 @@ recompilabilité **100 %** · WASM **7/7**.
   et non « environnemental » ; `*pcb` = taille requise **NUL compris** en succès **et** en échec ; tampon trop court ⇒
   `ERROR_INSUFFICIENT_BUFFER` et tampon **intact** (aucun nom tronqué). Aucun nom disponible ⇒ **abort**, jamais un
   substitut. Gardé `win32_username.c`.
+- **⭐ ACTIVATION COM in-proc servie par une DLL LIFTÉE (2026-08-01)** : `CoCreateInstance` rend un **vrai objet**
+  produit par du code lifté — chaîne `CoCreateInstance` → `DllGetClassObject` **lifté** → `IClassFactory::CreateInstance`
+  **à travers la vtable du module lifté** → `Release` de la fabrique, puis les méthodes de l'objet, toutes liftées.
+  **Aucune table de CLSID** (ce serait une rustine par binaire) : on interroge **chaque** module lifté qui exporte
+  `DllGetClassObject`, et celui qui ne sert pas la classe répond lui-même `CLASS_E_CLASSNOTAVAILABLE`. ⇒ **général** :
+  toute DLL COM in-proc liftée marche sans une ligne de plus. Seuls les contextes **in-proc** sont tentés
+  (`LOCAL_SERVER` = échec sound ailleurs, jamais dégradé en in-proc). Brique nouvelle et minuscule :
+  `Program::dll_exports` → table `aret_lifted_exports` (générée) → `aret_lifted_export`/`_iter` — le lifting DLL liait
+  jusqu'ici les imports **statiques** (slot IAT) ; COM atteint un point d'entrée qui n'est dans **aucune** table
+  d'imports. Vide (donc sans effet) pour un exe seul ; c'est aussi ce qui rendra `GetProcAddress` (§P1quater)
+  implémentable sur du lifté. Gardé `winecorpus/ole_mlang.c` (+`.withdll` mlang, bit-identique Wine). Détail 71.
+- **`TranslateCharsetInfo`** (gdi32, 2026-08-01, premier import que **mlang lifté** appelle) : table charset ↔ code page
+  ↔ signature de police, **balayée exhaustivement** (256 charsets, 32 bits de `fsCsb[0]`, 46 code pages) — c'est ce
+  balayage qui rend l'embarquement de la table légitime (§7 « gardable »). Contre-intuitions **mesurées** : `fsUsb[4]`
+  revient **tout à zéro** ; `TCI_SRCFONTSIG` prend un **pointeur** et le **bit le plus bas gagne** (`fsCsb[1]` ignoré) ;
+  tout refus laisse la structure **strictement intacte** et ne touche pas au last-error ; `DEFAULT_CHARSET(1)` refusé
+  alors que `ANSI_CHARSET(0)` passe. Trois cases (fsUsb, la ligne 254↔65001, `TCI_SRCLOCALE`) mises en file pour
+  l'**oracle Windows** plutôt que tranchées par Wine seul. Gardé `winecorpus/gdi_charsetinfo.c`.
 - **`GetClassInfo(Ex)A/W`** (2026-07-17) : le registre de classes stocke désormais **tous** les champs
   `WNDCLASS(EX)` (style, cbClsExtra/WndExtra, hInstance, hIcon, hCursor, hbrBackground, menu, hIconSm) à
   l'enregistrement → `GetClassInfo` les rend **verbatim** (round-trip register→query exact, atome non-nul en retour ;
@@ -867,6 +885,12 @@ résidu qui abort restera l'**obfusqué/fait-main/VM-packé** (indécidable, §9
   shell32 fait *monter* les imports manquants (270→394) car la carte compte ce que la DLL **pourrait** appeler
   (DDE/services/MSI), pas ce qu'elle appelle — **seule l'exécution juge**. Prérequis débloqué au passage : le
   **résolveur delay-load voit désormais tout le HLE** (table générée de 1043 shims, cf. 71).
+  **✅ LEVIER 1 ÉTENDU À COM (2026-08-01)** : une DLL COM in-proc liftée (`mlang.dll` : 14 exports, 0 thunk,
+  0 forwarder) **sert réellement ses classes** — `CoCreateInstance` interroge tout module lifté exportant
+  `DllGetClassObject`, sans aucune table de CLSID (cf. §4.5). Brique ajoutée : les exports liftés sont **publiés au
+  runtime** (`dll_exports` → `aret_lifted_exports`), parce que le routage IAT ne couvre que les imports **statiques**
+  et que COM atteint une entrée qui n'est dans aucune table d'imports. ⇒ oleaut32/comdlg32/shell32 suivront **sans
+  mécanisme nouveau**.
   **Stratégie qui en découle** : *lifter* les DLL **user-mode** (shell32, ole32, oleaut32, comdlg32, comctl32 ✅) qui
   reposent sur nos user32/gdi32 ; *écrire à la main* la surface **user32/gdi32** (MDI, accélérateurs, presse-papier,
   dessin GDI, metafiles, impression) qui, elle, bute sur **win32k** (doc 80 §1.2).

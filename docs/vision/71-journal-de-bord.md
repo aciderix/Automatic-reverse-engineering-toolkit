@@ -5738,3 +5738,71 @@ Détail : **70 §6** (roadmap). Résumé :
   règle corrigée. Il exporte `DllGetClassObject`. Chemin : `CoCreateInstance` reconnaît le CLSID → appelle le
   `DllGetClassObject` **lifté** → `IClassFactory::CreateInstance` **à travers la vtable liftée** (via `aret_call`,
   comme le WNDPROC comctl32) → `Release`. Les deux étapes appellent du code **lifté**, mécanisme déjà prouvé.
+
+### 2026-08-01 — [HLE-COM][LIFT-DLL][I5] **⭐ ACTIVATION COM RÉELLE : `CoCreateInstance` sert une classe depuis une DLL LIFTÉE — et sans table de CLSID**
+
+- **Ce qui tourne** : `CoCreateInstance(CLSID_CMultiLanguage, …, IID_IMultiLanguage, …)` rend un **vrai objet**,
+  servi de bout en bout par du **code lifté** de `mlang.dll` (builtin Wine, `--with-dll`). La chaîne est :
+  `CoCreateInstance` → **`DllGetClassObject` lifté** → **`IClassFactory::CreateInstance` à travers la vtable du
+  module lifté** → `Release` de la fabrique. Puis le programme appelle l'objet : `QueryInterface`,
+  `GetNumberOfCodePageInfo`, `GetCodePageInfo`, `ConvertStringToUnicode` — **quatre méthodes de plus à travers la
+  vtable liftée**. Gardé par `winecorpus/ole_mlang.c` (+ `.withdll`), **bit-identique Wine**.
+- **⭐ Le point de conception : il n'y a AUCUNE table de CLSID, et il ne doit pas y en avoir.** Coder « ce CLSID →
+  ce module » serait une **rustine par binaire** (§0.3) qui périme dès que le module change. On fait donc ce que
+  fait un chargeur COM in-proc **moins le registre** : demander à **chaque** module lifté qui exporte
+  `DllGetClassObject` s'il sert ce CLSID. Un module qui ne le sert pas répond `CLASS_E_CLASSNOTAVAILABLE` —
+  **une vraie réponse de vrai code**, pas une supposition de notre part. Le mécanisme est donc **général** : toute
+  DLL COM in-proc liftée à l'avenir marche sans une ligne de plus.
+- **La brique qui manquait, et elle est petite** : le lifting DLL liait jusqu'ici ce que l'app importe
+  **statiquement** (le loader écrit la VA d'export dans le slot IAT). L'activation COM va dans l'**autre sens** —
+  elle atteint un point d'entrée qui n'apparaît dans **aucune** table d'imports. D'où
+  `Program::dll_exports` (loader) → table `aret_lifted_exports` générée dans `aret_dispatch.c` →
+  `aret_lifted_export()` / `aret_lifted_export_iter()` dans le HLE. **Vide, donc sans effet, pour un exe seul.**
+  C'est aussi la brique qui rendra `GetProcAddress` (§P1quater) implémentable sur du code lifté.
+- **Choix mesuré : publier TOUS les exports nommés, sans filtrer sur « fonction récupérée ».** Une VA non
+  récupérée tombe dans l'abort **nommé** d'`aret_call` (« indirect call to unrecovered function 0x… »), ce qui en
+  dit plus qu'un lookup qui rapporterait « absent » — l'échec reste bruyant, il devient juste diagnostique.
+- **CLSCTX honoré** : seuls les contextes **in-proc** (`INPROC_SERVER|INPROC_HANDLER`) sont tentés. Un
+  `LOCAL_SERVER` demande un autre processus, qui est un **échec sound** ailleurs dans le HLE ; le dégrader
+  silencieusement en in-proc serait une exécution différente présentée comme normale.
+- **La fabrique est relâchée** : elle a sa propre durée de vie et l'appelant n'apprend jamais son existence.
+- **L'abort résiduel dit maintenant combien de modules ont été interrogés** — « 0 module lifté offrait
+  `DllGetClassObject` » et « 3 l'offraient et aucun ne l'a servie » sont deux problèmes différents, et l'ancien
+  message ne les distinguait pas.
+- **Vérifié** : `ole_mlang` bit-identique Wine, hash `19acad982194bf07` inchangé, difftest 272/272, audit stdcall
+  PASS, cargo test complet vert.
+
+### 2026-08-01 — [HLE-WIN32][ORACLE] **`TranslateCharsetInfo` — une table embarquée n'est légitime que balayée EXHAUSTIVEMENT**
+
+- **Mur** : le premier import que mlang **lifté** appelle est `gdi32.TranslateCharsetInfo` (il décrit un code page).
+  Le reste de sa liste statique — `GetTextCharset`, `GetFontUnicodeRanges`, `GetLocaleInfoA`, `LocaleNameToLCID`,
+  `EnumSystemLocalesEx`, `EnumResourceNamesW` — a été **mesuré d'abord** (Levier 0) : aucun n'est atteint sur ce
+  chemin, donc rien n'a été écrit spéculativement.
+- **Grille de mesure, exhaustive et non échantillonnée** : les **256** valeurs de charset, les **32** bits de
+  `fsCsb[0]`, **46** code pages. C'est ce qui rend l'embarquement de la table **légitime** au sens du 70 §7 : la
+  donnée est version-dépendante mais **déterministe**, donc la fixture couvre **chaque case** et un changement de
+  Wine vire au **rouge** au lieu de pourrir en silence. Une grille échantillonnée aurait donné la même
+  implémentation avec aucune de ses garanties.
+- **Ce que la mesure contredit** (et qui aurait été deviné faux) :
+  - `fsUsb[4]` revient **tout à zéro** ; seul `fsCsb[0]` porte l'information.
+  - Pour `TCI_SRCFONTSIG` la source est un **pointeur** vers `fsCsb`, le **bit le plus bas gagne** (bits 0+1 →
+    l'entrée du bit 0) et `fsCsb[1]` est **totalement ignoré**.
+  - Un bit **sans entrée** (9-15, 22-25, 27-30) → FAUX, et **tout** refus laisse la `CHARSETINFO` de l'appelant
+    **strictement intacte** — prouvé au tampon empoisonné, invisible autrement — et **ne touche pas** au last-error.
+  - `DEFAULT_CHARSET` (1) est **refusé** alors que `ANSI_CHARSET` (0) est accepté.
+- **⚠️ Piège d'oracle attrapé en cours de route (à retenir)** : ma 1ʳᵉ sonde faisait
+  `printf(…, TranslateCharsetInfo(…), ci.ciCharset, …)`. **L'ordre d'évaluation des arguments de `printf` n'est pas
+  spécifié** : gcc a lu la structure **avant** l'appel, et j'ai lu « Wine rend VRAI sans rien écrire » — une
+  conclusion **fausse**, du même genre que le last-error qui fuyait dans la famille SPI. Règle : *lire la valeur
+  APRÈS l'appel, dans son propre énoncé*. Encodé dans la fixture et dans son en-tête.
+- **Trois cases mises en file pour l'oracle Windows** plutôt que tranchées par Wine seul (`bench/winoracle/
+  win32_charsetdisputed.c`) : `fsUsb` tout-à-zéro, la ligne **254 ↔ 65001** (UTF-8, pas un charset Windows
+  documenté), et `TCI_SRCLOCALE` que Wine rend FAUX avec un FIXME dans sa source. Notre valeur est un **échec
+  défini**, jamais un succès fabriqué — mais c'est exactement le profil de `PathIsUNCServer`.
+- **Infra de l'oracle, deux corrections** : (a) l'étape « sondes » du workflow compile désormais **tout `.c` de
+  `bench/winoracle`** — ajouter une sonde est *ajouter un fichier*, plus éditer le YAML, et une sonde cassée ne
+  masque plus les autres ; (b) `wine_hashes.sh` **ignore le code de sortie**, comme le runner le faisait déjà :
+  `crt_assert` **meurt exprès** (c'est sa preuve), et le traiter en échec écartait la seule fixture dont le contrat
+  est de mourir — donc les deux côtés étaient éligibles sur des règles différentes, ce que le README interdit.
+- **Vérifié** : `winecorpus/gdi_charsetinfo.c` bit-identique Wine, `@N` (`TranslateCharsetInfo@12`,
+  `GetTextCharset@4`) pris de la **vérité terrain** (import-libs mingw), audit stdcall PASS.
