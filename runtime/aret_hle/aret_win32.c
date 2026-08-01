@@ -33,6 +33,7 @@
 #include <ucontext.h>      /* cooperative threads (fibers) — no ucontext in WASM */
 #endif
 #include <sys/ioctl.h>
+#include <pwd.h>          /* GetUserName reads the passwd database, as Wine does */
 
 /* G2b (doc 72): a *visible* window is presented via SDL2 (portable: Linux/macOS,
  * and WASM via Emscripten later). SDL2 is linked ONLY when the program creates a
@@ -3809,6 +3810,63 @@ uint32_t aret_PathRemoveFileSpec##TAG(uint32_t esp) {                           
 ARET_PATH_ROOT_FAMILY(A, char)
 ARET_PATH_ROOT_FAMILY(W, uint16_t)
 #undef ARET_PATH_ROOT_FAMILY
+
+/* GetUserNameA/W(buf, pcbBuffer) -> BOOL (advapi32).
+ *
+ * The NAME comes from the same place Wine's does — the host's Unix account — so the
+ * two engines read one source of truth and the fixture can compare it directly
+ * instead of skipping it. Nothing is invented: if the host provides no account name
+ * at all (no passwd entry, no $USER, no $LOGNAME) we abort rather than answer with a
+ * plausible-looking placeholder, because a wrong user name is exactly the kind of
+ * value a program would act on believing it.
+ *
+ * The SIZE contract is what a plausible implementation gets wrong, and it was
+ * MEASURED (`winecorpus/win32_username.c`): `*pcb` is set to the required count
+ * INCLUDING the terminating NUL, on success AND on failure; a buffer that is one
+ * short fails with ERROR_INSUFFICIENT_BUFFER (122) and is left COMPLETELY UNTOUCHED
+ * (proven on a poisoned buffer — no truncated name is written); a request of exactly
+ * the reported count succeeds. The count is bytes for A and characters for W. */
+static const char *u32_host_user_name(void) {
+    /* The passwd database FIRST, because that is what Wine reads — and the order
+     * matters, not just the set: a first version asked $USER/$LOGNAME/getlogin()
+     * only, which works in an interactive shell and fails in the winediff child
+     * (no environment, no controlling terminal). The abort caught it immediately
+     * instead of it becoming a silent divergence, which is the whole point of
+     * aborting rather than answering with a placeholder. */
+    const char *n = 0;
+#ifndef __wasm__
+    struct passwd *pw = getpwuid(geteuid());
+    if (pw && pw->pw_name && *pw->pw_name) n = pw->pw_name;
+#endif
+    if (!n || !*n) n = getenv("USER");
+    if (!n || !*n) n = getenv("LOGNAME");
+    if (!n || !*n)
+        aret_unmodelled("GetUserName: the host provides no account name "
+                        "(no passwd entry, no $USER, no $LOGNAME)");
+    return n;
+}
+uint32_t aret_GetUserNameA(uint32_t esp) {
+    char *buf = (char *)(uintptr_t)WU(0);
+    uint32_t *pcb = (uint32_t *)(uintptr_t)WU(1);
+    const char *name = u32_host_user_name();
+    uint32_t need = (uint32_t)strlen(name) + 1;
+    if (!pcb) return 0;
+    if (*pcb < need || !buf) { *pcb = need; g_last_error = 122; return 0; }
+    memcpy(buf, name, need);
+    *pcb = need;
+    return 1;
+}
+uint32_t aret_GetUserNameW(uint32_t esp) {
+    uint16_t *buf = (uint16_t *)(uintptr_t)WU(0);
+    uint32_t *pcb = (uint32_t *)(uintptr_t)WU(1);
+    const char *name = u32_host_user_name();
+    uint32_t need = (uint32_t)strlen(name) + 1;
+    if (!pcb) return 0;
+    if (*pcb < need || !buf) { *pcb = need; g_last_error = 122; return 0; }
+    u32_a2w(name, buf, (int)need);
+    *pcb = need;
+    return 1;
+}
 
 /* ExitWindowsEx(uFlags, dwReason) -> BOOL. We never log the user off / shut the
  * host down (sound: a transpiled app must not affect the real session); report

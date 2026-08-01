@@ -404,6 +404,7 @@ static TABLE: &[(&str, u32)] = &[
     ("GetTokenInformation", 20),
     ("GetTopWindow", 4),
     ("GetUserNameA", 8),
+    ("GetUserNameW", 8),
     ("GetVersion", 0),
     ("GetVersionExA", 4),
     ("GetVersionExW", 4),
