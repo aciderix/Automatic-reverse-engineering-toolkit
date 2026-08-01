@@ -241,7 +241,24 @@ fi
 mkdir -p "$TMP/log" "$TMP/w"
 export ARET_WD_TMP="$TMP"
 jobs="${WINEDIFF_JOBS:-$(nproc 2>/dev/null || echo 4)}"
-printf '%s\0' "${names[@]}" | xargs -0 -P "$jobs" -I{} bash "$0" --one {}
+# Window-creating fixtures run SERIALLY, the rest in parallel. Measured, not assumed:
+# with everything parallel, `user32_listbox` and `user32_isdlgmsg` intermittently came
+# back degenerate — and on the ORACLE side, Wine reporting an empty listbox and no
+# focus. A private Xvfb per fixture (see run_one) is necessary but NOT sufficient;
+# concurrent Wine GUI clients on one prefix still interfere. Each one passes 3/3 alone.
+# 43 of 194 fixtures create a window, so the parallel win is kept for the other 151
+# while the flaky class is removed rather than tolerated — a gate that goes red at
+# random teaches you to ignore red, which is worse than a slow gate.
+gui=(); cli=()
+for n in "${names[@]}"; do
+  if grep -qE 'CreateWindow|DialogBox|CreateDialog' "$CORPUS/$n.c" 2>/dev/null; then
+    gui+=("$n")
+  else
+    cli+=("$n")
+  fi
+done
+[ "${#cli[@]}" -gt 0 ] && printf '%s\0' "${cli[@]}" | xargs -0 -P "$jobs" -I{} bash "$0" --one {}
+[ "${#gui[@]}" -gt 0 ] && printf '%s\0' "${gui[@]}" | xargs -0 -P 1 -I{} bash "$0" --one {}
 
 # Replay in the original order: the log is then byte-identical to a serial run.
 pass=0; total=0

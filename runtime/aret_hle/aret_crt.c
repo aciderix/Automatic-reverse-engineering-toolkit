@@ -965,6 +965,24 @@ uint32_t aret_isctype(uint32_t esp) {
     return (uint32_t)(aret_ctype_bits(c) & mask);
 }
 
+/* strnlen / wcsnlen(s, maxlen) -> min(length, maxlen). MEASURED against Wine: the
+ * length when the NUL is inside the window, and maxlen when it is not — WITHOUT
+ * reading past maxlen, which is the entire point of the bounded form and the one
+ * thing a strlen-then-clamp implementation would get wrong (it would run off the end
+ * of a buffer that has no terminator, exactly the case these exist to make safe).
+ * maxlen 0 answers 0 and touches nothing, including for a NULL pointer. */
+#define ARET_NLEN_BODY(TYPE)                                                   \
+    const TYPE *s = (const TYPE *)(uintptr_t)a32(esp, 0);                      \
+    uint32_t maxlen = a32(esp, 1);                                             \
+    if (!s || maxlen == 0) return 0;                                           \
+    uint32_t n = 0;                                                            \
+    while (n < maxlen && s[n]) n++;                                            \
+    return n;
+
+uint32_t aret_strnlen(uint32_t esp) { ARET_NLEN_BODY(uint8_t) }
+uint32_t aret_wcsnlen(uint32_t esp) { ARET_NLEN_BODY(uint16_t) }
+#undef ARET_NLEN_BODY
+
 uint32_t aret_wcscmp(uint32_t esp) {
     const uint16_t *a = (const uint16_t *)(uintptr_t)a32(esp, 0);
     const uint16_t *b = (const uint16_t *)(uintptr_t)a32(esp, 1);

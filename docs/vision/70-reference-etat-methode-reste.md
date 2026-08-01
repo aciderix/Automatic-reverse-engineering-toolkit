@@ -175,7 +175,8 @@ bash bench/regression.sh    # PORTE unifiée : difftest 271/271, in-place 3/3,
                             # recompilabilité gzip/ls/cat 100%
 bash bench/difftest.sh              # décompile O0→O3
 bash bench/difftest_transpile.sh    # transpile (hash 19acad982194bf07)
-bash bench/winediff.sh              # axe 2 vs Wine — PARALLELE (nproc), ~290 s ; log byte-identique au sequentiel
+bash bench/winediff.sh              # axe 2 vs Wine — ~420 s : 151 fixtures en PARALLELE, les 43 qui creent
+#   une fenetre en SERIE (Wine GUI concurrent degrade l'ORACLE : listbox vide, focus perdu)
 bash bench/winediff.sh NOM          # une seule fixture (~20 s) : la boucle de dev
 WINEDIFF_JOBS=1 bash bench/winediff.sh   # force la serie (bisecter une fixture instable)
 #   ⚠️ chaque fixture a son PROPRE repertoire ET son PROPRE Xvfb : un display partage
@@ -202,7 +203,7 @@ bash bench/wallsweep.sh <dir1> [dir2…]  # AGRÈGE --mode walls sur un corpus :
 
 ### État régression (référence — doit rester vert)
 difftest **272/272** · transpile-diff **4/4** (H=`19acad982194bf07`) · winediff
-**192/193** (le seul rouge = `gdi_uifont`, **environnemental** : fontconfig i386, orthogonal au code) · **ehdiff 6/6** (SEH `seh_except`
+**193/194** (le seul rouge = `gdi_uifont`, **environnemental** : fontconfig i386, orthogonal au code) · **ehdiff 6/6** (SEH `seh_except`
 + C++ `throw_catch`/`throw_dtor`/`throw_across`/`throw_byval`/`throw_static` — throw/catch, destructeur d'unwind, multi-frames, catch-by-value, CRT statique — bit-identiques Wine) · cpudiff vert (per-instruction + séquences génératives) · funcdiff corpus **0 divergence** (lift **~20,6k** scorées /
 **~20k appels** — **imports (stubs `@N` + `@0` scalaires) + appels indirects résolus + intrinsèques mémoire host-backés (memmove/memcpy)** ; scratch sous-esp exclu ; opt ~10k scorées) · SMT **11/11** · in-place **3/3** · magicdiv **2³²** ·
 recompilabilité **100 %** · WASM **7/7**.
@@ -1263,6 +1264,10 @@ la **vitesse** change.
   **gardable exhaustivement** : on peut l'embarquer **à condition** que la porte la **balaie entièrement**, si bien
   qu'un changement de version vire au rouge au lieu de pourrir en silence. Précédents : sort-keys de collation,
   `ConvertDefaultLocale` (65440 valeurs balayées).
+- **Tout changement de PARALLÉLISME se valide sur ≥3 exécutions complètes (2026-07-26)**. Un défaut de concurrence est
+  **intermittent** : un run vert ne prouve rien. Ma 1ʳᵉ validation de winediff parallèle (un seul run byte-identique)
+  a laissé passer deux fixtures GUI qui flappaient — et c'était l'**ORACLE** qui se dégradait. Corrigé (GUI en série),
+  revalidé sur 3 runs.
 - **Une FIXTURE doit séparer contrat et environnement, sinon elle flappe (2026-07-26)**. `win_timechar` assertait la
   position **absolue** d'une fenêtre : sous charge parallèle le serveur X ne l'honore pas toujours, et c'est **l'ORACLE**
   qui bougeait ⇒ rouge intermittent. Réécrit en **contrat** (écart client↔écran = origine cliente ; les deux conversions
