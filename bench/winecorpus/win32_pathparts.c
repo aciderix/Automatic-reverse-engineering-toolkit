@@ -15,16 +15,16 @@
  *   - trailing separators, empty strings, NULL
  *   - "a b c"        where the arguments begin, and what a quoted path does
  *
- * PathCommonPrefix and PathIsPrefix are deliberately ABSENT: 11 measured pairs did
- * not pin their rule down (the returned length sometimes includes the separator and
- * sometimes does not, in a way this grid cannot separate from the root length), so
- * they are left unimplemented — an abort — rather than shipped on a guessed rule.
+ * PathCommonPrefix / PathIsPrefix / PathIsUNCServer were left unimplemented by this
+ * fixture's first version because Wine could not settle them. A real Windows runner
+ * (.github/workflows/windows-oracle.yml) did, so they are gated here now — with one
+ * asymmetry that has to stay:
  *
- * PathIsUNCServer is deliberately ABSENT. Measured, Wine's A entry point answers
- * FALSE for EVERY input while its W entry point answers correctly — the two cannot
- * both be right, and which one matches real Windows is not something this host can
- * decide. Rather than encode a coin flip, that pair is left unimplemented so a call
- * aborts loudly. See the journal entry for the measurement.
+ *   Only PathIsUNCServer**W** is compared against Wine. Wine's A entry point answers
+ *   FALSE for every input; Windows answers A === W. Our A implements the Windows
+ *   rule, so it deliberately DIVERGES from Wine and cannot be gated against it. The
+ *   A column is covered by the Windows probe instead. Do not "fix" this by matching
+ *   Wine — that is the bug, and it was demonstrated, not argued.
  *
  * Pointer results print an OFFSET (-1 for NULL): the address is environmental, the
  * offset is the contract. In-place writers dump the raw buffer, which is what caught
@@ -114,6 +114,41 @@ int main(void)
         memset(b, 0x7e, sizeof b); strcpy(b, G[i]);
         BOOL ok = PathStripToRootA(b);
         printf("A [%-20s] ok=%d out=[%s]", G[i], !!ok, b); dump(b, 28); puts("");
+    }
+
+    puts("== PathIsUNCServerW (W only: see the header) ==");
+    {
+        static const char *const u[] = { "", "\\\\", "\\\\a", "\\\\srv", "\\\\srv\\",
+                                         "\\\\srv\\sh", "\\\\srv\\sh\\", "C:\\x" };
+        wchar_t w[64];
+        for (int i = 0; i < (int)(sizeof(u) / sizeof(u[0])); i++) {
+            MultiByteToWideChar(CP_ACP, 0, u[i], -1, w, 64);
+            printf("[%-12s] server=%d\n", u[i], !!PathIsUNCServerW(w));
+        }
+    }
+
+    puts("== PathCommonPrefix / PathIsPrefix ==");
+    {
+        /* The pairs the Windows runner used to break the tie, so the two oracles are
+         * compared on the SAME rows rather than on two different grids. */
+        static const char *const pairs[][2] = {
+            {"C:\\a\\b", "C:\\a\\c"}, {"C:\\a\\b\\c", "C:\\a\\b\\d"},
+            {"C:\\aa\\b", "C:\\ab\\b"}, {"C:\\a", "C:\\ab"},
+            {"C:\\a\\", "C:\\a\\b"}, {"\\\\s\\h\\a", "\\\\s\\h\\b"},
+            {"\\\\s\\h", "\\\\s\\i"}, {"a\\b", "a\\c"}, {"a", "a"},
+            {"C:\\", "C:\\a"}, {"C:\\a", "C:\\a"},
+        };
+        for (int i = 0; i < (int)(sizeof(pairs) / sizeof(pairs[0])); i++) {
+            char cp[64];
+            memset(cp, 0x7e, sizeof cp);
+            int n = PathCommonPrefixA(pairs[i][0], pairs[i][1], cp);
+            cp[n < 60 ? n : 60] = 0;
+            printf("[%-10s][%-10s] common=%d=[%s] preAB=%d preBA=%d\n",
+                   pairs[i][0], pairs[i][1], n, cp,
+                   !!PathIsPrefixA(pairs[i][0], pairs[i][1]),
+                   !!PathIsPrefixA(pairs[i][1], pairs[i][0]));
+        }
+        printf("common NULL-out = %d\n", PathCommonPrefixA("C:\\a\\b", "C:\\a\\c", NULL));
     }
 
     puts("== PathIsSameRoot ==");

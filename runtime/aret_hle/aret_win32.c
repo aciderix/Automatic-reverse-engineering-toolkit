@@ -3931,6 +3931,63 @@ uint32_t aret_PathStripToRoot##TAG(uint32_t esp) {                              
 /* Same root = both HAVE a root and the roots match, case-insensitively (measured:    \
  * "C:\\a" and "c:\\b" are the same root). Compares only the root, so "C:\\dir" and      \
  * "C:\\dirx\\f" are the same. */                                                        \
+/* "\\\\server" — a UNC prefix with NO further separator. Settled on a REAL Windows      \
+ * runner, not on Wine: Wine's A entry point answers FALSE for every input while its   \
+ * W entry point is correct, and Windows agrees with W (A ≡ W there). So Wine's A is a \
+ * bug, and reproducing it — which a Wine-only gate would have pushed toward — would   \
+ * have shipped a wrong answer to every caller. Both our entry points implement the    \
+ * measured Windows rule. */                                                           \
+uint32_t aret_PathIsUNCServer##TAG(uint32_t esp) {                                     \
+    const TYPE *p = (const TYPE *)(uintptr_t)WU(0);                                    \
+    if (!p || p[0] != (TYPE)'\\' || p[1] != (TYPE)'\\') return 0;                      \
+    for (p += 2; *p; p++) if (*p == (TYPE)'\\') return 0;                              \
+    return 1;                                                                          \
+}                                                                                      \
+/* Length of the common prefix, cut at a component boundary. The rule fits all eleven  \
+ * Windows tie-breaker pairs and NONE of it is derivable from the Wine grid, which is  \
+ * why this was left unimplemented until the runner answered:                          \
+ *   - identical strings answer their FULL length ("C:\\a"/"C:\\a" -> 4, not 3)          \
+ *   - otherwise the answer is the index of the last separator inside the common part  \
+ *     ("C:\\a\\b"/"C:\\a\\c" -> 4, the separator itself excluded)                         \
+ *   - EXCEPT when that separator is the drive root's, which is kept                   \
+ *     ("C:\\aa\\b"/"C:\\ab\\b" -> 3, i.e. "C:\\", not 2)                                   \
+ *   - a UNC gets no such exception ("\\\\s\\h"/"\\\\s\\i" -> 3 = "\\\\s")                       \
+ * A NULL output buffer is allowed and only the length is returned. */                 \
+static int u32_p_common_##TAG(const TYPE *a, const TYPE *b) {                          \
+    if (!a || !b) return 0;                                                            \
+    int n = 0;                                                                         \
+    while (a[n] && b[n]) {                                                             \
+        TYPE x = a[n], y = b[n];                                                       \
+        if (x >= (TYPE)'A' && x <= (TYPE)'Z') x = (TYPE)(x - 'A' + 'a');               \
+        if (y >= (TYPE)'A' && y <= (TYPE)'Z') y = (TYPE)(y - 'A' + 'a');               \
+        if (x != y) break;                                                             \
+        n++;                                                                           \
+    }                                                                                  \
+    if (!a[n] && !b[n]) return n;               /* identical: the whole length */      \
+    int s = -1;                                                                        \
+    for (int k = 0; k < n; k++) if (a[k] == (TYPE)'\\') s = k;                         \
+    if (s < 0) return 0;                                                               \
+    if (s == 2 && a[1] == (TYPE)':') return 3;  /* the drive root keeps its separator */\
+    return s;                                                                          \
+}                                                                                      \
+uint32_t aret_PathCommonPrefix##TAG(uint32_t esp) {                                    \
+    const TYPE *a = (const TYPE *)(uintptr_t)WU(0);                                    \
+    const TYPE *b = (const TYPE *)(uintptr_t)WU(1);                                    \
+    TYPE *out = (TYPE *)(uintptr_t)WU(2);                                              \
+    int n = u32_p_common_##TAG(a, b);                                                  \
+    if (out) { for (int i = 0; i < n; i++) out[i] = a[i]; out[n] = 0; }                \
+    return (uint32_t)n;                                                                \
+}                                                                                      \
+/* TRUE when the whole of `prefix` is the common prefix — so "C:\\" IS a prefix of       \
+ * "C:\\a" but "C:\\a\\" is NOT a prefix of "C:\\a\\b" (the common part stops at 4, the      \
+ * prefix is 5 long). Measured, both directions. */                                    \
+uint32_t aret_PathIsPrefix##TAG(uint32_t esp) {                                        \
+    const TYPE *pre = (const TYPE *)(uintptr_t)WU(0);                                  \
+    const TYPE *path = (const TYPE *)(uintptr_t)WU(1);                                 \
+    if (!pre || !path) return 0;                                                       \
+    int n = 0; while (pre[n]) n++;                                                     \
+    return u32_p_common_##TAG(pre, path) == n;                                         \
+}                                                                                      \
 uint32_t aret_PathIsSameRoot##TAG(uint32_t esp) {                                      \
     const TYPE *a = (const TYPE *)(uintptr_t)WU(0);                                    \
     const TYPE *b = (const TYPE *)(uintptr_t)WU(1);                                    \
