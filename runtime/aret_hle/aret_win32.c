@@ -2304,6 +2304,57 @@ static const uint8_t *u32_rsrc_data_entry(uint32_t type_ref, uint32_t name_ref) 
     return rb + leaf;
 }
 
+/* EnumResourceLanguages{A,W}(hModule, lpType, lpName, lpEnumFunc, lParam) -> BOOL.
+ * Walks type -> name in the PE resource tree and calls the LIFTED callback once per
+ * language leaf. Contract MEASURED against Wine:
+ *   - success: callback per language, returns TRUE, last error untouched;
+ *   - the callback returning FALSE stops the walk and the FUNCTION returns FALSE —
+ *     with NO error set: "the caller asked to stop" is not a failure;
+ *   - type not found   -> FALSE + 1813 (ERROR_RESOURCE_TYPE_NOT_FOUND);
+ *   - name not found   -> FALSE + 1814 (ERROR_RESOURCE_NAME_NOT_FOUND).
+ * `lpType`/`lpName` are handed to the callback VERBATIM (measured: the callback sees
+ * 0xa and 0x64 for RT_RCDATA/100, i.e. the caller's own MAKEINTRESOURCE values, not
+ * anything re-derived from the tree).
+ * The whole contract comes from the binary's own .rsrc, so it is deterministic — no
+ * environmental component to separate out here, unlike the font enumeration. */
+static uint32_t u32_enum_res_langs(uint32_t esp, int wide) {
+    uint32_t hmod = WU(0), type_ref = WU(1), name_ref = WU(2), proc = WU(3), lparam = WU(4);
+    uint32_t base;
+    const uint8_t *rb = u32_rsrc_root(&base);
+    if (!rb) { g_last_error = 1813; return 0; }
+    uint32_t tid, nid; const char *tname, *nname;
+    u32_rsrc_ref(type_ref, &tid, &tname);
+    u32_rsrc_ref(name_ref, &nid, &nname);
+    /* A STRING type/name under the W entry point would be UTF-16, while the tree
+     * comparison here is the ANSI one. Rather than mismatch (and then report
+     * "not found" for a resource that exists — a lie), stop loudly. Integer
+     * MAKEINTRESOURCE refs, the overwhelmingly common case, are exact at both widths. */
+    if (wide && (tname || nname))
+        aret_unmodelled("EnumResourceLanguagesW: string (non-MAKEINTRESOURCE) type/name");
+    uint32_t off = u32_rsrc_entry(rb, rb, tid, tname);
+    if (!(off & 0x80000000u)) { g_last_error = 1813; return 0; }
+    off = u32_rsrc_entry(rb, rb + (off & 0x7FFFFFFFu), nid, nname);
+    if (!(off & 0x80000000u)) { g_last_error = 1814; return 0; }
+    const uint8_t *lang = rb + (off & 0x7FFFFFFFu);
+    uint16_t nnamed = *(const uint16_t *)(lang + 12), nidc = *(const uint16_t *)(lang + 14);
+    int total = (int)nnamed + (int)nidc;
+    if (total < 1) { g_last_error = 1815; return 0; }   /* ERROR_RESOURCE_LANG_NOT_FOUND */
+    const uint8_t *e = lang + 16;
+    for (int i = 0; i < total; i++, e += 8) {
+        uint32_t key = *(const uint32_t *)e;
+        if (key & 0x80000000u) continue;                /* a named language: skip */
+        /* stdcall frame below the caller's esp: [0] return slot, then the 5 args. */
+        uint32_t frame = (esp - 0x80) & ~15u;
+        uint32_t *fr = (uint32_t *)(uintptr_t)frame;
+        fr[0] = 0; fr[1] = hmod; fr[2] = type_ref; fr[3] = name_ref;
+        fr[4] = key & 0xFFFFu; fr[5] = lparam;
+        if (!(uint32_t)aret_call(proc, frame, 0, 0, 0, 0, 0, 0, 0)) return 0;
+    }
+    return 1;
+}
+uint32_t aret_EnumResourceLanguagesA(uint32_t esp) { return u32_enum_res_langs(esp, 0); }
+uint32_t aret_EnumResourceLanguagesW(uint32_t esp) { return u32_enum_res_langs(esp, 1); }
+
 /* FindResourceA(hModule, lpName, lpType) -> HRSRC. Returns the DATA_ENTRY pointer
  * as an opaque handle (LoadResource/SizeofResource take it back). */
 uint32_t aret_FindResourceA(uint32_t esp) {

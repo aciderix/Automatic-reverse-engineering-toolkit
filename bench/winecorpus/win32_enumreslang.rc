@@ -1,0 +1,3 @@
+100 RCDATA { "hello", 0 }
+200 RCDATA { "second", 0 }
+STRINGTABLE { 1, "un"  2, "deux" }
