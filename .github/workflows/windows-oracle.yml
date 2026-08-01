@@ -45,7 +45,9 @@ jobs:
           cl /nologo /W0 bench\winecorpus\win32_pathcombine.c shlwapi.lib /Fe:out\pathcombine.exe /Fo:out\ || exit /b 1
           cl /nologo /W0 bench\winecorpus\win32_pathparts.c   shlwapi.lib /Fe:out\pathparts.exe   /Fo:out\ || exit /b 1
           cl /nologo /W0 bench\winecorpus\win32_pathexists.c  shlwapi.lib /Fe:out\pathexists.exe  /Fo:out\ || exit /b 1
-          for %%p in (disputed pathroot pathcombine pathparts pathexists) do (
+          rem `disputed` LAST: it is the section a session actually reads, and a job log is
+          rem read from the end.
+          for %%p in (pathroot pathcombine pathparts pathexists disputed) do (
             echo ================ %%p ================
             out\%%p.exe > out\%%p.windows.txt
             type out\%%p.windows.txt
