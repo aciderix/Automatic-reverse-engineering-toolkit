@@ -3811,6 +3811,147 @@ ARET_PATH_ROOT_FAMILY(A, char)
 ARET_PATH_ROOT_FAMILY(W, uint16_t)
 #undef ARET_PATH_ROOT_FAMILY
 
+/* shlwapi path family, wave 3: EXTENSIONS, COMPONENTS, ROOT COMPARISON.
+ *
+ * Eleven functions taken as a BLOCK rather than one runtime wall at a time — the
+ * measurement technique from waves 1-2 is established, so a whole family costs one
+ * grid (`winecorpus/win32_pathparts.c`). Everything below reproduces a measured row.
+ *
+ * All the extension operations pivot on `PathFindExtension` (already implemented
+ * above): scanning forward, a `\` or a SPACE resets the candidate and a `.` records
+ * it. The space is the surprising half and it drives three answers — "x.exe arg1
+ * arg2" has NO extension, so PathAddExtension appends to the whole command line.
+ * Also measured: a LEADING dot counts (".hidden" already has an extension, so
+ * PathAddExtension refuses it) and so does a TRAILING one ("file.").
+ *
+ * Two functions from this family are deliberately NOT here:
+ *   - `PathIsUNCServer`: Wine's A entry point answers FALSE for every input while
+ *     its W entry point answers correctly. Both cannot be right and this host cannot
+ *     decide which matches Windows, so a call aborts instead of returning a coin flip.
+ *   - `PathCommonPrefix` / `PathIsPrefix`: 11 measured pairs did not separate "the
+ *     length includes the separator" from "the length is the root length". Not
+ *     shipped on a rule the grid does not prove. */
+#define ARET_PATH_PARTS_FAMILY(TAG, TYPE)                                              \
+static const TYPE *u32_p_ext_##TAG(const TYPE *p) {                                    \
+    const TYPE *last = 0;                                                              \
+    for (; *p; p++) {                                                                  \
+        if (*p == (TYPE)'\\' || *p == (TYPE)' ') last = 0;                             \
+        else if (*p == (TYPE)'.') last = p;                                            \
+    }                                                                                  \
+    return last ? last : p;                                                            \
+}                                                                                      \
+/* First character of the next component: skip to a separator, then skip the run of   \
+ * them — which is why "\\\\srv" answers 2 and not 1. NULL for an empty path. */         \
+uint32_t aret_PathFindNextComponent##TAG(uint32_t esp) {                               \
+    const TYPE *p = (const TYPE *)(uintptr_t)WU(0);                                    \
+    if (!p || !*p) return 0;                                                           \
+    while (*p && *p != (TYPE)'\\' && *p != (TYPE)'/') p++;                             \
+    while (*p == (TYPE)'\\' || *p == (TYPE)'/') p++;                                   \
+    return (uint32_t)(uintptr_t)p;                                                     \
+}                                                                                      \
+/* Arguments start after the first space OUTSIDE quotes; the terminating NUL if none. \
+ * The quote tracking is what makes "\"a b\" c" answer 6 rather than 2. */             \
+uint32_t aret_PathGetArgs##TAG(uint32_t esp) {                                         \
+    const TYPE *p = (const TYPE *)(uintptr_t)WU(0);                                    \
+    if (!p) return 0;                                                                  \
+    int q = 0;                                                                         \
+    for (; *p; p++) {                                                                  \
+        if (*p == (TYPE)'"') q = !q;                                                   \
+        else if (*p == (TYPE)' ' && !q) return (uint32_t)(uintptr_t)(p + 1);           \
+    }                                                                                  \
+    return (uint32_t)(uintptr_t)p;                                                     \
+}                                                                                      \
+uint32_t aret_PathGetDriveNumber##TAG(uint32_t esp) {                                  \
+    const TYPE *p = (const TYPE *)(uintptr_t)WU(0);                                    \
+    if (!p || !*p || p[1] != (TYPE)':') return 0xFFFFFFFFu;                            \
+    TYPE c = p[0];                                                                     \
+    if (c >= (TYPE)'a' && c <= (TYPE)'z') return (uint32_t)(c - (TYPE)'a');            \
+    if (c >= (TYPE)'A' && c <= (TYPE)'Z') return (uint32_t)(c - (TYPE)'A');            \
+    return 0xFFFFFFFFu;                                                                \
+}                                                                                      \
+/* A bare file name: no separator and no colon. The empty string qualifies. */         \
+uint32_t aret_PathIsFileSpec##TAG(uint32_t esp) {                                      \
+    const TYPE *p = (const TYPE *)(uintptr_t)WU(0);                                    \
+    if (!p) return 0;                                                                  \
+    for (; *p; p++)                                                                    \
+        if (*p == (TYPE)'\\' || *p == (TYPE)'/' || *p == (TYPE)':') return 0;          \
+    return 1;                                                                          \
+}                                                                                      \
+/* "\\\\server\\share" — a UNC prefix with EXACTLY one further separator. Measured: what  \
+ * follows that separator is irrelevant, so "\\\\srv\\" qualifies and "\\\\srv\\sh\\" does not. */ \
+uint32_t aret_PathIsUNCServerShare##TAG(uint32_t esp) {                                \
+    const TYPE *p = (const TYPE *)(uintptr_t)WU(0);                                    \
+    if (!p || p[0] != (TYPE)'\\' || p[1] != (TYPE)'\\') return 0;                      \
+    int seps = 0;                                                                      \
+    for (p += 2; *p; p++) if (*p == (TYPE)'\\') seps++;                                \
+    return seps == 1;                                                                  \
+}                                                                                      \
+uint32_t aret_PathAddExtension##TAG(uint32_t esp) {                                    \
+    TYPE *p = (TYPE *)(uintptr_t)WU(0);                                                \
+    const TYPE *ext = (const TYPE *)(uintptr_t)WU(1);                                  \
+    if (!p || !ext) return 0;                                                          \
+    if (!*ext) return 1;                     /* empty extension: success, no change */ \
+    if (*u32_p_ext_##TAG(p)) return 0;       /* already has one */                     \
+    int n = 0; while (p[n]) n++;                                                       \
+    int e = 0; while (ext[e]) e++;                                                     \
+    if (n + e >= 260) return 0;                                                        \
+    for (int i = 0; i <= e; i++) p[n + i] = ext[i];                                    \
+    return 1;                                                                          \
+}                                                                                      \
+uint32_t aret_PathRemoveExtension##TAG(uint32_t esp) {                                 \
+    TYPE *p = (TYPE *)(uintptr_t)WU(0);                                                \
+    if (p) { TYPE *e = (TYPE *)u32_p_ext_##TAG(p); *e = 0; }                           \
+    return 0;                                                                          \
+}                                                                                      \
+uint32_t aret_PathRenameExtension##TAG(uint32_t esp) {                                 \
+    TYPE *p = (TYPE *)(uintptr_t)WU(0);                                                \
+    const TYPE *ext = (const TYPE *)(uintptr_t)WU(1);                                  \
+    if (!p || !ext) return 0;                                                          \
+    TYPE *e = (TYPE *)u32_p_ext_##TAG(p);                                              \
+    int keep = (int)(e - p), n = 0;                                                    \
+    while (ext[n]) n++;                                                                \
+    if (keep + n >= 260) return 0;                                                     \
+    for (int i = 0; i <= n; i++) e[i] = ext[i];                                        \
+    return 1;                                                                          \
+}                                                                                      \
+/* Strip to the root by repeatedly removing the file spec until the path IS a root —  \
+ * literally Wine's loop, and it reuses the two wave-1 functions, so the three agree  \
+ * by construction. FALSE (with the path emptied) when there is no root to reach. */  \
+uint32_t aret_PathStripToRoot##TAG(uint32_t esp) {                                     \
+    TYPE *p = (TYPE *)(uintptr_t)WU(0);                                                \
+    if (!p) return 0;                                                                  \
+    while (!u32_p_isroot_##TAG(p)) {                                                   \
+        int b = u32_p_base_##TAG(p), cut = b, i;                                       \
+        for (i = b; p[i]; i++) if (p[i] == (TYPE)'\\') cut = i;                        \
+        if (!p[cut]) return 0;                                                         \
+        p[cut] = 0;                                                                    \
+    }                                                                                  \
+    return 1;                                                                          \
+}                                                                                      \
+/* Same root = both HAVE a root and the roots match, case-insensitively (measured:    \
+ * "C:\\a" and "c:\\b" are the same root). Compares only the root, so "C:\\dir" and      \
+ * "C:\\dirx\\f" are the same. */                                                        \
+uint32_t aret_PathIsSameRoot##TAG(uint32_t esp) {                                      \
+    const TYPE *a = (const TYPE *)(uintptr_t)WU(0);                                    \
+    const TYPE *b = (const TYPE *)(uintptr_t)WU(1);                                    \
+    if (!a || !b) return 0;                                                            \
+    const TYPE *ra = u32_p_skiproot_##TAG(a), *rb = u32_p_skiproot_##TAG(b);           \
+    if (!ra || !rb) return 0;                                                          \
+    int la = (int)(ra - a), lb = (int)(rb - b);                                        \
+    if (la != lb) return 0;                                                            \
+    for (int i = 0; i < la; i++) {                                                     \
+        TYPE x = a[i], y = b[i];                                                       \
+        if (x >= (TYPE)'A' && x <= (TYPE)'Z') x = (TYPE)(x - 'A' + 'a');               \
+        if (y >= (TYPE)'A' && y <= (TYPE)'Z') y = (TYPE)(y - 'A' + 'a');               \
+        if (x != y) return 0;                                                          \
+    }                                                                                  \
+    return 1;                                                                          \
+}
+
+ARET_PATH_PARTS_FAMILY(A, char)
+ARET_PATH_PARTS_FAMILY(W, uint16_t)
+#undef ARET_PATH_PARTS_FAMILY
+
 /* shlwapi path family, wave 2: PathCanonicalize / PathCombine / PathAppend.
  *
  * One implementation, because they are one function in disguise: PathAppend defers
