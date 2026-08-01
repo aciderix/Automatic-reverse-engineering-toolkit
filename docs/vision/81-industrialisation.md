@@ -227,6 +227,28 @@ mal diagnostiquée**. Bilan :
 - **Statut.** 🚧 driver validé tractable (Wine ouvre la fenêtre) ; prochain incrément =
   isoler la 1ʳᵉ API HLE divergente de l'init MFC.
 
+### I9 — Cache d'objets adressé par contenu ✅ **FAIT (2026-08-01)** · *et il a servi d'oracle*
+- **Problème (mesuré, WinMerge + 3 DLL).** `--mode imports` 0,086 s · `--mode walls` 116 s · **141 s** de `cc -O0` pour
+  les 254 `.c` générés (316 Mo). La boucle I5 réelle est *éditer un shim → rebuild → relancer* : sur cette édition, tous
+  les objets du code lifté sont **bit-identiques** au build précédent. Même gaspillage sur les **194 fixtures winediff**,
+  qui recompilent chacune les mêmes trois fichiers runtime.
+- **Proposition livrée.** `src/builder/objcache.rs`. Un objet est fonction pure de (compilateur, flags, octets de la
+  source, octets de **tout** fichier lu par le préprocesseur). C'est ce dernier point qu'un cache naïf rate. Donc *depend
+  mode* : le premier build écrit sa liste **`-MD`**, et une réutilisation **re-hache chaque fichier listé** (headers
+  générés **et** système) avant de servir l'objet. Le cache ne peut échouer que **fermé**. Chemins internes à l'out-dir
+  stockés **relatifs** ⇒ réutilisables depuis un `--out-dir` neuf, le cas qui compte.
+- **Conformité §0.** ✅ La règle « jamais un faux présenté comme correct » s'applique **au cache lui-même** : c'est
+  pourquoi la clé est exacte et non heuristique, et pourquoi le SHA-256 est **prouvé sur les vecteurs FIPS 180-4** plutôt
+  que supposé (un hash 64 bits serait une vraie façon de servir le mauvais objet). Off par `ARET_NO_OBJCACHE=1`.
+- **Oracle.** Test dédié contre un vrai compilateur, **dans les deux sens** : *warm* sert des octets identiques ; un
+  **header modifié rate**, avec preuve que l'objet périmé aurait été différent. Plus difftest/difftest_transpile passés
+  **avec et sans** cache, pour que la preuve ne dépende pas de lui.
+- **⭐ Bénéfice inattendu — le cache est un détecteur de non-déterminisme.** Le taux de réutilisation attendu est une
+  **mesure** ; l'écart à cette mesure est un bug. Ici : 42 réutilisations sur 255 au lieu de ~255 ⇒ le C généré n'était
+  **pas déterministe** (`HashMap` itéré dans le placement des φ, seedé aléatoirement par processus ⇒ 212 des 254 `.c`
+  différaient entre deux runs de la **même** commande). Invisible à toutes les portes existantes, parce que le hash
+  transpile est **comportemental**. Corrigé (`IndexMap`), vérifié bit-identique sur `sqlite3.exe`. Détail 71.
+
 ---
 
 ## 4. Oracles & outillage à ajouter (transverses)
@@ -454,5 +476,20 @@ affiché. On priorise par la donnée.
   « découplée de WinMerge, à planifier **quand un binaire l'exige** » — **c'est le cas maintenant**. La priorisation par la
   donnée a tenu : I4 n'a pas été construit spéculativement (contre l'avis du document externe qui le mettait en #1), et il
   arrive au moment où la mesure le réclame. Détail 71.
+
+- **2026-08-01 (Levier 1 — la limite mesurée ; I9 — cache d'objets ; ⭐ non-déterminisme du C généré)** — Trois choses liées
+  par la même question : *comment baisser le coût marginal sans rien diluer*. (1) **Pourquoi lifter shlwapi n'a rien
+  débloqué** : son export `PathAddBackslashW` est un `___wine_spec_imp_*` = `jmp *[IAT kernelbase]`, pas une implémentation
+  — le loader a bien routé l'appel vers du code lifté, mais ce code saute dans l'IAT d'un module non chargé ⇒ **le mur
+  recule d'un module au lieu de tomber**. D'où une **règle testable en une commande avant de payer un lift** :
+  `objdump -t <dll> | grep -c __wine_spec_imp_` vs les exports nommés (comctl32 0/126, ole32 0/301, shell32 4/362,
+  kernelbase 2/1402 = implémentent ; **shlwapi 198/362**, advapi32 196/582, version 12/16 = **relais**). Chaîne terminale
+  mesurée : kernelbase n'importe **que ntdll** (131 `Nt*` + 212 `Rtl*` + 74 divers) ⇒ le user-mode est **fini**, il bute sur
+  131 syscalls NT. ⇒ `Path*`/`Str*` (pur, déterministe) = **shim HLE**, pas lifting. (2) **I9 cache d'objets** livré (voir
+  §3 I9). (3) **Le cache a servi d'oracle** et a révélé que le **C généré n'était pas déterministe** — `HashMap` itéré au
+  placement des φ ⇒ 212 des 254 `.c` différaient entre deux runs de la même commande, invisible aux portes parce que le
+  hash transpile est **comportemental**. Corrigé (`IndexMap`), `sqlite3.exe` bit-identique sur deux transpiles.
+  **Leçon d'industrialisation** : un outil de vélocité bien construit produit une **mesure**, et l'écart à cette mesure
+  est un bug qu'aucune porte ne cherchait. Détail 71 (2026-08-01).
 
 <!-- NOUVELLES LIGNES D'AVANCEMENT ICI (plus récent en bas) -->

@@ -5482,3 +5482,58 @@ Détail : **70 §6** (roadmap). Résumé :
   kernelbase pour l'obtenir échangerait 5 fonctions de chaîne contre 131 syscalls NT.
 - **Vérifié** : désassemblage de l'export shlwapi, tables d'import/export `objdump -p/-t` des 9 builtins, `--mode imports`
   sur les 5 configurations, et le run WinMerge qui abort toujours sur le même nom.
+
+### 2026-08-01 — [INFRA][SSA] **⭐ Le C généré n'était PAS déterministe — trouvé par le cache d'objets, cause = un `HashMap` itéré dans le placement des φ**
+
+- **Comment c'est sorti** : en mesurant le cache d'objets (I9) sur WinMerge, la passe *warm* n'a réutilisé que **42 objets
+  sur 255**. Attendu : ~255 (rien n'avait changé entre les deux runs — même binaire, même commande, même compilateur).
+  Le cache ne mentait pas : les **sources différaient**. Comparaison des deux `--out-dir` :
+  **212 des 254 `.c` générés diffèrent**, et l'ELF final diffère. Les **8 fichiers fixes** (`aret_hle.c`, `aret_crt.c`,
+  `aret_win32.c`, `aret_dispatch.c`, `aret_iat.c`, `aret_stubs.c`, `aret_main.c`, `aret_layout.c`) sont, eux, identiques —
+  donc le non-déterminisme est **dans le lifting**, pas dans l'émission de la couche fixe.
+- **Cause racine** (`src/ssa/mod.rs`, `to_ssa`) : `defsites: HashMap<Location, Vec<usize>>` est **itéré**
+  (`for (var, sites) in &defsites`) pour placer les φ. Le `HashMap` de Rust est **seedé aléatoirement par processus** ⇒
+  l'ordre d'insertion des φ dans chaque bloc change à chaque run ⇒ le compteur de renommage distribue d'autres `ValueId`
+  ⇒ tout le C change, et la copy-propagation ne folde pas les mêmes copies (mesuré : `v30 = v21;` d'un côté, **quatre**
+  affectations de l'autre). Ce n'était **pas** un simple renommage cosmétique.
+- **Ce que ça n'est pas** : un bug de justesse. Les deux numérotations sont du SSA valide et les deux programmes se
+  comportent pareil — c'est exactement pourquoi **aucune porte ne l'avait vu** : le hash de `difftest_transpile` est
+  **comportemental** (il hache la *sortie du programme*), donc il reste `19acad982194bf07` quelle que soit la numérotation.
+- **Ce que ça est quand même** : « même entrée ⇒ même sortie » est une propriété dont le projet a besoin. Sans elle
+  aucune porte **au niveau octet** ne peut exister, un diff de C généré entre deux commits est illisible, et un binaire
+  livré n'est pas reproductible. Le 81 §0.2 exige déjà « déterminisme intact » pour l'instrumentation ; ici c'était le
+  pipeline lui-même.
+- **Fix** : `defsites` passe en **`IndexMap`** (déjà une dépendance, « Ordered maps for deterministic output » dit le
+  `Cargo.toml`). L'ordre d'insertion — blocs dans l'ordre, statements dans l'ordre — est déterministe par construction,
+  et coûte zéro. Audit des autres itérations de `Hash*` dans `ssa`/`opt` fait au passage : `undef` est itéré mais son
+  résultat (`fp80`) est **trié+dédupliqué** ⇒ insensible à l'ordre ; `range` (`opt/frame.rs`) est un `BTreeMap` ; `safe`
+  n'est jamais itéré. **`defsites` était le seul.**
+- **Vérifié** : `sqlite3.exe` transpilé deux fois → **22/22 `.c` identiques et `app` bit-identique** (avant le fix : les
+  mêmes fichiers différaient). Portes : difftest **272/272**, hash **`19acad982194bf07` inchangé** (avec **et** sans
+  cache — la porte est passée les deux fois pour que la preuve ne dépende pas du cache).
+- **Leçon** : un outil construit pour une raison (aller plus vite) a servi d'**oracle** pour une propriété qu'aucune
+  porte ne testait. Un cache adressé par contenu est, gratuitement, un **détecteur de non-déterminisme** — le taux de
+  réutilisation attendu est une mesure, et l'écart à cette mesure est un bug.
+
+### 2026-08-01 — [INFRA] **I9 — cache d'objets adressé par contenu : la boucle de dev cesse de repayer la même compilation**
+
+- **Problème mesuré** (WinMerge + mfc90u + shell32 + shlwapi) : `--mode imports` 0,086 s · `--mode walls` 116 s ·
+  **compilation des 254 `.c` générés (316 Mo) = 141 s** sur 4 cœurs. Or la boucle I5 réelle est *éditer un shim HLE →
+  rebuild → relancer*, et sur cette édition **tous** les objets du code applicatif lifté sont bit-identiques au build
+  précédent (le C lifté ne dépend pas des sources du runtime). Même gaspillage sur les **194 fixtures winediff**, qui
+  recompilent chacune les mêmes `aret_hle.c`/`aret_crt.c`/`aret_win32.c` (~1,7 s de CPU par fixture).
+- **Le point délicat = la soundness, pas la vitesse.** Un cache qui sert un objet périmé **est** le faux silencieux que
+  le §0 interdit. Donc la clé n'est **pas** approximative : le premier build écrit sa liste de dépendances **`-MD`**, et
+  toute réutilisation **re-hache chaque fichier listé** — headers générés **et** headers système — avant de servir
+  l'objet. Header modifié, header système modifié, fichier supprimé : chacun échoue la vérification et retombe sur une
+  compilation. Le cache ne peut échouer que **fermé** (travail en trop), jamais **ouvert** (mauvais octets).
+- **Détails qui comptent** : les chemins internes à l'`--out-dir` sont stockés **relatifs** ⇒ un objet construit dans un
+  répertoire est réutilisable depuis un autre (le cas qui compte : chaque expérience utilise un `--out-dir` neuf).
+  **SHA-256 implémenté sur place** (aucune dépendance de hash dans le projet) et **prouvé sur les vecteurs FIPS 180-4** —
+  un hash 64 bits serait une vraie façon de servir le mauvais objet. La liste `-MD` est écrite à côté de l'objet dans
+  l'out-dir (noms uniques ⇒ deux threads rayon, ou deux fixtures winediff parallèles, ne peuvent pas s'écraser).
+- **Réglages** : `ARET_NO_OBJCACHE=1` (off) · `ARET_OBJCACHE=<dir>` (défaut `$XDG_CACHE_HOME/aret/obj`) ·
+  `ARET_OBJCACHE_MAX_MB` (défaut 4096, éviction LRU en fin de build). Une ligne `note: N object(s) compiled, M reused`.
+- **Vérifié** : test dédié qui mesure les **deux sens** contre un vrai compilateur — un *warm lookup* sert des octets
+  **identiques**, et un header modifié **rate**, avec la preuve que l'objet périmé aurait été **différent** ; plus le
+  retour à l'ancien header qui re-touche l'entrée d'origine. + KAT SHA-256 + parsing des continuations `-MD`. 4/4.

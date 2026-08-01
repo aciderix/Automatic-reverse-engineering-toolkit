@@ -199,7 +199,20 @@ aret <exe> --mode walls             # CARTE DES MURS statique complète (une pas
        # subir un par un au runtime. Agrégeable sur un corpus (grep les compteurs) pour dégrossir.
 bash bench/wallsweep.sh <dir1> [dir2…]  # AGRÈGE --mode walls sur un corpus : murs classés par
        # nb de BINAIRES bloqués (largeur) → prioriser un fix par la donnée. Couplé aux oracles.
+
+# Cache d'objets (doc 81 §I9) — ACTIF PAR DÉFAUT, ne change jamais les octets produits :
+#   la clé couvre compilateur+flags+source ET la liste `-MD` complète des headers lus,
+#   re-hachée à chaque réutilisation ⇒ un header modifié RECOMPILE (échec fermé, jamais ouvert).
+ARET_NO_OBJCACHE=1 …        # désactiver (à faire pour une preuve indépendante du cache)
+ARET_OBJCACHE=<dir> …       # emplacement (défaut $XDG_CACHE_HOME/aret/obj)
+ARET_OBJCACHE_MAX_MB=<n> …  # budget, éviction LRU en fin de build (défaut 4096)
 ```
+
+**Déterminisme (propriété acquise 2026-08-01)** : deux transpiles de la même commande produisent
+désormais des `.c` **bit-identiques** et le **même ELF**. Ce n'était pas le cas avant (un `HashMap`
+itéré au placement des φ, seedé aléatoirement par processus) et **aucune porte ne pouvait le voir**
+— le hash de `difftest_transpile` est **comportemental**. Le taux de réutilisation du cache d'objets
+sert désormais de **détecteur** : un warm build qui ne réutilise pas ~tout signale un non-déterminisme.
 
 ### État régression (référence — doit rester vert)
 difftest **272/272** · transpile-diff **4/4** (H=`19acad982194bf07`) · winediff
@@ -1295,6 +1308,15 @@ la **vitesse** change.
 - **Pour toute fixture d'API `*_s` : vérifier à l'`objdump` qu'elle IMPORTE bien msvcrt.** mingw fournit ses **propres**
   corps pour plusieurs d'entre elles (`memmove_s`, `memcpy_s`, `_strupr_s`…) ⇒ sans `.def` forçant l'import, la fixture
   mesure **mingw des deux côtés** et ne garde **rien**. Mécanisme : `winecorpus/NOM.def` (cf. `crt_mem_s.def`).
+- **⭐ UN OUTIL DE VÉLOCITÉ BIEN CONSTRUIT EST UN ORACLE GRATUIT (2026-08-01)**. Le cache d'objets a été écrit pour
+  aller plus vite ; sa **première** trouvaille a été un bug. Le mécanisme est général : le cache **prédit** un taux de
+  réutilisation (rien n'a changé ⇒ tout doit être réutilisé), donc l'écart à cette prédiction est un **signal**. Ici :
+  42 réutilisations sur 255 ⇒ le C généré n'était **pas déterministe** (212 des 254 `.c` différaient entre deux runs de
+  la même commande). Aucune porte ne pouvait le voir : le hash `difftest_transpile` est **comportemental**, donc
+  indifférent à la numérotation SSA. À retenir avant de bâtir un outil d'infra : *quelle mesure produit-il, et que
+  saurais-je si elle sortait fausse ?*
+- **Vérifier une porte AVEC et SANS le nouvel outil** : difftest/difftest_transpile ont été passés `ARET_NO_OBJCACHE=1`
+  **puis** avec le cache — sinon la preuve du fix dépendrait de l'outil qu'elle est censée valider.
 - **funcdiff `0 divergence` ≠ pas de bug** : ça dit *où il n'est pas* (lift brut des
   fonctions scorées sain). Les bugs profonds sont dans les fonctions **skippées**
   (derrière imports) ou **en aval** (SSA/opt — couvert par l'opt-diff).

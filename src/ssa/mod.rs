@@ -115,7 +115,20 @@ pub fn to_ssa(func: &mut IrFunction) {
 
     // --- 1. φ placement ---------------------------------------------------
     // Definition sites per variable.
-    let mut defsites: HashMap<Location, Vec<usize>> = HashMap::new();
+    //
+    // ⚠️ **`IndexMap`, not `HashMap`** — this map is *iterated*, and the iteration
+    // order decides the order φs are pushed into each block, which decides the order
+    // the renaming counter hands out `ValueId`s, which decides the whole shape of the
+    // emitted C (and, through it, what copy-propagation folds). Rust's `HashMap` is
+    // seeded randomly **per process**, so with it two runs of the same command on the
+    // same binary produced **different programs** — measured on WinMerge: 212 of 254
+    // generated `.c` files differed, and the final ELF differed. Nothing was *wrong*
+    // (both renumberings are valid SSA), but "same input, same output" is a property
+    // the project needs: it is what lets a byte-level gate exist at all, and the
+    // behavioural transpile hash cannot see the difference. `IndexMap` keeps insertion
+    // order — blocks in order, statements in order — which is deterministic by
+    // construction and costs nothing.
+    let mut defsites: indexmap::IndexMap<Location, Vec<usize>> = indexmap::IndexMap::new();
     for (b, blk) in func.blocks.iter().enumerate() {
         for s in &blk.stmts {
             if let Stmt::Set { dst, .. } = s {
