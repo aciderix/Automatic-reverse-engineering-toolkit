@@ -1,0 +1,58 @@
+# A REAL Windows oracle (doc 70 §1, doc 81).
+#
+# Every behavioural gate in this project compares ARET against Wine. That is a good
+# oracle — Wine is tested by the whole world and does not fail silently — but the
+# doctrine has always recorded one honest weakness: where Wine is both the oracle and
+# the reference implementation, we are verifying Wine against Wine. This workflow
+# breaks that circle by running the same probes on `windows-latest`, i.e. the actual
+# Win32 the original binaries were built against.
+#
+# It is NOT a gate. It produces MEASUREMENTS, in the job log and as an artifact, that
+# a session reads and then encodes. Nothing here can turn red and block work, because
+# a disagreement between Windows and Wine is a finding to think about, not a
+# regression to fix reflexively.
+#
+# Built 32-bit (vcvars32) because that is what ARET targets, so the ABI, the wchar_t
+# width and the structure layouts are the ones under test.
+name: windows-oracle
+
+on:
+  push:
+    paths:
+      - 'bench/winoracle/**'
+      - 'bench/winecorpus/win32_path*.c'
+      - '.github/workflows/windows-oracle.yml'
+  workflow_dispatch:
+
+jobs:
+  probe:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build and run the probes under real Win32 (32-bit)
+        shell: cmd
+        run: |
+          for /f "usebackq tokens=*" %%i in (`"C:\Program Files (x86)\Microsoft Visual Studio\Installer\vswhere.exe" -latest -property installationPath`) do call "%%i\VC\Auxiliary\Build\vcvars32.bat"
+          if errorlevel 1 exit /b 1
+          mkdir out
+          rem The disputed probe: the questions Wine's answers do not settle.
+          cl /nologo /W0 bench\winoracle\win32_pathdisputed.c shlwapi.lib /Fe:out\disputed.exe /Fo:out\ || exit /b 1
+          rem The gated fixtures, re-run against the real thing: anywhere their output
+          rem differs from the Wine run recorded in the repo, either Wine or our reading
+          rem of it is wrong, and that is worth knowing even when the gate is green.
+          cl /nologo /W0 bench\winecorpus\win32_pathroot.c    shlwapi.lib /Fe:out\pathroot.exe    /Fo:out\ || exit /b 1
+          cl /nologo /W0 bench\winecorpus\win32_pathcombine.c shlwapi.lib /Fe:out\pathcombine.exe /Fo:out\ || exit /b 1
+          cl /nologo /W0 bench\winecorpus\win32_pathparts.c   shlwapi.lib /Fe:out\pathparts.exe   /Fo:out\ || exit /b 1
+          cl /nologo /W0 bench\winecorpus\win32_pathexists.c  shlwapi.lib /Fe:out\pathexists.exe  /Fo:out\ || exit /b 1
+          for %%p in (disputed pathroot pathcombine pathparts pathexists) do (
+            echo ================ %%p ================
+            out\%%p.exe > out\%%p.windows.txt
+            type out\%%p.windows.txt
+          )
+
+      - name: Publish the measurements
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-oracle
+          path: out/*.windows.txt
