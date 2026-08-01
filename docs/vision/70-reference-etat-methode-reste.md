@@ -824,6 +824,16 @@ résidu qui abort restera l'**obfusqué/fait-main/VM-packé** (indécidable, §9
   **Reste** : les autres contrôles (trackbar/toolbar/listview…) = **même machinerie**, data-driven (shims gdi32/user32
   manquants selon le contrôle) ; + les 106 shims socle ; + (optionnel, pour lifter gdi32/user32 eux-mêmes) FLIRT
   chirurgical `NtGdi*`/`NtUser*`→HLE ; + ~17 unresolved-direct / `jl 0x100afcd4`×16 (récup mineure).
+- **⭐ LEVIER 1 VALIDÉ SUR WinMerge (2026-07-26)** : lifter **shell32** (builtin Wine) efface d'un coup
+  `SHGetSpecialFolderLocation`/`SHGetMalloc`/`SHGetPathFromIDListW`/`ShellExecuteW`/`DragQueryFileW`/… **sans un seul
+  shim**. ⇒ **le « mécanisme de vtable COM » n'a pas lieu d'être** : une DLL liftée crée ses objets **et vtables** en
+  mémoire liftée, l'appelant lifté dispatche par `aret_call`. ⚠️ **Ne pas arbitrer sur le compteur statique** : lifter
+  shell32 fait *monter* les imports manquants (270→394) car la carte compte ce que la DLL **pourrait** appeler
+  (DDE/services/MSI), pas ce qu'elle appelle — **seule l'exécution juge**. Prérequis débloqué au passage : le
+  **résolveur delay-load voit désormais tout le HLE** (table générée de 1043 shims, cf. 71).
+  **Stratégie qui en découle** : *lifter* les DLL **user-mode** (shell32, ole32, oleaut32, comdlg32, comctl32 ✅) qui
+  reposent sur nos user32/gdi32 ; *écrire à la main* la surface **user32/gdi32** (MDI, accélérateurs, presse-papier,
+  dessin GDI, metafiles, impression) qui, elle, bute sur **win32k** (doc 80 §1.2).
 - **Levier 2 — Finir les mécanismes bornés qui débloquent une CLASSE** : EH C++ (`__CxxFrameHandler`), bitmap-fonts,
   runtime VB. Chacun = une session, des milliers de binaires.
 - **Levier 3 — Mop-up data-driven** du résidu, trié par le Levier 0.

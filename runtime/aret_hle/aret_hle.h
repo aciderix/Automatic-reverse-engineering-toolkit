@@ -94,6 +94,10 @@ void aret_unmodelled(const char *insn);
  * when no delay-import was resolved (the common case). */
 int aret_delay_dispatch(uint32_t va, uint32_t esp, uint64_t *out);
 uint32_t aret_delay_pop(uint32_t va);
+/* Generated in aret_dispatch.c: find an HLE shim by its Win32/CRT name, with the same
+ * stdcall pop the static path uses. Lets the delay-load resolver reach the whole HLE
+ * instead of a hard-coded list. */
+int aret_hle_shim_lookup(const char *fn, uint32_t (**shim)(uint32_t), uint16_t *pop);
 
 /* No-op shim (returns 0) for recognized startup-glue functions (mingw/MSVC
  * global ctor/dtor runners, EH-frame registration, pseudo-relocator) we bind

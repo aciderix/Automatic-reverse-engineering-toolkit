@@ -6233,6 +6233,33 @@ uint32_t aret_ResolveDelayLoadedAPI(uint32_t esp) {
             return va;
         }
     }
+    /* Not in the small curated list above — but the HLE may implement it anyway.
+     * The generated name table (aret_dispatch.c) covers every shim, so a delay-load
+     * reaches exactly what a direct import would, with the same stdcall pop. Before
+     * this, Wine's lifted shell32 aborted on `ole32.CoTaskMemAlloc` — an API we HAVE:
+     * the resolver simply could not see it, and two lists of "APIs we model" had
+     * drifted apart. Matching by function name only, as the static import path does:
+     * a Win32 API name identifies its behaviour regardless of which DLL forwards it. */
+    {
+        uint32_t (*shim)(uint32_t) = 0;
+        uint16_t pop = 0;
+        if (aret_hle_shim_lookup(fn, &shim, &pop)) {
+            for (int j = 0; j < g_delay_res_n; j++)
+                if (g_delay_res[j].shim == shim) {
+                    *(uint32_t *)(uintptr_t)thunk = g_delay_res[j].va;
+                    return g_delay_res[j].va;
+                }
+            if (g_delay_res_n < 64) {
+                uint32_t va = DELAY_VA_BASE + (uint32_t)g_delay_res_n;
+                g_delay_res[g_delay_res_n].va = va;
+                g_delay_res[g_delay_res_n].shim = shim;
+                g_delay_res[g_delay_res_n].pop = pop;
+                g_delay_res_n++;
+                *(uint32_t *)(uintptr_t)thunk = va;
+                return va;
+            }
+        }
+    }
     snprintf(m, sizeof m, "delay-load %s.%s (not modelled)", dll, fn);
     aret_unmodelled(m);
     return 0;
