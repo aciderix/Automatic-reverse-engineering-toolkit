@@ -1800,6 +1800,52 @@ uint32_t aret_GetFileAttributesA(uint32_t esp) {
     return aret_attr_named((const char *)(uintptr_t)arg(esp, 0));
 }
 
+/* PathFileExistsA/W and PathIsDirectoryA/W (shlwapi). They live here, beside
+ * `translate_path`/`aret_attr_named`, rather than with the lexical Path family in
+ * aret_win32.c: these two ask the FILESYSTEM, and sharing the one translation +
+ * attribute mapping keeps a single answer to "what does this path name".
+ *
+ * MEASURED (`winecorpus/win32_pathexists.c`), and three of the answers are not what
+ * a plain stat() wrapper produces:
+ *   - `PathIsDirectory` returns **FILE_ATTRIBUTE_DIRECTORY (0x10)**, not 1. Any
+ *     caller writing `== TRUE` gets a silent wrong branch.
+ *   - A path containing a WILDCARD is ERROR_INVALID_NAME (123), not "not found" —
+ *     stat() would say ENOENT and we would report 2.
+ *   - The EMPTY path is ERROR_PATH_NOT_FOUND (3), where stat("") gives ENOENT, i.e.
+ *     2. A NULL path answers FALSE and leaves the last error ALONE.
+ * The rest falls out of `aret_attr_named`, which already maps ENOENT->2 and
+ * ENOTDIR->3 — which is exactly what a trailing separator on a file, or a component
+ * under a non-directory, needs. */
+static uint32_t aret_path_probe(const char *name, int want_dir) {
+    if (!name) return 0;                          /* last error deliberately untouched */
+    if (!*name) { g_last_error = 3u; return 0; }  /* ERROR_PATH_NOT_FOUND */
+    for (const char *p = name; *p; p++)
+        if (*p == '*' || *p == '?') { g_last_error = 123u; return 0; } /* INVALID_NAME */
+    uint32_t a = aret_attr_named(name);
+    if (a == 0xFFFFFFFFu) return 0;               /* aret_attr_named set 2 or 3 */
+    return want_dir ? (a & 0x10u) : 1u;
+}
+uint32_t aret_PathFileExistsA(uint32_t esp) {
+    return aret_path_probe((const char *)(uintptr_t)arg(esp, 0), 0);
+}
+uint32_t aret_PathIsDirectoryA(uint32_t esp) {
+    return aret_path_probe((const char *)(uintptr_t)arg(esp, 0), 1);
+}
+uint32_t aret_PathFileExistsW(uint32_t esp) {
+    const uint16_t *w = (const uint16_t *)(uintptr_t)arg(esp, 0);
+    if (!w) return 0;
+    char name[1024];
+    aret_w2n(w, name, sizeof name);
+    return aret_path_probe(name, 0);
+}
+uint32_t aret_PathIsDirectoryW(uint32_t esp) {
+    const uint16_t *w = (const uint16_t *)(uintptr_t)arg(esp, 0);
+    if (!w) return 0;
+    char name[1024];
+    aret_w2n(w, name, sizeof name);
+    return aret_path_probe(name, 1);
+}
+
 /* SetFileAttributesA/W(name, attrs) -> BOOL. The only POSIX-mappable attribute is
  * FILE_ATTRIBUTE_READONLY (0x01) <-> the write permission bits; the rest (hidden/
  * system/archive) have no host analogue and are accepted-and-ignored, exactly as
