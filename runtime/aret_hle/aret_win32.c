@@ -3811,6 +3811,129 @@ ARET_PATH_ROOT_FAMILY(A, char)
 ARET_PATH_ROOT_FAMILY(W, uint16_t)
 #undef ARET_PATH_ROOT_FAMILY
 
+/* shlwapi path family, wave 2: PathCanonicalize / PathCombine / PathAppend.
+ *
+ * One implementation, because they are one function in disguise: PathAppend defers
+ * to PathCombine, which canonicalizes. All three are gated by one grid of 38 rows in
+ * `winecorpus/win32_pathcombine.c`, and every rule below reproduces the MEASURED
+ * answer — several of which no amount of reading the documentation would give:
+ *
+ *   "C:\\a\\.\\b"   -> "C:\\a\\b"    but "C:\\a\\."  -> "C:\\a\\."   (a TRAILING dot stays)
+ *   "C:\\a\\...\\b" -> "C:.\\b"      ("..." is ".." then ".", not a component)
+ *   "C:"          -> "C:\\"        (a naked drive spec gains a backslash at the END)
+ *   "C:a\\..\\b"   -> "\\b"         (a drive with NO separator is not a root: it is LOST)
+ *   "C:\\..\\a"    -> "C:\\a"       (but a drive WITH one is protected)
+ *   "\\\\srv\\..'   -> "\\\\srv"      (climbing into a UNC server name is refused —
+ *                                 only the trailing separator goes)
+ *   "\\\\..\\a"     -> "\\\\a"        (same refusal at the bare "\\\\")
+ *   ""            -> "\\"
+ *   PathCombine("C:\\dir","\\file")  -> "C:\\file"   (dir's ROOT, not dir)
+ *   PathCombine("C:\\dir","C:rel")   -> "C:rel"     (drive-relative counts as absolute)
+ *   PathCombine over MAX_PATH        -> NULL, and the destination is set to ""
+ *
+ * The `..` rule that fits every row: back up to the previous separator; if there is
+ * none, fall back to just inside the root when the root ends in a separator and to
+ * the very start when it does not; and on a UNC path refuse any back-up that would
+ * land at or before index 1, dropping only the trailing separator instead. */
+#define ARET_PATH_COMBINE_FAMILY(TAG, TYPE)                                            \
+static int u32_p_canon_##TAG(TYPE *out, const TYPE *src) {                             \
+    if (!out || !src) return 0;                                                        \
+    if (!*src) { out[0] = (TYPE)'\\'; out[1] = 0; return 1; }                          \
+    /* Built in scratch, then copied out as exactly one string. Canonicalization       \
+     * writes components and then backs over them, so working directly in the          \
+     * caller's buffer would leave stale bytes PAST the terminating NUL — which is     \
+     * visible, and measurably not what Wine leaves there (its A entry point converts  \
+     * through a wide buffer and writes only the final result). Also makes an aliased  \
+     * out == src safe. */                                                             \
+    TYPE dst[2 * 260 + 4];                                                             \
+    TYPE *d = dst;                                                                     \
+    const TYPE *s = src;                                                               \
+    if (*s == (TYPE)'\\') { *d++ = *s++; }                                             \
+    else if (*s && s[1] == (TYPE)':') {                                                \
+        *d++ = *s++; *d++ = *s++;                                                      \
+        if (*s == (TYPE)'\\') *d++ = *s++;                                             \
+    }                                                                                  \
+    int rootlen = (int)(d - dst);                                                      \
+    while (*s) {                                                                       \
+        /* "\.\" or a leading ".\" — drop it. Only at a component start, which is why  \
+         * the middle dot of "..." does not qualify. */                                \
+        if (*s == (TYPE)'.' && s[1] == (TYPE)'\\' &&                                   \
+            (s == src || s[-1] == (TYPE)'\\' || s[-1] == (TYPE)':')) { s += 2; continue; } \
+        if (*s == (TYPE)'.' && s[1] == (TYPE)'.' && d > dst && d[-1] == (TYPE)'\\') {  \
+            int n = (int)(d - dst), j = -1;                                            \
+            for (int k = n - 2; k >= 0; k--)                                           \
+                if (dst[k] == (TYPE)'\\') { j = k; break; }                            \
+            if (j >= 0) {                                                              \
+                int unc = (n > 1 && dst[0] == (TYPE)'\\' && dst[1] == (TYPE)'\\');     \
+                d = dst + ((unc && j <= 1) ? n - 1 : j);                               \
+            } else {                                                                   \
+                d = dst + ((rootlen > 0 && dst[rootlen - 1] == (TYPE)'\\')             \
+                           ? rootlen - 1 : 0);                                         \
+            }                                                                          \
+            s += 2;                                                                    \
+            continue;                                                                  \
+        }                                                                              \
+        *d++ = *s++;                                                                   \
+    }                                                                                  \
+    if (d - dst == 2 && d[-1] == (TYPE)':') *d++ = (TYPE)'\\';                         \
+    *d = 0;                                                                            \
+    for (int i = 0; i <= (int)(d - dst); i++) out[i] = dst[i];                         \
+    return 1;                                                                          \
+}                                                                                      \
+static TYPE *u32_p_combine_##TAG(TYPE *dst, const TYPE *dir, const TYPE *file) {       \
+    if (!dst) return 0;                                                                \
+    if (!dir && !file) { *dst = 0; return 0; }                                         \
+    /* Built in a scratch buffer, never in place: PathAppend calls this with           \
+     * dst == dir, so reading dir after writing dst would read what we just wrote. */  \
+    TYPE tmp[2 * 260 + 4];                                                             \
+    int t = 0;                                                                         \
+    const TYPE *only = 0;                                                              \
+    if (!file || !*file) only = dir;                    /* nothing to append */        \
+    else if (!dir || !*dir) only = file;                /* nothing to append to */     \
+    else if ((file[0] == (TYPE)'\\' && file[1] == (TYPE)'\\') || file[1] == (TYPE)':') \
+        only = file;                                    /* UNC or drive: absolute */   \
+    if (only) {                                                                        \
+        for (; only[t] && t < 260; t++) tmp[t] = only[t];                              \
+    } else if (file[0] == (TYPE)'\\') {                                                \
+        /* Rooted but not absolute: dir's ROOT plus the tail, separator dropped. */    \
+        const TYPE *r = u32_p_skiproot_##TAG(dir);                                     \
+        int rl = r ? (int)(r - dir) : 0;                                               \
+        for (int i = 0; i < rl && t < 260; i++) tmp[t++] = dir[i];                     \
+        for (const TYPE *f = file + 1; *f && t < 2 * 260; f++) tmp[t++] = *f;          \
+    } else {                                                                           \
+        for (int i = 0; dir[i] && t < 2 * 260; i++) tmp[t++] = dir[i];                 \
+        if (t && tmp[t - 1] != (TYPE)'\\' && t < 2 * 260) tmp[t++] = (TYPE)'\\';       \
+        for (int i = 0; file[i] && t < 2 * 260; i++) tmp[t++] = file[i];               \
+    }                                                                                  \
+    tmp[t] = 0;                                                                        \
+    if (t >= 260) { *dst = 0; return 0; }  /* over MAX_PATH: measured NULL + "" */     \
+    u32_p_canon_##TAG(dst, tmp);                                                       \
+    return dst;                                                                        \
+}                                                                                      \
+uint32_t aret_PathCanonicalize##TAG(uint32_t esp) {                                    \
+    return (uint32_t)u32_p_canon_##TAG((TYPE *)(uintptr_t)WU(0),                       \
+                                       (const TYPE *)(uintptr_t)WU(1));                \
+}                                                                                      \
+uint32_t aret_PathCombine##TAG(uint32_t esp) {                                         \
+    return (uint32_t)(uintptr_t)u32_p_combine_##TAG((TYPE *)(uintptr_t)WU(0),          \
+                                                    (const TYPE *)(uintptr_t)WU(1),    \
+                                                    (const TYPE *)(uintptr_t)WU(2));   \
+}                                                                                      \
+uint32_t aret_PathAppend##TAG(uint32_t esp) {                                          \
+    TYPE *path = (TYPE *)(uintptr_t)WU(0);                                             \
+    const TYPE *more = (const TYPE *)(uintptr_t)WU(1);                                 \
+    if (!path || !more) return 0;                                                      \
+    /* Leading separators are stripped — UNLESS the tail is itself UNC, which is what  \
+     * makes PathAppend("C:\\dir","\\\\srv\\sh") answer "\\\\srv\\sh" rather than "C:\\dir\\srv\\sh". */ \
+    if (!(more[0] == (TYPE)'\\' && more[1] == (TYPE)'\\'))                             \
+        while (*more == (TYPE)'\\') more++;                                            \
+    return u32_p_combine_##TAG(path, path, more) ? 1 : 0;                              \
+}
+
+ARET_PATH_COMBINE_FAMILY(A, char)
+ARET_PATH_COMBINE_FAMILY(W, uint16_t)
+#undef ARET_PATH_COMBINE_FAMILY
+
 /* GetUserNameA/W(buf, pcbBuffer) -> BOOL (advapi32).
  *
  * The NAME comes from the same place Wine's does — the host's Unix account — so the
