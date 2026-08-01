@@ -991,30 +991,86 @@ uint32_t aret_GetSystemDefaultLCID(uint32_t esp)     { (void)esp; return 0x0409;
 uint32_t aret_GetUserDefaultUILanguage(uint32_t esp) { (void)esp; return 0x0409; }
 uint32_t aret_SetThreadLocale(uint32_t esp)          { (void)esp; return 0x0409; }
 /* ConvertDefaultLocale(LCID) -> LCID: replaces the "default" pseudo-LCIDs with a
- * concrete one. MEASURED against Wine by sweeping the WHOLE 16-bit LCID space, which is
- * what decided the shape of this shim:
- *   - the five default LCIDs (0 NEUTRAL, 0x400 USER, 0x800 SYSTEM, 0xC00 CUSTOM_DEFAULT,
- *     0x1000 CUSTOM_UNSPECIFIED) all resolve to the user locale — 0x0409 here, matching
- *     the invariant GetThreadLocale/GetUserDefaultLCID already publish just above;
- *   - a NEUTRAL sublang (0) does NOT simply become sublang 1: the sweep found ~40
- *     exceptions, e.g. Chinese 0x0004 -> 0x0804 and 0x000a -> 0x0c0a. It is a TABLE,
- *     not a rule.
- *   - even a non-neutral sublang is not universally pass-through: 33 of 64449 remap
- *     (0x641a -> 0x201a, 0x0460 -> 0x1000, alternate sorts and script variants).
- * Those tables are Wine's locale database — ENVIRONMENTAL, version-dependent data, in
- * the sense of the EnumFontFamilies rule (70 §4.5): model the CONTRACT, do not embed the
- * DATA. So only the five defaults are answered; everything else ABORTS soundly rather
- * than shipping a rule the sweep proved wrong. */
+ * concrete one. The WHOLE 16-bit LCID space was swept against Wine, and the sweep —
+ * not reasoning — decided what this models:
+ *   - the five defaults (0 NEUTRAL, 0x400 USER, 0x800 SYSTEM, 0xC00 CUSTOM_DEFAULT,
+ *     0x1000 CUSTOM_UNSPECIFIED) resolve to the user locale, 0x0409 here, matching
+ *     the invariant GetThreadLocale/GetUserDefaultLCID publish;
+ *   - an LCID with a NON-neutral sublang passes through unchanged — for 64416 of the
+ *     64449 such values. The other 33 are remapped (0x641a->0x201a, 0x0460->0x1000,
+ *     alternate sorts and script variants) and are listed below;
+ *   - a NEUTRAL sublang (0) does NOT simply become sublang 1: ~40 values disagree
+ *     (Chinese 0x0004 -> 0x0804, 0x000a -> 0x0c0a). It is a TABLE, not a rule.
+ * The remappings and the neutral-sublang table are Wine's locale DATABASE —
+ * environmental, version-dependent — so by the EnumFontFamilies rule (70 §4.5) the
+ * CONTRACT is modelled and the DATA is not: those cases ABORT rather than ship a
+ * rule the sweep proved wrong, or embed a table that would silently rot. */
+static int u32_lcid_is_remapped(uint32_t l) {
+    static const uint16_t remap[] = {
+        0x0460, 0x641a, 0x681a, 0x6c1a, 0x701a, 0x703b, 0x742c, 0x743b, 0x7804,
+        0x7814, 0x781a, 0x782c, 0x783b, 0x7843, 0x7850, 0x785d, 0x7c04, 0x7c14,
+        0x7c1a, 0x7c28, 0x7c2e, 0x7c3b, 0x7c43, 0x7c46, 0x7c50, 0x7c59, 0x7c5c,
+        0x7c5d, 0x7c5f, 0x7c67, 0x7c68, 0x7c86, 0x7c92,
+    };
+    for (unsigned i = 0; i < sizeof remap / sizeof *remap; i++)
+        if (remap[i] == l) return 1;
+    return 0;
+}
+/* A NEUTRAL sublang (0) asks for "this language's default locale". Swept across all
+ * 1024 primary ids, the answers fall into exactly three groups, and the shape is what
+ * makes this modellable at all rather than a 1024-entry blob:
+ *   - 122 assigned languages take SUBLANG_DEFAULT, i.e. simply `id | 0x400`;
+ *   - 12 take a DIFFERENT sublang, because their conventional default is not the
+ *     first one (Chinese 0x004 -> 0x804 Simplified, Serbian-ish 0x01a -> 0xc0a, and
+ *     three that answer 0x1000 CUSTOM_UNSPECIFIED outright);
+ *   - the remaining 889 ids are UNASSIGNED and pass through untouched.
+ * So the naive "neutral becomes sublang 1" is wrong 901 times out of 1023 — it is
+ * right only for the assigned set, which has to be enumerated.
+ * This is Wine's locale database, but unlike a font list it is not machine-dependent:
+ * it is compiled into Wine, so it is deterministic for a given version and CAN be
+ * gated. `winecorpus/win32_convlocale.c` sweeps every one of the 1024 ids, so a Wine
+ * that gained or lost a language turns this red instead of letting it rot silently.
+ * That gateability is the whole reason it is embedded rather than aborted on. */
+static uint32_t u32_lcid_neutral(uint32_t id) {
+    static const uint16_t assigned[] = {
+        0x001, 0x002, 0x003, 0x005, 0x006, 0x007, 0x008, 0x009, 0x00b, 0x00c, 0x00d, 0x00e,
+        0x00f, 0x010, 0x011, 0x012, 0x013, 0x014, 0x015, 0x016, 0x017, 0x018, 0x019, 0x01a,
+        0x01b, 0x01c, 0x01d, 0x01e, 0x01f, 0x020, 0x021, 0x022, 0x023, 0x024, 0x025, 0x026,
+        0x027, 0x028, 0x029, 0x02a, 0x02b, 0x02c, 0x02d, 0x02e, 0x02f, 0x030, 0x031, 0x032,
+        0x033, 0x034, 0x035, 0x036, 0x037, 0x038, 0x039, 0x03a, 0x03b, 0x03e, 0x03f, 0x040,
+        0x041, 0x042, 0x043, 0x044, 0x046, 0x047, 0x048, 0x049, 0x04a, 0x04b, 0x04c, 0x04d,
+        0x04e, 0x04f, 0x050, 0x051, 0x052, 0x053, 0x054, 0x055, 0x056, 0x057, 0x058, 0x05a,
+        0x05b, 0x05c, 0x05e, 0x061, 0x062, 0x063, 0x064, 0x065, 0x066, 0x068, 0x06a, 0x06b,
+        0x06c, 0x06d, 0x06e, 0x06f, 0x070, 0x071, 0x072, 0x074, 0x075, 0x076, 0x077, 0x078,
+        0x07a, 0x07c, 0x07e, 0x080, 0x081, 0x082, 0x083, 0x085, 0x086, 0x087, 0x088, 0x08c,
+        0x091, 0x092,
+    };
+    static const uint16_t special[][2] = {
+        { 0x004, 0x0804 }, { 0x00a, 0x0c0a }, { 0x03c, 0x083c }, { 0x03d, 0x1000 },
+        { 0x045, 0x0845 }, { 0x059, 0x0859 }, { 0x05d, 0x085d }, { 0x05f, 0x085f },
+        { 0x060, 0x1000 }, { 0x067, 0x0867 }, { 0x073, 0x0873 }, { 0x084, 0x1000 },
+    };
+    for (unsigned i = 0; i < sizeof special / sizeof *special; i++)
+        if (special[i][0] == id) return special[i][1];
+    for (unsigned i = 0; i < sizeof assigned / sizeof *assigned; i++)
+        if (assigned[i] == id) return id | 0x400u;
+    return id;                                   /* unassigned: unchanged */
+}
+
 uint32_t aret_ConvertDefaultLocale(uint32_t esp) {
     uint32_t lcid = w32_arg(esp, 0);
     if (lcid == 0x0000 || lcid == 0x0400 || lcid == 0x0800 ||
         lcid == 0x0c00 || lcid == 0x1000)
         return 0x0409;
+    if (lcid <= 0xFFFFu && (lcid >> 10) != 0 && !u32_lcid_is_remapped(lcid))
+        return lcid;                                   /* proven pass-through */
+    if (lcid <= 0xFFFFu && (lcid >> 10) == 0)
+        return u32_lcid_neutral(lcid);
     {
-        char m[96];
+        char m[112];
         snprintf(m, sizeof m,
-                 "ConvertDefaultLocale(%#x): only the default LCIDs are modelled "
-                 "(the rest is Wine's locale table, not a rule)", lcid);
+                 "ConvertDefaultLocale(%#x): this remapped LCID is Wine's locale table",
+                 lcid);
         aret_unmodelled(m);
     }
     return 0;
