@@ -5436,3 +5436,49 @@ Détail : **70 §6** (roadmap). Résumé :
   ratés de pop sont **voulus**. La dérive est donc ailleurs, et le périmètre de recherche est réduit d'autant.
 - **Piste restante, cadrée** : la chaîne esp exécutée donne `v555 = v514 + v515 + v531` et `v555 = 0x120ce160` (mesuré) ;
   il reste à remonter `v514` (statiquement, sans rebuild — la dérive est **figée dans le C**).
+
+### 2026-08-01 — [LIFT-DLL][INFRA] **Pourquoi lifter shlwapi n'a RIEN débloqué : une DLL builtin Wine peut n'être qu'un RELAIS (règle mesurable avant de lifter)**
+
+- **Symptôme** : le mur de WinMerge était `PathAddBackslashW`, exporté par **shlwapi**, disponible en builtin Wine. Levier 1
+  appliqué (`--with-dll shlwapi.dll=…`) ⇒ transpile OK (695 Mo), **et le mur ne bouge pas** : toujours
+  `ARET: unimplemented import CALLED: PathAddBackslashW`. Contradiction avec le résultat shell32 (qui, lui, avait effacé
+  7 API d'un coup). Tant que ce n'était pas expliqué, « lifter plus de DLL » ne pouvait pas être recommandé comme stratégie.
+- **Cause racine, PROUVÉE au désassemblage** (pas déduite) : le PE `WinMergeU.exe` **n'importe pas** `PathAddBackslashW` ;
+  `mfc90u.dll` non plus ; **aucun** binaire livré avec WinMerge ne l'importe. C'est la **shell32 liftée** qui l'appelle —
+  et l'export de shlwapi n'est **pas une implémentation** :
+  ```
+  10006120 <___wine_spec_imp_PathAddBackslashW>:
+      8b ff  mov %edi,%edi ; 55 push %ebp ; 8b ec mov %esp,%ebp ; 5d pop %ebp
+      ff 25 ec e9 03 10    jmp *0x1003e9ec        ; slot IAT → kernelbase.PathAddBackslashW
+  ```
+  Wine's shlwapi **importe** `PathAddBackslashA/W` **de kernelbase** (bloc d'import mesuré) et **réexporte** un thunk. Le
+  loader multi-modules a donc parfaitement fait son travail : l'appel a bien été routé vers du **code lifté** — un thunk qui
+  saute dans l'IAT d'un module **non chargé** ⇒ repli `aret_hle_shim_lookup` ⇒ pas de shim ⇒ `aret_unimpl`. **Le mur n'est
+  pas tombé, il a reculé d'un module.** Le nom du symbole le disait : `__wine_spec_imp_`.
+- **Règle générale qui en sort (mesurable en une commande, AVANT de payer un lift)** :
+  `objdump -t <dll> | grep -c __wine_spec_imp_` vs le nombre d'exports nommés. Mesure sur les builtins Wine i386 :
+
+  | DLL | exports nommés | thunks de réexport | verdict |
+  |---|---|---|---|
+  | comctl32 | 126 | **0** | implémente → lifter (prouvé : progress bar stateful) |
+  | ole32 | 301 | **0** | implémente → lifter |
+  | comdlg32 | 28 | **0** | implémente → lifter |
+  | oleaut32 | 418 | 3 | implémente → lifter |
+  | shell32 | 362 | 4 | implémente → lifter (prouvé : 7 API effacées) |
+  | kernelbase | 1402 | 2 | **la vraie couche d'implémentation** |
+  | advapi32 | 582 | **196 (34 %)** | relais partiel vers kernelbase |
+  | **shlwapi** | 362 | **198 (55 %)** | **RELAIS — lifter ne rend rien** |
+  | version | 16 | **12 (75 %)** | relais |
+- **Où finit la chaîne** (mesuré) : `kernelbase` n'importe **que ntdll**, 417 fonctions = **131 `Nt*` (vrais syscalls = le
+  mur, jumeau du mur win32k côté noyau)** + **212 `Rtl*`** (utilitaires user-mode, liftables) + 74 divers (CRT/`Ldr*`/`Tp*`).
+  Donc la chaîne user-mode est **finie et énumérée** ; elle ne se dilue pas à l'infini, elle bute sur 131 syscalls NT.
+- **Contre-mesure au compteur statique** (le 70 §5.0 avertissait déjà de ne pas arbitrer dessus) : `--mode imports` sur le
+  programme fusionné, **0,086 s** par configuration, donne la trajectoire — 146 → 287 (mfc90u) → 410 (shell32) → 565
+  (shlwapi) → 731 (kernelbase) imports non couverts. Le compteur **monte** à chaque lift parce qu'une DLL apporte ses
+  propres imports ; il ne dit donc pas si le lift sert. **Ce qui le dit, c'est le ratio de thunks ci-dessus** — et lui se
+  mesure sans rien construire.
+- **Conséquence pour WinMerge** : la famille `Path*`/`Str*` réclamée est de la **manipulation de chaînes pure**
+  (déterministe, sans état, oracle Wine trivial) ⇒ elle relève du **shim HLE** (méthode I5), pas du lifting. Lifter
+  kernelbase pour l'obtenir échangerait 5 fonctions de chaîne contre 131 syscalls NT.
+- **Vérifié** : désassemblage de l'export shlwapi, tables d'import/export `objdump -p/-t` des 9 builtins, `--mode imports`
+  sur les 5 configurations, et le run WinMerge qui abort toujours sur le même nom.

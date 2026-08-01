@@ -8,6 +8,8 @@
 //! `runtime/aret_hle` and a generated `main` into a native ELF via the system C
 //! compiler. The produced binary runs natively — not under an emulator or Wine.
 
+pub mod objcache;
+
 use crate::analysis::Function;
 use crate::emit;
 use crate::ir;
@@ -1488,33 +1490,67 @@ pub fn transpile(
 
     let triple = if bits == 32 { "i386-pc-linux-gnu" } else { "x86_64-pc-linux-gnu" };
     let llc = std::env::var("LLC").unwrap_or_else(|_| "llc".to_string());
+    // Flags shared by every C compile. Held in one place because the object cache
+    // keys on them: a build with different flags must not reuse another's objects.
+    let mut c_flags: Vec<String> = [march, "-w", "-fno-strict-aliasing", "-fno-builtin", "-fno-pie", "-O0", "-c"]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+    c_flags.extend(feat_cflags.iter().cloned());
+    // Content-addressed object cache (doc 81 §I9). On a run that only changed an HLE
+    // shim, every lifted-app object is bit-identical to the previous build — measured
+    // 141 s of pure waste on WinMerge — and every winediff fixture re-compiles the
+    // same three runtime files. Reuse is validated against the full `-MD` dependency
+    // list, so a changed header always recompiles (see objcache.rs).
+    let cache = objcache::ObjCache::open(&cc);
+    let cache_hits = std::sync::atomic::AtomicUsize::new(0);
     use rayon::prelude::*;
     let objs: Result<Vec<std::path::PathBuf>> = sources
         .par_iter()
         .map(|src| {
             // Unique object name per source (so .c and .S of the same stem don't clash).
             let obj = out_dir.join(format!("{}.o", src.file_name().unwrap().to_string_lossy()));
+            let ext = src.extension().and_then(|e| e.to_str());
             // LLVM IR chunks go through llc; C / asm through the C compiler.
-            let out = if src.extension().and_then(|e| e.to_str()) == Some("ll") {
-                Command::new(&llc)
+            if ext == Some("ll") {
+                let out = Command::new(&llc)
                     .args([&format!("-mtriple={triple}"), "-filetype=obj", "-O2", "-relocation-model=static"])
                     .arg(src)
                     .arg("-o")
                     .arg(&obj)
                     .output()
-                    .with_context(|| format!("failed to run {}", llc))?
+                    .with_context(|| format!("failed to run {}", llc))?;
+                if !out.status.success() {
+                    bail!("compile {} failed:\n{}", src.display(),
+                          String::from_utf8_lossy(&out.stderr).trim());
+                }
+                return Ok(obj);
+            }
+            // Cached only for C (the `.S` is one tiny file, and llc has its own flags).
+            let pending = if ext == Some("c") {
+                cache.as_ref().and_then(|c| c.begin(&c_flags, src, out_dir).map(|p| (c, p)))
             } else {
-                Command::new(&cc)
-                    .args([march, "-w", "-fno-strict-aliasing", "-fno-builtin", "-fno-pie", "-O0", "-c"])
-                    .args(&feat_cflags)
-                    .arg(src)
-                    .arg("-I")
-                    .arg(out_dir)
-                    .arg("-o")
-                    .arg(&obj)
-                    .output()
-                    .with_context(|| format!("failed to run {}", cc))?
+                None
             };
+            if let Some((c, p)) = &pending {
+                if c.lookup(p, out_dir, &obj) {
+                    cache_hits.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    return Ok(obj);
+                }
+            }
+            let mut cmd = Command::new(&cc);
+            cmd.args(&c_flags)
+                .arg(src)
+                .arg("-I")
+                .arg(out_dir)
+                .arg("-o")
+                .arg(&obj);
+            if let Some((_, p)) = &pending {
+                // Record what the preprocessor actually read, so a later lookup can
+                // re-hash it instead of trusting the source alone.
+                cmd.arg("-MD").arg("-MF").arg(&p.depfile);
+            }
+            let out = cmd.output().with_context(|| format!("failed to run {}", cc))?;
             if !out.status.success() {
                 bail!(
                     "compile {} failed:\n{}",
@@ -1522,10 +1558,18 @@ pub fn transpile(
                     String::from_utf8_lossy(&out.stderr).trim()
                 );
             }
+            if let Some((c, p)) = &pending {
+                c.store(p, out_dir, &obj);
+            }
             Ok(obj)
         })
         .collect();
     let objs = objs?;
+    if let Some(c) = &cache {
+        let hits = cache_hits.load(std::sync::atomic::Ordering::Relaxed);
+        eprintln!("note: {} object(s) compiled, {hits} reused from cache", objs.len() - hits);
+        c.trim();
+    }
 
     let link = Command::new(&cc)
         .args([march, "-no-pie"])

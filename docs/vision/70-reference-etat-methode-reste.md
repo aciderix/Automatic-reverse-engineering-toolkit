@@ -834,6 +834,15 @@ résidu qui abort restera l'**obfusqué/fait-main/VM-packé** (indécidable, §9
   **Stratégie qui en découle** : *lifter* les DLL **user-mode** (shell32, ole32, oleaut32, comdlg32, comctl32 ✅) qui
   reposent sur nos user32/gdi32 ; *écrire à la main* la surface **user32/gdi32** (MDI, accélérateurs, presse-papier,
   dessin GDI, metafiles, impression) qui, elle, bute sur **win32k** (doc 80 §1.2).
+  **⚠️ PRÉ-REQUIS MESURABLE AVANT DE LIFTER (2026-08-01) — une builtin Wine peut n'être qu'un RELAIS.** Lifter **shlwapi**
+  n'a **rien** débloqué : son export `PathAddBackslashW` est un `___wine_spec_imp_*` = `jmp *[IAT kernelbase]`, pas une
+  implémentation ⇒ le mur **recule d'un module** au lieu de tomber. Test en une commande, avant de payer le lift :
+  `objdump -t <dll> | grep -c __wine_spec_imp_` rapporté aux exports nommés. Mesuré : comctl32 **0**/126, ole32 **0**/301,
+  comdlg32 **0**/28, oleaut32 3/418, shell32 4/362, kernelbase 2/1402 (= **la vraie couche d'implémentation**) — mais
+  advapi32 **196/582**, **shlwapi 198/362**, version 12/16 = **relais**. Fin de chaîne mesurée : kernelbase n'importe **que
+  ntdll** (131 `Nt*` syscalls + 212 `Rtl*` + 74 divers) ⇒ la chaîne user-mode est **finie**, elle bute sur 131 syscalls NT
+  (jumeau du mur win32k). ⇒ Une famille **pure et déterministe** (`Path*`/`Str*`) se comble au **shim HLE** (I5), pas en
+  liftant kernelbase. Détail 71 (2026-08-01 [LIFT-DLL][INFRA]).
 - **Levier 2 — Finir les mécanismes bornés qui débloquent une CLASSE** : EH C++ (`__CxxFrameHandler`), bitmap-fonts,
   runtime VB. Chacun = une session, des milliers de binaires.
 - **Levier 3 — Mop-up data-driven** du résidu, trié par le Levier 0.
