@@ -39,6 +39,14 @@ echo "  $out"
 n="${out##*: }"; got="${n%%/*}"; tot="${n#*/}"; tot="${tot%% *}"
 if [ -n "$got" ] && [ "$got" = "$tot" ]; then ok "in-place $n"; else ko "in-place $out"; fi
 
+step "stdcall-pop audit (every proven __stdcall shim has its @N)"
+out="$(bash bench/stdcall_audit.sh 2>&1)"
+echo "$out" | grep -E "proven __stdcall|missing @N|MISSING|SKIP" | sed 's/^ */  /'
+case "$out" in
+  *"audit: PASS"*|*SKIP*) ok "stdcall-pop audit" ;;
+  *) ko "stdcall-pop audit: $(echo "$out" | tail -1)" ;;
+esac
+
 step "magic-division exhaustive 2^32"
 out="$(bash bench/magicdiv.sh 2>&1 | tail -1)"
 echo "  $out"

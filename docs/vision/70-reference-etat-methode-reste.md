@@ -173,6 +173,8 @@ bash bench/difftest.sh              # décompile O0→O3
 bash bench/difftest_transpile.sh    # transpile (hash 19acad982194bf07)
 bash bench/winediff.sh              # axe 2 vs Wine (169/169 ; gdi_uifont peut être rouge = env fontconfig i386)
 bash bench/funcdiff.sh              # lift-closure + opt-diff vs Unicorn (0 div)
+bash bench/stdcall_audit.sh         # PORTE ABI : tout shim __stdcall prouve a son @N dans la table
+                                    # (la famille esp-drift ; invisible a difftest/cpudiff/funcdiff)
 # Sweeps de vrais binaires (téléchargent + comparent à Wine) :
 bash bench/sqlite_sweep.sh   bash bench/busybox_sweep.sh   bash bench/corpus_sweep.sh
 bash bench/gauntlet/score.sh        # 21 binaires gauntlet, corpus dans le repo
