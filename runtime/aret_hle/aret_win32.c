@@ -4377,6 +4377,138 @@ uint32_t aret_StrStrNW(uint32_t esp) {
     }
     return 0;
 }
+/* shlwapi `Str*` — wave 2: COPY / CONCATENATE / TRIM / DUPLICATE.
+ *
+ * The counted variants all take the size of the WHOLE destination, NUL included —
+ * not a number of characters to move. That one convention is the difference between
+ * a correct shim and an off-by-one overflow, and it is measured, not assumed:
+ *   - `StrCpyN(dst, "hello", 0)` writes **nothing at all** — not even a NUL. n=1
+ *     writes only the NUL. Visible solely on a poisoned buffer.
+ *   - `StrNCat(dst, "CDEFG", n)` appends exactly n-1 characters (n=2 appends one).
+ *   - `StrCatBuff(dst, src, cch)` treats cch as the total buffer, so a cch that only
+ *     covers what is already there appends nothing and leaves the string as it was.
+ * Other measured facts that would have been guessed wrong:
+ *   - `StrDup(NULL)` returns a valid EMPTY string, not NULL. So does `StrDup("")`.
+ *     The block comes from the process heap because the caller frees it with
+ *     `LocalFree`, which is `free()` here — the pair has to agree or every StrDup
+ *     leaks or corrupts.
+ *   - `StrTrim` trims BOTH ends in place and returns whether it changed anything;
+ *     a NULL or empty trim set changes nothing and returns FALSE (not TRUE).
+ *   - `StrCatChainW` writes at `ichAt` LITERALLY — it does not scan for the end, so
+ *     a gap before it keeps whatever was there (proven: indices 1..4 kept the
+ *     poison). `ichAt = -1` means "at the current length", cchDst = 0 writes
+ *     nothing and answers 0, and the answer is always the new end index.
+ * NOT modelled, deliberately: a NULL SOURCE to `StrNCat`/`StrCpyN`. Wine faults on
+ * it (measured), so it is a caller bug rather than a contract, and a shim that
+ * invented "does nothing" would be kinder than Windows — which is its own kind of
+ * divergence. `StrCpyNX*` is also left out: it is undocumented and absent from the
+ * mingw import library, so no fixture could bind it without a `.def`. */
+#define ARET_STR_COPY_FAMILY(TAG, TYPE)                                                \
+static uint32_t u32_s_len_##TAG(const TYPE *s) {                                       \
+    uint32_t n = 0; while (s[n]) n++; return n;                                        \
+}                                                                                      \
+/* Append, bounded by the TOTAL destination size (NUL included). */                     \
+uint32_t aret_StrCatBuff##TAG(uint32_t esp) {                                          \
+    TYPE *dst = (TYPE *)(uintptr_t)WU(0);                                              \
+    const TYPE *src = (const TYPE *)(uintptr_t)WU(1);                                  \
+    uint32_t cch = WU(2);                                                              \
+    if (!dst || !src) return (uint32_t)(uintptr_t)dst;                                 \
+    uint32_t have = u32_s_len_##TAG(dst);                                              \
+    if (cch > have + 1) {                                                              \
+        uint32_t room = cch - have - 1, i = 0;                                         \
+        for (; i < room && src[i]; i++) dst[have + i] = src[i];                         \
+        dst[have + i] = 0;                                                             \
+    }                                                                                  \
+    return (uint32_t)(uintptr_t)dst;                                                   \
+}                                                                                      \
+/* Append at most cchMax-1 characters (cchMax counts the NUL). */                       \
+uint32_t aret_StrNCat##TAG(uint32_t esp) {                                             \
+    TYPE *dst = (TYPE *)(uintptr_t)WU(0);                                              \
+    const TYPE *src = (const TYPE *)(uintptr_t)WU(1);                                  \
+    uint32_t cch = WU(2);                                                              \
+    if (!dst || !cch) return (uint32_t)(uintptr_t)dst;                                 \
+    uint32_t have = u32_s_len_##TAG(dst), i = 0;                                       \
+    for (; i + 1 < cch && src[i]; i++) dst[have + i] = src[i];                          \
+    dst[have + i] = 0;                                                                 \
+    return (uint32_t)(uintptr_t)dst;                                                   \
+}                                                                                      \
+/* Trim both ends in place; TRUE only if something actually moved. */                   \
+uint32_t aret_StrTrim##TAG(uint32_t esp) {                                             \
+    TYPE *s = (TYPE *)(uintptr_t)WU(0);                                                \
+    const TYPE *set = (const TYPE *)(uintptr_t)WU(1);                                  \
+    if (!s || !set || !*set) return 0;                                                 \
+    uint32_t n = u32_s_len_##TAG(s), lo = 0, hi = n;                                   \
+    while (lo < hi) { const TYPE *m = set; while (*m && *m != s[lo]) m++; if (!*m) break; lo++; } \
+    while (hi > lo) { const TYPE *m = set; while (*m && *m != s[hi - 1]) m++; if (!*m) break; hi--; } \
+    if (lo == 0 && hi == n) return 0;                                                   \
+    uint32_t k = 0;                                                                    \
+    for (; lo < hi; lo++, k++) s[k] = s[lo];                                           \
+    s[k] = 0;                                                                          \
+    return 1;                                                                          \
+}                                                                                      \
+/* Heap copy the caller frees with LocalFree (== free() here). NULL duplicates to    \
+ * an EMPTY string, not to NULL — measured. */                                         \
+uint32_t aret_StrDup##TAG(uint32_t esp) {                                              \
+    const TYPE *s = (const TYPE *)(uintptr_t)WU(0);                                    \
+    uint32_t n = s ? u32_s_len_##TAG(s) : 0;                                           \
+    TYPE *p = (TYPE *)malloc((size_t)(n + 1) * sizeof(TYPE));                          \
+    if (!p) return 0;                                                                  \
+    for (uint32_t i = 0; i < n; i++) p[i] = s[i];                                      \
+    p[n] = 0;                                                                          \
+    return (uint32_t)(uintptr_t)p;                                                     \
+}
+
+ARET_STR_COPY_FAMILY(A, char)
+ARET_STR_COPY_FAMILY(W, uint16_t)
+#undef ARET_STR_COPY_FAMILY
+
+/* W-only: shlwapi exports no StrCat/StrCpy/StrCpyN for ANSI (lstrcat/lstrcpy
+ * already cover it), so these are not part of the macro above. */
+uint32_t aret_StrCatW(uint32_t esp) {
+    uint16_t *dst = (uint16_t *)(uintptr_t)WU(0);
+    const uint16_t *src = (const uint16_t *)(uintptr_t)WU(1);
+    if (!dst || !src) return (uint32_t)(uintptr_t)dst;
+    uint32_t n = 0; while (dst[n]) n++;
+    uint32_t i = 0; for (; src[i]; i++) dst[n + i] = src[i];
+    dst[n + i] = 0;
+    return (uint32_t)(uintptr_t)dst;
+}
+uint32_t aret_StrCpyW(uint32_t esp) {
+    uint16_t *dst = (uint16_t *)(uintptr_t)WU(0);
+    const uint16_t *src = (const uint16_t *)(uintptr_t)WU(1);
+    if (!dst || !src) return (uint32_t)(uintptr_t)dst;
+    uint32_t i = 0; for (; src[i]; i++) dst[i] = src[i];
+    dst[i] = 0;
+    return (uint32_t)(uintptr_t)dst;
+}
+uint32_t aret_StrCpyNW(uint32_t esp) {
+    uint16_t *dst = (uint16_t *)(uintptr_t)WU(0);
+    const uint16_t *src = (const uint16_t *)(uintptr_t)WU(1);
+    uint32_t cch = WU(2);
+    if (!dst || !cch) return (uint32_t)(uintptr_t)dst;   /* cch 0 writes NOTHING */
+    uint32_t i = 0;
+    for (; i + 1 < cch && src[i]; i++) dst[i] = src[i];
+    dst[i] = 0;
+    return (uint32_t)(uintptr_t)dst;
+}
+/* StrCatChainW(dst, cchDst, ichAt, src) -> the new end index. `ichAt` is a literal
+ * write position (-1 = the current length); anything before it is left alone. */
+uint32_t aret_StrCatChainW(uint32_t esp) {
+    uint16_t *dst = (uint16_t *)(uintptr_t)WU(0);
+    uint32_t cch = WU(1), at = WU(2);
+    const uint16_t *src = (const uint16_t *)(uintptr_t)WU(3);
+    if (!dst || !cch) return 0;
+    if (at == 0xFFFFFFFFu) { at = 0; while (at < cch && dst[at]) at++; }
+    if (at >= cch) return at;
+    if (src) {
+        uint32_t i = 0;
+        while (at + i + 1 < cch && src[i]) { dst[at + i] = src[i]; i++; }
+        at += i;
+    }
+    dst[at] = 0;
+    return at;
+}
+
 /* Window station / desktop (user32) — the "which desktop am I on" family every
  * framework asks at startup (MFC/WinMerge's wall after the Str* family).
  *

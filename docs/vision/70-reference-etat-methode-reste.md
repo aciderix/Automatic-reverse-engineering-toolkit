@@ -673,8 +673,16 @@ recompilabilité **100 %** · WASM **7/7**.
   NULL (`strstr` rend la botte de foin) ; `StrCSpn(s,"")` = longueur **entière** vs `StrSpn(s,"")` = 0 ; le `n` des
   variantes comptées borne **le départ** du motif, pas sa fin ; NULL toléré partout ; et `StrChrW(s,0)` rend le
   **terminateur** là où `StrChrA`/`StrChrIW`/`StrRChrW` rendent NULL (asymétrie mesurée, reproduite, **en file pour
-  l'oracle Windows**). Gardé `winecorpus/str_search.c`. **Reste** : 53 exports en 4 vagues (copie/concat/trim,
-  comparaison dont `StrCmpLogicalW`, conversion entière, formatage de tailles, `StrRetTo*`).
+  l'oracle Windows**). Gardé `winecorpus/str_search.c`.
+  **Vague 2 : copie/concat/trim/dup (14 shims)** — `StrCatBuff`/`StrNCat`/`StrTrim`/`StrDup` (A+W), `StrCatW`/
+  `StrCpyW`/`StrCpyNW`/`StrCatChainW`. Toute la famille tient sur une convention : le compteur = **taille de la
+  destination ENTIÈRE, NUL compris**. ⚠️ Mesuré au tampon empoisonné : `StrCpyNW(…,0)` n'écrit **rien**, pas même
+  le NUL ; `StrCatChainW` écrit à `ichAt` **littéralement** (le trou avant garde ses octets) ; `StrDup(NULL)` rend
+  une chaîne **vide valide** (pas NULL) allouée sur le tas que `LocalFree` accepte ; `StrTrim` rend **FAUX** quand
+  rien n'a bougé. Non modélisé : source NULL à `StrNCat`/`StrCpyN` (Wine **faute** ⇒ bug d'appelant), et
+  `StrCpyNX*` (export non documenté, absent de l'import-lib). Gardé `winecorpus/str_copy.c`.
+  **Reste** : 39 exports en 3 vagues (comparaison dont `StrCmpLogicalW`, conversion entière, formatage de tailles
+  et `StrRetTo*`).
 - **Famille window-station/desktop (2026-08-01)** : `GetThreadDesktop`/`GetProcessWindowStation`/
   `GetUserObjectInformationA/W` — deux singletons **distincts** nommés comme Windows (`Default` sur `WinSta0`) ;
   `GetThreadDesktop` réussit pour un tid que le processus **possède** (thread principal ou fiber vivant), NULL + 87
@@ -1374,6 +1382,14 @@ la **vitesse** change.
   qui bougeait ⇒ rouge intermittent. Réécrit en **contrat** (écart client↔écran = origine cliente ; les deux conversions
   s'inversent), vrai où que la fenêtre atterrisse. **Une porte instable est pire qu'une porte lente** : elle apprend à
   ignorer le rouge.
+- **⭐ DANS UN `printf` DE SONDE, DEUX ARGUMENTS QUI TOUCHENT LE MÊME OBJET SONT UN BUG (2026-08-01, vu DEUX fois
+  le même jour)**. L'ordre d'évaluation des arguments n'est **pas spécifié** en C, et les deux visages du piège se
+  ressemblent si peu qu'on peut se faire avoir deux fois : (a) `printf(…, f(&s), s.champ, …)` lit la structure
+  **avant** l'appel — conclusion publiée fausse sur `TranslateCharsetInfo` ; (b) `printf(…, strcmp(p,…), LocalFree(p), …)`
+  **libère** `p` avant de le comparer — **use-after-free** que Wine survit (les octets sont encore là) et qu'un
+  autre allocateur ne survit pas, d'où une fixture rouge sur une ligne alors que le shim était juste. **Règle** :
+  une sonde calcule ses valeurs dans des **énoncés séparés**, puis les imprime. Même famille que « remettre le
+  last-error à zéro avant chaque appel » : la sonde doit être plus disciplinée que le code testé.
 - **Pour toute fixture d'API `*_s` : vérifier à l'`objdump` qu'elle IMPORTE bien msvcrt.** mingw fournit ses **propres**
   corps pour plusieurs d'entre elles (`memmove_s`, `memcpy_s`, `_strupr_s`…) ⇒ sans `.def` forçant l'import, la fixture
   mesure **mingw des deux côtés** et ne garde **rien**. Mécanisme : `winecorpus/NOM.def` (cf. `crt_mem_s.def`).

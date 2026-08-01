@@ -5846,3 +5846,37 @@ Détail : **70 §6** (roadmap). Résumé :
   `StrNCat*`/`StrDup*`/`StrTrim*`), comparaison (`StrCmp*` + `StrCmpLogicalW` + `StrIsIntlEqual*`), conversion
   entière (`StrToInt*`/`StrToInt64Ex*`), formatage (`StrFormatByteSize*`/`StrFormatKBSize*`/`StrFromTimeInterval*`),
   et les `StrRetTo*` (structure `STRRET` du shell).
+
+### 2026-08-01 — [HLE-WIN32] **Famille shlwapi `Str*`, vague 2 (copie/concat/trim/dup) — et le piège d'ordre d'évaluation a frappé DEUX fois dans la même journée**
+
+- **Livré** (14 shims) : `StrCatBuffA/W`, `StrNCatA/W`, `StrTrimA/W`, `StrDupA/W`, `StrCatW`, `StrCpyW`,
+  `StrCpyNW`, `StrCatChainW`. Grille **balayée** (les compteurs de 0 à 8/12) plutôt qu'échantillonnée, parce que
+  toute cette famille tient sur une convention : **le compteur est la taille de la destination ENTIÈRE, NUL
+  compris**, et se tromper d'un cran est un débordement d'un caractère.
+- **Ce que seul le tampon empoisonné montre** : `StrCpyNW(dst, src, 0)` n'écrit **rien du tout** — pas même le NUL
+  (n=1 n'écrit que le NUL) ; `StrCatBuff` avec un cch qui ne couvre que l'existant n'ajoute rien et **laisse la
+  chaîne intacte** ; et `StrCatChainW` écrit à `ichAt` **littéralement**, sans chercher la fin — les indices 1 à 4
+  gardent le poison quand on écrit à l'indice 5. Un test qui relit une *chaîne* validerait les trois à tort.
+- **Autres faits mesurés, non déductibles** : `StrDup(NULL)` rend une chaîne **vide valide**, pas NULL (idem
+  `StrDup("")`) ; le bloc doit venir du tas que **`LocalFree` (= `free()` ici)** accepte, sinon chaque `StrDup`
+  fuit ou corrompt ; `StrTrim` rogne **les deux bouts** en place et rend FAUX quand rien n'a bougé — un ensemble de
+  caractères vide ou NULL ne change rien et rend **FAUX**, pas VRAI.
+- **Non modélisé, volontairement** : une **source NULL** à `StrNCat`/`StrCpyN` — Wine **faute** (mesuré), c'est donc
+  un bug d'appelant et pas un contrat ; inventer « ne fait rien » serait être plus gentil que Windows, ce qui est
+  une divergence comme une autre. `StrCpyNX*` reste dehors : export **non documenté**, absent de l'import-lib mingw,
+  donc non liable par une fixture sans `.def`.
+- **⚠️ LE PIÈGE D'ORDRE D'ÉVALUATION A FRAPPÉ DEUX FOIS AUJOURD'HUI, sous deux visages.** Le matin :
+  `printf(…, TranslateCharsetInfo(…), ci.ciCharset, …)` lisait la structure **avant** l'appel. Le soir :
+  `printf(…, strcmp(p,"dup me")==0, LocalFree(p)==NULL)` **libérait `p` avant de le comparer** — un
+  **use-after-free** que Wine survit (les octets sont encore là) et qu'un autre allocateur ne survit pas. La
+  fixture est sortie **rouge sur une seule ligne**, et la cause n'était pas le shim mais la sonde. **La leçon
+  générale est plus forte que « lire après l'appel »** : *dans un `printf`, deux arguments qui touchent le même
+  objet sont un bug latent, quel que soit le sens de la dépendance* (lire-après-écrire, ou lire-après-libérer).
+  Écrit dans l'en-tête de la fixture pour que la prochaine session ne le redécouvre pas une troisième fois.
+  **Et le rouge a été qualifié avant d'accuser** (règle 70 §7) : c'était la sonde, pas l'implémentation.
+- **Vérifié** : `str_copy` bit-identique Wine, difftest 272/272, hash `19acad982194bf07` inchangé, audit stdcall
+  PASS (table 949, `@N` depuis les import-libs mingw).
+- **Effet driver** : WinMerge franchit `GetThreadDesktop` (4ᵉ mur de la session) et demande `swprintf_s` — famille
+  CRT `*_s` wide, prochain incrément. À noter : `swprintf` **tout court** reste **non modélisé** (signature
+  ambiguë, 70 §4.5), mais `swprintf_s` est **sans ambiguïté** (`buf, count, fmt, …`) — donc implémentable, et le
+  refus de deviner sur l'un n'empêche pas de servir l'autre.
