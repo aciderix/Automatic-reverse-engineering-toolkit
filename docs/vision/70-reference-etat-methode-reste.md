@@ -224,7 +224,7 @@ sert désormais de **détecteur** : un warm build qui ne réutilise pas ~tout si
 
 ### État régression (référence — doit rester vert)
 difftest **272/272** · transpile-diff **4/4** (H=`19acad982194bf07`) · winediff
-**201/202** (le seul rouge = `gdi_uifont`, **environnemental** : fontconfig i386, orthogonal au code) · **ehdiff 6/6** (SEH `seh_except`
+**203/204** (le seul rouge = `gdi_uifont`, **environnemental** : fontconfig i386, orthogonal au code) · **ehdiff 6/6** (SEH `seh_except`
 + C++ `throw_catch`/`throw_dtor`/`throw_across`/`throw_byval`/`throw_static` — throw/catch, destructeur d'unwind, multi-frames, catch-by-value, CRT statique — bit-identiques Wine) · cpudiff vert (per-instruction + séquences génératives) · funcdiff corpus **0 divergence** (lift **~20,6k** scorées /
 **~20k appels** — **imports (stubs `@N` + `@0` scalaires) + appels indirects résolus + intrinsèques mémoire host-backés (memmove/memcpy)** ; scratch sous-esp exclu ; opt ~10k scorées) · SMT **11/11** · in-place **3/3** · magicdiv **2³²** ·
 recompilabilité **100 %** · WASM **7/7**.
@@ -667,6 +667,21 @@ recompilabilité **100 %** · WASM **7/7**.
   d'extension) ; `PathIsDirectory` rend **0x10**, pas 1 ; `"C:"` → `"C:\"` mais `"C:a\..\b"` → `"\b"` (lecteur
   **sans** séparateur = pas une racine) ; aucun cas spécial `\\?\`. Gardé par `win32_pathroot`/`pathcombine`/
   `pathparts`/`pathexists`. Détail 71 (2026-08-01).
+- **Famille shlwapi `Str*` — vague 1 : recherche/balayage (2026-08-01, 22 shims, bit-identiques Wine)** :
+  `StrChr(I/N)`/`StrRChr(I)`/`StrStr(I/N/NI)`/`StrRStrI`/`StrSpn`/`StrCSpn(I)`/`StrPBrk`, A et W. **Shimmées, pas
+  liftées** (shlwapi = relais, §5.0). ⚠️ Ça **ressemble** à `<string.h>` et ça n'en est pas : aiguille **vide** ⇒
+  NULL (`strstr` rend la botte de foin) ; `StrCSpn(s,"")` = longueur **entière** vs `StrSpn(s,"")` = 0 ; le `n` des
+  variantes comptées borne **le départ** du motif, pas sa fin ; NULL toléré partout ; et `StrChrW(s,0)` rend le
+  **terminateur** là où `StrChrA`/`StrChrIW`/`StrRChrW` rendent NULL (asymétrie mesurée, reproduite, **en file pour
+  l'oracle Windows**). Gardé `winecorpus/str_search.c`. **Reste** : 53 exports en 4 vagues (copie/concat/trim,
+  comparaison dont `StrCmpLogicalW`, conversion entière, formatage de tailles, `StrRetTo*`).
+- **Famille window-station/desktop (2026-08-01)** : `GetThreadDesktop`/`GetProcessWindowStation`/
+  `GetUserObjectInformationA/W` — deux singletons **distincts** nommés comme Windows (`Default` sur `WinSta0`) ;
+  `GetThreadDesktop` réussit pour un tid que le processus **possède** (thread principal ou fiber vivant), NULL + 87
+  sinon. ⚠️ Mesuré au tampon empoisonné : `UOI_FLAGS` remplit 12 octets mais **n'écrit que le 3ᵉ dword**
+  (`fInherit`/`fReserved` **intacts**) ; trois échecs distincts (tampon court → 122 + taille, index inconnu → 87 +
+  **0**, mauvais handle → **6** + 0) ; et sur le chemin **A** le succès rend la taille **étroite** (8) mais l'échec
+  la taille **large** (16) — **en file pour l'oracle Windows**. Gardé `winecorpus/user32_desktop.c`.
 - **`GetUserNameA/W`** (2026-08-01, advapi32) : nom depuis la **même source que Wine** (compte Unix), donc comparable
   et non « environnemental » ; `*pcb` = taille requise **NUL compris** en succès **et** en échec ; tampon trop court ⇒
   `ERROR_INSUFFICIENT_BUFFER` et tampon **intact** (aucun nom tronqué). Aucun nom disponible ⇒ **abort**, jamais un
@@ -885,6 +900,10 @@ résidu qui abort restera l'**obfusqué/fait-main/VM-packé** (indécidable, §9
   shell32 fait *monter* les imports manquants (270→394) car la carte compte ce que la DLL **pourrait** appeler
   (DDE/services/MSI), pas ce qu'elle appelle — **seule l'exécution juge**. Prérequis débloqué au passage : le
   **résolveur delay-load voit désormais tout le HLE** (table générée de 1043 shims, cf. 71).
+  **✅ PRÉDICTION DE JUILLET VÉRIFIÉE (2026-08-01)** : lifter **shell32** a effacé `SHGetSpecialFolderLocation` sur
+  WinMerge **sans un seul shim** — le mur a coûté `--with-dll shell32.dll=…` et rien d'autre. La mesure du 26 juillet
+  a payé six jours plus tard sans travail supplémentaire : c'est la meilleure justification produite pour « mesurer
+  avant de coder ».
   **✅ LEVIER 1 ÉTENDU À COM (2026-08-01)** : une DLL COM in-proc liftée (`mlang.dll` : 14 exports, 0 thunk,
   0 forwarder) **sert réellement ses classes** — `CoCreateInstance` interroge tout module lifté exportant
   `DllGetClassObject`, sans aucune table de CLSID (cf. §4.5). Brique ajoutée : les exports liftés sont **publiés au

@@ -5806,3 +5806,43 @@ Détail : **70 §6** (roadmap). Résumé :
   est de mourir — donc les deux côtés étaient éligibles sur des règles différentes, ce que le README interdit.
 - **Vérifié** : `winecorpus/gdi_charsetinfo.c` bit-identique Wine, `@N` (`TranslateCharsetInfo@12`,
   `GetTextCharset@4`) pris de la **vérité terrain** (import-libs mingw), audit stdcall PASS.
+
+### 2026-08-01 — [LIFT-DLL][HLE-WIN32][I5] **Trois murs de WinMerge en une passe — et le deuxième a coûté un argument de ligne de commande**
+
+- **Progression réelle du driver**, dans l'ordre où les murs sont tombés :
+  `CoCreateInstance` (activation COM, entrée précédente) → **`SHGetSpecialFolderLocation`** → **`StrSpnW`** →
+  **`GetThreadDesktop`** → mur suivant à mesurer. Tous de la **couverture d'API**, aucun de lift-correctness.
+- **⭐ `SHGetSpecialFolderLocation` a coûté `--with-dll shell32.dll=…`, rien d'autre.** Le 70 §5.0 mesurait déjà
+  shell32 « implémente » (362 exports, 4 thunks, 36 forwarders) et prédisait que le lifter effacerait
+  `SHGetSpecialFolderLocation`/`SHGetMalloc`/`SHGetPathFromIDListW`/… d'un coup. **La prédiction était juste** : zéro
+  shim écrit. C'est le Levier 1 rendant ce qu'il promet, et c'est la meilleure justification qu'on ait produite pour
+  **mesurer avant de coder** — la mesure de juillet a payé six jours plus tard sans travail supplémentaire.
+- **Famille shlwapi `Str*`, vague 1 (22 shims : recherche/balayage)** — shimmée et **pas** liftée, parce que shlwapi
+  est un **relais** (198 thunks + 217 forwarders / 362). Ces fonctions **ressemblent** à `<string.h>` et n'en sont
+  pas ; les quatre contrastes mesurés qui font qu'une implémentation « évidente » diverge en silence :
+  aiguille **vide** ⇒ NULL (là où `strstr` rend la botte de foin) ; `StrCSpn(s,"")` = longueur **entière** quand
+  `StrSpn(s,"")` = 0 ; le `n` des variantes comptées borne **le départ** du motif, pas sa fin (**balayé n=0..22**
+  plutôt que raisonné) ; NULL toléré partout. **Et une asymétrie franche** : `StrChrW(s,0)` rend le **terminateur**
+  quand `StrChrA`, `StrChrIW` et `StrRChrW` rendent NULL — une fonction sur quatre en désaccord avec ses sœurs.
+  Reproduite verbatim (Wine est la porte), **mise en file pour l'oracle Windows**, et l'en-tête de la fixture
+  interdit explicitement de « corriger vers la cohérence » sans mesure Windows. `StrChr`/`StrChrN` sont **écrites à
+  la main** et non générées par macro **précisément** parce qu'une macro aurait imposé une seule réponse aux deux
+  largeurs — le sur-partage aurait effacé le fait mesuré.
+- **Famille window-station/desktop (`GetThreadDesktop`, `GetProcessWindowStation`, `GetUserObjectInformationA/W`)** :
+  deux singletons distincts, nommés comme Windows les nomme (`Default` sur `WinSta0`). `GetThreadDesktop` réussit
+  pour un tid que **ce processus possède réellement** (le thread principal ou un fiber vivant, `0x1000+i` que
+  `CreateThread` rend) et répond NULL + 87 sinon — jamais un handle pour un thread qui n'existe pas.
+  **Ce que seul le tampon empoisonné révèle** : `UOI_FLAGS` remplit 12 octets mais **n'écrit que le troisième
+  dword** — `fInherit` et `fReserved` gardent le poison. Un shim qui aurait `memset` la structure passerait
+  n'importe quel test lisant `dwFlags` seul. Trois échecs **distincts** aussi : tampon trop court (err 122, taille
+  rendue), index non supporté (err 87, taille **0**), mauvais handle (err **6**, taille 0).
+  **⚠️ Mis en file pour l'oracle Windows** : sur le chemin **A**, le succès rend la taille **étroite** (8) et
+  l'échec la taille **large** (16). Une taille requise qui dépend de la **réussite** n'est pas un contrat qu'on
+  dessine — c'est ce que fait un wrapper A qui délègue au W et ne convertit qu'en sortie.
+- **Vérifié** : `str_search` et `user32_desktop` bit-identiques Wine du **premier coup**, winediff complet
+  **202/203** après la vague `Str*` (seul rouge `gdi_uifont`, environnemental), difftest 272/272, hash
+  `19acad982194bf07` inchangé, audit stdcall PASS (table 909 → 937, `@N` depuis les import-libs mingw).
+- **Reste cartographié de la famille `Str*`** (53 exports, 4 vagues) : copie/concat/trim (`StrCpy*`/`StrCat*`/
+  `StrNCat*`/`StrDup*`/`StrTrim*`), comparaison (`StrCmp*` + `StrCmpLogicalW` + `StrIsIntlEqual*`), conversion
+  entière (`StrToInt*`/`StrToInt64Ex*`), formatage (`StrFormatByteSize*`/`StrFormatKBSize*`/`StrFromTimeInterval*`),
+  et les `StrRetTo*` (structure `STRRET` du shell).

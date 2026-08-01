@@ -4377,6 +4377,83 @@ uint32_t aret_StrStrNW(uint32_t esp) {
     }
     return 0;
 }
+/* Window station / desktop (user32) — the "which desktop am I on" family every
+ * framework asks at startup (MFC/WinMerge's wall after the Str* family).
+ *
+ * Two process-wide singleton handles, distinct from each other, in their own range.
+ * A desktop is not something ARET can meaningfully have several of headless, and
+ * inventing a second one would be inventing state: the honest model is exactly one
+ * of each, named as Windows names them ("Default" on "WinSta0"), which is also what
+ * Wine reports. `GetThreadDesktop` succeeds for a thread id THIS process actually
+ * has — the main thread (`GetCurrentThreadId`) or a live fiber (`0x1000 + index`,
+ * what `CreateThread` hands back) — and answers NULL + ERROR_INVALID_PARAMETER for
+ * anything else, rather than a handle for a thread that does not exist.
+ *
+ * `GetUserObjectInformation`, measured on a POISONED buffer, and every line of this
+ * is a contrast the obvious implementation gets wrong:
+ *   - UOI_FLAGS writes a 12-byte USEROBJECTFLAGS but only the THIRD dword:
+ *     `fInherit` and `fReserved` are left **untouched**. A shim that zero-filled the
+ *     struct would look correct in any test that reads only dwFlags.
+ *   - UOI_TYPE lengths differ per object ("Desktop" 8, "WindowStation" 14), so the
+ *     required size is not a constant.
+ *   - Indices 4+ (UOI_USER_SID and beyond) fail with ERROR_INVALID_PARAMETER and
+ *     leave `*lpnLengthNeeded` at **0**, where a too-small buffer sets it.
+ *   - A bad handle is ERROR_INVALID_HANDLE (6), not INVALID_PARAMETER (87).
+ *   - ⚠️ On the A path the FAILURE branch reports the WIDE byte count (16 for
+ *     "Default") while the SUCCESS branch reports the narrow one (8). Reproduced
+ *     because Wine is the gate, and QUEUED FOR THE WINDOWS ORACLE: reporting a
+ *     different size depending on whether you succeeded is far more like Wine's A
+ *     wrapper leaking its W call than a contract. */
+#define U32_DESKTOP_H  0x76000001u        /* the one desktop */
+#define U32_WINSTA_H   0x76000002u        /* the one window station */
+uint32_t aret_GetThreadDesktop(uint32_t esp) {
+    uint32_t tid = WU(0);
+    if (tid == (uint32_t)getpid()) return U32_DESKTOP_H;      /* the main thread */
+    if (tid >= 0x1000u && tid < 0x1000u + (uint32_t)g_nfiber) return U32_DESKTOP_H;
+    g_last_error = 87u;                                       /* ERROR_INVALID_PARAMETER */
+    return 0;
+}
+uint32_t aret_GetProcessWindowStation(uint32_t esp) { (void)esp; return U32_WINSTA_H; }
+static uint32_t u32_userobj_info(uint32_t esp, int wide) {
+    uint32_t h = WU(0), index = WU(1), pv = WU(2), len = WU(3), pneed = WU(4);
+    if (h != U32_DESKTOP_H && h != U32_WINSTA_H) {
+        if (pneed) *(uint32_t *)(uintptr_t)pneed = 0;
+        g_last_error = 6u;                                    /* ERROR_INVALID_HANDLE */
+        return 0;
+    }
+    if (index == 1) {                                         /* UOI_FLAGS */
+        if (pneed) *(uint32_t *)(uintptr_t)pneed = 12;
+        if (!pv || len < 12) { g_last_error = 122u; return 0; }
+        /* Only dwFlags is written; fInherit/fReserved stay as the caller left
+         * them — measured, and the reason this is not a memset. */
+        ((uint32_t *)(uintptr_t)pv)[2] = (h == U32_WINSTA_H) ? 1u : 0u; /* WSF_VISIBLE */
+        return 1;
+    }
+    const char *s;
+    if (index == 2) s = (h == U32_WINSTA_H) ? "WinSta0" : "Default";        /* UOI_NAME */
+    else if (index == 3) s = (h == U32_WINSTA_H) ? "WindowStation" : "Desktop"; /* UOI_TYPE */
+    else {
+        if (pneed) *(uint32_t *)(uintptr_t)pneed = 0;
+        g_last_error = 87u;
+        return 0;
+    }
+    uint32_t chars = (uint32_t)strlen(s) + 1;
+    uint32_t bytes = wide ? chars * 2 : chars;
+    if (!pv || len < bytes) {
+        /* The failure branch reports the WIDE size even for A — measured, queued
+         * for the Windows oracle. The buffer is left untouched. */
+        if (pneed) *(uint32_t *)(uintptr_t)pneed = chars * 2;
+        g_last_error = 122u;                                  /* INSUFFICIENT_BUFFER */
+        return 0;
+    }
+    if (pneed) *(uint32_t *)(uintptr_t)pneed = bytes;
+    if (wide) { uint16_t *o = (uint16_t *)(uintptr_t)pv; for (uint32_t i = 0; i < chars; i++) o[i] = (uint8_t)s[i]; }
+    else memcpy((void *)(uintptr_t)pv, s, chars);
+    return 1;
+}
+uint32_t aret_GetUserObjectInformationA(uint32_t esp) { return u32_userobj_info(esp, 0); }
+uint32_t aret_GetUserObjectInformationW(uint32_t esp) { return u32_userobj_info(esp, 1); }
+
 uint32_t aret_StrStrNIW(uint32_t esp) {
     const uint16_t *h = (const uint16_t *)(uintptr_t)WU(0);
     const uint16_t *n = (const uint16_t *)(uintptr_t)WU(1);

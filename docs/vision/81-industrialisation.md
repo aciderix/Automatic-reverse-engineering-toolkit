@@ -556,3 +556,17 @@ affiché. On priorise par la donnée.
   les deux côtés étaient donc éligibles sur des règles différentes — précisément ce que le README interdit, et
   invisible tant qu'on ne relit pas les deux implémentations côte à côte. **Trois cases** de
   `TranslateCharsetInfo` mises en file pour le runner plutôt que tranchées par Wine seul.
+
+- **2026-08-01 (I5 — trois murs de WinMerge, et une prédiction de mesure qui paie six jours plus tard)** —
+  `CoCreateInstance` → `SHGetSpecialFolderLocation` → `StrSpnW` → `GetThreadDesktop`, tous franchis, tous de la
+  **couverture d'API**. **Le fait marquant est le deuxième** : il a coûté `--with-dll shell32.dll=…` et **rien
+  d'autre**. Le 26 juillet, la mesure « shell32 implémente (362 exports, 4 thunks, 36 forwarders) » avait été
+  écrite au 70 §5.0 avec la prédiction qu'un lift effacerait toute cette famille ; six jours plus tard la
+  prédiction se vérifie **sans une ligne de code**. C'est l'argument le plus concret qu'on ait produit pour la
+  règle « mesurer avant de coder » — et le contre-exemple utile est juste à côté : la même méthode, appliquée à
+  **shlwapi**, dit « relais » et interdit de le lifter, ce qui a évité de payer un lift inutile une deuxième fois.
+  **Deux familles comblées** (shlwapi `Str*` vague 1, window-station/desktop), les deux **bit-identiques Wine du
+  premier coup**, ce qui n'était pas le cas des vagues `Path*` — la technique de grille est en train de se
+  stabiliser. **Deux cellules de plus mises en file pour l'oracle Windows** (`StrChrW` sur le terminateur, et une
+  taille requise qui dépend de la réussite dans `GetUserObjectInformationA`) : le rythme auquel un second oracle
+  fait remonter des questions **sur du code déjà vert** ne faiblit pas.
