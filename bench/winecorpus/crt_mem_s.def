@@ -1,0 +1,4 @@
+LIBRARY msvcrt.dll
+EXPORTS
+memmove_s
+memcpy_s

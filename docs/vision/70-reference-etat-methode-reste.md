@@ -202,7 +202,7 @@ bash bench/wallsweep.sh <dir1> [dir2…]  # AGRÈGE --mode walls sur un corpus :
 
 ### État régression (référence — doit rester vert)
 difftest **272/272** · transpile-diff **4/4** (H=`19acad982194bf07`) · winediff
-**191/192** (le seul rouge = `gdi_uifont`, **environnemental** : fontconfig i386, orthogonal au code) · **ehdiff 6/6** (SEH `seh_except`
+**192/193** (le seul rouge = `gdi_uifont`, **environnemental** : fontconfig i386, orthogonal au code) · **ehdiff 6/6** (SEH `seh_except`
 + C++ `throw_catch`/`throw_dtor`/`throw_across`/`throw_byval`/`throw_static` — throw/catch, destructeur d'unwind, multi-frames, catch-by-value, CRT statique — bit-identiques Wine) · cpudiff vert (per-instruction + séquences génératives) · funcdiff corpus **0 divergence** (lift **~20,6k** scorées /
 **~20k appels** — **imports (stubs `@N` + `@0` scalaires) + appels indirects résolus + intrinsèques mémoire host-backés (memmove/memcpy)** ; scratch sous-esp exclu ; opt ~10k scorées) · SMT **11/11** · in-place **3/3** · magicdiv **2³²** ·
 recompilabilité **100 %** · WASM **7/7**.
@@ -1263,6 +1263,14 @@ la **vitesse** change.
   **gardable exhaustivement** : on peut l'embarquer **à condition** que la porte la **balaie entièrement**, si bien
   qu'un changement de version vire au rouge au lieu de pourrir en silence. Précédents : sort-keys de collation,
   `ConvertDefaultLocale` (65440 valeurs balayées).
+- **Une FIXTURE doit séparer contrat et environnement, sinon elle flappe (2026-07-26)**. `win_timechar` assertait la
+  position **absolue** d'une fenêtre : sous charge parallèle le serveur X ne l'honore pas toujours, et c'est **l'ORACLE**
+  qui bougeait ⇒ rouge intermittent. Réécrit en **contrat** (écart client↔écran = origine cliente ; les deux conversions
+  s'inversent), vrai où que la fenêtre atterrisse. **Une porte instable est pire qu'une porte lente** : elle apprend à
+  ignorer le rouge.
+- **Pour toute fixture d'API `*_s` : vérifier à l'`objdump` qu'elle IMPORTE bien msvcrt.** mingw fournit ses **propres**
+  corps pour plusieurs d'entre elles (`memmove_s`, `memcpy_s`, `_strupr_s`…) ⇒ sans `.def` forçant l'import, la fixture
+  mesure **mingw des deux côtés** et ne garde **rien**. Mécanisme : `winecorpus/NOM.def` (cf. `crt_mem_s.def`).
 - **funcdiff `0 divergence` ≠ pas de bug** : ça dit *où il n'est pas* (lift brut des
   fonctions scorées sain). Les bugs profonds sont dans les fonctions **skippées**
   (derrière imports) ou **en aval** (SSA/opt — couvert par l'opt-diff).

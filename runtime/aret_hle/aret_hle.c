@@ -686,6 +686,28 @@ uint32_t aret_memcpy_s(uint32_t esp) {
     return 0;
 }
 
+/* memmove_s(dst, destsz, src, count) -> errno_t. Same validation as memcpy_s, and
+ * overlap-safe like memmove — but ⚠️ MEASURED against Wine, it does NOT share
+ * memcpy_s's destructive behaviour on failure:
+ *     memcpy_s (destsz 3, count 5) -> ERANGE, dst[0..2] ZEROED
+ *     memmove_s(destsz 3, count 5) -> ERANGE, dst COMPLETELY UNTOUCHED
+ * Two near-identical functions, opposite policies. Deriving one from the other — the
+ * obvious move, since everything else about them matches — would silently wipe a
+ * caller's buffer that the real msvcrt leaves alone.
+ * `count == 0` short-circuits ALL validation and succeeds, even with a NULL dst
+ * (measured on both). */
+uint32_t aret_memmove_s(uint32_t esp) {
+    void *dst = (void *)(uintptr_t)arg(esp, 0);
+    uint32_t destsz = arg(esp, 1);
+    const void *src = (const void *)(uintptr_t)arg(esp, 2);
+    uint32_t count = arg(esp, 3);
+    if (count == 0) return 0;                  /* no validation at all, measured */
+    if (!dst || !src) return 22;               /* EINVAL — destination untouched */
+    if (destsz < count) return 34;             /* ERANGE — destination untouched */
+    memmove(dst, src, count);
+    return 0;
+}
+
 uint32_t aret_strlen(uint32_t esp) {
     return (uint32_t)strlen((const char *)(uintptr_t)arg(esp, 0));
 }
