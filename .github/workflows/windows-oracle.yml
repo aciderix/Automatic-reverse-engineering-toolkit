@@ -44,7 +44,7 @@ jobs:
           for /f "usebackq tokens=*" %%i in (`"C:\Program Files (x86)\Microsoft Visual Studio\Installer\vswhere.exe" -latest -property installationPath`) do call "%%i\VC\Auxiliary\Build\vcvars32.bat"
           if errorlevel 1 exit /b 1
           mkdir out
-          cl /nologo /W0 bench\winoracle\win32_pathdisputed.c shlwapi.lib /Fe:out\disputed.exe /Fo:out\ || exit /b 1
+          cl /nologo /W0 bench\winoracle\win32_pathdisputed.c shlwapi.lib ole32.lib uuid.lib /Fe:out\disputed.exe /Fo:out\ || exit /b 1
           echo ================ disputed ================
           out\disputed.exe > out\disputed.windows.txt
           type out\disputed.windows.txt
@@ -71,7 +71,7 @@ jobs:
           if exist "bench\winecorpus\%n%.nodisplay" (echo %n% SKIP-nodisplay   & goto :eof)
           findstr /c:"__asm__" /c:"__attribute__" "bench\winecorpus\%n%.c" >nul && (echo %n% SKIP-gcc-only & goto :eof)
           findstr /r "CreateWindow DialogBox CreateDialog" "bench\winecorpus\%n%.c" >nul && (echo %n% SKIP-gui & goto :eof)
-          cl /nologo /W0 "bench\winecorpus\%n%.c" user32.lib gdi32.lib advapi32.lib shell32.lib shlwapi.lib ole32.lib oleaut32.lib version.lib comctl32.lib winspool.lib /Fe:fp\%n%.exe /Fo:fp\ >nul 2>&1 || (echo %n% BUILD-FAIL & goto :eof)
+          cl /nologo /W0 "bench\winecorpus\%n%.c" user32.lib gdi32.lib advapi32.lib shell32.lib shlwapi.lib ole32.lib oleaut32.lib uuid.lib version.lib comctl32.lib winspool.lib /Fe:fp\%n%.exe /Fo:fp\ >nul 2>&1 || (echo %n% BUILD-FAIL & goto :eof)
           pushd fp
           if exist "..\bench\winecorpus\%n%.in" (%n%.exe < "..\bench\winecorpus\%n%.in" > %n%.txt 2>nul) else (%n%.exe > %n%.txt 2>nul)
           popd

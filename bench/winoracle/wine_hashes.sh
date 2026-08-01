@@ -35,7 +35,7 @@ for src in "$CORPUS"/*.c; do
   grep -qE 'CreateWindow|DialogBox|CreateDialog' "$src" && { echo "$name SKIP-gui"; continue; }
 
   wd="$TMP/w/$name"; mkdir -p "$wd"
-  if ! "$MINGW" -O1 -w "$src" -lversion -lole32 -loleaut32 -luser32 -lgdi32 \
+  if ! "$MINGW" -O1 -w "$src" -lversion -lole32 -loleaut32 -luuid -luser32 -lgdi32 \
         -lcomctl32 -lwinspool -llz32 -lshlwapi -ladvapi32 -lshell32 \
         -o "$wd/$name.exe" 2>/dev/null; then
     echo "$name BUILD-FAIL"; continue

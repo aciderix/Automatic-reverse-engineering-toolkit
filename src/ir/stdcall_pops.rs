@@ -63,6 +63,7 @@ static TABLE: &[(&str, u32)] = &[
     ("ClientToScreen", 8),
     ("CloseHandle", 4),
     ("ClosePrinter", 4),
+    ("CoGetMalloc", 8),
     ("CoInitialize", 4),
     ("CoInitializeEx", 8),
     ("CoTaskMemAlloc", 4),

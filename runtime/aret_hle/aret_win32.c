@@ -2164,9 +2164,82 @@ uint32_t aret_CoUninitialize(uint32_t esp) { (void)esp; if (aret_co_init_depth) 
  * Co returns 0 then 1). OleUninitialize unwinds like CoUninitialize. */
 uint32_t aret_OleInitialize(uint32_t esp)   { (void)esp; return aret_co_init_depth++ ? 1u : 0u; }
 uint32_t aret_OleUninitialize(uint32_t esp) { (void)esp; if (aret_co_init_depth) aret_co_init_depth--; return 0; }
-uint32_t aret_CoTaskMemAlloc(uint32_t esp)   { return (uint32_t)(uintptr_t)malloc((size_t)WU(0)); }
-uint32_t aret_CoTaskMemRealloc(uint32_t esp) { return (uint32_t)(uintptr_t)realloc((void *)(uintptr_t)WU(0), (size_t)WU(1)); }
-uint32_t aret_CoTaskMemFree(uint32_t esp)    { free((void *)(uintptr_t)WU(0)); return 0; }
+/* COM task-allocator bookkeeping: pointer -> requested size, for IMalloc::GetSize
+ * and IMalloc::DidAlloc (below). A side table rather than a size header, for two
+ * reasons that both matter: a header would change the pointer CoTaskMemAlloc
+ * returns (so a program that mixes it with plain free() would corrupt), and
+ * DidAlloc must answer for a pointer we did NOT allocate — reading a header there
+ * means dereferencing a foreign pointer, which can fault. The table only ever reads
+ * its own memory, so a hostile argument gets a correct "no", never a crash.
+ *
+ * Open addressing, power-of-two capacity, grown at 70% — the count is the number of
+ * LIVE COM blocks, so it tracks the program rather than growing forever. */
+struct u32_com_ent { uintptr_t p; size_t n; };
+static struct u32_com_ent *g_com_blk;
+static size_t g_com_cap, g_com_cnt;
+
+static size_t u32_com_slot(uintptr_t p, size_t cap) {
+    size_t h = (size_t)((p >> 4) * 2654435761u) & (cap - 1);
+    while (g_com_blk[h].p && g_com_blk[h].p != p) h = (h + 1) & (cap - 1);
+    return h;
+}
+static void u32_com_grow(void) {
+    size_t ncap = g_com_cap ? g_com_cap * 2 : 1024;
+    void *nb = calloc(ncap, sizeof *g_com_blk);
+    if (!nb) { aret_unmodelled("COM allocator bookkeeping: out of memory"); return; }
+    struct u32_com_ent *old = g_com_blk;
+    size_t ocap = g_com_cap;
+    g_com_blk = nb; g_com_cap = ncap;
+    for (size_t i = 0; i < ocap; i++)
+        if (old[i].p) g_com_blk[u32_com_slot(old[i].p, ncap)] = old[i];
+    free(old);
+}
+static void u32_com_track(void *p, size_t n) {
+    if (!p) return;
+    if ((g_com_cnt + 1) * 10 >= g_com_cap * 7) u32_com_grow();
+    size_t h = u32_com_slot((uintptr_t)p, g_com_cap);
+    if (!g_com_blk[h].p) g_com_cnt++;
+    g_com_blk[h].p = (uintptr_t)p; g_com_blk[h].n = n;
+}
+/* Removal must re-insert the probe chain behind the hole, or a later lookup walks
+ * past a live entry and reports "not mine" for memory we allocated. */
+static void u32_com_untrack(void *p) {
+    if (!p || !g_com_cap) return;
+    size_t h = u32_com_slot((uintptr_t)p, g_com_cap);
+    if (!g_com_blk[h].p) return;
+    g_com_blk[h].p = 0; g_com_blk[h].n = 0; g_com_cnt--;
+    for (size_t i = (h + 1) & (g_com_cap - 1); g_com_blk[i].p; i = (i + 1) & (g_com_cap - 1)) {
+        struct u32_com_ent e = g_com_blk[i];
+        g_com_blk[i].p = 0; g_com_blk[i].n = 0; g_com_cnt--;
+        u32_com_track((void *)e.p, e.n);
+    }
+}
+/* -1 (not one of ours / NULL) or the requested size. */
+static size_t u32_com_size(void *p) {
+    if (!p || !g_com_cap) return (size_t)-1;
+    size_t h = u32_com_slot((uintptr_t)p, g_com_cap);
+    return g_com_blk[h].p ? g_com_blk[h].n : (size_t)-1;
+}
+
+uint32_t aret_CoTaskMemAlloc(uint32_t esp) {
+    size_t n = (size_t)WU(0);
+    void *p = malloc(n);
+    u32_com_track(p, n);
+    return (uint32_t)(uintptr_t)p;
+}
+uint32_t aret_CoTaskMemRealloc(uint32_t esp) {
+    void *old = (void *)(uintptr_t)WU(0);
+    size_t n = (size_t)WU(1);
+    void *p = realloc(old, n);
+    if (p) { u32_com_untrack(old); u32_com_track(p, n); }
+    return (uint32_t)(uintptr_t)p;
+}
+uint32_t aret_CoTaskMemFree(uint32_t esp) {
+    void *p = (void *)(uintptr_t)WU(0);
+    u32_com_untrack(p);
+    free(p);
+    return 0;
+}
 
 /* ---- DDE param packing (user32) -------------------------------------------
  * The two values a DDE message carries fit a LPARAM directly for most messages
@@ -6708,6 +6781,113 @@ uint32_t aret_delay_pop(uint32_t va) {
     for (int i = 0; i < g_delay_res_n; i++)
         if (g_delay_res[i].va == va) return g_delay_res[i].pop;
     return 0;
+}
+
+/* ---- CoGetMalloc / IMalloc — the first COM INTERFACE in the HLE -------------
+ *
+ * Everything COM-shaped until now has been a flat function. This one hands the
+ * program a VTABLE and the program then calls THROUGH it, so the HLE has to be
+ * callable from lifted code rather than the other way round. That mechanism already
+ * exists and is proven: the delay-load resolver hands out synthetic VAs that
+ * `aret_call` dispatches back into the HLE. A vtable is just nine of them, so no new
+ * machinery is invented here — the doc's "COM vtable problem" turns out to be the
+ * delay-load problem in a different shape.
+ *
+ * MEASURED (`winecorpus/win32_comalloc.c`), and three rows contradict the documented
+ * COM contract, which is exactly why they were probed rather than reasoned:
+ *   - QueryInterface does **NOT** AddRef (three successful QIs leave the count at 1).
+ *   - QueryInterface for an unsupported interface returns E_NOINTERFACE and leaves
+ *     the out-parameter **untouched** — COM says it must be NULLed; it is not.
+ *   - the reference count is real (AddRef->2, Release->1), not a fixed 1, even
+ *     though the object is a process singleton that is never destroyed.
+ * And the useful positive result: a CoTaskMemAlloc block is known to IMalloc and
+ * freeable through it — the two entry points are ONE allocator, not two.
+ *
+ * GetSize/DidAlloc answer from the side table above, so DidAlloc on a pointer we
+ * never allocated is a correct "no" rather than a fault. */
+static uint32_t g_imalloc_refs = 1;
+
+static int u32_iid_eq(const uint8_t *iid, uint32_t d1) {
+    /* IID_IUnknown {00000000-...-C000-...46}, IID_IMalloc {00000002-...}: they differ
+     * only in Data1, and the 12-byte tail is the standard one. Compare in full. */
+    static const uint8_t tail[12] = { 0,0, 0,0, 0xC0,0,0,0, 0,0,0,0x46 };
+    if (!iid) return 0;
+    return *(const uint32_t *)iid == d1 && memcmp(iid + 4, tail, 12) == 0;
+}
+static uint32_t u32_im_qi(uint32_t esp) {
+    uint32_t self = WU(0);
+    const uint8_t *iid = (const uint8_t *)(uintptr_t)WU(1);
+    uint32_t *out = (uint32_t *)(uintptr_t)WU(2);
+    if (u32_iid_eq(iid, 0) || u32_iid_eq(iid, 2)) {   /* IUnknown or IMalloc */
+        if (out) *out = self;                          /* no AddRef: measured */
+        return 0;                                      /* S_OK */
+    }
+    return 0x80004002u;          /* E_NOINTERFACE, out left untouched: measured */
+}
+static uint32_t u32_im_addref(uint32_t esp)  { (void)esp; return ++g_imalloc_refs; }
+static uint32_t u32_im_release(uint32_t esp) {
+    (void)esp;
+    /* A process singleton is never destroyed; the count is still real. */
+    return g_imalloc_refs > 1 ? --g_imalloc_refs : 1;
+}
+static uint32_t u32_im_alloc(uint32_t esp) {
+    size_t n = (size_t)WU(1);
+    void *p = malloc(n);
+    u32_com_track(p, n);
+    return (uint32_t)(uintptr_t)p;
+}
+static uint32_t u32_im_realloc(uint32_t esp) {
+    void *old = (void *)(uintptr_t)WU(1);
+    size_t n = (size_t)WU(2);
+    void *p = realloc(old, n);
+    if (p) { u32_com_untrack(old); u32_com_track(p, n); }
+    return (uint32_t)(uintptr_t)p;
+}
+static uint32_t u32_im_free(uint32_t esp) {
+    void *p = (void *)(uintptr_t)WU(1);
+    u32_com_untrack(p);
+    free(p);
+    return 0;
+}
+static uint32_t u32_im_getsize(uint32_t esp) {
+    return (uint32_t)u32_com_size((void *)(uintptr_t)WU(1));   /* -1 when not ours */
+}
+static uint32_t u32_im_didalloc(uint32_t esp) {
+    void *p = (void *)(uintptr_t)WU(1);
+    if (!p) return 0xFFFFFFFFu;                                 /* -1: measured */
+    return u32_com_size(p) == (size_t)-1 ? 0u : 1u;
+}
+static uint32_t u32_im_heapmin(uint32_t esp) { (void)esp; return 0; }
+
+/* The object and its vtable, in memory the lifted program can reach and read. */
+static uint32_t g_imalloc_vtbl[9];
+static uint32_t g_imalloc_obj;          /* one field: the vtable pointer */
+
+uint32_t aret_CoGetMalloc(uint32_t esp) {
+    uint32_t *ppv = (uint32_t *)(uintptr_t)WU(1);
+    if (!ppv) return 0x80004003u;       /* E_POINTER */
+    if (!g_imalloc_obj) {
+        static const struct { uint32_t (*fn)(uint32_t); uint16_t pop; } meth[9] = {
+            { u32_im_qi, 12 }, { u32_im_addref, 4 }, { u32_im_release, 4 },
+            { u32_im_alloc, 8 }, { u32_im_realloc, 12 }, { u32_im_free, 8 },
+            { u32_im_getsize, 8 }, { u32_im_didalloc, 8 }, { u32_im_heapmin, 4 },
+        };
+        for (int i = 0; i < 9; i++) {
+            if (g_delay_res_n >= 64) {
+                aret_unmodelled("CoGetMalloc: no synthetic VA left for the IMalloc vtable");
+                return 0x80004005u;
+            }
+            uint32_t va = DELAY_VA_BASE + (uint32_t)g_delay_res_n;
+            g_delay_res[g_delay_res_n].va = va;
+            g_delay_res[g_delay_res_n].shim = meth[i].fn;
+            g_delay_res[g_delay_res_n].pop = meth[i].pop;
+            g_delay_res_n++;
+            g_imalloc_vtbl[i] = va;
+        }
+        g_imalloc_obj = (uint32_t)(uintptr_t)g_imalloc_vtbl;
+    }
+    *ppv = (uint32_t)(uintptr_t)&g_imalloc_obj;   /* singleton: measured */
+    return 0;                                     /* S_OK */
 }
 
 /* ResolveDelayLoadedAPI(base, descriptor, failDllHook, failSysHook, thunk, flags)
