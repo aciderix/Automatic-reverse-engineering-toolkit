@@ -240,6 +240,9 @@ mal diagnostiquée**. Bilan :
 - **Conformité §0.** ✅ La règle « jamais un faux présenté comme correct » s'applique **au cache lui-même** : c'est
   pourquoi la clé est exacte et non heuristique, et pourquoi le SHA-256 est **prouvé sur les vecteurs FIPS 180-4** plutôt
   que supposé (un hash 64 bits serait une vraie façon de servir le mauvais objet). Off par `ARET_NO_OBJCACHE=1`.
+- **Effet mesuré** (après le fix de déterminisme ci-dessous — la 1ʳᵉ mesure ne mesurait que le bug) : **WinMerge + 3 DLL**
+  4 min 35 → **1 min 58** (254/255 objets réutilisés, seul `aret_layout.S` recompile) · **winediff complet** 6 min 25 →
+  **3 min 56** (CPU total 10 min 22 → 3 min 08), verdict **identique** 193/194 et 194 lignes de fixtures byte-identiques.
 - **Oracle.** Test dédié contre un vrai compilateur, **dans les deux sens** : *warm* sert des octets identiques ; un
   **header modifié rate**, avec preuve que l'objet périmé aurait été différent. Plus difftest/difftest_transpile passés
   **avec et sans** cache, pour que la preuve ne dépende pas de lui.
@@ -247,7 +250,7 @@ mal diagnostiquée**. Bilan :
   **mesure** ; l'écart à cette mesure est un bug. Ici : 42 réutilisations sur 255 au lieu de ~255 ⇒ le C généré n'était
   **pas déterministe** (`HashMap` itéré dans le placement des φ, seedé aléatoirement par processus ⇒ 212 des 254 `.c`
   différaient entre deux runs de la **même** commande). Invisible à toutes les portes existantes, parce que le hash
-  transpile est **comportemental**. Corrigé (`IndexMap`), vérifié bit-identique sur `sqlite3.exe`. Détail 71.
+  transpile est **comportemental**. Corrigé (`IndexMap`), vérifié bit-identique sur `sqlite3.exe` **et sur WinMerge + 3 DLL (254/254 `.c`, ELF de 172 Mo)**. Détail 71.
 
 ---
 

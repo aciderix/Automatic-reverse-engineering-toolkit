@@ -5508,7 +5508,8 @@ Détail : **70 §6** (roadmap). Résumé :
   et coûte zéro. Audit des autres itérations de `Hash*` dans `ssa`/`opt` fait au passage : `undef` est itéré mais son
   résultat (`fp80`) est **trié+dédupliqué** ⇒ insensible à l'ordre ; `range` (`opt/frame.rs`) est un `BTreeMap` ; `safe`
   n'est jamais itéré. **`defsites` était le seul.**
-- **Vérifié** : `sqlite3.exe` transpilé deux fois → **22/22 `.c` identiques et `app` bit-identique** (avant le fix : les
+- **Vérifié** : `sqlite3.exe` transpilé deux fois → **22/22 `.c` identiques et `app` bit-identique** ; et à la plus grande
+  échelle disponible, **WinMerge + 3 DLL → 254/254 `.c` identiques et l'ELF de 172 Mo bit-identique** (avant le fix : les
   mêmes fichiers différaient). Portes : difftest **272/272**, hash **`19acad982194bf07` inchangé** (avec **et** sans
   cache — la porte est passée les deux fois pour que la preuve ne dépende pas du cache).
 - **Leçon** : un outil construit pour une raison (aller plus vite) a servi d'**oracle** pour une propriété qu'aucune
@@ -5534,6 +5535,13 @@ Détail : **70 §6** (roadmap). Résumé :
   l'out-dir (noms uniques ⇒ deux threads rayon, ou deux fixtures winediff parallèles, ne peuvent pas s'écraser).
 - **Réglages** : `ARET_NO_OBJCACHE=1` (off) · `ARET_OBJCACHE=<dir>` (défaut `$XDG_CACHE_HOME/aret/obj`) ·
   `ARET_OBJCACHE_MAX_MB` (défaut 4096, éviction LRU en fin de build). Une ligne `note: N object(s) compiled, M reused`.
+- **Effet mesuré (après le fix de déterminisme — l'ancienne mesure ne mesurait que le bug)** :
+  | | froid | chaud | objets réutilisés |
+  |---|---|---|---|
+  | **WinMerge + 3 DLL** (255 objets, 316 Mo de C) | **4 min 35** | **1 min 58** | **254 / 255** |
+  | **winediff complet** (194 fixtures) | **6 min 25** | **3 min 56** | — (CPU total 10 min 22 → 3 min 08) |
+  Le seul objet non réutilisé de WinMerge est `aret_layout.S` (l'assembleur n'est pas caché, un fichier minuscule).
+  Verdict winediff **identique** (193/194) et les **194 lignes de fixtures byte-identiques** entre les deux runs.
 - **Vérifié** : test dédié qui mesure les **deux sens** contre un vrai compilateur — un *warm lookup* sert des octets
   **identiques**, et un header modifié **rate**, avec la preuve que l'objet périmé aurait été **différent** ; plus le
   retour à l'ancien header qui re-touche l'entrée d'origine. + KAT SHA-256 + parsing des continuations `-MD`. 4/4.

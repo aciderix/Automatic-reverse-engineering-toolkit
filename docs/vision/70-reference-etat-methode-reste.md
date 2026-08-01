@@ -175,7 +175,7 @@ bash bench/regression.sh    # PORTE unifiée : difftest 271/271, in-place 3/3,
                             # recompilabilité gzip/ls/cat 100%
 bash bench/difftest.sh              # décompile O0→O3
 bash bench/difftest_transpile.sh    # transpile (hash 19acad982194bf07)
-bash bench/winediff.sh              # axe 2 vs Wine — ~420 s : 151 fixtures en PARALLELE, les 43 qui creent
+bash bench/winediff.sh              # axe 2 vs Wine — ~235 s cache chaud (385 s a froid) : 151 fixtures en PARALLELE, les 43 qui creent
 #   une fenetre en SERIE (Wine GUI concurrent degrade l'ORACLE : listbox vide, focus perdu)
 bash bench/winediff.sh NOM          # une seule fixture (~20 s) : la boucle de dev
 WINEDIFF_JOBS=1 bash bench/winediff.sh   # force la serie (bisecter une fixture instable)
