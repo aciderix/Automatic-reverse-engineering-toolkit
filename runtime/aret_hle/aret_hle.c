@@ -2333,13 +2333,29 @@ uint32_t aret_GetFileSizeEx(uint32_t esp) {
 /* Reported by the builder's weak per-import stubs when an unimplemented API is
  * actually called. Warn once per name (the stubs pass stable string literals, so
  * pointer comparison de-dups), then let the program limp on. */
-void aret_unimpl(const char *name) {
+/* A MODELLED API meeting a sub-case we do not model, which then returns a DEFINED
+ * failure value (FormatMessage 0, CreateDIBSection 0, TextOut 0…). That is sound —
+ * the caller is told the call failed, it is not handed a made-up success — so this
+ * warns once and continues. Kept strictly separate from `aret_unimpl`, which means
+ * "this import has no implementation at all" and must stop the program: conflating
+ * the two would either let a genuinely unmodelled API return a guessed 0, or turn an
+ * honest failure report into a crash. */
+void aret_partial(const char *what) {
     static const char *seen[1024];
     static int nseen = 0;
     for (int i = 0; i < nseen; i++)
-        if (seen[i] == name) return;
-    if (nseen < 1024) seen[nseen++] = name;
-    fprintf(stderr, "ARET: unimplemented import called: %s\n", name);
+        if (seen[i] == what) return;
+    if (nseen < 1024) seen[nseen++] = what;
+    fprintf(stderr, "ARET: partially modelled: %s (returning a defined failure)\n", what);
+}
+
+void aret_unimpl(const char *name) {
+    fflush(stdout);
+    fprintf(stderr, "ARET: unimplemented import CALLED: %s\n", name);
+    fprintf(stderr, "ARET: aborting — this API is not modelled; continuing would run the "
+                    "program on a value it never produced.\n");
+    aret_trace_dump();
+    abort();
 }
 
 /* Reached an instruction the lifter could not model: fail loud rather than

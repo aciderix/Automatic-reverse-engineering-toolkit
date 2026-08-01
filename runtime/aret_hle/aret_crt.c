@@ -891,6 +891,37 @@ uint32_t aret_strncpy_s(uint32_t esp) { ARET_NCPY_S_BODY(uint8_t) }
 uint32_t aret_wcsncpy_s(uint32_t esp) { ARET_NCPY_S_BODY(uint16_t) }
 #undef ARET_NCPY_S_BODY
 
+/* _isctype(c, mask) -> the character's ctype bits ANDed with `mask` (NOT a boolean:
+ * `_isctype('5', 0xffff)` answers 0x84 = _DIGIT|_HEX). Table MEASURED against Wine by
+ * sweeping all 256 codes against every mask, then the return shape confirmed
+ * separately — a boolean implementation would satisfy every `if (_isctype(...))` caller
+ * and quietly break any that uses the value.
+ * Pure ASCII, C locale. Two measured details worth keeping: _BLANK(0x40) covers ONLY
+ * the space, not the tab (unlike C's isblank), and the _ALPHA 0x100 bit is not stored
+ * in the table at all — `_isctype('A', 0x103)` answers 0x1 because 0x103 contains
+ * _UPPER, not because a 0x100 bit matched. Anything outside 0..255 (EOF included)
+ * answers 0. */
+static uint16_t aret_ctype_bits(int c) {
+    if (c < 0 || c > 255) return 0;
+    uint16_t b = 0;
+    if (c >= 'A' && c <= 'Z') b |= 0x01;                        /* _UPPER   */
+    if (c >= 'a' && c <= 'z') b |= 0x02;                        /* _LOWER   */
+    if (c >= '0' && c <= '9') b |= 0x04;                        /* _DIGIT   */
+    if ((c >= 9 && c <= 13) || c == 32) b |= 0x08;              /* _SPACE   */
+    if ((c >= 33 && c <= 47) || (c >= 58 && c <= 64) ||
+        (c >= 91 && c <= 96) || (c >= 123 && c <= 126)) b |= 0x10; /* _PUNCT */
+    if (c < 32 || c == 127) b |= 0x20;                          /* _CONTROL */
+    if (c == 32) b |= 0x40;                                     /* _BLANK: space only */
+    if ((c >= '0' && c <= '9') || (c >= 'A' && c <= 'F') ||
+        (c >= 'a' && c <= 'f')) b |= 0x80;                      /* _HEX     */
+    return b;
+}
+uint32_t aret_isctype(uint32_t esp) {
+    int c = (int)a32(esp, 0);
+    uint32_t mask = a32(esp, 1);
+    return (uint32_t)(aret_ctype_bits(c) & mask);
+}
+
 uint32_t aret_wcscmp(uint32_t esp) {
     const uint16_t *a = (const uint16_t *)(uintptr_t)a32(esp, 0);
     const uint16_t *b = (const uint16_t *)(uintptr_t)a32(esp, 1);

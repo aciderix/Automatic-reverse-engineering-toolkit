@@ -72,10 +72,15 @@ uint32_t aret_DeleteFileA(uint32_t esp);  /* (name) -> BOOL */
 uint32_t aret_SetFilePointer(uint32_t esp); /* (h, dist, *high, method) -> DWORD */
 uint32_t aret_GetFileAttributesA(uint32_t esp); /* (name) -> DWORD attrs / INVALID */
 
-/* Diagnostic for an intercepted import that has no shim yet: the builder emits a
- * weak stub per unresolved import that calls this (warns once, then returns 0),
- * so a large binary still links and reports exactly which APIs it needs. */
+/* An intercepted import with NO implementation at all, reached at run time. The
+ * builder emits a weak stub per unresolved import that calls this. It ABORTS: the
+ * stub's 0 is a guessed value, and for an HRESULT API 0 is S_OK — the program would
+ * believe it succeeded and read an output pointer that was never written. A large
+ * binary still LINKS (so `--mode imports`/`walls` still enumerate what it needs);
+ * it just cannot silently run past an API we do not model. */
 void aret_unimpl(const char *name);
+/* Modelled API, unmodelled SUB-CASE: warns once and returns a defined failure. */
+void aret_partial(const char *what);
 
 /* An instruction the lifter could not model, reached at run time. Continuing
  * would substitute a no-op for an unknown effect — a silent wrong result — so we

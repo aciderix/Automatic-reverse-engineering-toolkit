@@ -945,9 +945,9 @@ static const char *u32_sys_msg_lookup(uint32_t code) {
  * empty string. */
 uint32_t aret_FormatMessageA(uint32_t esp) {
     uint32_t flags = WU(0), msgId = WU(2), buf = WU(4), size = WU(5);
-    if (!(flags & 0x00001000u)) { aret_unimpl("FormatMessageA: only FORMAT_MESSAGE_FROM_SYSTEM modelled"); return 0; }
+    if (!(flags & 0x00001000u)) { aret_partial("FormatMessageA: only FORMAT_MESSAGE_FROM_SYSTEM modelled"); return 0; }
     const char *msg = u32_sys_msg_lookup(msgId);
-    if (!msg) { char m[80]; snprintf(m, sizeof m, "FormatMessageA: unmodelled system message %u", msgId); aret_unimpl(m); return 0; }
+    if (!msg) { char m[80]; snprintf(m, sizeof m, "FormatMessageA: unmodelled system message %u", msgId); aret_partial(m); return 0; }
     uint32_t len = (uint32_t)strlen(msg);
     if (flags & 0x00000100u /*ALLOCATE_BUFFER*/) {
         char *p = (char *)malloc(len + 1);
@@ -964,9 +964,9 @@ uint32_t aret_FormatMessageA(uint32_t esp) {
 }
 uint32_t aret_FormatMessageW(uint32_t esp) {
     uint32_t flags = WU(0), msgId = WU(2), buf = WU(4), size = WU(5);
-    if (!(flags & 0x00001000u)) { aret_unimpl("FormatMessageW: only FORMAT_MESSAGE_FROM_SYSTEM modelled"); return 0; }
+    if (!(flags & 0x00001000u)) { aret_partial("FormatMessageW: only FORMAT_MESSAGE_FROM_SYSTEM modelled"); return 0; }
     const char *msg = u32_sys_msg_lookup(msgId);
-    if (!msg) { char m[80]; snprintf(m, sizeof m, "FormatMessageW: unmodelled system message %u", msgId); aret_unimpl(m); return 0; }
+    if (!msg) { char m[80]; snprintf(m, sizeof m, "FormatMessageW: unmodelled system message %u", msgId); aret_partial(m); return 0; }
     uint32_t len = (uint32_t)strlen(msg);
     if (flags & 0x00000100u /*ALLOCATE_BUFFER*/) {
         uint16_t *p = (uint16_t *)malloc((len + 1) * 2);
@@ -3119,7 +3119,7 @@ uint32_t aret_GetMessageW(uint32_t esp) {
         if (sdl_any_window()) { usleep(2000); continue; }
 #endif
         if (!u32_any_timer())
-            aret_unimpl("GetMessageW: empty queue, no WM_QUIT, no timer (would block forever in mono-thread model)");
+            aret_partial("GetMessageW: empty queue, no WM_QUIT, no timer (would block forever in mono-thread model)");
         usleep(1000);                        /* wait for the next timer to come due */
     }
 }
@@ -4109,7 +4109,7 @@ static void u32_dialog_default_focus(uint32_t esp, uint32_t hDlg, uint32_t initr
 static uint32_t u32_dialog_modal(uint32_t esp, const uint8_t *tpl, uint32_t dlgproc,
                                  uint32_t parent, uint32_t param) {
     if (!tpl || !dlgproc) return (uint32_t)-1;
-    if (g_u32_modal_hwnd) aret_unimpl("nested modal DialogBox (mono-thread model)");
+    if (g_u32_modal_hwnd) aret_partial("nested modal DialogBox (mono-thread model)");
     uint32_t hDlg = u32_dialog_create(esp, tpl, dlgproc, parent);
     if (!hDlg) return (uint32_t)-1;
     g_u32_modal_hwnd = hDlg; g_u32_modal_ended = 0; g_u32_modal_result = 0;
@@ -4131,7 +4131,7 @@ static uint32_t u32_dialog_modal(uint32_t esp, const uint8_t *tpl, uint32_t dlgp
 #ifdef ARET_HAVE_SDL
             if (g_u32_win[(int)hDlg - 1].sdl_win) { SDL_WaitEventTimeout(NULL, 20); continue; }
 #endif
-            aret_unimpl("modal DialogBox: DLGPROC did not EndDialog and no events (headless)");
+            aret_partial("modal DialogBox: DLGPROC did not EndDialog and no events (headless)");
         }
     }
     int result = g_u32_modal_result;
@@ -4371,7 +4371,7 @@ static int dc_map_identity(int d) {
 #define GDI_MAP_GUARD(hdc, ret) do { \
     int _gd = gdi_idx(hdc); \
     if (_gd >= 0 && !dc_map_identity(_gd)) { \
-        aret_unimpl("GDI primitive under non-identity mapping mode pending"); return (ret); } \
+        aret_partial("GDI primitive under non-identity mapping mode pending"); return (ret); } \
 } while (0)
 
 /* ================================================================== */
@@ -4645,7 +4645,7 @@ uint32_t aret_CreateDIBSection(uint32_t esp) {
     int32_t bw = *(const int32_t *)(bmi + 4);
     int32_t bh = *(const int32_t *)(bmi + 8);
     uint16_t bpp = *(const uint16_t *)(bmi + 14);
-    if (bpp != 32) { aret_unimpl("CreateDIBSection: only 32bpp BI_RGB modelled"); return 0; }
+    if (bpp != 32) { aret_partial("CreateDIBSection: only 32bpp BI_RGB modelled"); return 0; }
     int w = bw, h = bh < 0 ? -bh : bh, td = bh < 0;
     if (w <= 0 || h <= 0) return 0;
     int i = gdi_alloc(GDIT_BITMAP); if (!i) return 0;
@@ -4681,7 +4681,7 @@ uint32_t aret_GetDIBits(uint32_t esp) {
         *biSizeImg = (uint32_t)(bm->w * bm->h * 4);
         return (uint32_t)bm->h;
     }
-    if (*biBpp != 32) { aret_unimpl("GetDIBits: only 32bpp output modelled"); return 0; }
+    if (*biBpp != 32) { aret_partial("GetDIBits: only 32bpp output modelled"); return 0; }
     int td_out = *biH < 0;                         /* negative height = top-down output */
     uint32_t copied = 0;
     for (uint32_t r = 0; r < lines; r++) {
@@ -4715,10 +4715,10 @@ uint32_t aret_StretchDIBits(uint32_t esp) {
     uint16_t sbpp = *(const uint16_t *)(bmi + 14);
     int sh = sh_raw < 0 ? -sh_raw : sh_raw, s_topdown = sh_raw < 0;
     if (sbpp != 32 || rop != 0x00CC0020u /*SRCCOPY*/ || wDest != wSrc || hDest != hSrc) {
-        aret_unimpl("StretchDIBits: only 32bpp SRCCOPY 1:1 modelled"); return 0;
+        aret_partial("StretchDIBits: only 32bpp SRCCOPY 1:1 modelled"); return 0;
     }
     if (xSrc != 0 || ySrc != 0 || wSrc != sw || hSrc != sh) {
-        aret_unimpl("StretchDIBits: only whole-image source modelled"); return 0;
+        aret_partial("StretchDIBits: only whole-image source modelled"); return 0;
     }
     for (int iy = 0; iy < sh; iy++) {                       /* iy = image row from the top */
         int srow = s_topdown ? iy : (sh - 1 - iy);
@@ -4842,7 +4842,7 @@ uint32_t aret_SetMapMode(uint32_t esp) {
     if (m == 1) {                          /* MM_TEXT: 1:1 (y down) */
         g_gdi[d].vp_ex = g_gdi[d].vp_ey = g_gdi[d].win_ex = g_gdi[d].win_ey = 1;
     } else if (m != 8) {                   /* MM_ANISOTROPIC: app controls extents */
-        aret_unimpl("SetMapMode: only MM_TEXT/MM_ANISOTROPIC modelled (metric/isotropic pending)");
+        aret_partial("SetMapMode: only MM_TEXT/MM_ANISOTROPIC modelled (metric/isotropic pending)");
         return 0;
     }
     g_gdi[d].mapmode = m;
@@ -5013,7 +5013,7 @@ static int gdi_pen(int d, uint32_t *color) {
     if (p < 0) { if (color) *color = 0; return 1; }        /* default black */
     if (g_gdi[p].null_obj) return 0;                        /* NULL_PEN: draws nothing */
     if (!g_gdi[p].stock && (g_gdi[p].pen_style != 0 || g_gdi[p].pen_width > 1)) {
-        aret_unimpl("GDI pen: only PS_SOLID width<=1 modelled (styled/wide pens pending)");
+        aret_partial("GDI pen: only PS_SOLID width<=1 modelled (styled/wide pens pending)");
         return -1;
     }
     if (color) *color = g_gdi[p].color;
@@ -5190,12 +5190,12 @@ uint32_t aret_DrawFocusRect(uint32_t esp) {
  * — the "soft" bevel a push button uses. Returns 0 (with a sound abort) outside the
  * modelled subset. */
 static int u32_drawedge(struct gdi_obj *bm, const int32_t *r, uint32_t edge, uint32_t flags) {
-    if ((flags & ~0x180Fu) || (flags & 0xFu) != 0xFu) { aret_unimpl("DrawEdge: only BF_RECT(+BF_MIDDLE/BF_SOFT) modelled"); return 0; }
+    if ((flags & ~0x180Fu) || (flags & 0xFu) != 0xFu) { aret_partial("DrawEdge: only BF_RECT(+BF_MIDDLE/BF_SOFT) modelled"); return 0; }
     int lo, bo, li, bi;                        /* sys-colour indices: outer LT/BR, inner LT/BR */
     if (edge == 0x5)      { lo = 22; bo = 21; li = 20; bi = 16; }   /* EDGE_RAISED */
     else if (edge == 0xA) { lo = 16; bo = 20; li = 21; bi = 22; }   /* EDGE_SUNKEN */
     else if (edge == 0x6) { lo = 16; bo = 20; li = 20; bi = 16; }   /* EDGE_ETCHED (group box) — measured */
-    else { aret_unimpl("DrawEdge: only EDGE_RAISED/SUNKEN/ETCHED modelled"); return 0; }
+    else { aret_partial("DrawEdge: only EDGE_RAISED/SUNKEN/ETCHED modelled"); return 0; }
     if ((flags & 0x1000u) && edge == 0x5) { int tmp = lo; lo = li; li = tmp; }   /* BF_SOFT (raised) */
     int l = r[0], t = r[1], rt = r[2], b = r[3];
     if (rt - l < 2 || b - t < 2) return 1;
@@ -5248,7 +5248,7 @@ uint32_t aret_DrawFrameControl(uint32_t esp) {
             return 1;
         }
     }
-    aret_unimpl("DrawFrameControl: only DFC_BUTTON push / 13x13 check|radio modelled");
+    aret_partial("DrawFrameControl: only DFC_BUTTON push / 13x13 check|radio modelled");
     return 0;
 }
 
@@ -5797,7 +5797,7 @@ uint32_t aret_PatBlt(uint32_t esp) {
         c = g_gdi[b].color;
     } else if (rop == 0x00000042u /* BLACKNESS */) c = 0x000000;
     else if (rop == 0x00FF0062u /* WHITENESS */) c = 0xFFFFFF;
-    else { aret_unimpl("PatBlt: only PATCOPY/BLACKNESS/WHITENESS modelled"); return 0; }
+    else { aret_partial("PatBlt: only PATCOPY/BLACKNESS/WHITENESS modelled"); return 0; }
     for (int y = y0; y < y1; y++) for (int x = x0; x < x1; x++) gdi_put(bm, x, y, c);
     return 1;
 }
@@ -5827,7 +5827,7 @@ uint32_t aret_BitBlt(uint32_t esp) {
     GDI_MAP_GUARD(WU(0), 0);
     struct gdi_obj *dst = gdi_dc_surface(WU(0));
     uint32_t rop = WU(8), tmp;
-    if (!gdi_rop_apply(rop, 0, 0, &tmp)) { aret_unimpl("BitBlt: unmodelled raster-op"); return 0; }
+    if (!gdi_rop_apply(rop, 0, 0, &tmp)) { aret_partial("BitBlt: unmodelled raster-op"); return 0; }
     int needs = gdi_rop_needs_src(rop);
     struct gdi_obj *src = needs ? gdi_dc_surface(WU(5)) : NULL;
     if (!dst || (needs && !src)) return 0;
@@ -5857,13 +5857,13 @@ uint32_t aret_StretchBlt(uint32_t esp) {
     GDI_MAP_GUARD(WU(0), 0);
     struct gdi_obj *dst = gdi_dc_surface(WU(0));
     uint32_t rop = WU(10), tmp;
-    if (!gdi_rop_apply(rop, 0, 0, &tmp)) { aret_unimpl("StretchBlt: unmodelled raster-op"); return 0; }
+    if (!gdi_rop_apply(rop, 0, 0, &tmp)) { aret_partial("StretchBlt: unmodelled raster-op"); return 0; }
     int needs = gdi_rop_needs_src(rop);
     struct gdi_obj *src = needs ? gdi_dc_surface(WU(5)) : NULL;
     if (!dst || (needs && !src)) return 0;
     int dx = WI(1), dy = WI(2), dw = WI(3), dh = WI(4), sx = WI(6), sy = WI(7), sw = WI(8), sh = WI(9);
     if (dw <= 0 || dh <= 0 || (needs && (sw <= 0 || sh <= 0))) {
-        aret_unimpl("StretchBlt: only positive (non-mirrored) extents modelled"); return 0;
+        aret_partial("StretchBlt: only positive (non-mirrored) extents modelled"); return 0;
     }
     for (int j = 0; j < dh; j++)
         for (int i = 0; i < dw; i++) {
@@ -5891,7 +5891,7 @@ uint32_t aret_SetDIBits(uint32_t esp) {
     if (!bits || !h) return 0;
     int W = h[1], Hs = h[2], botup = Hs > 0, H = Hs < 0 ? -Hs : Hs;
     int bpp = (h[3] >> 16) & 0xFFFF; uint32_t comp = (uint32_t)h[4];
-    if (comp != 0 || (bpp != 32 && bpp != 24)) { aret_unimpl("SetDIBits: only BI_RGB 24/32bpp modelled"); return 0; }
+    if (comp != 0 || (bpp != 32 && bpp != 24)) { aret_partial("SetDIBits: only BI_RGB 24/32bpp modelled"); return 0; }
     int bppB = bpp / 8, stride = (W * bppB + 3) & ~3;
     uint32_t done = 0;
     for (uint32_t k = 0; k < lines; k++) {
@@ -5911,7 +5911,7 @@ uint32_t aret_GdiAlphaBlend(uint32_t esp) {
     struct gdi_obj *dst = gdi_dc_surface(WU(0)), *src = gdi_dc_surface(WU(5));
     if (!dst || !src) return 0;
     int dx = WI(1), dy = WI(2), dw = WI(3), dh = WI(4), sx = WI(6), sy = WI(7), sw = WI(8), sh = WI(9);
-    if (dw <= 0 || dh <= 0 || sw <= 0 || sh <= 0) { aret_unimpl("GdiAlphaBlend: positive extents only"); return 0; }
+    if (dw <= 0 || dh <= 0 || sw <= 0 || sh <= 0) { aret_partial("GdiAlphaBlend: positive extents only"); return 0; }
     uint32_t bf = WU(10);
     int ca = (bf >> 16) & 0xFF, af = (bf >> 24) & 0xFF;   /* SourceConstantAlpha, AlphaFormat */
     for (int j = 0; j < dh; j++)
@@ -6149,9 +6149,9 @@ static uint32_t u32_load_dib_resource(uint32_t name_ref) {
     int32_t w = *(const int32_t *)(p + 4), hh = *(const int32_t *)(p + 8);
     uint16_t bitcount = *(const uint16_t *)(p + 14);
     uint32_t comp = *(const uint32_t *)(p + 16), clrused = *(const uint32_t *)(p + 32);
-    if (comp != 0) { aret_unimpl("LoadBitmap: only BI_RGB (uncompressed) DIB modelled"); return 0; }
+    if (comp != 0) { aret_partial("LoadBitmap: only BI_RGB (uncompressed) DIB modelled"); return 0; }
     if (bitcount != 1 && bitcount != 4 && bitcount != 8 && bitcount != 24 && bitcount != 32) {
-        aret_unimpl("LoadBitmap: only 1/4/8/24/32 bpp modelled"); return 0;
+        aret_partial("LoadBitmap: only 1/4/8/24/32 bpp modelled"); return 0;
     }
     if (w <= 0 || w > 8192) return 0;
     int topdown = hh < 0, h = topdown ? -hh : hh;
@@ -6280,7 +6280,7 @@ static FT_Face ft_get_face(const char *path) {
  * instead of aborting — used by best-effort callers (dialog base units) where a
  * missing font just leaves the metric unavailable rather than being a hard error. */
 static int g_dc_font_quiet;
-static FT_Face u32_dc_font_fail(const char *msg) { if (!g_dc_font_quiet) aret_unimpl(msg); return NULL; }
+static FT_Face u32_dc_font_fail(const char *msg) { if (!g_dc_font_quiet) aret_partial(msg); return NULL; }
 /* Resolve the DC's selected font to an FT_Face sized to its LOGFONT, plus Wine's
  * tmAscent/tmDescent (from OS/2 usWinAscent/usWinDescent scaled). Returns the face
  * (NULL ⇒ a sound abort, `aret_unimpl` already called). Shared by TextOut and the
@@ -6367,7 +6367,7 @@ static int u32_textout_full(uint32_t hdc, int x, int y, const uint32_t *cps, int
     int d = gdi_idx(hdc);
     if (d < 0 || g_gdi[d].type != GDIT_DC) return 0;
     struct gdi_obj *surf = gdi_dc_surface(hdc);
-    if (!surf || surf->bpp != 32) { aret_unimpl("TextOut: only 32bpp DIB target modelled"); return 0; }
+    if (!surf || surf->bpp != 32) { aret_partial("TextOut: only 32bpp DIB target modelled"); return 0; }
     int fi = gdi_idx(g_gdi[d].sel_font);
     int quality = (fi >= 0) ? g_gdi[fi].lf_quality : 0;
     /* Wine's render mode by CreateFont quality (measured): NONANTIALIASED→mono,
@@ -6379,13 +6379,13 @@ static int u32_textout_full(uint32_t hdc, int x, int y, const uint32_t *cps, int
     /* Grayscale ANTIALIASED_QUALITY renders differently from FreeType's NORMAL/LIGHT
      * (Wine's grayscale has harder edges — a distinct pipeline) → abort soundly until
      * matched. Mono and subpixel (the DEFAULT/ClearType path) are bit-exact. */
-    if (aa == AA_GRAY) { aret_unimpl("TextOut: grayscale ANTIALIASED_QUALITY pending (mono + subpixel done)"); return 0; }
+    if (aa == AA_GRAY) { aret_partial("TextOut: grayscale ANTIALIASED_QUALITY pending (mono + subpixel done)"); return 0; }
     int load_target = (aa == AA_MONO) ? FT_LOAD_TARGET_MONO
                     : (aa == AA_GRAY) ? FT_LOAD_TARGET_NORMAL : FT_LOAD_TARGET_LCD;
     uint32_t ta = g_gdi[d].text_align;
-    if (ta & ~0x1Eu) { aret_unimpl("TextOut: TA_UPDATECP/RTL alignment pending"); return 0; }  /* only TA_{LEFT,RIGHT,CENTER,TOP,BASELINE,BOTTOM} */
+    if (ta & ~0x1Eu) { aret_partial("TextOut: TA_UPDATECP/RTL alignment pending"); return 0; }  /* only TA_{LEFT,RIGHT,CENTER,TOP,BASELINE,BOTTOM} */
     int bkmode = g_gdi[d].bk_mode;
-    if (bkmode != 1 /*TRANSPARENT*/ && bkmode != 2 /*OPAQUE*/) { aret_unimpl("TextOut: unknown background mode"); return 0; }
+    if (bkmode != 1 /*TRANSPARENT*/ && bkmode != 2 /*OPAQUE*/) { aret_partial("TextOut: unknown background mode"); return 0; }
     int ascent, descent;
     FT_Face ftf = u32_dc_font(d, &ascent, &descent);
     if (!ftf) return 0;
@@ -6484,7 +6484,7 @@ static int u32_textout_full(uint32_t hdc, int x, int y, const uint32_t *cps, int
     return 1;
 #else
     (void)hdc; (void)x; (void)y; (void)cps; (void)len; (void)dx; (void)rect; (void)do_opaque; (void)do_clip;
-    aret_unimpl("TextOut: FreeType not linked (rebuild with freetype2+fontconfig)");
+    aret_partial("TextOut: FreeType not linked (rebuild with freetype2+fontconfig)");
     return 0;
 #endif
 }
@@ -6496,7 +6496,7 @@ static int u32_textout_core(uint32_t hdc, int x, int y, const uint32_t *cps, int
  * numeric-shaping abort soundly). */
 static int u32_exttextout(uint32_t hdc, int x, int y, uint32_t opts, uint32_t prect,
                           const void *str, int count, uint32_t pdx, int wide) {
-    if (opts & ~0x6u) { aret_unimpl("ExtTextOut: only ETO_OPAQUE|ETO_CLIPPED modelled"); return 0; }
+    if (opts & ~0x6u) { aret_partial("ExtTextOut: only ETO_OPAQUE|ETO_CLIPPED modelled"); return 0; }
     if (count < 0) count = 0;
     uint32_t cps[1024]; int m = count < 1024 ? count : 1024;
     if (str) {
@@ -6527,7 +6527,7 @@ static uint32_t u32_drawtext(uint32_t hdc, const uint32_t *cps, int len, uint32_
     enum { DT_CENTER=1, DT_RIGHT=2, DT_VCENTER=4, DT_BOTTOM=8, DT_WORDBREAK=0x10, DT_SINGLELINE=0x20,
            DT_EXPANDTABS=0x40, DT_TABSTOP=0x80, DT_NOCLIP=0x100, DT_CALCRECT=0x400, DT_NOPREFIX=0x800 };
     if (fmt & (DT_EXPANDTABS|DT_TABSTOP|0x8000/*DT_END_ELLIPSIS*/|0x40000/*DT_PATH_ELLIPSIS*/|0x20000/*DT_WORD_ELLIPSIS*/))
-        { aret_unimpl("DrawText: tabs/ellipsis pending"); return 0; }
+        { aret_partial("DrawText: tabs/ellipsis pending"); return 0; }
     /* '&' prefix (unless DT_NOPREFIX): a single '&' is removed and marks the next
      * char as the underlined accelerator; '&&' is a literal '&'; a trailing '&' is
      * dropped. Single-line only (accelerators in wrapped text are rare → abort). */
@@ -6536,7 +6536,7 @@ static uint32_t u32_drawtext(uint32_t hdc, const uint32_t *cps, int len, uint32_
     if (!(fmt & DT_NOPREFIX)) {
         int has_amp = 0; for (int i = 0; i < len; i++) if (cps[i] == '&') { has_amp = 1; break; }
         if (has_amp) {
-            if (!(fmt & DT_SINGLELINE)) { aret_unimpl("DrawText: '&' accelerator in multi-line text pending"); return 0; }
+            if (!(fmt & DT_SINGLELINE)) { aret_partial("DrawText: '&' accelerator in multi-line text pending"); return 0; }
             int o = 0;
             for (int i = 0; i < len && o < 1024; ) {
                 if (cps[i] == '&') {
@@ -6641,7 +6641,7 @@ static uint32_t u32_drawtext(uint32_t hdc, const uint32_t *cps, int len, uint32_
     return (uint32_t)textH;
 #else
     (void)hdc; (void)cps; (void)len; (void)prc; (void)fmt;
-    aret_unimpl("DrawText: FreeType not linked"); return 0;
+    aret_partial("DrawText: FreeType not linked"); return 0;
 #endif
 }
 uint32_t aret_DrawTextA(uint32_t esp) {
@@ -6680,7 +6680,7 @@ static int u32_text_extent(uint32_t hdc, const uint32_t *cps, int len, uint32_t 
     return 1;
 #else
     (void)hdc; (void)cps; (void)len; (void)psize;
-    aret_unimpl("GetTextExtentPoint32: FreeType not linked");
+    aret_partial("GetTextExtentPoint32: FreeType not linked");
     return 0;
 #endif
 }
@@ -6740,7 +6740,7 @@ uint32_t aret_GetCharWidthW(uint32_t esp) {
     }
     return 1;
 #else
-    (void)esp; aret_unimpl("GetCharWidthW: FreeType not linked"); return 0;
+    (void)esp; aret_partial("GetCharWidthW: FreeType not linked"); return 0;
 #endif
 }
 uint32_t aret_GetCharWidthA(uint32_t esp) { return aret_GetCharWidthW(esp); }
@@ -6760,7 +6760,7 @@ uint32_t aret_GetCharABCWidthsW(uint32_t esp) {
     }
     return 1;
 #else
-    (void)esp; aret_unimpl("GetCharABCWidthsW: FreeType not linked"); return 0;
+    (void)esp; aret_partial("GetCharABCWidthsW: FreeType not linked"); return 0;
 #endif
 }
 static int u32_gtee(uint32_t hdc, const uint32_t *cps, int n, int maxext,
@@ -6780,7 +6780,7 @@ static int u32_gtee(uint32_t hdc, const uint32_t *cps, int n, int maxext,
     return 1;
 #else
     (void)hdc; (void)cps; (void)n; (void)maxext; (void)pfit; (void)dx; (void)sz;
-    aret_unimpl("GetTextExtentExPoint: FreeType not linked"); return 0;
+    aret_partial("GetTextExtentExPoint: FreeType not linked"); return 0;
 #endif
 }
 uint32_t aret_GetTextExtentExPointW(uint32_t esp) {
@@ -6808,7 +6808,7 @@ uint32_t aret_GdiGetCharDimensions(uint32_t esp) {
     int32_t *ph = (int32_t *)WP(2); if (ph) *ph = asc + desc;   /* tmHeight */
     return (uint32_t)((w / 26 + 1) / 2);
 #else
-    (void)esp; aret_unimpl("GdiGetCharDimensions: FreeType not linked"); return 0;
+    (void)esp; aret_partial("GdiGetCharDimensions: FreeType not linked"); return 0;
 #endif
 }
 /* GetCharWidthInfo(hdc, struct char_width_info{lsb,rsb,unk}) -> internal ntgdi helper
@@ -6844,14 +6844,14 @@ static uint32_t u32_tabbed_core(uint32_t hdc, int x, int y, const uint32_t *cps,
     if (d < 0 || g_gdi[d].type != GDIT_DC) return 0;
     if (!tabs) nTabs = 0;
     for (int j = 0; j < nTabs; j++)
-        if (tabs[j] < 0) { aret_unimpl("TabbedTextOut: negative (right-aligned) tab stops pending"); return 0; }
+        if (tabs[j] < 0) { aret_partial("TabbedTextOut: negative (right-aligned) tab stops pending"); return 0; }
     int ascent, descent;
     FT_Face ftf = u32_dc_font(d, &ascent, &descent);
     if (!ftf) return 0;
     TT_OS2 *os2 = (TT_OS2 *)FT_Get_Sfnt_Table(ftf, FT_SFNT_OS2);
     int ave = os2 ? (int)((FT_MulFix(os2->xAvgCharWidth, ftf->size->metrics.x_scale) + 32) >> 6) : 0;
     int defWidth = (nTabs == 1) ? tabs[0] : (8 * ave);
-    if (defWidth <= 0) { aret_unimpl("TabbedTextOut: non-positive tab width"); return 0; }
+    if (defWidth <= 0) { aret_partial("TabbedTextOut: non-positive tab width"); return 0; }
     int pen = x, i = 0;
     while (i < len) {
         int seg = i; while (seg < len && cps[seg] != '\t') seg++;
@@ -6863,7 +6863,7 @@ static uint32_t u32_tabbed_core(uint32_t hdc, int x, int y, const uint32_t *cps,
     return ((uint32_t)(ascent + descent) << 16) | ((uint32_t)(pen - x) & 0xFFFFu);
 #else
     (void)hdc; (void)x; (void)y; (void)cps; (void)len; (void)nTabs; (void)tabs; (void)org; (void)draw;
-    aret_unimpl("TabbedTextOut: FreeType not linked"); return 0;
+    aret_partial("TabbedTextOut: FreeType not linked"); return 0;
 #endif
 }
 uint32_t aret_TabbedTextOutA(uint32_t esp) {
@@ -6950,7 +6950,7 @@ static int u32_fill_textmetric(int d, int wide, uint32_t out) {
     int italic = (fi >= 0 && g_gdi[fi].lf_italic) ? 1 : 0;
     return u32_tm_from_face(f, ascent, descent, italic, wide, out);
 #else
-    (void)d; (void)wide; (void)out; aret_unimpl("GetTextMetrics: FreeType not linked"); return 0;
+    (void)d; (void)wide; (void)out; aret_partial("GetTextMetrics: FreeType not linked"); return 0;
 #endif
 }
 uint32_t aret_GetTextMetricsA(uint32_t esp) { int d = gdi_idx(WU(0)); return (d >= 0 && u32_fill_textmetric(d, 0, WU(1))) ? 1 : 0; }
@@ -7037,7 +7037,7 @@ static uint32_t u32_enum_font_families(uint32_t esp, const char *want, uint32_t 
                                        uint32_t lparam, int wide) {
 #ifdef ARET_HAVE_FREETYPE
     if (!proc) return 1;
-    if (!ft_ensure()) { aret_unimpl("EnumFontFamilies: FreeType/fontconfig init failed"); return 0; }
+    if (!ft_ensure()) { aret_partial("EnumFontFamilies: FreeType/fontconfig init failed"); return 0; }
     /* The two guest structures live between the caller's esp and the callback's
      * frame, so the callback's own stack (which grows below that frame) cannot
      * clobber them. */
@@ -7074,7 +7074,7 @@ static uint32_t u32_enum_font_families(uint32_t esp, const char *want, uint32_t 
     return ret;
 #else
     (void)esp; (void)want; (void)proc; (void)lparam; (void)wide;
-    aret_unimpl("EnumFontFamilies: FreeType not linked");
+    aret_partial("EnumFontFamilies: FreeType not linked");
     return 0;
 #endif
 }
@@ -7737,7 +7737,7 @@ uint32_t aret_DrawStateW(uint32_t esp) {
         return 1;
     }
     if (typ == 3 /* DST_ICON */) { u32_icon_blit(hdc, x, y, u32_icon_idx(lData), 0, 0); return 1; }
-    aret_unimpl("DrawStateW: DST_COMPLEX (callback) not modelled"); return 0;
+    aret_partial("DrawStateW: DST_COMPLEX (callback) not modelled"); return 0;
 }
 
 /* ---- comctl32 socle batch 9 (final): locale/date, polygons, heap, Uniscribe stubs.
@@ -7849,7 +7849,7 @@ uint32_t aret_LocalSize(uint32_t esp) { void *p = WP(0); return p ? (uint32_t)ma
  * consistent with the vector-GDI section (Polygon/Ellipse/Arc = abort-sound), this stays a
  * loud abort until its fill is reproduced bit-exactly and DIB-hash verified. */
 uint32_t aret_Polygon(uint32_t esp) {
-    (void)esp; aret_unimpl("Polygon: filled-polygon rasterisation not bit-exact vs Wine (abort, not a guess)"); return 0;
+    (void)esp; aret_partial("Polygon: filled-polygon rasterisation not bit-exact vs Wine (abort, not a guess)"); return 0;
 }
 /* PolyPolyline(hdc, POINT*, DWORD* counts, n): n independent OPEN polylines — pure pen
  * outline via the same Bresenham primitive as Polyline (already DIB-hash exact vs Wine),
@@ -8530,7 +8530,7 @@ uint32_t aret_GetClassLongW(uint32_t esp) {
         case -8:  return g_u32_class[ci].menu_name;           /* GCL_MENUNAME */
         case -34: return g_u32_class[ci].hicon_sm;            /* GCL_HICONSM */
         default:
-            if (idx >= 0) aret_unimpl("GetClassLong: class-extra bytes (positive index) not modelled");
+            if (idx >= 0) aret_partial("GetClassLong: class-extra bytes (positive index) not modelled");
             return 0;
     }
 }
@@ -8682,7 +8682,7 @@ uint32_t aret_GetWindowRgn(uint32_t esp) {   /* -> region type, or ERROR(0) if t
 }
 uint32_t aret_FillRgn(uint32_t esp) {   /* fill a region with a brush */
     int rg = gdi_idx(WU(1)); if (rg < 0) return 0;
-    if (g_gdi[rg].rgn_complex) { aret_unimpl("FillRgn: complex (non-rect) region not modelled"); return 0; }
+    if (g_gdi[rg].rgn_complex) { aret_partial("FillRgn: complex (non-rect) region not modelled"); return 0; }
     struct gdi_obj *bm = gdi_dc_surface(WU(0)); uint32_t c;
     if (!bm || !gdi_brush_color(WU(2), &c)) return bm ? 1 : 0;   /* null brush: nothing */
     for (int y = g_gdi[rg].rgn_t; y < g_gdi[rg].rgn_b; y++)
@@ -8691,7 +8691,7 @@ uint32_t aret_FillRgn(uint32_t esp) {   /* fill a region with a brush */
 }
 uint32_t aret_FrameRgn(uint32_t esp) {   /* draw a border of thickness (w,h) around the region */
     int rg = gdi_idx(WU(1)); if (rg < 0) return 0;
-    if (g_gdi[rg].rgn_complex) { aret_unimpl("FrameRgn: complex (non-rect) region not modelled"); return 0; }
+    if (g_gdi[rg].rgn_complex) { aret_partial("FrameRgn: complex (non-rect) region not modelled"); return 0; }
     struct gdi_obj *bm = gdi_dc_surface(WU(0)); uint32_t c;
     if (!bm || !gdi_brush_color(WU(2), &c)) return bm ? 1 : 0;
     int fw = WI(3), fh = WI(4), l = g_gdi[rg].rgn_l, t = g_gdi[rg].rgn_t, r = g_gdi[rg].rgn_r, b = g_gdi[rg].rgn_b;
@@ -8700,7 +8700,7 @@ uint32_t aret_FrameRgn(uint32_t esp) {   /* draw a border of thickness (w,h) aro
     return 1;
 }
 uint32_t aret_ExtCreateRegion(uint32_t esp) {   /* region from RGNDATA (NULL transform only) */
-    if (WP(0)) { aret_unimpl("ExtCreateRegion: XFORM transform not modelled"); return 0; }
+    if (WP(0)) { aret_partial("ExtCreateRegion: XFORM transform not modelled"); return 0; }
     const uint8_t *rd = (const uint8_t *)WP(2); if (!rd) return 0;
     const int32_t *hdr = (const int32_t *)rd;      /* RGNDATAHEADER: dwSize,iType,nCount,nRgnSize,rcBound[4] */
     int32_t ncount = hdr[2];
@@ -8986,7 +8986,7 @@ uint32_t aret_MapDialogRect(uint32_t esp) {
     int32_t *r = (int32_t *)(uintptr_t)WU(1);
     if (i < 0 || !r) return 0;
     int bx = g_u32_win[i].du_x, by = g_u32_win[i].du_y;
-    if (bx <= 0 || by <= 0) { aret_unimpl("MapDialogRect: dialog has no base units (font unresolved)"); return 0; }
+    if (bx <= 0 || by <= 0) { aret_partial("MapDialogRect: dialog has no base units (font unresolved)"); return 0; }
     r[0] = gdi_muldiv(r[0], bx, 4); r[2] = gdi_muldiv(r[2], bx, 4);
     r[1] = gdi_muldiv(r[1], by, 8); r[3] = gdi_muldiv(r[3], by, 8);
     return 1;

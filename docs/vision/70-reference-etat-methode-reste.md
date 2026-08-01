@@ -38,6 +38,10 @@ en programme **natif d'un autre système** (ELF direct **ou** WASM), **entièrem
 fonctionnel comme natif, sans émulation** — **universel**.
 
 **Principe sacré (non négociable).**
+> **Application 2026-07-26** : un **import non implémenté ABORTE** (`aret_unimpl`) au lieu d'avertir puis de rendre 0 —
+> le programme ne peut plus tourner sur une valeur qu'il n'a jamais produite (et `0 == S_OK` faisait croire au succès
+> d'une API `HRESULT`). Canal **distinct** `aret_partial` pour une API **modélisée** dont un **sous-cas** ne l'est pas
+> et qui rend un **échec défini** : ça, c'est sound, et ça continue.
 1. **Jamais de sortie incorrecte présentée comme correcte.** Juste, ou **arrêt
    bruyant** (`aret_unmodelled`/abort). Jamais un no-op silencieux, jamais une
    valeur devinée. Un faux silencieux est **pire que rien**.
@@ -193,7 +197,7 @@ bash bench/wallsweep.sh <dir1> [dir2…]  # AGRÈGE --mode walls sur un corpus :
 
 ### État régression (référence — doit rester vert)
 difftest **272/272** · transpile-diff **4/4** (H=`19acad982194bf07`) · winediff
-**187/188** (le seul rouge = `gdi_uifont`, **environnemental** : fontconfig i386, orthogonal au code) · **ehdiff 6/6** (SEH `seh_except`
+**188/189** (le seul rouge = `gdi_uifont`, **environnemental** : fontconfig i386, orthogonal au code) · **ehdiff 6/6** (SEH `seh_except`
 + C++ `throw_catch`/`throw_dtor`/`throw_across`/`throw_byval`/`throw_static` — throw/catch, destructeur d'unwind, multi-frames, catch-by-value, CRT statique — bit-identiques Wine) · cpudiff vert (per-instruction + séquences génératives) · funcdiff corpus **0 divergence** (lift **~20,6k** scorées /
 **~20k appels** — **imports (stubs `@N` + `@0` scalaires) + appels indirects résolus + intrinsèques mémoire host-backés (memmove/memcpy)** ; scratch sous-esp exclu ; opt ~10k scorées) · SMT **11/11** · in-place **3/3** · magicdiv **2³²** ·
 recompilabilité **100 %** · WASM **7/7**.
