@@ -175,7 +175,12 @@ bash bench/regression.sh    # PORTE unifiée : difftest 271/271, in-place 3/3,
                             # recompilabilité gzip/ls/cat 100%
 bash bench/difftest.sh              # décompile O0→O3
 bash bench/difftest_transpile.sh    # transpile (hash 19acad982194bf07)
-bash bench/winediff.sh              # axe 2 vs Wine (169/169 ; gdi_uifont peut être rouge = env fontconfig i386)
+bash bench/winediff.sh              # axe 2 vs Wine — PARALLELE (nproc), ~290 s ; log byte-identique au sequentiel
+bash bench/winediff.sh NOM          # une seule fixture (~20 s) : la boucle de dev
+WINEDIFF_JOBS=1 bash bench/winediff.sh   # force la serie (bisecter une fixture instable)
+#   ⚠️ chaque fixture a son PROPRE repertoire ET son PROPRE Xvfb : un display partage
+#   deplace les fenetres de l'ORACLE sous concurrence (mesure sur win_timechar), et un
+#   `wineboot` sans display change le placement ensuite -> les deux sont necessaires.
 bash bench/funcdiff.sh              # lift-closure + opt-diff vs Unicorn (0 div)
 bash bench/stdcall_audit.sh         # PORTE ABI : tout shim __stdcall prouve a son @N dans la table
                                     # (la famille esp-drift ; invisible a difftest/cpudiff/funcdiff)
