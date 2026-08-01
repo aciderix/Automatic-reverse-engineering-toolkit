@@ -4205,6 +4205,193 @@ ARET_PATH_COMBINE_FAMILY(A, char)
 ARET_PATH_COMBINE_FAMILY(W, uint16_t)
 #undef ARET_PATH_COMBINE_FAMILY
 
+/* shlwapi `Str*` — wave 1: the SEARCH/SCAN group (StrChr/StrRChr/StrStr/StrRStrI/
+ * StrSpn/StrCSpn/StrPBrk and their case-insensitive and counted variants).
+ *
+ * Shimmed rather than lifted, and that is a measured decision, not a preference:
+ * shlwapi is a RELAY (198 `__wine_spec_imp_` thunks + 217 PE forwarders out of 362
+ * exports, doc 70 §5.0), so lifting it moves the wall one module deeper instead of
+ * removing it. A pure lexical family belongs in the HLE.
+ *
+ * These look like the C library and are NOT the C library. Every line below is a
+ * measured contrast that the obvious implementation gets wrong:
+ *   - An EMPTY needle returns NULL — `strstr` returns the haystack. True for
+ *     StrStr/StrStrI/StrStrN/StrStrNI/StrRStrI and for StrPBrk with an empty set.
+ *   - `StrCSpn(s, "")` is the FULL length (nothing in the set was found) while
+ *     `StrSpn(s, "")` is 0. Symmetric-looking, opposite answers.
+ *   - The `N` variants bound where a match may START, not where it may end:
+ *     `StrStrNW("Hello, World!…", "World", 8)` finds the match at index 7 even
+ *     though it runs to 11. Swept n = 0..22 to pin that down rather than reasoned.
+ *   - NULL arguments are SAFE on every one of them (NULL / 0), not a fault.
+ *   - ⚠️ `StrChrW(s, 0)` returns the TERMINATOR while `StrChrA(s,'\0')`,
+ *     `StrChrIW(s,0)` and `StrRChrW(s,NULL,0)` all return NULL. One function out of
+ *     four disagrees with its own siblings; that asymmetry is measured, reproduced
+ *     verbatim, and QUEUED FOR THE WINDOWS ORACLE (bench/winoracle) because it looks
+ *     far more like a Wine slip than a contract — same shape as PathIsUNCServerA.
+ *     Do not "clean it up" without a Windows measurement saying so.
+ * Case folding is ASCII, exactly as elsewhere in the HLE (ordinal, locale C);
+ * non-ASCII case rules are a different subject and are not claimed here. */
+#define ARET_STR_SEARCH_FAMILY(TAG, TYPE)                                              \
+static TYPE u32_s_low_##TAG(TYPE c) {                                                  \
+    return (c >= (TYPE)'A' && c <= (TYPE)'Z') ? (TYPE)(c + 32) : c;                    \
+}                                                                                      \
+/* Length of the run of leading characters that ARE in `set`. */                       \
+uint32_t aret_StrSpn##TAG(uint32_t esp) {                                              \
+    const TYPE *s = (const TYPE *)(uintptr_t)WU(0), *set = (const TYPE *)(uintptr_t)WU(1); \
+    if (!s || !set) return 0;                                                          \
+    uint32_t n = 0;                                                                    \
+    for (; s[n]; n++) {                                                                \
+        const TYPE *m = set;                                                           \
+        while (*m && *m != s[n]) m++;                                                  \
+        if (!*m) break;                                                                \
+    }                                                                                  \
+    return n;                                                                          \
+}                                                                                      \
+/* Length of the run of leading characters NOT in `set`; an empty set therefore       \
+ * answers the whole length, where StrSpn answers 0. */                                \
+static uint32_t u32_s_cspn_##TAG(const TYPE *s, const TYPE *set, int fold) {           \
+    if (!s || !set) return 0;                                                          \
+    uint32_t n = 0;                                                                    \
+    for (; s[n]; n++) {                                                                \
+        TYPE c = fold ? u32_s_low_##TAG(s[n]) : s[n];                                  \
+        const TYPE *m = set;                                                           \
+        while (*m && (fold ? u32_s_low_##TAG(*m) : *m) != c) m++;                      \
+        if (*m) break;                                                                 \
+    }                                                                                  \
+    return n;                                                                          \
+}                                                                                      \
+uint32_t aret_StrCSpn##TAG(uint32_t esp)                                               \
+    { return u32_s_cspn_##TAG((const TYPE *)(uintptr_t)WU(0), (const TYPE *)(uintptr_t)WU(1), 0); } \
+uint32_t aret_StrCSpnI##TAG(uint32_t esp)                                              \
+    { return u32_s_cspn_##TAG((const TYPE *)(uintptr_t)WU(0), (const TYPE *)(uintptr_t)WU(1), 1); } \
+/* First character of `s` that appears in `set`; NULL when none — and an EMPTY set    \
+ * finds nothing, so it yields NULL rather than `s`. */                                \
+uint32_t aret_StrPBrk##TAG(uint32_t esp) {                                             \
+    const TYPE *s = (const TYPE *)(uintptr_t)WU(0), *set = (const TYPE *)(uintptr_t)WU(1); \
+    if (!s || !set) return 0;                                                          \
+    for (; *s; s++) {                                                                  \
+        const TYPE *m = set;                                                           \
+        while (*m && *m != *s) m++;                                                    \
+        if (*m) return (uint32_t)(uintptr_t)s;                                         \
+    }                                                                                  \
+    return 0;                                                                          \
+}                                                                                      \
+static const TYPE *u32_s_chr_##TAG(const TYPE *s, TYPE c, int fold, uint32_t maxn) {   \
+    if (!s) return 0;                                                                  \
+    if (fold) c = u32_s_low_##TAG(c);                                                  \
+    for (uint32_t i = 0; s[i] && i < maxn; i++)                                        \
+        if ((fold ? u32_s_low_##TAG(s[i]) : s[i]) == c) return s + i;                  \
+    return 0;                                                                          \
+}                                                                                      \
+uint32_t aret_StrChrI##TAG(uint32_t esp)                                               \
+    { return (uint32_t)(uintptr_t)u32_s_chr_##TAG((const TYPE *)(uintptr_t)WU(0), (TYPE)WU(1), 1, ~0u); } \
+/* Last occurrence before `end` (NULL end = the whole string). */                      \
+static const TYPE *u32_s_rchr_##TAG(const TYPE *s, const TYPE *end, TYPE c, int fold) { \
+    if (!s) return 0;                                                                  \
+    if (fold) c = u32_s_low_##TAG(c);                                                  \
+    const TYPE *hit = 0;                                                               \
+    for (const TYPE *p = s; *p && (!end || p < end); p++)                              \
+        if ((fold ? u32_s_low_##TAG(*p) : *p) == c) hit = p;                           \
+    return hit;                                                                        \
+}                                                                                      \
+uint32_t aret_StrRChr##TAG(uint32_t esp) {                                             \
+    return (uint32_t)(uintptr_t)u32_s_rchr_##TAG((const TYPE *)(uintptr_t)WU(0),        \
+        (const TYPE *)(uintptr_t)WU(1), (TYPE)WU(2), 0);                               \
+}                                                                                      \
+uint32_t aret_StrRChrI##TAG(uint32_t esp) {                                            \
+    return (uint32_t)(uintptr_t)u32_s_rchr_##TAG((const TYPE *)(uintptr_t)WU(0),        \
+        (const TYPE *)(uintptr_t)WU(1), (TYPE)WU(2), 1);                               \
+}                                                                                      \
+/* Substring search. `maxstart` is the number of positions allowed as a match START;  \
+ * the match itself may run past it (measured by sweeping n). An empty needle finds   \
+ * nothing, which is where this parts company with strstr. */                          \
+static const TYPE *u32_s_str_##TAG(const TYPE *h, const TYPE *n, int fold, uint32_t maxstart) { \
+    if (!h || !n || !*n) return 0;                                                     \
+    for (uint32_t i = 0; h[i] && i < maxstart; i++) {                                  \
+        uint32_t k = 0;                                                                \
+        while (n[k] && h[i + k] &&                                                     \
+               (fold ? u32_s_low_##TAG(h[i + k]) == u32_s_low_##TAG(n[k]) : h[i + k] == n[k])) k++; \
+        if (!n[k]) return h + i;                                                       \
+    }                                                                                  \
+    return 0;                                                                          \
+}                                                                                      \
+uint32_t aret_StrStr##TAG(uint32_t esp)                                                \
+    { return (uint32_t)(uintptr_t)u32_s_str_##TAG((const TYPE *)(uintptr_t)WU(0), (const TYPE *)(uintptr_t)WU(1), 0, ~0u); } \
+uint32_t aret_StrStrI##TAG(uint32_t esp)                                               \
+    { return (uint32_t)(uintptr_t)u32_s_str_##TAG((const TYPE *)(uintptr_t)WU(0), (const TYPE *)(uintptr_t)WU(1), 1, ~0u); } \
+/* Last occurrence, case-insensitive, before `end` (NULL end = whole string). */       \
+uint32_t aret_StrRStrI##TAG(uint32_t esp) {                                            \
+    const TYPE *h = (const TYPE *)(uintptr_t)WU(0);                                    \
+    const TYPE *end = (const TYPE *)(uintptr_t)WU(1);                                  \
+    const TYPE *nd = (const TYPE *)(uintptr_t)WU(2);                                   \
+    if (!h || !nd || !*nd) return 0;                                                   \
+    const TYPE *hit = 0;                                                               \
+    for (const TYPE *p = h; *p && (!end || p < end); p++) {                            \
+        uint32_t k = 0;                                                                \
+        while (nd[k] && p[k] && u32_s_low_##TAG(p[k]) == u32_s_low_##TAG(nd[k])) k++;  \
+        if (!nd[k]) hit = p;                                                           \
+    }                                                                                  \
+    return (uint32_t)(uintptr_t)hit;                                                   \
+}
+
+ARET_STR_SEARCH_FAMILY(A, char)
+ARET_STR_SEARCH_FAMILY(W, uint16_t)
+#undef ARET_STR_SEARCH_FAMILY
+
+/* StrChrA/W and the two counted W variants, written out rather than generated,
+ * because A and W genuinely DISAGREE on the terminator (see the family comment) and
+ * a macro would have quietly imposed one answer on both. */
+uint32_t aret_StrChrA(uint32_t esp) {
+    const char *s = (const char *)(uintptr_t)WU(0);
+    char c = (char)WU(1);
+    if (!s) return 0;
+    for (; *s; s++) if (*s == c) return (uint32_t)(uintptr_t)s;
+    return 0;                                   /* NUL is NOT matched: measured */
+}
+uint32_t aret_StrChrW(uint32_t esp) {
+    const uint16_t *s = (const uint16_t *)(uintptr_t)WU(0);
+    uint16_t c = (uint16_t)WU(1);
+    if (!s) return 0;
+    for (;; s++) {                              /* terminator INCLUDED: measured */
+        if (*s == c) return (uint32_t)(uintptr_t)s;
+        if (!*s) return 0;
+    }
+}
+uint32_t aret_StrChrNW(uint32_t esp) {
+    const uint16_t *s = (const uint16_t *)(uintptr_t)WU(0);
+    uint16_t c = (uint16_t)WU(1);
+    uint32_t n = WU(2);
+    if (!s) return 0;
+    for (uint32_t i = 0; s[i] && i < n; i++) if (s[i] == c) return (uint32_t)(uintptr_t)(s + i);
+    return 0;
+}
+uint32_t aret_StrStrNW(uint32_t esp) {
+    const uint16_t *h = (const uint16_t *)(uintptr_t)WU(0);
+    const uint16_t *n = (const uint16_t *)(uintptr_t)WU(1);
+    uint32_t maxstart = WU(2);
+    if (!h || !n || !*n) return 0;
+    for (uint32_t i = 0; h[i] && i < maxstart; i++) {
+        uint32_t k = 0;
+        while (n[k] && h[i + k] && h[i + k] == n[k]) k++;
+        if (!n[k]) return (uint32_t)(uintptr_t)(h + i);
+    }
+    return 0;
+}
+uint32_t aret_StrStrNIW(uint32_t esp) {
+    const uint16_t *h = (const uint16_t *)(uintptr_t)WU(0);
+    const uint16_t *n = (const uint16_t *)(uintptr_t)WU(1);
+    uint32_t maxstart = WU(2);
+    if (!h || !n || !*n) return 0;
+    for (uint32_t i = 0; h[i] && i < maxstart; i++) {
+        uint32_t k = 0;
+        while (n[k] && h[i + k] &&
+               ((h[i+k] >= 'A' && h[i+k] <= 'Z' ? h[i+k] + 32 : h[i+k]) ==
+                (n[k]   >= 'A' && n[k]   <= 'Z' ? n[k]   + 32 : n[k]))) k++;
+        if (!n[k]) return (uint32_t)(uintptr_t)(h + i);
+    }
+    return 0;
+}
+
 /* GetUserNameA/W(buf, pcbBuffer) -> BOOL (advapi32).
  *
  * The NAME comes from the same place Wine's does — the host's Unix account — so the
