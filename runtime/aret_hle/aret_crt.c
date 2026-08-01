@@ -593,6 +593,49 @@ uint32_t aret_snwprintf(uint32_t esp) {
     size_t n = aret_wvformat(tmp, 8192, fmt, va);
     return aret_wsn_finish(dst, cap, tmp, n);
 }
+/* _snwprintf_s(dst, sizeOfBuffer, count, fmt, ...) — the secure wide snprintf.
+ * MEASURED against Wine across nine shapes, which is what separates FOUR regimes that
+ * a single "truncate and return -1" implementation would blur together:
+ *   - it fits within both `count` and the buffer  -> writes it, returns the LENGTH;
+ *   - `count` is the binding limit and the buffer could have held more -> writes
+ *     `count` characters plus a NUL, KEEPS them, returns -1;
+ *   - `count` is _TRUNCATE ((size_t)-1) and the text is longer than the buffer ->
+ *     writes size-1 characters plus a NUL, KEEPS them, returns -1;
+ *   - the BUFFER is what is too small (count >= size) -> ZEROES THE WHOLE BUFFER, all
+ *     `size` elements, not just the first, and returns -1. This is the one that is
+ *     genuinely surprising: the two "too long" cases differ by whether the caller
+ *     asked for truncation, and only the un-asked-for one destroys the output.
+ * Edges: size 0 leaves the buffer completely untouched and returns -1; a NULL fmt
+ * empties the buffer and returns -1; a NULL BUFFER is a length QUERY — it returns how
+ * many characters the result would take (measured 3 for L"abc"), it is not an error. */
+uint32_t aret_snwprintf_s(uint32_t esp) {
+    uint16_t *dst = (uint16_t *)AP(0);
+    size_t size = AU(1);
+    uint32_t count = AU(2);
+    const uint16_t *fmt = (const uint16_t *)AP(3);
+    const uint32_t *va = &((const uint32_t *)(uintptr_t)esp)[4];
+    static uint16_t tmp[8192];
+    if (!fmt) { if (dst && size) dst[0] = 0; return (uint32_t)-1; }
+    size_t n = aret_wvformat(tmp, 8192, fmt, va);
+    if (!dst) return (uint32_t)n;                  /* length query, not a failure */
+    if (size == 0) return (uint32_t)-1;            /* buffer untouched */
+    int trunc = (count == 0xffffffffu);
+    size_t limit = size - 1;
+    if (!trunc && (size_t)count < limit) limit = count;
+    if (n <= limit) {
+        for (size_t i = 0; i < n; i++) dst[i] = tmp[i];
+        dst[n] = 0;
+        return (uint32_t)n;
+    }
+    if (!trunc && (size_t)count >= size) {         /* the BUFFER was too small */
+        for (size_t i = 0; i < size; i++) dst[i] = 0;
+        return (uint32_t)-1;
+    }
+    for (size_t i = 0; i < limit; i++) dst[i] = tmp[i];  /* asked-for truncation */
+    dst[limit] = 0;
+    return (uint32_t)-1;
+}
+
 /* _vsnwprintf(dst, count, fmt, va_list) — the va_list is a pointer to the args. */
 uint32_t aret_vsnwprintf(uint32_t esp) {
     uint16_t *dst = (uint16_t *)AP(0);
