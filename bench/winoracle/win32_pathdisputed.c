@@ -18,7 +18,11 @@
  *    the two candidate rules give DIFFERENT numbers, which the earlier grid lacked.
  *
  * Output is deliberately plain and stable so it can be diffed against the same
- * program's output under Wine. */
+ * program's output under Wine.
+ *
+ * NOTE for whoever adds a probe here: the workflow triggers on `paths:`, so a commit
+ * that only fixes something OUTSIDE those paths will not re-run it. That is how the
+ * first green run had to be forced. */
 #include <windows.h>
 #include <shlwapi.h>
 #include <stdio.h>
