@@ -6890,6 +6890,48 @@ uint32_t aret_CoGetMalloc(uint32_t esp) {
     return 0;                                     /* S_OK */
 }
 
+/* CoCreateInstance(rclsid, pUnkOuter, dwClsContext, riid, ppv) — NOT modelled, but
+ * the abort now NAMES what was asked for.
+ *
+ * "unimplemented import CALLED: CoCreateInstance" is true and useless: which class a
+ * program wants is the entire question, and without it the next session has to go
+ * find out with a debugger. Printing the CLSID and IID costs nothing and turns the
+ * wall into a work item. Same lesson as the x87 guard, which was sound but mute:
+ * "loud" and "diagnostic" are not the same property, and only the second saves time.
+ *
+ * Deliberately still an abort rather than REGDB_E_CLASSNOTREG. That would be a
+ * DEFINED failure and therefore tempting, but it is not a sound one here: under Wine
+ * the class IS registered and the call succeeds, so answering "not registered" would
+ * silently push the program down an error path it never takes on a real system —
+ * a different execution, presented as normal. */
+static void u32_fmt_guid(char *out, const uint8_t *g) {
+    static const char hex[] = "0123456789ABCDEF";
+    if (!g) { memcpy(out, "(null)", 7); return; }
+    static const int ord[16] = { 3,2,1,0, -1, 5,4, -1, 7,6, -1, 8,9, -1, 10,11 };
+    int o = 0;
+    out[o++] = '{';
+    for (int i = 0; i < 16; i++) {
+        if (ord[i] < 0) { out[o++] = '-'; continue; }
+        out[o++] = hex[(g[ord[i]] >> 4) & 15];
+        out[o++] = hex[g[ord[i]] & 15];
+    }
+    for (int i = 12; i < 16; i++) {
+        out[o++] = hex[(g[i] >> 4) & 15];
+        out[o++] = hex[g[i] & 15];
+    }
+    out[o++] = '}';
+    out[o] = 0;
+}
+uint32_t aret_CoCreateInstance(uint32_t esp) {
+    char msg[160], c[48], i[48];
+    u32_fmt_guid(c, (const uint8_t *)(uintptr_t)WU(0));
+    u32_fmt_guid(i, (const uint8_t *)(uintptr_t)WU(3));
+    snprintf(msg, sizeof msg, "CoCreateInstance class %s as %s (ctx %u)",
+             c, i, (unsigned)WU(2));
+    aret_unmodelled(msg);
+    return 0x80004005u;   /* E_FAIL, never reached: aret_unmodelled aborts */
+}
+
 /* ResolveDelayLoadedAPI(base, descriptor, failDllHook, failSysHook, thunk, flags)
  * — parse the IMAGE_DELAYLOAD_DESCRIPTOR (RVA-based), resolve the API to a
  * synthetic VA (patching the delay-IAT slot so later calls dispatch directly),
