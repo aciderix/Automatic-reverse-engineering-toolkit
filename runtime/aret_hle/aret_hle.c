@@ -2961,6 +2961,58 @@ uint32_t aret_signal(uint32_t esp) {
     aret_sig_handlers[sig] = handler;
     return prev;
 }
+
+/* `_XcptFilter(code, EXCEPTION_POINTERS*)` — the CRT's top-level exception filter, the
+ * one `mainCRTStartup` wraps its call to `main` in. It is where a Win32 structured
+ * exception meets the C `signal()` world: the CRT maps the NT code to a C signal and
+ * honours whatever disposition `signal()` left there.
+ *
+ * MEASURED against Wine's msvcrt through a forced import, sweeping 16 NT codes across
+ * three states of the signal table (nothing installed / handlers installed / SIG_IGN).
+ * The three-state sweep is what makes the table derivable at all: with a handler
+ * installed, only the FIRST code of each signal group fires — because delivering a
+ * signal RESETS its disposition to SIG_DFL, the classic one-shot rule — so a single
+ * pass would have looked like an almost-empty mapping. The SIG_IGN pass, which
+ * consumes nothing, is the one that shows the real groups.
+ *
+ * Two results that contradict what the names suggest:
+ *   - `STATUS_INTEGER_DIVIDE_BY_ZERO` is **not** mapped to SIGFPE (nor is
+ *     INTEGER_OVERFLOW, nor ARRAY_BOUNDS_EXCEEDED, nor STACK_OVERFLOW). Only the
+ *     seven floating-point statuses are. A C program that installs a SIGFPE handler
+ *     and divides an integer by zero does not get it.
+ *   - With nothing installed the answer is EXCEPTION_CONTINUE_SEARCH (0), not
+ *     EXECUTE_HANDLER: the CRT does not swallow the exception, it lets it keep
+ *     propagating. That is also what keeps us sound — an exception nobody handles
+ *     still reaches our loud unhandled path instead of being quietly absorbed here.
+ * NULL EXCEPTION_POINTERS is answered with 0, not a fault — and it is checked BEFORE
+ * the signal table, proven by sweeping the NULL case through all three dispositions:
+ * the answer stays 0 even where SIG_IGN would give -1, and the handler does not run.
+ * One state would not have separated "checked first" from "coincidence". */
+uint32_t aret_XcptFilter(uint32_t esp) {
+    uint32_t code = arg(esp, 0);
+    if (arg(esp, 1) == 0) return 0;
+    int sig;
+    switch (code) {
+    case 0xC0000005u: sig = 11; break;                    /* ACCESS_VIOLATION -> SIGSEGV */
+    case 0xC000008Du: case 0xC000008Eu: case 0xC000008Fu: /* FLT_DENORMAL/DIV0/INEXACT   */
+    case 0xC0000090u: case 0xC0000091u: case 0xC0000092u: /* INVALID_OP/OVERFLOW/STACK   */
+    case 0xC0000093u: sig = 8;  break;                    /* FLT_UNDERFLOW    -> SIGFPE  */
+    case 0xC0000096u: case 0xC000001Du: sig = 4; break;   /* PRIV/ILLEGAL_INSTR -> SIGILL */
+    default: return 0;                                    /* unmapped -> CONTINUE_SEARCH */
+    }
+    uint32_t h = aret_sig_handlers[sig];
+    if (h == 0) return 0;                                 /* SIG_DFL -> CONTINUE_SEARCH  */
+    if (h == 1) return 0xFFFFFFFFu;                       /* SIG_IGN -> CONTINUE_EXECUTION */
+    /* Delivering resets the disposition FIRST — measured: a second exception in the
+     * same signal group afterwards behaves exactly like SIG_DFL. Reset before the
+     * call, not after, so a handler that raises again sees the reset state. */
+    aret_sig_handlers[sig] = 0;
+    uint32_t frame = (esp - 0x80) & ~15u;
+    uint32_t *fr = (uint32_t *)(uintptr_t)frame;
+    fr[0] = 0; fr[1] = (uint32_t)sig;
+    (void)aret_call(h, frame, 0, 0, 0, 0, 0, 0, 0);
+    return 0xFFFFFFFFu;                                   /* EXCEPTION_CONTINUE_EXECUTION */
+}
 /* atexit: the registered callbacks are transpiled sub_<va> using the machine-
  * stack ABI, so dispatch them through aret_call (like the qsort trampoline) from
  * a single host atexit handler. LIFO order, as C requires. */

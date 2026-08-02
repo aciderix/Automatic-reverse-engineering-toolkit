@@ -6013,3 +6013,27 @@ Détail : **70 §6** (roadmap). Résumé :
 - **Périmètre honnête** : la fixture couvre les chemins **sans transfert**. `EXECUTE_HANDLER` (unwind global +
   longjmp) est **partagé mot pour mot** avec `_except_handler3` et gardé par `ehdiff` ; il n'est pas testable sur une
   frame fabriquée à la main, qui n'a pas fait de vrai `mov fs:[0]` et n'a donc pas de `setjmp` où revenir.
+
+### 2026-08-01 — [HLE-CRT][EH] **`_XcptFilter` — pourquoi il fallait balayer TROIS états de la table `signal()` pour en dériver un seul**
+
+- **Mur** : après `_except_handler4_common`, WinMerge appelle `_XcptFilter(code, EXCEPTION_POINTERS*)` — le filtre
+  top-level du CRT, l'endroit où une exception structurée Win32 rencontre le monde `signal()` du C.
+- **⭐ Le point de méthode, et il est réutilisable** : la grille balaie **trois états** de la table (rien d'installé /
+  handlers installés / `SIG_IGN`), et ce n'est **pas** de la minutie gratuite. **Délivrer un signal REMET sa
+  disposition à `SIG_DFL`** (règle one-shot ANSI) ⇒ avec des handlers installés, seul le **premier** code de chaque
+  groupe se déclenche. Un balayage à un seul état aurait montré une correspondance quasi vide, et une implémentation
+  bâtie dessus aurait été fausse pour **tous les codes sauf un par groupe**. C'est la passe **`SIG_IGN`**, qui ne
+  consomme rien, qui révèle les vrais groupes. *Quand une API lit un état global qu'elle MODIFIE, une grille à un
+  seul état mesure la consommation, pas le contrat.*
+- **Deux résultats mesurés qui contredisent les noms** : `STATUS_INTEGER_DIVIDE_BY_ZERO` n'est **pas** mappé sur
+  SIGFPE (ni `INTEGER_OVERFLOW`, ni `ARRAY_BOUNDS_EXCEEDED`, ni `STACK_OVERFLOW`) — **seuls les sept statuts
+  flottants** le sont ; et sans rien d'installé la réponse est **CONTINUE_SEARCH (0)**, pas EXECUTE_HANDLER : le CRT
+  **n'avale pas** l'exception. Ce second point est aussi ce qui nous garde sound — une exception que personne ne
+  gère continue jusqu'à notre chemin « non gérée », bruyant, au lieu d'être absorbée en silence ici.
+- **⚠️ Et la fixture a attrapé une case que j'avais modélisée de travers** : `_XcptFilter(code, **NULL**)` rend **0**
+  *même* quand la disposition est `SIG_IGN` (qui rendrait -1). Ma 1ʳᵉ version consultait la table d'abord ⇒ rouge sur
+  **une ligne**. Correction : le pointeur est testé **avant**. Et plutôt que de patcher sur un seul point, la grille a
+  été **élargie** — le cas NULL est désormais balayé dans les **trois** dispositions, ce qui sépare « testé d'abord »
+  de « coïncidence ». Un seul état ne l'aurait pas fait.
+- **Vérifié** : `winecorpus/crt_xcptfilter.{c,def}` bit-identique Wine, **ehdiff 6/6**, difftest 272/272, hash
+  `19acad982194bf07` inchangé.
