@@ -22,7 +22,7 @@ Trois **couches** (branchement → comportement), et pour le comportement trois 
 | Couche | Source | Forme | Coût |
 |--------|--------|-------|------|
 | `@N` / pops (ABI) | import-libs mingw | script | ✅ fait |
-| Signatures / stubs | win32metadata / entêtes mingw + clang | script | 🔜 pas fait |
+| Signatures / stubs | entêtes mingw + clang (AST JSON) | script | ✅ premier cran (`gen_win32_sigs.py`) : 5066 `@N` mutuellement prouvés + squelettes typés |
 | **Comportement (corps)** | **sources Wine** | légère (données) / moyenne (corps) / lourde (DLL entières + plancher ntdll) | 🚧 **légère + moyenne prouvées** ; lourde = milestone |
 
 ---
@@ -37,6 +37,25 @@ Trois **couches** (branchement → comportement), et pour le comportement trois 
 - **Portes** : hash transpile inchangé `19acad982194bf07` + **winediff 210/211** + stdcall_audit PASS.
 - **Sûreté** : additif ⇒ le hash ne peut pas changer, aucune régression possible ; les `@N` viennent des mêmes
   libs contre lesquelles les binaires sont liés ⇒ corrects par construction. Détail : 81 §I12.
+
+### `tools/gen_win32_sigs.py` — prototypes typés Win32 (couche SIGNATURES) ✅ premier cran
+- **Entrée** : entêtes mingw du cœur système, lus via l'**AST JSON de clang** (`clang-18 -Xclang -ast-dump=json`,
+  cible `i686-w64-mingw32`; aucun binding libclang requis).
+- **Récupère** ce que les import-libs ne portent PAS : type de retour, **types par argument**, convention d'appel.
+  **6494** prototypes `__stdcall` parsés.
+- **`--check`** (preuve, ré-exécutable) : recalcule le `@N` de chaque `__stdcall` par **somme des tailles d'arguments**
+  (ABI i686) et le compare à `stdcall_pops.rs`. Les deux nombres viennent de **chemins toolchain INDÉPENDANTS**
+  (prototype d'entête vs mangling d'import-lib) ⇒ l'accord est une **preuve mutuelle** de la couche ABI :
+  **5066 fonctions mutuellement prouvées**, **0 conflit**. On n'affirme que là où **chaque** argument est **prouvablement
+  dimensionné** ; un struct-par-valeur/typedef inconnu ⇒ **abstention** (711), jamais un pari (§0).
+- **⭐ A découvert un vrai skew entête/lib** : `I_RpcGetAssociationContext` et `mmDrvInstall` — l'entête porte une
+  arité plus récente (8/16) que l'import-lib (`@4`/`@12`, vérifié au `nm`). L'import-lib **fait foi** (c'est ce que le
+  binaire lie réellement pour nettoyer la pile) ⇒ `stdcall_pops.rs` a raison ; skew **documenté** (allowlist), le check
+  reste vert en le **signalant**.
+- **`--skeleton NAME…`** (tueur de boilerplate) : émet un shim ARET prêt à remplir — args dépaquetés en **locaux typés**
+  via le bon accesseur (`WP`/`WI`/`WU`/`WS`), corps `aret_unimpl` **SOUND** (aborte tant que la logique n'est pas écrite,
+  jamais de valeur devinée). Auto-vérification : le squelette de `StrFromTimeIntervalW` **reproduit l'ABI écrite à la main**.
+- **Ré-exécuter** : `python3 tools/gen_win32_sigs.py --check` (ou `--skeleton StrFromTimeIntervalW …`).
 
 ### `tools/gen_mlang_cp.py` — table de code pages mlang (couche comportement, forme LÉGÈRE) ✅
 - **Entrée** : `dlls/mlang/mlang.c` de Wine (récupéré via `curl` github raw ; `WINE_MLANG_C=<path>`).
@@ -67,8 +86,10 @@ Trois **couches** (branchement → comportement), et pour le comportement trois 
 ### Prochains crans (priorisés)
 1. **WinMerge** : le mur courant n'est plus mlang mais un **null-deref** (`0xC0000005 at 0x10`, C++ lifté) →
    forensics **instrument-first** (build `ARET_TRACE` → fonction + objet null). *(Chantier profondeur.)*
-2. **Signatures / stubs** (couche 2) : générer les squelettes de shims + le marshalling A/W depuis les entêtes
-   mingw (clang AST) ou win32metadata. *(Multiplicateur ; pas commencé.)*
+2. ✅ **FAIT (premier cran) — Signatures / stubs** (couche 2, `gen_win32_sigs.py`) : prototypes typés depuis l'AST clang
+   des entêtes mingw ⇒ (a) `--check` = 5066 `@N` mutuellement prouvés (entête vs import-lib), 0 conflit, 1 skew documenté ;
+   (b) `--skeleton` = shims typés prêts à remplir, corps `aret_unimpl` sound. **Prolonger** : marshalling A/W automatique
+   (paire détectée), génération de familles entières de squelettes sur un mur mesuré.
 3. ✅ **FAIT — Corps Wine forme MOYENNE, deux tailles** : `GetFamilyCodePage` (petite boucle) **puis**
    `StrFromTimeIntervalW/A` (shlwapi, **corps entier à algorithme** + sa chaîne de 3 aides internes
    `WriteReverseNum`/`FormatSignificant`/`WriteTimeClass` + chaînes ressource), les deux **bit-identiques Wine**.

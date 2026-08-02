@@ -6515,3 +6515,26 @@ Détail : **70 §6** (roadmap). Résumé :
   `StrFromTimeIntervalA` **rend toujours 0** (il n'actualise jamais `iRet`).
 - **Portes** : `winecorpus/str_time_interval` (22 cas : exemple documenté 138h43m15s × iDigits 1..7, arrondis 499/500 ms,
   classes isolées, clamps `cchMax`, variante A) **bit-identique Wine** ; hash inchangé `19acad982194bf07` ; stdcall_audit PASS.
+
+### 2026-08-02 — [I12][INFRA][ABI][SIG] **Couche 2 (signatures) — premier cran : `gen_win32_sigs.py` extrait les prototypes TYPÉS de l'AST clang ; 5066 `@N` mutuellement prouvés (entête vs import-lib) ; squelettes typés sound**
+
+- **Couche SIGNATURES** (doc 82) : les import-libs (couche 1) portent le `@N` mais **pas les types**.
+  `tools/gen_win32_sigs.py` lit l'**AST JSON de clang-18** des entêtes mingw (`-Xclang -ast-dump=json`, cible
+  `i686-w64-mingw32`, aucun binding libclang) et récupère retour + **types par argument** + convention. **6494**
+  prototypes `__stdcall`.
+- **⭐ Preuve mutuelle de l'ABI par deux chemins toolchain INDÉPENDANTS** (`--check`) : recalcule `@N` par **somme des
+  tailles d'args** (ABI i686) et compare à `stdcall_pops.rs` (dérivé, lui, du **mangling d'import-lib**). **5066
+  fonctions d'accord, 0 conflit**. On n'affirme que si **chaque** arg est prouvablement dimensionné ; struct-par-valeur/
+  typedef inconnu ⇒ **abstention (711)**, jamais un pari (§0). C'est un **oracle statique** de la couche 1.
+- **⭐ A trouvé un vrai skew entête/lib** : `I_RpcGetAssociationContext`, `mmDrvInstall` — l'**entête** porte une arité
+  plus récente (8/16) que l'**import-lib** (`@4`/`@12`, confirmé au `nm` sur `librpcrt4/libmincore/libwinmm`). L'import-lib
+  **fait foi** (c'est ce que le binaire lie pour nettoyer la pile) ⇒ `stdcall_pops.rs` a raison ; skew **documenté**
+  (allowlist), le check reste vert **en le signalant**. Deux internes obscurs, hors de tout chemin d'app.
+- **Tueur de boilerplate** (`--skeleton NAME…`) : émet un shim ARET prêt à remplir — args en **locaux typés** via le bon
+  accesseur (`WP`/`WI`/`WU`/`WS`), corps **`aret_unimpl` SOUND** (aborte tant que la logique n'est pas écrite). Le
+  squelette de `StrFromTimeIntervalW` **reproduit exactement l'ABI que j'avais écrite à la main** (auto-vérification).
+- **Cas-par-cas → amont** : ce cran déplace le **squelette** (dépaquetage typé des args + arité) vers l'**amont/en gros**
+  (5066 fonctions d'un coup), pendant que la **logique** reste cas-par-cas (jusqu'à la forme LOURDE). Réponse concrète à
+  la question « au cas par cas ou en amont ».
+- **Portes** : `gen_win32_sigs.py --check` **PASS** (5066 prouvés, 2 skew documentés) ; n'entre pas dans le binaire
+  (fabrication seule ⇒ autonomie au runtime intacte) ; hash transpile inchangé.
