@@ -16,6 +16,7 @@
 #define ARET_HLE_H
 
 #include <stdint.h>
+#include <stddef.h>  /* size_t (translate_path) */
 
 /* kernel32.dll — console / standard handles */
 uint32_t aret_GetStdHandle(uint32_t esp);  /* (DWORD nStdHandle) -> HANDLE (a POSIX fd) */
@@ -144,6 +145,11 @@ uint32_t __aret_callee_pop(uint32_t va);
 /* Register a transpiled callback (its code VA) to run at process exit; shared by
  * the atexit and _onexit shims. */
 void aret_register_atexit(uint32_t va);
+
+/* Translate a Windows path to a native one under the ARET prefix (`C:\dir` ->
+ * `<prefix>/drive_c/dir`, `\dir` -> `<prefix>/dir`, Unix/relative pass through).
+ * Shared with the shell special-folder shims so a CSIDL folder maps like any path. */
+void translate_path(const char *win, char *out, size_t cap);
 
 /* Data imports (variables): for a known name returns a pointer to a synthetic
  * object (e.g. the `_iob` stdio array), so the builder can patch the IAT slot to

@@ -743,7 +743,7 @@ static const char *aret_prefix(void) {
  * (only `\`-rooted backslash paths, which a Unix tool never produces, are
  * sandboxed). Relative paths still pass through, so write-then-read round-trips
  * stay consistent. */
-static void translate_path(const char *win, char *out, size_t cap) {
+void translate_path(const char *win, char *out, size_t cap) {
     if (!win) { if (cap) out[0] = 0; return; }
     size_t o = 0;
     const char *s = win;

@@ -7263,9 +7263,12 @@ static uint32_t u32_im_heapmin(uint32_t esp) { (void)esp; return 0; }
 static uint32_t g_imalloc_vtbl[9];
 static uint32_t g_imalloc_obj;          /* one field: the vtable pointer */
 
-uint32_t aret_CoGetMalloc(uint32_t esp) {
-    uint32_t *ppv = (uint32_t *)(uintptr_t)WU(1);
-    if (!ppv) return 0x80004003u;       /* E_POINTER */
+/* Lazily build the process-singleton IMalloc (vtable in program-reachable memory)
+ * and return a pointer to the object. 0 if no synthetic VA is left. Shared by
+ * CoGetMalloc and SHGetMalloc — they hand out the SAME allocator, so a block from
+ * one frees through the other (a PIDL from SHGetSpecialFolderLocation is freed via
+ * SHGetMalloc()->Free in the classic shell idiom). */
+static uint32_t u32_get_imalloc(void) {
     if (!g_imalloc_obj) {
         static const struct { uint32_t (*fn)(uint32_t); uint16_t pop; } meth[9] = {
             { u32_im_qi, 12 }, { u32_im_addref, 4 }, { u32_im_release, 4 },
@@ -7275,7 +7278,7 @@ uint32_t aret_CoGetMalloc(uint32_t esp) {
         for (int i = 0; i < 9; i++) {
             if (g_delay_res_n >= 64) {
                 aret_unmodelled("CoGetMalloc: no synthetic VA left for the IMalloc vtable");
-                return 0x80004005u;
+                return 0;
             }
             uint32_t va = DELAY_VA_BASE + (uint32_t)g_delay_res_n;
             g_delay_res[g_delay_res_n].va = va;
@@ -7286,8 +7289,196 @@ uint32_t aret_CoGetMalloc(uint32_t esp) {
         }
         g_imalloc_obj = (uint32_t)(uintptr_t)g_imalloc_vtbl;
     }
-    *ppv = (uint32_t)(uintptr_t)&g_imalloc_obj;   /* singleton: measured */
-    return 0;                                     /* S_OK */
+    return (uint32_t)(uintptr_t)&g_imalloc_obj;   /* singleton: measured */
+}
+
+uint32_t aret_CoGetMalloc(uint32_t esp) {
+    uint32_t *ppv = (uint32_t *)(uintptr_t)WU(1);
+    if (!ppv) return 0x80004003u;       /* E_POINTER */
+    uint32_t obj = u32_get_imalloc();
+    if (!obj) return 0x80004005u;       /* E_FAIL: no VA left */
+    *ppv = obj;
+    return 0;                           /* S_OK */
+}
+
+/* SHGetMalloc(IMalloc **ppMalloc) -> HRESULT. The shell's task allocator IS the COM
+ * task allocator (Wine and Windows return the same IMalloc), so hand out the shared
+ * singleton. Its single argument sits at [esp+0] (vs CoGetMalloc's [esp+1]). */
+uint32_t aret_SHGetMalloc(uint32_t esp) {
+    uint32_t *ppv = (uint32_t *)(uintptr_t)WU(0);
+    if (!ppv) return 0x80004003u;       /* E_POINTER */
+    uint32_t obj = u32_get_imalloc();
+    if (!obj) return 0x80004005u;
+    *ppv = obj;
+    return 0;                           /* S_OK */
+}
+
+/* ---- Shell special folders (shell32 CSIDL / PIDL) --------------------------
+ * The CSIDL family, modelled as ONE coherent, sound unit:
+ *   SHGetSpecialFolderLocation(hwnd, csidl, &pidl)  -> a synthetic PIDL
+ *   SHGetPathFromIDList{W,A}(pidl, path)            -> the path back out
+ *   SHGetSpecialFolderPath{W,A}(hwnd, path, csidl, create)  -> path directly
+ *   SHGetFolderPath{W,A}(hwnd, csidl, tok, flags, path)     -> path directly (HRESULT)
+ * A CSIDL resolves to a Windows path under a synthetic user profile; the file
+ * subsystem then maps THAT under the ARET prefix like any other path (a program
+ * writing into CSIDL_APPDATA lands in <prefix>/drive_c/users/aret/AppData/...).
+ * The exact bytes of a special-folder path are environment-specific (user name,
+ * OS layout) and NOT a soundness property — any valid, writable folder of the
+ * right kind is correct; so this returns a standard-layout path, not a guess.
+ * An UNKNOWN csidl returns a DEFINED failure (E_INVALIDARG / FALSE), never a made-up
+ * path. A PIDL we did not create decodes to FALSE (no real shell-namespace PIDL can
+ * exist — the enumerators are unimplemented), never a wrong path. The PIDL is a
+ * CoTaskMem-tracked block, so IMalloc::Free / CoTaskMemFree / ILFree free it. */
+#define ARET_CSIDL_MASK        0x00ffu
+#define ARET_CSIDL_FLAG_CREATE 0x8000u
+static const uint8_t ARET_PIDL_MAGIC[4] = { 'A','P','I','L' };
+
+static int csidl_to_winpath(unsigned csidl, char *out, size_t cap) {
+    const char *p = 0;
+    switch (csidl & ARET_CSIDL_MASK) {
+        case 0x00: p = "C:\\users\\aret\\Desktop"; break;                 /* DESKTOP */
+        case 0x02: p = "C:\\users\\aret\\AppData\\Roaming\\Microsoft\\Windows\\Start Menu\\Programs"; break; /* PROGRAMS */
+        case 0x05: p = "C:\\users\\aret\\Documents"; break;               /* PERSONAL */
+        case 0x06: p = "C:\\users\\aret\\Favorites"; break;               /* FAVORITES */
+        case 0x07: p = "C:\\users\\aret\\AppData\\Roaming\\Microsoft\\Windows\\Start Menu\\Programs\\Startup"; break; /* STARTUP */
+        case 0x08: p = "C:\\users\\aret\\Recent"; break;                  /* RECENT */
+        case 0x09: p = "C:\\users\\aret\\SendTo"; break;                  /* SENDTO */
+        case 0x0b: p = "C:\\users\\aret\\AppData\\Roaming\\Microsoft\\Windows\\Start Menu"; break; /* STARTMENU */
+        case 0x0d: p = "C:\\users\\aret\\Music"; break;                   /* MYMUSIC */
+        case 0x0e: p = "C:\\users\\aret\\Videos"; break;                  /* MYVIDEO */
+        case 0x10: p = "C:\\users\\aret\\Desktop"; break;                 /* DESKTOPDIRECTORY */
+        case 0x14: p = "C:\\windows\\Fonts"; break;                       /* FONTS */
+        case 0x15: p = "C:\\users\\aret\\Templates"; break;               /* TEMPLATES */
+        case 0x16: p = "C:\\ProgramData\\Microsoft\\Windows\\Start Menu"; break; /* COMMON_STARTMENU */
+        case 0x17: p = "C:\\ProgramData\\Microsoft\\Windows\\Start Menu\\Programs"; break; /* COMMON_PROGRAMS */
+        case 0x18: p = "C:\\ProgramData\\Microsoft\\Windows\\Start Menu\\Programs\\Startup"; break; /* COMMON_STARTUP */
+        case 0x19: p = "C:\\users\\Public\\Desktop"; break;               /* COMMON_DESKTOPDIRECTORY */
+        case 0x1a: p = "C:\\users\\aret\\AppData\\Roaming"; break;        /* APPDATA */
+        case 0x1c: p = "C:\\users\\aret\\AppData\\Local"; break;          /* LOCAL_APPDATA */
+        case 0x1f: p = "C:\\users\\Public\\Favorites"; break;             /* COMMON_FAVORITES */
+        case 0x20: p = "C:\\users\\aret\\AppData\\Local\\Microsoft\\Windows\\Temporary Internet Files"; break; /* INTERNET_CACHE */
+        case 0x21: p = "C:\\users\\aret\\AppData\\Roaming\\Microsoft\\Windows\\Cookies"; break; /* COOKIES */
+        case 0x22: p = "C:\\users\\aret\\AppData\\Local\\Microsoft\\Windows\\History"; break; /* HISTORY */
+        case 0x23: p = "C:\\ProgramData"; break;                          /* COMMON_APPDATA */
+        case 0x24: p = "C:\\windows"; break;                              /* WINDOWS */
+        case 0x25: p = "C:\\windows\\system32"; break;                    /* SYSTEM */
+        case 0x26: p = "C:\\Program Files"; break;                        /* PROGRAM_FILES */
+        case 0x27: p = "C:\\users\\aret\\Pictures"; break;                /* MYPICTURES */
+        case 0x28: p = "C:\\users\\aret"; break;                          /* PROFILE */
+        case 0x2b: p = "C:\\Program Files\\Common Files"; break;          /* PROGRAM_FILES_COMMON */
+        case 0x2d: p = "C:\\ProgramData\\Microsoft\\Windows\\Templates"; break; /* COMMON_TEMPLATES */
+        case 0x2e: p = "C:\\users\\Public\\Documents"; break;             /* COMMON_DOCUMENTS */
+        case 0x35: p = "C:\\users\\Public\\Music"; break;                 /* COMMON_MUSIC */
+        case 0x36: p = "C:\\users\\Public\\Pictures"; break;              /* COMMON_PICTURES */
+        case 0x37: p = "C:\\users\\Public\\Videos"; break;                /* COMMON_VIDEO */
+        default: return 0;
+    }
+    snprintf(out, cap, "%s", p);
+    return 1;
+}
+
+/* Create the native directory a CSIDL folder maps to (mkdir -p), so fCreate
+ * semantics hold and a program that stats the folder finds it. */
+static void shell_ensure_dir(const char *winpath) {
+    char nat[1024];
+    translate_path(winpath, nat, sizeof nat);
+    for (char *s = nat + 1; *s; s++) {
+        if (*s == '/') { *s = 0; mkdir(nat, 0777); *s = '/'; }
+    }
+    mkdir(nat, 0777);
+}
+
+/* Copy a narrow string to a guest WIDE (UTF-16) buffer (Latin-1 widen — the folder
+ * names above are ASCII). Writes the terminating NUL. */
+static void shell_put_wide(uint16_t *dst, const char *src) {
+    size_t i = 0;
+    for (; src[i]; i++) dst[i] = (unsigned char)src[i];
+    dst[i] = 0;
+}
+
+uint32_t aret_SHGetSpecialFolderLocation(uint32_t esp) {
+    /* (HWND hwnd, int csidl, LPITEMIDLIST *ppidl) -> HRESULT */
+    unsigned csidl = (unsigned)WU(1);
+    uint32_t *ppidl = (uint32_t *)WP(2);
+    char win[512];
+    if (!csidl_to_winpath(csidl, win, sizeof win)) {
+        if (ppidl) *ppidl = 0;
+        return 0x80070057u;                 /* E_INVALIDARG: unknown CSIDL, defined failure */
+    }
+    shell_ensure_dir(win);
+    size_t n = strlen(win) + 1;
+    unsigned char *blob = (unsigned char *)malloc(4 + n);
+    if (!blob) { if (ppidl) *ppidl = 0; return 0x8007000Eu; }  /* E_OUTOFMEMORY */
+    memcpy(blob, ARET_PIDL_MAGIC, 4);
+    memcpy(blob + 4, win, n);
+    u32_com_track(blob, 4 + n);             /* freeable via IMalloc::Free / CoTaskMemFree */
+    if (ppidl) *ppidl = (uint32_t)(uintptr_t)blob;
+    return 0;                               /* S_OK */
+}
+
+/* Decode our synthetic PIDL back to its Windows path; 0 and empty if foreign. */
+static const char *shell_pidl_path(uint32_t pidl) {
+    const unsigned char *b = (const unsigned char *)(uintptr_t)pidl;
+    if (!b || memcmp(b, ARET_PIDL_MAGIC, 4) != 0) return 0;
+    return (const char *)(b + 4);
+}
+
+uint32_t aret_SHGetPathFromIDListW(uint32_t esp) {
+    /* (LPCITEMIDLIST pidl, LPWSTR pszPath) -> BOOL */
+    const char *win = shell_pidl_path(WU(0));
+    uint16_t *out = (uint16_t *)WP(1);
+    if (!win || !out) return 0;             /* FALSE: foreign PIDL, defined failure */
+    shell_put_wide(out, win);
+    return 1;
+}
+uint32_t aret_SHGetPathFromIDListA(uint32_t esp) {
+    const char *win = shell_pidl_path(WU(0));
+    char *out = WS(1);
+    if (!win || !out) return 0;
+    strcpy(out, win);
+    return 1;
+}
+
+uint32_t aret_SHGetSpecialFolderPathW(uint32_t esp) {
+    /* (HWND hwnd, LPWSTR pszPath, int csidl, BOOL fCreate) -> BOOL */
+    uint16_t *out = (uint16_t *)WP(1);
+    unsigned csidl = (unsigned)WU(2);
+    char win[512];
+    if (!out || !csidl_to_winpath(csidl, win, sizeof win)) return 0;
+    if (WU(3)) shell_ensure_dir(win);
+    shell_put_wide(out, win);
+    return 1;
+}
+uint32_t aret_SHGetSpecialFolderPathA(uint32_t esp) {
+    char *out = WS(1);
+    unsigned csidl = (unsigned)WU(2);
+    char win[512];
+    if (!out || !csidl_to_winpath(csidl, win, sizeof win)) return 0;
+    if (WU(3)) shell_ensure_dir(win);
+    strcpy(out, win);
+    return 1;
+}
+
+uint32_t aret_SHGetFolderPathW(uint32_t esp) {
+    /* (HWND, int csidl, HANDLE hToken, DWORD dwFlags, LPWSTR pszPath) -> HRESULT */
+    unsigned csidl = (unsigned)WU(1);
+    uint16_t *out = (uint16_t *)WP(4);
+    char win[512];
+    if (!out) return 0x80004003u;           /* E_POINTER */
+    if (!csidl_to_winpath(csidl, win, sizeof win)) return 0x80070057u; /* E_INVALIDARG */
+    shell_ensure_dir(win);                  /* SHGFP always ensures the folder exists */
+    shell_put_wide(out, win);
+    return 0;                               /* S_OK */
+}
+uint32_t aret_SHGetFolderPathA(uint32_t esp) {
+    unsigned csidl = (unsigned)WU(1);
+    char *out = WS(4);
+    char win[512];
+    if (!out) return 0x80004003u;
+    if (!csidl_to_winpath(csidl, win, sizeof win)) return 0x80070057u;
+    shell_ensure_dir(win);
+    strcpy(out, win);
+    return 0;
 }
 
 /* CoCreateInstance(rclsid, pUnkOuter, dwClsContext, riid, ppv) — NOT modelled, but

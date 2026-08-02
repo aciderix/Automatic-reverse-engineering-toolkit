@@ -6260,3 +6260,40 @@ Détail : **70 §6** (roadmap). Résumé :
   (traceur I1, ring-buffer vidé au crash) → la **queue de trace** dira **lequel** des appels intermédiaires de
   `0x42e884` fut le dernier entré avant la faute `0x42e14e`, donc **quel** appel mfc90u lifté déroute. Mesure en
   cours.
+
+### 2026-08-02 — [I5][HLE-WIN32][DIAG] **Le mur WinMerge a BOUGÉ (mesuré, pas supposé) : le champ `0x51efdc` est franchi — nouveau mur = `SHGetSpecialFolderLocation` ; famille CSIDL/PIDL shell32 implémentée et vérifiée bit-identique Wine**
+
+- **Mesure décisive (build `ARET_TRACE=1` de WinMerge+mfc90u, exécuté headless)** : l'ELF tourne **46 252 entrées de
+  fonctions** avant l'`aret_unimpl`, et l'abort n'est **plus** le champ nul `[0x51efd0+0xc]` — c'est
+  **`SHGetSpecialFolderLocation`**. Contrôles dans la trace : `sub_42e884` (le ctor du sous-objet, cf. entrée
+  précédente) **a tourné** (compté 1), et l'ancien consommateur `sub_42e14e` **n'a jamais tourné** (compté 0) ⇒
+  **le mur `0x10` est derrière nous** dans ce build. Il n'a **pas** été « corrigé » par un fix ciblé : les
+  incréments HLE de la session (SEH v4, Str*/charset/desktop, etc.) ont déplacé le flot, et la **re-mesure** l'a
+  montré — exactement pourquoi la doctrine dit *mesurer, pas affirmer*. La forensics statique du `0x51efdc` reste
+  utile (elle a **corrigé le dossier** : global `_initterm`, pas garde paresseuse) mais le binaire ne l'atteint plus.
+- **`SHGetSpecialFolderLocation` vient de mfc90u LIFTÉ** (absent du désassemblage de WinMergeU.exe) : MFC résout un
+  dossier spécial au démarrage. WinMergeU.exe importe la famille : `SHGetSpecialFolderLocation`,
+  `SHGetPathFromIDListW`, `SHGetMalloc`, `SHBrowseForFolderW`, `SHGetDesktopFolder`, `SHGetValueW` ; mfc90u ajoute
+  `SHGetSpecialFolderPathW`/`SHGetFolderPath{W,A}`.
+- **Famille CSIDL/PIDL modélisée d'un bloc, SOUND (`aret_win32.c`)** :
+  - `SHGetSpecialFolderLocation(hwnd,csidl,&pidl)` → un **PIDL synthétique** : bloc `CoTaskMem`-tracké
+    `[magic 'APIL'][chemin Windows\0]` ; `SHGetPathFromIDList{W,A}(pidl,path)` le **décode**. Un PIDL étranger
+    (impossible dans notre monde : les énumérateurs de namespace shell ne sont pas modélisés) → **FALSE défini**,
+    jamais un chemin faux.
+  - `SHGetSpecialFolderPath{W,A}` et `SHGetFolderPath{W,A}` → le chemin **directement**.
+  - `SHGetMalloc(&pMalloc)` → **le MÊME singleton IMalloc** que `CoGetMalloc` (refactor `u32_get_imalloc`) ⇒ le
+    PIDL se libère via `IMalloc::Free`/`CoTaskMemFree` (le `u32_com_track` partagé). C'est l'idiome exact de MFC.
+  - `csidl_to_winpath` mappe **34 CSIDL** vers un profil utilisateur standard (`C:\users\aret\AppData\Roaming`…),
+    masque les `CSIDL_FLAG_*`, crée le dossier natif (mkdir -p sous le préfixe, via `translate_path` exposé).
+    **CSIDL inconnu → échec DÉFINI** (`E_INVALIDARG`/`FALSE`), jamais un chemin deviné (principe sacré §0).
+  - **Choix de soundness** : la *valeur* exacte d'un chemin de dossier spécial est **environnementale** (nom
+    d'utilisateur, layout OS) et **n'est pas** une propriété de justesse — n'importe quel dossier valide et
+    inscriptible du bon type est correct. Le fixture ne compare donc **pas** les octets du chemin (ils diffèrent
+    légitimement d'avec Wine) mais le **contrat** : codes de succès, chemin non vide, PIDL qui round-trippe, accord
+    entre les deux familles d'API, et l'échec défini du CSIDL inconnu — **tout bit-identique Wine**.
+- **Vérif & portes** : `winecorpus/shell_folders.c` = **bit-identique Wine** (`ok    shell_folders`, winediff 1/1) ;
+  `-lshell32` ajouté à la ligne de link partagée de `winediff.sh` (shell32 était absent) ; **stdcall_audit PASS**
+  (8 nouveaux `@N` : `SHGetSpecialFolderLocation@12`, `SHGetPathFromIDList{W,A}@8`, `SHGetMalloc@4`,
+  `SHGetSpecialFolderPath{W,A}@16`, `SHGetFolderPath{W,A}@20` ; 0 manquant) ; **hash transpile inchangé**
+  `19acad982194bf07` (additif, zéro impact comportemental). `#include <stddef.h>` ajouté à `aret_hle.h` (le
+  `size_t` de `translate_path` exposé).
