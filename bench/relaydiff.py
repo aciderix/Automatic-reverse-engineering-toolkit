@@ -67,6 +67,27 @@ NOISE = {
     "RtlDecodePointer", "RtlEncodePointer", "lock", "unlock", "_lock", "_unlock",
 }
 
+# Pure computational CRT primitives (ctype/string/mem/math). ARET HOST-BACKS these --
+# they run as native libc calls, NOT through a relayed HLE shim -- so they appear on
+# the Wine side but not ours. Dropping them compares like-for-like at the OS/Win32
+# boundary (the HLE surface), instead of over-reporting Wine's msvcrt as divergence.
+# They are computation, not OS state, so this cannot hide a meaningful divergence.
+CRT_PRIMS = {
+    "isspace", "isalpha", "isdigit", "isalnum", "isupper", "islower", "ispunct",
+    "iscntrl", "isprint", "isgraph", "isxdigit", "toupper", "tolower", "_toupper",
+    "_tolower", "iswspace", "iswalpha", "iswdigit", "iswalnum", "towupper", "towlower",
+    "strlen", "wcslen", "strcmp", "wcscmp", "strncmp", "wcsncmp", "strchr", "wcschr",
+    "strrchr", "wcsrchr", "strstr", "wcsstr", "memcpy", "memmove", "memset", "memcmp",
+    "memchr", "strcpy", "wcscpy", "strncpy", "wcsncpy", "strcat", "wcscat", "_stricmp",
+    "_wcsicmp", "_strnicmp", "_wcsnicmp", "atoi", "atol", "strtol", "wcstol", "abs",
+    "labs", "_ismbblead", "_ismbbtrail", "mbtowc", "wctomb", "_mbsinc",
+    "malloc", "free", "realloc", "calloc", "malloc_crt", "free_crt", "_recalloc",
+    "memcpy_s", "memmove_s", "wcscpy_s", "strcpy_s", "wcscat_s", "strcat_s",
+    "wcsncpy_s", "strncpy_s", "dllonexit", "onexit", "initterm", "initterm_e",
+    "new", "delete", "operator new", "operator delete", "_callnewh",
+    "wcsicoll", "wcscoll", "_wcsicoll", "strcoll", "_stricoll",
+}
+
 
 def parse_aret(path):
     """-> ordered list of (name, arg0, retval)."""
@@ -78,7 +99,8 @@ def parse_aret(path):
             calls[m.group(1)] = (m.group(2), m.group(3))
             continue
         m = re.match(r"([0-9a-f]+):Ret\s+(\w+)\(\) retval=([0-9a-f]+)", line)
-        if m and m.group(2) not in RELAY_EXCLUDE and m.group(2) not in NOISE:
+        if m and m.group(2) not in RELAY_EXCLUDE and m.group(2) not in NOISE \
+                and m.group(2) not in CRT_PRIMS:
             arg0 = calls.get(m.group(1), (m.group(2), "?"))[1]
             out.append((m.group(2), arg0, m.group(3)))
     return out
@@ -128,7 +150,7 @@ def parse_wine(path, mods):
             if seq not in pend:
                 continue
             name, arg0, caller = pend.pop(seq)
-            if name in RELAY_EXCLUDE or name in NOISE:
+            if name in RELAY_EXCLUDE or name in NOISE or name in CRT_PRIMS:
                 continue
             if mods and caller in CORE_CALLERS:
                 continue          # Win32-internal plumbing ARET does not replicate

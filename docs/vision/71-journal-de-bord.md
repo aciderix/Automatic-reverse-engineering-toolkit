@@ -6176,3 +6176,29 @@ Détail : **70 §6** (roadmap). Résumé :
   par du vrai code MFC** sur le chemin de faute (handler `0x4b5684` = frame v4 de `sub_44bf51`), et le pipeline de
   diagnostic (traceur I1 → C généré → winedbg remote gdb) est validé de bout en bout — winedbg **fonctionne** en
   remote gdb pour lire la mémoire à un breakpoint, ce qui n'était pas établi avant cette session.
+
+### 2026-08-01 — [I11][DIAG] **Le diff d'exécution TRANCHE : le mur MFC n'est PAS un mauvais retour d'API OS — nos constantes GDI diffèrent, et le reste est plus profond**
+
+- **Outil** : `bench/relaydiff.py` (doc 81 §I11) confronte la trace relay d'ARET (`ARET_RELAY=1`, build+run) à celle
+  de Wine (`WINEDEBUG=+relay,+loaddll`). Détail de construction et règles d'alignement : 81 §I11.
+- **Constat principal sur WinMerge, après filtrage du CRT host-backé des deux côtés** : ARET et Wine **tracent
+  ensemble** à la frontière OS/Win32 jusqu'au crash d'ARET. **Aucune** bifurcation de flot réelle, **aucune** API
+  créatrice qui rende un handle d'un côté et 0 de l'autre. ⇒ **l'hypothèse « un retour HLE incorrect en amont fait
+  abandonner MFC » est ÉCARTÉE pour la surface OS** — c'était pourtant la thèse portée depuis I5. Un outil général
+  a réfuté une hypothèse que la forensics mono-objet ne pouvait ni confirmer ni infirmer.
+- **Ce que l'outil fait REMONTER, en revanche** (42 divergences de valeur, toutes bénignes pour l'instant mais
+  réelles) : nos **`GetSysColor`** rendent les couleurs **Win95 classiques** (`c0c0c0`, `808080`) là où Wine rend
+  son **thème moderne** (`f5f5f5`, `a6a6a6`) — 18 occurrences ; **`GetSystemMetrics`** diverge sur 4 indices
+  (scrollbars 16 vs 17) ; et surtout **`GetSystemMetrics(0x44/0x45)` (SM_C{X,Y}MENUSIZE) rend 0 sous ARET** contre 4
+  sous Wine — une **métrique non modélisée** (retour 0), la plus susceptible des trois de casser un calcul de
+  layout en aval (division/indexation par une taille nulle). **Piste à instruire, pas cause prouvée.**
+- **Filtres d'alignement, documentés comme ne pouvant masquer une divergence** : le CRT purement computationnel
+  (ctype/string/mem/alloc/collate) est **host-backé** par ARET (libc native, non relayée) donc n'apparaît que côté
+  Wine ; le jeter des deux côtés compare le **même périmètre** (la frontière HLE), pas msvcrt. Après ce filtrage :
+  ARET **940** appels OS avant crash, Wine **142 631** (l'app complète). L'asymétrie résiduelle est le crash
+  d'ARET, pas un défaut de l'outil.
+- **Valeur de méthode** : c'est le premier outil du projet qui **réfute une hypothèse de diagnostic à l'échelle du
+  binaire entier** au lieu de la remonter à la main. Le prochain pas cadré n'est plus « trouver qui écrit
+  `[0x51efd0+0xc]` » (frontière OS écartée) mais **soit** modéliser les métriques manquantes (`SM_CXMENUSIZE`…) et
+  re-mesurer, **soit** étendre le relay au **CRT non-computationnel** (les retours msvcrt qui portent de l'état :
+  `_setmbcp`, `setlocale`, `_get_osplatform`…) pour voir si la divergence est là.
