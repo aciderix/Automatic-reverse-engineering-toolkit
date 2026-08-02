@@ -219,6 +219,85 @@ def cmd_skeleton(sigs, names):
         print()
 
 
+# --- A/W marshalling emitter --------------------------------------------------------------
+# Classify a parameter's string-ness from its (sugared) type. Narrow vs wide vs not-a-string,
+# and input (const) vs output (writable). Marshalling A->W is sound ONLY for INPUT strings.
+NARROW_IN  = re.compile(r'\b(LPCSTR|PCSTR|PCTSTR|LPCTSTR)\b|const\s+(unsigned\s+)?char\s*\*|const\s+CHAR\s*\*')
+NARROW_OUT = re.compile(r'\b(LPSTR|PSTR|PTSTR|LPTSTR)\b|(?<!const )\bCHAR\s*\*|(?<!const )\bchar\s*\*')
+WIDE_IN    = re.compile(r'\b(LPCWSTR|PCWSTR)\b|const\s+(WCHAR|wchar_t)\s*\*')
+WIDE_OUT   = re.compile(r'\b(LPWSTR|PWSTR)\b|(?<!const )\b(WCHAR|wchar_t)\s*\*')
+
+
+def _strclass(q):
+    if NARROW_IN.search(q):  return "narrow_in"
+    if WIDE_IN.search(q):    return "wide_in"
+    if NARROW_OUT.search(q): return "narrow_out"
+    if WIDE_OUT.search(q):   return "wide_out"
+    return None
+
+
+def classify_pair(sigA, sigW):
+    """Return ('accept', actions) where actions[i] is 'widen' | 'pass', or ('refuse', reason).
+    ACCEPT only when A and W differ solely in DIRECT INPUT (const) string args."""
+    if len(sigA["params"]) != len(sigW["params"]):
+        return ("refuse", "A/W arities differ")
+    actions = []
+    for i, ((_, qa), (_, qw)) in enumerate(zip(sigA["params"], sigW["params"])):
+        ca, cw = _strclass(qa), _strclass(qw)
+        if qa == qw:
+            actions.append("pass"); continue
+        if ca == "narrow_in" and cw == "wide_in":
+            actions.append("widen"); continue
+        # A narrow OUT buffer marshals to W by a size-tracked round-trip we do NOT model.
+        if ca in ("narrow_out",) or cw in ("wide_out",):
+            return ("refuse", f"arg{i} is an OUTPUT string buffer ({qa}) -> needs size marshalling")
+        # Anything else that differs (e.g. LPLOGFONTA vs LPLOGFONTW: distinct struct layouts,
+        # the documented A!=marshal(W) trap, doc 70) is NOT a pure-string marshal.
+        return ("refuse", f"arg{i} differs beyond strings ({qa} vs {qw}) -> A is not marshal(W)")
+    if "widen" not in actions:
+        return ("refuse", "no string arg differs (A and W identical) -> no marshalling needed")
+    return ("accept", actions)
+
+
+def cmd_marshal(sigs, names):
+    for name in names:
+        if not name.endswith("A"):
+            print(f"/* {name}: pass the ANSI (…A) entry point */"); continue
+        base = name[:-1]; wname = base + "W"
+        sigA, sigW = sigs.get(name), sigs.get(wname)
+        if not sigA or not sigW:
+            print(f"/* {name}: A or W not found in parsed headers */"); continue
+        verdict, info = classify_pair(sigA, sigW)
+        protoA = f"{sigA['ret']} ({', '.join(q for _, q in sigA['params']) or 'void'})"
+        if verdict == "refuse":
+            # SOUND refusal: no thunk. A hand implementation is required; the abort keeps it honest.
+            print(f"/* {name} :: {protoA}\n"
+                  f" * REFUSED (not a pure-string marshal): {info}.\n"
+                  f" * Emit a hand shim; do NOT auto-derive from {wname}. */")
+            print(f"uint32_t aret_{name}(uint32_t esp) {{ aret_unimpl(\"{name}\"); return 0; }}\n")
+            continue
+        actions = info
+        print(f"/* {name} :: {protoA}\n"
+              f" * Auto-marshalled A->{wname}: widen input string args (u32_a2w), pass the rest,\n"
+              f" * call the W core. NULL passes through as NULL. ASCII-exact (u32_a2w). */")
+        print(f"uint32_t aret_{name}(uint32_t esp) {{")
+        for i, act in enumerate(actions):
+            if act == "widen":
+                print(f"    const char *s{i} = (const char *)WP({i});")
+                print(f"    int n{i} = 0; if (s{i}) while (s{i}[n{i}]) n{i}++;")
+                print(f"    uint16_t w{i}[n{i} + 1]; u32_a2w(s{i}, w{i}, n{i} + 1);")
+        n = len(actions)
+        print(f"    uint32_t fr[{n}];")
+        for i, act in enumerate(actions):
+            if act == "widen":
+                print(f"    fr[{i}] = s{i} ? (uint32_t)(uintptr_t)w{i} : 0;")
+            else:
+                print(f"    fr[{i}] = WU({i});")
+        print(f"    return aret_{wname}((uint32_t)(uintptr_t)fr);")
+        print("}")
+        print()
+
+
 def main():
     args = sys.argv[1:]
     ast = parse_ast()
@@ -228,7 +307,10 @@ def main():
     if args[0] == "--skeleton":
         cmd_skeleton(sigs, args[1:])
         return
-    sys.exit(f"usage: {sys.argv[0]} [--check | --skeleton NAME...]")
+    if args[0] == "--marshal":
+        cmd_marshal(sigs, args[1:])
+        return
+    sys.exit(f"usage: {sys.argv[0]} [--check | --skeleton NAME... | --marshal NAMEA...]")
 
 
 if __name__ == "__main__":

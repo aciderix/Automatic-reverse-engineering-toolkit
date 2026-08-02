@@ -6538,3 +6538,24 @@ Détail : **70 §6** (roadmap). Résumé :
   la question « au cas par cas ou en amont ».
 - **Portes** : `gen_win32_sigs.py --check` **PASS** (5066 prouvés, 2 skew documentés) ; n'entre pas dans le binaire
   (fabrication seule ⇒ autonomie au runtime intacte) ; hash transpile inchangé.
+
+### 2026-08-02 — [I12][INFRA][ABI][SIG] **Couche 2 — marshalling A→W automatique (`--marshal`) : le garde-fou §0 EST le cran (refuse le piège `LOGFONTA`≠`LOGFONTW`)**
+
+- **Cran suivant de la couche signatures** (doc 82) : `gen_win32_sigs.py --marshal NAMEA` **dérive** le point d'entrée
+  `…A` de son jumeau `…W` déjà implémenté — élargit chaque arg chaîne **d'entrée** (`u32_a2w`), passe le reste tel quel
+  (rappel : `esp[i]` = arg *i* **directement** dans notre modèle, donc le cadre d'appel W est un simple `uint32_t fr[N]`),
+  appelle le cœur W. **NULL propagé en NULL** (jamais une chaîne vide devinée).
+- **⭐ Le garde-fou de soundness EST la contribution, pas un à-côté.** Le 70 documente que `A ≡ marshal(W)` est **FAUX**
+  en général (le shim W de `GETNONCLIENTMETRICS` renvoyant vers A écrivait aux mauvais offsets car `LOGFONTA` 60 o ≠
+  `LOGFONTW` 92). Le générateur **encode cette frontière** : il **REFUSE** (pas de thunk, `aret_unimpl` honnête) toute
+  paire où A/W diffèrent **ailleurs que sur des chaînes d'entrée** — (a) struct A/W distincts (`CreateFontIndirectA` :
+  `const LOGFONTA*` vs `const LOGFONTW*`), (b) **tampon de SORTIE** (`GetWindowTextA` : `LPSTR` → exige un marshalling de
+  **taille** non modélisé). Démontré : accepte `DeleteFileA`/`CreateDirectoryA`/`CreateFontA` (13 scalaires passés, seul le
+  nom de police élargi), refuse les deux pièges.
+- **Équivalence prouvée** (pas affirmée) : `u32_a2w` élargit `(uint16_t)(unsigned char)`, `aret_w2n` rétrécit `(char)(&0xFF)`
+  ⇒ round-trip **byte-exact 0-255** ⇒ un `…A` **dérivé** est équivalent au `…A` **fait-main** (mêmes `translate_path`+`unlink`
+  pour `DeleteFileA`, pour **tout** octet, pas seulement l'ASCII). **Compile+run vérifiés** (thunk généré compilé `-m32`,
+  `DeleteFileA("hi.txt")`→1, `DeleteFileA(NULL)`→0 = NULL propagé).
+- **Statut** : générateur livré et prouvé (comme `--skeleton`, outil de fabrication non câblé). **Prochain** : exposer
+  `u32_a2w` + proto du cœur W, câbler un thunk dérivé dans le HLE, winediff bit-identique (câblage mécanique).
+- **Portes** : `--check` toujours PASS ; hash transpile **inchangé** (fabrication seule) ; aucun octet du binaire modifié.

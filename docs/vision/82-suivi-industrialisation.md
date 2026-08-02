@@ -55,7 +55,14 @@ Trois **couches** (branchement → comportement), et pour le comportement trois 
 - **`--skeleton NAME…`** (tueur de boilerplate) : émet un shim ARET prêt à remplir — args dépaquetés en **locaux typés**
   via le bon accesseur (`WP`/`WI`/`WU`/`WS`), corps `aret_unimpl` **SOUND** (aborte tant que la logique n'est pas écrite,
   jamais de valeur devinée). Auto-vérification : le squelette de `StrFromTimeIntervalW` **reproduit l'ABI écrite à la main**.
-- **Ré-exécuter** : `python3 tools/gen_win32_sigs.py --check` (ou `--skeleton StrFromTimeIntervalW …`).
+- **`--marshal NAMEA…`** (marshalling A→W automatique) : dérive le point d'entrée **…A** de son jumeau **…W** déjà
+  implémenté — élargit les args chaîne **d'entrée** (`u32_a2w`), passe le reste tel quel (`esp[i]` = arg *i* directement),
+  appelle le cœur W ; **NULL passe en NULL** (pas de chaîne vide devinée). **⭐ Garde-fou §0 = le cœur du cran** : il
+  **REFUSE** (pas de thunk, `aret_unimpl` honnête) toute paire où A/W diffèrent **ailleurs que sur des chaînes d'entrée**
+  — struct A/W distincts (`LOGFONTA`≠`LOGFONTW`, le piège documenté au 70), **tampon de SORTIE** (`LPSTR` : exige un
+  marshalling de taille non modélisé). Le round-trip `u32_a2w`/`aret_w2n` est **byte-exact 0-255** ⇒ un `…A` dérivé est
+  équivalent au `…A` fait-main (ex. `DeleteFileA`). Compile+run vérifiés (thunk généré, NULL propagé).
+- **Ré-exécuter** : `python3 tools/gen_win32_sigs.py --check` (ou `--skeleton …`, `--marshal DeleteFileA …`).
 
 ### `tools/gen_mlang_cp.py` — table de code pages mlang (couche comportement, forme LÉGÈRE) ✅
 - **Entrée** : `dlls/mlang/mlang.c` de Wine (récupéré via `curl` github raw ; `WINE_MLANG_C=<path>`).
@@ -88,8 +95,10 @@ Trois **couches** (branchement → comportement), et pour le comportement trois 
    forensics **instrument-first** (build `ARET_TRACE` → fonction + objet null). *(Chantier profondeur.)*
 2. ✅ **FAIT (premier cran) — Signatures / stubs** (couche 2, `gen_win32_sigs.py`) : prototypes typés depuis l'AST clang
    des entêtes mingw ⇒ (a) `--check` = 5066 `@N` mutuellement prouvés (entête vs import-lib), 0 conflit, 1 skew documenté ;
-   (b) `--skeleton` = shims typés prêts à remplir, corps `aret_unimpl` sound. **Prolonger** : marshalling A/W automatique
-   (paire détectée), génération de familles entières de squelettes sur un mur mesuré.
+   (b) `--skeleton` = shims typés prêts à remplir, corps `aret_unimpl` sound ; (c) `--marshal` = **marshalling A→W
+   automatique** (dérive `…A` de `…W`, élargit les chaînes d'entrée, **refuse** les pièges struct/OUT — garde-fou §0).
+   **Prolonger** : génération de familles entières de squelettes sur un mur mesuré ; câbler un thunk `--marshal` dans le HLE
+   (exposer `u32_a2w` + proto du cœur W) et le prouver bit-identique Wine en winediff.
 3. ✅ **FAIT — Corps Wine forme MOYENNE, deux tailles** : `GetFamilyCodePage` (petite boucle) **puis**
    `StrFromTimeIntervalW/A` (shlwapi, **corps entier à algorithme** + sa chaîne de 3 aides internes
    `WriteReverseNum`/`FormatSignificant`/`WriteTimeClass` + chaînes ressource), les deux **bit-identiques Wine**.
