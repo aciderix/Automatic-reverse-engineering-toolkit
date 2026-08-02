@@ -6119,3 +6119,33 @@ Détail : **70 §6** (roadmap). Résumé :
 - **État mesuré de la bonne cible** : `0x51ef18` est référencée **172 fois** dans le `.text` d'origine (globale
   très utilisée), et **aucun** accès direct à `0x51ef24` n'existe — l'écriture passe donc par un `this`, comme pour
   l'autre. Watchpoint sur `0x51ef24` en cours ; c'est elle qui tranchera.
+
+### 2026-08-01 — [DIAG][CORRECTION-2] **La correction précédente était FAUSSE — et le vrai enseignement est que j'ai raisonné deux fois sur des POSITIONS au lieu de mesurer**
+
+- **Rétablissement** : la globale est bien **`0x51efd0 + 0xc`**, comme l'entrée initiale le disait. La
+  « correction » qui désignait `0x51ef18` est **erronée** et est annulée.
+- **Ce qui tranche, et c'est vérifiable par n'importe qui** : la ligne de définition est
+  `sub_42e14e(uint64_t __esp, uint64_t v256, uint64_t v33, uint64_t v37, uint64_t v20, uint64_t v17, uint64_t v19,
+  uint64_t v15)` et la convention d'émission est `sub_X(__esp, eax, ecx, edx, ebp, esi, edi, ebx)` ⇒ **`v33` est
+  `ecx`**. Or le corps fait `v34 = (v33 & 0xffffffff)` puis `v49 = *(uint32_t*)(v34 + 0xc)`. Donc la base est
+  `ecx = 0x51efd0`.
+- **Pourquoi je me suis trompé la 2ᵉ fois** : j'ai vu `v34` apparaître dans le **slot esi** d'un appel sortant
+  (`sub_42d86f(..., v21, v34, v19, v15)`) et j'en ai conclu que `v34` **était** esi. Faux : c'est la valeur que
+  l'appelant **place** dans l'esi de l'appelé — un simple mouvement de registre. *Un paramètre se lit dans la
+  DÉFINITION, jamais dans un site d'appel sortant.*
+- **⭐ Le vrai enseignement, et il vaut plus que le bug** : les deux fois, j'ai déduit un registre d'une **position**
+  (dans une trace, puis dans un appel) au lieu de le **mesurer**. Et les deux fois, des mesures ultérieures sont
+  venues **confirmer** la fausse piste — parce qu'elles portaient sur le mauvais objet et qu'un objet non concerné
+  n'est, lui non plus, jamais écrit. **Une mesure ne valide pas l'hypothèse qui a choisi sa cible.** C'est la
+  version « diagnostic » du piège des 104 FAIL et des compteurs : *qualifier la nature de ce qu'on mesure avant
+  d'en tirer une cause* (70 §7) — ici, qualifier **quel objet** on mesure.
+- **Faits VÉRIFIÉS par mesure directe** (pas par lecture de code), à la faute :
+  - `[0x51efd0+0xc] = 0` **et** `[0x51ef18+0xc] = 0` (les deux, donc la mémoire seule ne discrimine pas — c'est
+    précisément ce qui a rendu l'erreur confortable) ;
+  - les **deux** objets sont **construits** : vtables `0x4cab90` et `0x4d0b94` réellement écrites — donc le
+    problème n'est **pas** un constructeur global qui ne tourne pas ;
+  - watchpoints sur `0x51efdc` **et** sur `0x51ef24` : **aucune des deux ne se déclenche** avant la faute.
+- **Énoncé net du mur** : `0x51efd0` est un objet global **construit**, dont le membre `+0xc` est un pointeur
+  **initialisé paresseusement** et resté nul ; `sub_42e14e` le charge et le passe comme `this` à `sub_42eca8`, qui
+  déréférence `this->+0x10`. **Reste à trouver ce qui doit le remplir** — et, puisque ce n'est pas le constructeur,
+  c'est un chemin d'initialisation paresseuse (un « get-or-create ») qu'on n'emprunte jamais.
