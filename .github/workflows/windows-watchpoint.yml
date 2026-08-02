@@ -30,17 +30,12 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
-          # WinMerge 2.14.0 portable (contains WinMergeU.exe + mfc90u/msvcr90/msvcp90).
-          $urls = @(
-            'https://downloads.sourceforge.net/project/winmerge/stable/2.14.0/WinMerge-2.14.0-exe.zip',
+          # curl.exe -L follows SourceForge's mirror redirects reliably where
+          # Invoke-WebRequest stops on them. The portable zip carries WinMergeU.exe;
+          # the VC90 runtime it needs is installed in the next step.
+          curl.exe -L --fail --max-time 120 -o wm.zip `
             'https://master.dl.sourceforge.net/project/winmerge/stable/2.14.0/WinMerge-2.14.0-exe.zip'
-          )
-          $ok = $false
-          foreach ($u in $urls) {
-            try { Invoke-WebRequest -Uri $u -OutFile wm.zip -MaximumRedirection 5; $ok = $true; break }
-            catch { Write-Host "download failed: $u" }
-          }
-          if (-not $ok) { throw 'all download mirrors failed' }
+          if ($LASTEXITCODE -ne 0) { throw 'download failed' }
           Expand-Archive -Path wm.zip -DestinationPath wm -Force
           $exe = Get-ChildItem -Path wm -Recurse -Filter WinMergeU.exe | Select-Object -First 1
           if (-not $exe) { throw 'WinMergeU.exe not found in archive' }
@@ -51,7 +46,16 @@ jobs:
           # the addresses would be wrong, so fail loudly rather than measure the wrong
           # binary (doc 70 section 7: qualify what you measure before drawing a cause).
           $want = 'cb886017f996154becdbbaaa34548d18db209a1c25dbd518c8f13dc3411a6a6e'
-          if ($h -ne $want) { throw "sha256 mismatch: got $h want $want — addresses would not match the analysis" }
+          if ($h -ne $want) { throw "sha256 mismatch: got $h want $want" }
+
+      - name: Install the VC++ 2008 (VC90) runtime WinMerge needs
+        shell: pwsh
+        run: |
+          # WinMerge 2.14.0 links mfc90u/msvcr90/msvcp90 as SxS assemblies; the portable
+          # zip does not bundle them, so install the redistributable. The watched
+          # address 0x51efdc is inside WinMergeU.exe itself (no ASLR), so the runtime
+          # version does not affect it — the DLLs only need to be present so the exe runs.
+          choco install vcredist2008 -y --no-progress 2>&1 | Select-Object -Last 5
 
       - name: Locate cdb (Windows SDK debugger)
         shell: pwsh
