@@ -6297,3 +6297,13 @@ Détail : **70 §6** (roadmap). Résumé :
   `SHGetSpecialFolderPath{W,A}@16`, `SHGetFolderPath{W,A}@20` ; 0 manquant) ; **hash transpile inchangé**
   `19acad982194bf07` (additif, zéro impact comportemental). `#include <stddef.h>` ajouté à `aret_hle.h` (le
   `size_t` de `translate_path` exposé).
+
+- **⭐ Advance CONFIRMÉ par re-build (le fix a bougé le driver)** : WinMerge re-transpilé **avec** la famille
+  CSIDL franchit `SHGetSpecialFolderLocation` et bute désormais **plus loin**, sur un `aret_unmodelled` **nommé** :
+  `CoCreateInstance` de la classe **`{275C23E2-3747-11D0-9FEA-00AA003F8646}`** (= **CLSID_CMultiLanguage**, mlang)
+  en **`{275C23E1-…}`** (= **IMultiLanguage**) — *« 0 lifted module offered DllGetClassObject »* parce que WinMerge
+  est lifté avec **mfc90u seul**, pas mlang. **Prochain mur = activation COM de mlang** : soit `--with-dll
+  mlang.dll` (l'infra COM in-proc existe, §COM), soit un objet `IMultiLanguage` en HLE. Mur propre, borné, nommé.
+- **Oracle Windows réel (run #3, `bp 0x42e8fa` logiciel)** : **succès en 46 s** — le breakpoint logiciel sur
+  l'instruction writer exacte se déclenche au CRT-init comme prévu, confirmant la leçon du run #2 (le `ba w4` posé
+  au break loader ne tenait pas). L'infra oracle-Windows est désormais **fiable** pour un writer à adresse fixe.

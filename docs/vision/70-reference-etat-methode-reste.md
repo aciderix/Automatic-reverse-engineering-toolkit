@@ -990,13 +990,14 @@ résidu qui abort restera l'**obfusqué/fait-main/VM-packé** (indécidable, §9
      conditionnel** (`jcc <fonction>`), le **garde x87 rendu diagnostique**, et la **frontière statique/runtime x87**
      (`call` avec pile non vide ⇒ bail) qui fait tomber le mur x87. **État : WinMerge atteint le chargement de polices
      GDI.** Puis (2026-08-01) `_except_handler4_common` (SEH /GS v4), Str*/desktop/charset/swprintf_s HLE, et le diff
-     d'exécution relay (I11) qui **écarte** la frontière OS comme cause. **Mur courant 2026-08-02 = un champ MFC
-     `[0x51efd0+0xc]` nul** : `0x51efd0` = sous-objet (`+0xb8`) du **global `_initterm` `0x51ef18`** ; son constructeur
-     `0x42e884` écrit la vtable (`0x42e89c`, mesuré sous ARET) mais **n'atteint pas** le store du champ (`0x42e8fa`,
-     après `operator new(0x18)`+ctor `0x470022`, tous deux mfc90u lifté). Construction **inconditionnelle** (pas une
-     garde) ⇒ **un appel mfc90u lifté déroute au lieu de retourner** entre les deux. Détail + réconciliation d'adresses :
-     71 (2026-08-02). Mesure en cours : build `ARET_TRACE=1` → queue de trace = l'appel fautif. L'oracle Windows réel
-     (`windows-watchpoint.yml`) fonctionne mais `ba w4` au break loader ne tient pas ; voie robuste = `bp 0x42e8fa`.
+     d'exécution relay (I11) qui **écarte** la frontière OS comme cause. **Le mur `0x51efdc` (champ MFC nul) est
+     franchi (2026-08-02, mesuré)** : un build `ARET_TRACE=1` montre **46 252** entrées de fonctions avant l'abort et
+     le champ n'est plus la cause (l'ancien consommateur `sub_42e14e` ne tourne plus) — les incréments HLE de la
+     session ont déplacé le flot, la **re-mesure** l'a prouvé. **Nouveau mur = `SHGetSpecialFolderLocation`** →
+     **famille CSIDL/PIDL shell32 implémentée + vérifiée bit-identique Wine** (`shell_folders`) → re-build : **mur
+     courant 2026-08-02 = `CoCreateInstance(CLSID_CMultiLanguage → IMultiLanguage)`** (mlang COM ; WinMerge lifté
+     mfc90u seul ⇒ aucun module ne sert `DllGetClassObject`). Prochain = `--with-dll mlang.dll` **ou** objet
+     `IMultiLanguage` HLE. Détail : 71 (2026-08-02). Oracle Windows réel : `bp 0x42e8fa` logiciel fiable (run #3, 46 s).
   5. **win32k `NtGdi*`/`NtUser*`** — **différé** (inutile tant qu'on ne lifte pas gdi32/user32 eux-mêmes ; notre HLE les
      couvre). Priorité basse, sur demande de la mesure seulement.
 
