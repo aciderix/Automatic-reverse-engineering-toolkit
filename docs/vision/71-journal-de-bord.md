@@ -6067,3 +6067,32 @@ Détail : **70 §6** (roadmap). Résumé :
   traceur I1 (fait, ci-dessus) → **instrumentation directe du C généré par numéro de ligne** (l'outil qui a
   tranché le /GS, cf. 81 2026-07-26) → watchpoint matérielle sur l'adresse fautive. Ne PAS repartir de gdb sur
   `$esp` (l'`__esp` modélisé n'est pas celui de l'hôte).
+
+### 2026-08-01 — [I5][LIFT][DIAG] **Le mur `0x10` DIAGNOSTIQUÉ (et ce n'est PAS le lift) — une globale MFC que personne n'initialise**
+
+- **Point de départ** : `unhandled hardware exception 0xc0000005 at 0x10`, opaque.
+- **Chaîne de diagnostic, du moins cher au plus cher** — et chaque étape a réduit l'espace avant la suivante :
+  1. **Traceur I1** → la fonction fautive est `sub_42eca8`, entrée avec **`ecx = 0`**.
+  2. **Lecture du C généré** de `sub_42eca8` → sa 1ʳᵉ instruction est `v5 = *(uint32_t*)(ecx + 0x10)` : une méthode
+     **thiscall** qui déréférence `this->+0x10`. Donc `this` est nul, et `0x10` **est** l'offset du champ — la
+     valeur du message d'abort n'était pas une adresse mais un **déplacement**.
+  3. **Lecture du site d'appel** (`sub_42e14e`) → `ecx` vient de `*(uint32_t*)(esi + 0xc)` avec `esi = 0x51efd0`,
+     une **globale**. ⇒ **le lift est FIDÈLE** : il charge et passe exactement ce que le flux d'instructions dit.
+     C'est le contenu de la globale qui est faux, pas la traduction.
+  4. **Watchpoint matérielle** sur `0x51efdc` (= `0x51efd0+0xc`), posée juste après `__aret_map_memory` →
+     **elle ne se déclenche JAMAIS** avant la faute. Personne n'écrit ce champ, du démarrage jusqu'au crash.
+  5. **Recherche du writer dans tout le C généré** → **aucune** fonction récupérée ne matérialise `0x51efd0+0xc`
+     pour y écrire. Cohérent avec (4), par un chemin indépendant.
+- **Énoncé du mur, désormais précis et actionnable** : *la globale `[0x51efd0+0xc]` doit contenir un pointeur
+  d'objet et vaut 0 ; `sub_42e14e` la charge comme `this` et appelle `sub_42eca8`, qui déréférence `this->+0x10`.
+  Reste à trouver quelle initialisation MFC devrait la peupler et pourquoi elle ne tourne pas.* On est passé de
+  « faute à 0x10 » à une question de **flot de données sur une globale nommée** — celle-là se tranche.
+- **⭐ Bénéfice collatéral qui vaut l'entrée à lui seul** : l'appelant `sub_44bf51` est une fonction **/GS** dont le
+  prologue pose une frame SEH **v4** (XOR du cookie `0x51e7ec`, handler `0x4b5684`) — et `0x4b5684` est
+  **exactement** l'un des handlers que la trace montrait s'exécuter sur la pile de faute. ⇒ **la brique
+  `_except_handler4_common` livrée aujourd'hui n'est pas seulement verte sur une fixture : elle est exercée par du
+  vrai code MFC, sur le chemin réel**, et c'est elle qui dispatche cette faute.
+- **Méthode à retenir** : l'ordre traceur → C généré → site d'appel → watchpoint a coûté **quatre mesures** et a
+  éliminé le lift comme suspect **avant** d'ouvrir gdb sérieusement. Le réflexe inverse (gdb d'abord) échoue ici,
+  parce que l'`__esp` modélisé n'est pas celui de l'hôte (70 §7) — mais la watchpoint sur une **adresse guest
+  identity-mappée** marche parfaitement, elle.
