@@ -23,7 +23,7 @@ Trois **couches** (branchement → comportement), et pour le comportement trois 
 |--------|--------|-------|------|
 | `@N` / pops (ABI) | import-libs mingw | script | ✅ fait |
 | Signatures / stubs | win32metadata / entêtes mingw + clang | script | 🔜 pas fait |
-| **Comportement (corps)** | **sources Wine** | légère (données) / moyenne (corps) / lourde (DLL entières + plancher ntdll) | 🚧 légère prouvée |
+| **Comportement (corps)** | **sources Wine** | légère (données) / moyenne (corps) / lourde (DLL entières + plancher ntdll) | 🚧 **légère + moyenne prouvées** ; lourde = milestone |
 
 ---
 
@@ -60,7 +60,8 @@ Trois **couches** (branchement → comportement), et pour le comportement trois 
   frontière PE-enfant préservée). `CreateProcess`/`_spawn` d'un `.exe` = échec sound maintenu. Détail 71 (2026-08-02).
 - **Phase C — mlang `IMultiLanguage`** 🚧 EN COURS :
   - brique 1 : **activation COM** (objet HLE, IUnknown, 15 méthodes instrument-first) ✅ ;
-  - brique 2 : **`GetCodePageInfo`** rempli depuis la table Wine ✅ (bit-identique Wine) ;
+  - brique 2 : **`GetCodePageInfo`** rempli depuis la table Wine ✅ (forme légère) ;
+  - brique 3 : **`GetFamilyCodePage`** portée de la LOGIQUE de Wine ✅ (forme MOYENNE prouvée) ; `GetNumberOfCodePageInfo` **non livré** (count runtime≠source) ;
   - suite : autres méthodes **au besoin mesuré** (WinMerge n'en appelle pas d'autre sur le chemin courant).
 
 ### Prochains crans (priorisés)
@@ -68,8 +69,8 @@ Trois **couches** (branchement → comportement), et pour le comportement trois 
    forensics **instrument-first** (build `ARET_TRACE` → fonction + objet null). *(Chantier profondeur.)*
 2. **Signatures / stubs** (couche 2) : générer les squelettes de shims + le marshalling A/W depuis les entêtes
    mingw (clang AST) ou win32metadata. *(Multiplicateur ; pas commencé.)*
-3. **Corps Wine — forme MOYENNE** : porter un **corps de fonction** Wine (pas juste une table) et le vérifier oracle,
-   pour mesurer le coût de la forme moyenne. *(Prolongement direct du spike mlang.)*
+3. ✅ **FAIT — Corps Wine forme MOYENNE** (`GetFamilyCodePage`, bit-identique Wine). Prolonger sur des corps plus gros
+   (ex. une fonction `shlwapi`/`msvcrt` avec algorithme) pour éprouver la montée en taille.
 4. **Corps Wine — forme LOURDE** : compiler une DLL Wine entière + **porter une fois le plancher `ntdll`/win32u**
    (~131 syscalls, doc 70 §5.0) → couverture massive. *(Milestone.)*
 
