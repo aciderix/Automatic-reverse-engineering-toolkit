@@ -6149,3 +6149,30 @@ Détail : **70 §6** (roadmap). Résumé :
   **initialisé paresseusement** et resté nul ; `sub_42e14e` le charge et le passe comme `this` à `sub_42eca8`, qui
   déréférence `this->+0x10`. **Reste à trouver ce qui doit le remplir** — et, puisque ce n'est pas le constructeur,
   c'est un chemin d'initialisation paresseuse (un « get-or-create ») qu'on n'emprunte jamais.
+
+### 2026-08-01 — [DIAG][BORNÉ→PIVOT] **Mur `0x10` : diagnostic FERME et borné — l'objet est construit, un membre lazy reste nul, et le vrai levier est un outil, pas ce binaire**
+
+- **Fait décisif, mesuré des DEUX côtés** (winedbg `--gdb` en remote gdb, au même point `0x42e14e`) :
+  - **sous Wine** : `[0x51efd0+0xc] = 0xed63f0` — un **pointeur tas**, l'objet lazy existe ;
+  - **sous ARET** : `[0x51efd0+0xc] = 0` — il n'existe pas.
+  L'objet **conteneur** `0x51efd0`, lui, est **construit des deux côtés** (vtable `0x4cab90` écrite, observé sous ARET
+  par watchpoint). ⇒ Ce n'est **ni un bug de lift** (le site d'appel charge fidèlement le champ), **ni un
+  constructeur global manquant**. C'est un **membre à initialisation paresseuse** (`get-or-create` via `new`) dont
+  le chemin de création **ne s'exécute pas sous ARET**.
+- **Pourquoi la localisation exacte est bloquée ICI** (limite d'outillage, pas de méthode) : trouver l'écrivain
+  demande une **watchpoint données côté Wine**, et dans ce bac à sable — pas de desktop réel — les trois voies
+  échouent : le **stub gdb** de `winedbg --gdb` **ignore les watchpoints matérielles** ; **winedbg natif** se bloque
+  sur le pilotage par pipe ; et la recherche **statique** de l'écrivain est ambiguë (le setter reçoit `this` en
+  paramètre thiscall, sans immédiat `0x51efd0` à tracer, et « store `eax` à `+0xc` après un `call` » a **118**
+  occurrences — le motif de tout constructeur). Aucune de ces trois n'est un cul-de-sac de fond, seulement de
+  moyens.
+- **⭐ Le vrai levier est GÉNÉRAL, et il est déjà nommé (doc 81 §4)** : un **diff d'exécution ARET↔Wine** — logguer
+  les appels d'imports (nom + args + retour) des deux côtés et **diffe** — donnerait la **première divergence** d'un
+  gros binaire GUI **directement**, au lieu de la remonter à la main mur par mur. Cette classe de murs (« un retour
+  HLE incorrect en amont fait abandonner MFC », I5) ne se traite pas efficacement un objet nul à la fois : elle se
+  traite avec l'outil qui **pointe la divergence amont**. C'est le prochain incrément à fort levier, à opposer à la
+  forensics mono-binaire qui, elle, est **bornée et documentée** ici (§2 « borner puis pivoter »).
+- **Ce qui reste ACQUIS de ce fil**, indépendamment de WinMerge : la brique `_except_handler4_common` est **exercée
+  par du vrai code MFC** sur le chemin de faute (handler `0x4b5684` = frame v4 de `sub_44bf51`), et le pipeline de
+  diagnostic (traceur I1 → C généré → winedbg remote gdb) est validé de bout en bout — winedbg **fonctionne** en
+  remote gdb pour lire la mémoire à un breakpoint, ce qui n'était pas établi avant cette session.
