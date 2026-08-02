@@ -1304,6 +1304,39 @@ uint32_t aret_GetExitCodeProcess(uint32_t esp) {
     return 1;
 }
 
+/* GetHandleInformation(handle, LPDWORD lpdwFlags) -> BOOL. Our handles are host fds;
+ * they carry no Win32 inherit/protect flags, so report 0 flags and success. */
+uint32_t aret_GetHandleInformation(uint32_t esp) {
+    uint32_t *flags = (uint32_t *)WP(1);
+    if (flags) *flags = 0;
+    return 1;
+}
+/* SetHandleInformation(handle, dwMask, dwFlags) -> BOOL. The flags (HANDLE_FLAG_INHERIT
+ * / PROTECT_FROM_CLOSE) have no effect in this single-process model; accept and succeed. */
+uint32_t aret_SetHandleInformation(uint32_t esp) { (void)esp; return 1; }
+
+/* DuplicateHandle(srcProc, srcHandle, tgtProc, LPHANDLE tgtHandle, access, inherit,
+ * options) -> BOOL. Handles are host fds, so dup() the source. The process arguments
+ * are pseudo-handles here (one process) and ignored. DUPLICATE_CLOSE_SOURCE closes the
+ * source; DUPLICATE_SAME_ACCESS is implicit (a dup shares the description). */
+uint32_t aret_DuplicateHandle(uint32_t esp) {
+    int src = (int)WU(1);
+    uint32_t *tgt = (uint32_t *)WP(3);
+    uint32_t options = WU(6);
+    int nfd = dup(src);
+    if (nfd < 0) { if (tgt) *tgt = 0; return 0; }
+    if (options & 0x1u /* DUPLICATE_CLOSE_SOURCE */) close(src);
+    if (tgt) *tgt = (uint32_t)nfd;
+    return 1;
+}
+
+/* SetConsoleTextAttribute(handle, WORD attr) -> BOOL. Handles are host fds. The colour
+ * is out-of-band and has no effect on the program's byte output, so the effect is a
+ * no-op — but the RETURN must be faithful: a console API succeeds only on a real console
+ * and fails (FALSE) on a redirected/piped handle. isatty() gives exactly that, matching
+ * Windows/Wine both when attached to a terminal and under redirection. */
+uint32_t aret_SetConsoleTextAttribute(uint32_t esp) { return (uint32_t)(isatty((int)WU(0)) ? 1 : 0); }
+
 /* GetDiskFreeSpaceA(lpRootPath, lpSectorsPerCluster, lpBytesPerSector,
  * lpFreeClusters, lpTotalClusters) -> BOOL. Host `statvfs` with a fixed geometry
  * (512-byte sectors, 8 sectors/cluster = 4 KiB), free/total clusters from the real

@@ -6307,3 +6307,31 @@ Détail : **70 §6** (roadmap). Résumé :
 - **Oracle Windows réel (run #3, `bp 0x42e8fa` logiciel)** : **succès en 46 s** — le breakpoint logiciel sur
   l'instruction writer exacte se déclenche au CRT-init comme prévu, confirmant la leçon du run #2 (le `ba w4` posé
   au break loader ne tenait pas). L'infra oracle-Windows est désormais **fiable** pour un writer à adresse fixe.
+
+### 2026-08-02 — [I5][HLE-CRT][HLE-WIN32][LARGEUR] **Cluster CRT/console/handle piloté par la LARGEUR mesurée (wallsweep) — 11 shims, bit-identiques Wine**
+
+- **Méthode = mesurer la largeur d'abord** : `bench/wallsweep.sh bench/gauntlet/bins` (21 binaires CLI, 19 avec murs)
+  classe les murs d'imports par **#binaires bloqués**. Tête : `__p___argv` (9), `popen/pclose` (8), `DuplicateHandle`/
+  `GetHandleInformation`/`dup2`/`_get/_setmaxstdio` (7), `SetConsoleTextAttribute`/`raise` (6), `_fstat64`/`_wunlink` (4).
+  **Enseignement stratégique** : `mlang` (le mur WinMerge) n'apparaît **nulle part** ⇒ il est *étroit* (spécifique
+  GUI/MFC) ; la vraie largeur est un **cluster CRT/console/handle** dont chaque shim débloque 4-9 binaires.
+- **Implémenté (sound, general)** : `_dup`/`_dup2` (⚠️ msvcrt `_dup2` rend **0** au succès, pas le fd POSIX),
+  `_getmaxstdio`/`_setmaxstdio` (512 par défaut), `_fstat64`/`_stat64` (nouveau `struct _stat64` 56 o, times 64-bit),
+  `_wunlink`, `raise` (via la **même table de dispositions** que `signal`/`_XcptFilter` : SIG_IGN avale, handler
+  installé one-shot via `aret_call`, SIG_DFL termine bruyamment), `__p___argv`/`__p___argc` (+ data-imports
+  `__argv`/`__argc` → `&aret_real_argv`/`&aret_real_argc`), `GetHandleInformation`/`SetHandleInformation`,
+  `DuplicateHandle` (handles = fds ⇒ `dup`, `DUPLICATE_CLOSE_SOURCE` gérée), `SetConsoleTextAttribute`.
+- **⭐ Soundness `SetConsoleTextAttribute`** : le retour n'est **pas** un TRUE aveugle. Une API console **échoue
+  (FALSE)** sur un handle **redirigé** (non-console) — exactement le cas de stdout sous `winediff`. Le retour est
+  donc `isatty(fd)` : TRUE sur un vrai terminal, FALSE sous pipe/fichier ⇒ fidèle à Windows/Wine dans les deux cas
+  (la couleur reste un no-op hors-bande sur les octets). Un TRUE constant aurait été **faux** (et aurait cassé
+  l'oracle).
+- **Vérif & portes** : `winecorpus/crt_console_cluster.c` = **bit-identique Wine** (sortie *significative* : chaque
+  contrat vérifié, valeurs env-spécifiques réduites à des booléens) ; `stdcall_audit` **PASS** (seul `@N` ajouté :
+  `GetHandleInformation@8` — `DuplicateHandle@28`/`SetHandleInformation@12`/`SetConsoleTextAttribute@8` existaient
+  déjà) ; **hash transpile inchangé** `19acad982194bf07`. Débloque une large part des 19 binaires du gauntlet en une
+  passe — le rendement de la **priorisation par la largeur** (levier 0).
+- **Note stratégique (échange avec l'utilisateur)** : la vraie accélération « en gros » = **générer depuis les
+  sources ouvertes, compilé DANS le binaire** (autonome), pas lier Winelib au runtime (dépendance Wine = refusé) :
+  win32metadata → tuyauterie (`@N`/signatures) ; sources Wine (C portable des DLL user-mode) → comportement, avec un
+  plancher `ntdll`/win32u fini (~131 syscalls NT) porté une fois. À analyser au prochain incrément.

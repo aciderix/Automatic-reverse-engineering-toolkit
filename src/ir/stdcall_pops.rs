@@ -305,6 +305,7 @@ static TABLE: &[(&str, u32)] = &[
     ("GetFileVersionInfoSizeA", 8),
     ("GetFullPathNameA", 16),
     ("GetFullPathNameW", 16),
+    ("GetHandleInformation", 8),
     ("GetIconInfo", 8),
     ("GetKeyNameTextW", 12),
     ("GetKeyState", 4),

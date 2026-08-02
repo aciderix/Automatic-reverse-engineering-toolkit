@@ -594,6 +594,8 @@ uint32_t aret_data_import(const char *name) {
     if (!strcmp(name, "__initenv")) return (uint32_t)(uintptr_t)&aret_initenv_var;
     if (!strcmp(name, "_environ")) return (uint32_t)(uintptr_t)&aret_environ_var;
     if (!strcmp(name, "__mb_cur_max")) return (uint32_t)(uintptr_t)&aret_mb_cur_max_var;
+    if (!strcmp(name, "__argv")) { extern char **aret_real_argv; return (uint32_t)(uintptr_t)&aret_real_argv; }
+    if (!strcmp(name, "__argc")) { extern int aret_real_argc; return (uint32_t)(uintptr_t)&aret_real_argc; }
     return 0;
 }
 
@@ -2098,6 +2100,68 @@ uint32_t aret_wstat(uint32_t esp) {
     aret_fill_stat32(buf, &st);
     return 0;
 }
+/* `struct _stat64` (56 bytes): like _stati64 but the three time fields are also
+ * 64-bit (__time64_t). Same MSVC byte layout rule (8-byte-aligned st_size at 24). */
+static void aret_fill_stat64(uint8_t *b, const struct stat *st) {
+    memset(b, 0, 56);
+    aret_put_u32(b, 0, (uint32_t)st->st_dev);
+    aret_put_u16(b, 4, (uint16_t)st->st_ino);
+    aret_put_u16(b, 6, aret_msvcrt_mode(st->st_mode));
+    aret_put_u16(b, 8, (uint16_t)st->st_nlink);
+    aret_put_u32(b, 16, (uint32_t)st->st_rdev);
+    aret_put_u64(b, 24, (uint64_t)st->st_size);
+    aret_put_u64(b, 32, (uint64_t)st->st_atime);
+    aret_put_u64(b, 40, (uint64_t)st->st_mtime);
+    aret_put_u64(b, 48, (uint64_t)st->st_ctime);
+}
+/* _fstat64(fd, struct _stat64*) -> 0 / -1. */
+uint32_t aret_fstat64(uint32_t esp) {
+    uint8_t *buf = (uint8_t *)(uintptr_t)arg(esp, 1);
+    struct stat st;
+    if (!buf || fstat((int)arg(esp, 0), &st) != 0) return (uint32_t)-1;
+    aret_fill_stat64(buf, &st);
+    return 0;
+}
+/* _stat64(path, struct _stat64*) -> 0 / -1. */
+uint32_t aret_stat64(uint32_t esp) {
+    char path[1024];
+    translate_path((const char *)(uintptr_t)arg(esp, 0), path, sizeof path);
+    uint8_t *buf = (uint8_t *)(uintptr_t)arg(esp, 1);
+    struct stat st;
+    if (!buf || stat(path, &st) != 0) return (uint32_t)-1;
+    aret_fill_stat64(buf, &st);
+    return 0;
+}
+/* _dup2(fd1, fd2) -> 0 / -1. NOTE: msvcrt _dup2 returns 0 on success (NOT the new
+ * descriptor like POSIX dup2), so translate the POSIX result. Handles/FILE fds are
+ * real host fds in this model, so the redirection is genuine. */
+uint32_t aret_dup2(uint32_t esp) {
+    int r = dup2((int)arg(esp, 0), (int)arg(esp, 1));
+    return (uint32_t)(r < 0 ? -1 : 0);
+}
+/* _dup(fd) -> new fd / -1 (msvcrt _dup DOES return the new descriptor). */
+uint32_t aret_dup(uint32_t esp) {
+    int r = dup((int)arg(esp, 0));
+    return (uint32_t)r;
+}
+/* _getmaxstdio()/_setmaxstdio(n): the soft cap on simultaneously open FILE streams.
+ * msvcrt defaults to 512 (max 2048). We keep a plain counter — the real limit is the
+ * host's fd table, far above what a program raising this cap is checking for. */
+static int aret_maxstdio = 512;
+uint32_t aret_getmaxstdio(uint32_t esp) { (void)esp; return (uint32_t)aret_maxstdio; }
+uint32_t aret_setmaxstdio(uint32_t esp) {
+    int n = (int)arg(esp, 0);
+    if (n < 0) return (uint32_t)-1;
+    aret_maxstdio = n;
+    return (uint32_t)n;
+}
+/* _wunlink(wpath) -> 0 / -1 (wide sibling of _unlink). */
+uint32_t aret_wunlink(uint32_t esp) {
+    char name[4096], host[4096];
+    aret_w2n((const uint16_t *)(uintptr_t)arg(esp, 0), name, sizeof name);
+    translate_path(name, host, sizeof host);
+    return (uint32_t)(unlink(host) == 0 ? 0 : (uint32_t)-1);
+}
 /* _wfopen(wpath, wmode) — wide-char fopen; returns one of our msvcrt-layout FILEs
  * (see aret_fopen). NASM opens its output file through this. */
 uint32_t aret_wfopen(uint32_t esp) {
@@ -2939,6 +3003,13 @@ uint32_t aret_p__wcmdln(uint32_t esp) {
     }
     return (uint32_t)(uintptr_t)&ptr;
 }
+/* __p___argv() / __p___argc(): msvcrt exposes the parsed argument vector as globals
+ * `char** __argv` and `int __argc`, reached either directly or through these pointer
+ * accessors. Return the address of our real (native) argv/argc — the same arguments
+ * GetCommandLine and __getmainargs serve, so a program that reads __argv[i] sees them. */
+uint32_t aret_p___argv(uint32_t esp) { (void)esp; extern char **aret_real_argv; return (uint32_t)(uintptr_t)&aret_real_argv; }
+uint32_t aret_p___argc(uint32_t esp) { (void)esp; extern int aret_real_argc; return (uint32_t)(uintptr_t)&aret_real_argc; }
+
 /* __lconv_init: CRT locale-conv table init. Under our HLE the C locale is fixed
  * ("C"), so there is nothing to initialise — a no-op (return 0) is correct. */
 uint32_t aret_lconv_init(uint32_t esp) { (void)esp; return 0; }
@@ -2985,6 +3056,26 @@ uint32_t aret_signal(uint32_t esp) {
     uint32_t prev = aret_sig_handlers[sig];
     aret_sig_handlers[sig] = handler;
     return prev;
+}
+
+/* raise(sig) -> 0 on success. Delivers a C signal through the SAME disposition table
+ * as signal()/_XcptFilter: SIG_IGN swallows it (0); an installed handler is reset to
+ * SIG_DFL first (the one-shot rule) then invoked via aret_call with sig as its arg;
+ * SIG_DFL terminates the process (raise's default action for the signals a program
+ * actually raises — SIGABRT/SIGTERM/SIGINT). We flush and _exit loudly rather than
+ * return a guessed success that lets the program run past a fatal signal. */
+uint32_t aret_raise(uint32_t esp) {
+    uint32_t sig = arg(esp, 0);
+    if (sig >= ARET_NSIG) return (uint32_t)-1;
+    uint32_t h = aret_sig_handlers[sig];
+    if (h == 1) return 0;                 /* SIG_IGN */
+    if (h == 0) { fflush(NULL); _exit(3); }   /* SIG_DFL -> terminate (abort-like) */
+    aret_sig_handlers[sig] = 0;           /* one-shot reset before the call */
+    uint32_t frame = (esp - 0x80) & ~15u;
+    uint32_t *fr = (uint32_t *)(uintptr_t)frame;
+    fr[0] = 0; fr[1] = sig;               /* [ret-slot][arg0=sig] */
+    (void)aret_call(h, frame, 0, 0, 0, 0, 0, 0, 0);
+    return 0;
 }
 
 /* `_XcptFilter(code, EXCEPTION_POINTERS*)` — the CRT's top-level exception filter, the
