@@ -6037,3 +6037,33 @@ Détail : **70 §6** (roadmap). Résumé :
   de « coïncidence ». Un seul état ne l'aurait pas fait.
 - **Vérifié** : `winecorpus/crt_xcptfilter.{c,def}` bit-identique Wine, **ehdiff 6/6**, difftest 272/272, hash
   `19acad982194bf07` inchangé.
+
+### 2026-08-01 — [I5][EH][LIFT] **Le driver CHANGE DE RÉGIME : après sept murs d'API, le suivant est une faute matérielle — et la brique v4 tourne pour de vrai**
+
+- **Sept murs franchis dans la session**, tous de **couverture d'API** :
+  `CoCreateInstance` → `SHGetSpecialFolderLocation` → `StrSpnW` → `GetThreadDesktop` → `swprintf_s` →
+  `_except_handler4_common` → `_XcptFilter`. Le **huitième n'en est plus un** : `unhandled hardware exception
+  0xc0000005 at 0x10`. ⇒ **le blocage rebascule de la surface d'API vers la lift-correctness**, pour la 1ʳᵉ fois
+  depuis le 2026-07-26.
+- **⭐ Ce que la trace I1 montre, et c'est une bonne nouvelle avant d'être un mur** : la faute est **dispatchée par
+  la machinerie SEH**, sur la pile scratch dédiée de `aret_hw_fault` (`esp=0x13269d..`, distinct de la pile
+  machine `0x13d63...`, registres à 0), avec des handlers **liftés qui s'exécutent** (`sub_4ac1cc` récurrent,
+  `ecx=0xc8593fa7` — profil d'un `__security_check_cookie` / thunk `_except_handler4`). ⇒ **la brique v4 livrée
+  aujourd'hui n'est pas seulement bit-identique sur une fixture : elle est EXERCÉE par un vrai binaire MFC.** Ce
+  qui termine le run, c'est la **chaîne épuisée** — aucune frame ne rattrape —, pas un défaut du handler.
+- **Chaîne d'appel avant la faute** (trace, du plus ancien au plus récent) : init MFC → `sub_864955` →
+  `sub_6faeaf` → `sub_42e14e` → `sub_42d86f` → **`sub_42eca8`**, puis bascule sur la pile de faute. Le mur est
+  donc dans/après `sub_42eca8`.
+- **Piste, affichée comme HYPOTHÈSE et non comme cause** : un accès à `NULL+0x10` a la forme classique d'un
+  `this->membre` avec `this` nul, ou d'un **appel de vtable sur un pointeur d'interface COM nul**. Le précédent
+  `0xe` (2026-07-26) avait cette même signature et s'est révélé être une **dérive esp** (import stdcall appelé
+  register-indirect cross-block), pas ce que la forme suggérait — donc **ne pas conclure sur la forme**. Le
+  cookie /GS reste le détecteur de dérive esp gratuit (70 §7) et `ecx=0xc8593fa7` est cohérent avec ce chemin :
+  à instruire, pas à affirmer.
+- **Honnêteté sur l'antériorité** : ce code est **nouvellement atteignable**, donc « le bug est-il préexistant ? »
+  n'est **pas testé**. Les portes (difftest, ehdiff, winediff, hash) disent qu'il n'y a pas de régression, ce qui
+  est un **raisonnement**, pas une mesure directe sur ce chemin.
+- **Cadrage pour la suite** : session dédiée, méthode déjà éprouvée sur le mur `0xe` puis sur le mur /GS —
+  traceur I1 (fait, ci-dessus) → **instrumentation directe du C généré par numéro de ligne** (l'outil qui a
+  tranché le /GS, cf. 81 2026-07-26) → watchpoint matérielle sur l'adresse fautive. Ne PAS repartir de gdb sur
+  `$esp` (l'`__esp` modélisé n'est pas celui de l'hôte).
