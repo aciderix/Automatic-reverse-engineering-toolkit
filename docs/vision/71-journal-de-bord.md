@@ -6559,3 +6559,20 @@ Détail : **70 §6** (roadmap). Résumé :
 - **Statut** : générateur livré et prouvé (comme `--skeleton`, outil de fabrication non câblé). **Prochain** : exposer
   `u32_a2w` + proto du cœur W, câbler un thunk dérivé dans le HLE, winediff bit-identique (câblage mécanique).
 - **Portes** : `--check` toujours PASS ; hash transpile **inchangé** (fabrication seule) ; aucun octet du binaire modifié.
+
+### 2026-08-02 — [I12][HLE-WIN32][ABI] **Marshalling A→W CÂBLÉ et prouvé : `DeleteFileA` généré remplace le shim fait-main, bit-identique Wine (6 fixtures)**
+
+- **Ferme la boucle** du cran précédent : le thunk généré par `--marshal DeleteFileA` est **câblé dans le HLE**
+  (`aret_win32.c`, à côté de `u32_a2w` ; proto `aret_DeleteFileW` ajouté) et **remplace** le `aret_DeleteFileA`
+  fait-main (retiré d'`aret_hle.c`). Modèle de build : les 3 `.c` runtime sont compilés en `.o` **séparés** puis liés
+  ⇒ un appel cross-fichier `win32.c → hle.c` marche avec un simple prototype ; la découverte de shims scanne `win32.c`
+  (151 shims `…A` y vivent déjà).
+- **Équivalence mesurée, pas raisonnée** : **6 fixtures** exerçant `DeleteFile` (`win32_fileops`, `win32_file`,
+  `win32_filetime`, `win32_fileinfo`, `win32_find`, `win32_mmap`) **bit-identiques Wine** avec le thunk généré. Le
+  round-trip `u32_a2w`(byte→u16) / `aret_w2n`(u16&0xFF→byte) est byte-exact 0-255 ⇒ même `translate_path`+`unlink` que
+  le fait-main, pour tout octet.
+- **Preuve produit** : un générateur de marshalling **sound** (refuse les pièges struct/OUT) produit du code **câblé,
+  correct, indistinguable de la main** — le boilerplate A→W devient mécanique et vérifié. Premier `…A` d'ARET **dérivé**
+  plutôt qu'écrit.
+- **Portes** : winediff **6/6** bit-identiques ; hash transpile **inchangé** `19acad982194bf07` (le hash est
+  comportemental sur le code app transpilé, pas sur la source HLE) ; stdcall_audit **PASS** (`DeleteFileA@4` déjà tabulé).

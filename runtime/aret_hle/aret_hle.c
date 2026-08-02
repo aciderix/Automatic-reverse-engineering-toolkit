@@ -1750,11 +1750,9 @@ uint32_t aret_GetFileSize(uint32_t esp) {
     return (uint32_t)(uint64_t)st.st_size;
 }
 
-uint32_t aret_DeleteFileA(uint32_t esp) {
-    char path[1024];
-    translate_path((const char *)(uintptr_t)arg(esp, 0), path, sizeof path);
-    return unlink(path) == 0 ? 1 : 0;
-}
+/* DeleteFileA is now AUTO-MARSHALLED from DeleteFileW in aret_win32.c (gen_win32_sigs.py
+ * --marshal, doc 82) — byte-exact equivalent to the former hand shim (u32_a2w/aret_w2n
+ * round-trip every byte 0-255 into the same translate_path+unlink). */
 uint32_t aret_CreateDirectoryA(uint32_t esp) {
     char path[1024];
     translate_path((const char *)(uintptr_t)arg(esp, 0), path, sizeof path);

@@ -2684,6 +2684,23 @@ static void u32_a2w(const char *s, uint16_t *d, int cap) {
 static void u32_w2n(const uint16_t *s, char *d, int cap) {
     int i = 0; if (s) for (; s[i] && i < cap - 1; i++) d[i] = (char)(s[i] & 0xFF); d[i] = 0;
 }
+
+/* DeleteFileA — AUTO-MARSHALLED from DeleteFileW by `gen_win32_sigs.py --marshal
+ * DeleteFileA` (doc 82, layer 2). Widen the input path (u32_a2w), pass nothing else,
+ * call the wide core; NULL propagates as NULL. This is the first generated marshalling
+ * thunk WIRED into the HLE: it replaces a hand shim that did translate_path+unlink
+ * directly, and is byte-exact-equivalent because u32_a2w/aret_w2n round-trip every byte
+ * 0-255. Proven bit-identical Wine (win32_fileops/win32_file/win32_find/…). The generator
+ * REFUSES any pair that differs beyond input strings (LOGFONTA≠LOGFONTW, OUT buffers). */
+uint32_t aret_DeleteFileW(uint32_t esp);
+uint32_t aret_DeleteFileA(uint32_t esp) {
+    const char *s0 = (const char *)WP(0);
+    int n0 = 0; if (s0) while (s0[n0]) n0++;
+    uint16_t w0[n0 + 1]; u32_a2w(s0, w0, n0 + 1);
+    uint32_t fr[1];
+    fr[0] = s0 ? (uint32_t)(uintptr_t)w0 : 0;
+    return aret_DeleteFileW((uint32_t)(uintptr_t)fr);
+}
 /* Register a class (shared A/W core): store the full WNDCLASS(EX) so GetClassInfo
  * round-trips it, and return the atom. */
 static uint32_t u32_class_register(uint32_t style, uint32_t wndproc, uint32_t cls_extra,

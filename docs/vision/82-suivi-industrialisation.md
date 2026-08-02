@@ -97,8 +97,9 @@ Trois **couches** (branchement → comportement), et pour le comportement trois 
    des entêtes mingw ⇒ (a) `--check` = 5066 `@N` mutuellement prouvés (entête vs import-lib), 0 conflit, 1 skew documenté ;
    (b) `--skeleton` = shims typés prêts à remplir, corps `aret_unimpl` sound ; (c) `--marshal` = **marshalling A→W
    automatique** (dérive `…A` de `…W`, élargit les chaînes d'entrée, **refuse** les pièges struct/OUT — garde-fou §0).
-   **Prolonger** : génération de familles entières de squelettes sur un mur mesuré ; câbler un thunk `--marshal` dans le HLE
-   (exposer `u32_a2w` + proto du cœur W) et le prouver bit-identique Wine en winediff.
+   **✅ CÂBLÉ ET PROUVÉ** : le thunk `--marshal DeleteFileA` est câblé dans le HLE (remplace le fait-main) et **bit-identique
+   Wine sur 6 fixtures** (`win32_fileops`/`file`/`filetime`/`fileinfo`/`find`/`mmap`) — premier `…A` d'ARET **dérivé** plutôt
+   qu'écrit. **Prolonger** : générer des familles entières de squelettes/marshalling sur un mur mesuré.
 3. ✅ **FAIT — Corps Wine forme MOYENNE, deux tailles** : `GetFamilyCodePage` (petite boucle) **puis**
    `StrFromTimeIntervalW/A` (shlwapi, **corps entier à algorithme** + sa chaîne de 3 aides internes
    `WriteReverseNum`/`FormatSignificant`/`WriteTimeClass` + chaînes ressource), les deux **bit-identiques Wine**.
