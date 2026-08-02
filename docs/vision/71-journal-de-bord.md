@@ -6420,3 +6420,11 @@ Détail : **70 §6** (roadmap). Résumé :
   (l'objet HLE est un singleton sans état, un vrai CMultiLanguage se détruit à 0 — non observable ici).
 - **Prochain incrément** : rebuild WinMerge (mesure en cours) → nom de la 1ʳᵉ méthode `IMultiLanguage` appelée →
   l'implémenter (charset via table de codepages / iconv), vérifiée contre l'oracle.
+
+- **⭐ Mesure instrument-first (rebuild WinMerge) : l'activation mlang est FRANCHIE**, et le stub nommé donne le mur
+  suivant sans ambiguïté : `ARET: reached an unmodelled instruction: IMultiLanguage::GetCodePageInfo`. ⇒ WinMerge
+  obtient bien l'objet `IMultiLanguage` (la brique 1 marche de bout en bout sur le vrai driver) et appelle
+  **`GetCodePageInfo`** en premier. **Prochain incrément Phase C** = implémenter `GetCodePageInfo(UINT uiCodePage,
+  PMIMECPINFO)` (remplir la struct `MIMECPINFO` — description, family/web/header/body charset, GDI charset — par une
+  table de codepages), vérifié contre l'oracle ; d'abord logger le `uiCodePage` que WinMerge passe pour cibler la
+  donnée. Le design instrument-first a payé : un seul rebuild, le mur exact est nommé.
