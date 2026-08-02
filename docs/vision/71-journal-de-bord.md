@@ -6202,3 +6202,20 @@ Détail : **70 §6** (roadmap). Résumé :
   `[0x51efd0+0xc]` » (frontière OS écartée) mais **soit** modéliser les métriques manquantes (`SM_CXMENUSIZE`…) et
   re-mesurer, **soit** étendre le relay au **CRT non-computationnel** (les retours msvcrt qui portent de l'état :
   `_setmbcp`, `setlocale`, `_get_osplatform`…) pour voir si la divergence est là.
+
+### 2026-08-01 — [I11][DIAG] **Mur `0x10` encore rétréci : TLS écarté, la création NE S'EXÉCUTE PAS sous ARET**
+
+- Le contexte relay juste avant la faute montrait `TlsGetValue(0)` entre Enter/LeaveCriticalSection avec `0x51ef18`
+  en argument — le motif **AFX_MODULE_STATE de MFC** (état de module en slot TLS). `TlsGetValue` étant dans
+  `RELAY_EXCLUDE`, le diff ne l'avait **jamais comparé** : candidat naturel.
+- **⭐ TLS ÉCARTÉ par mesure directe** : la trace ARET montre `TlsAlloc→0`, `TlsSetValue(0, 1442b4a0)`, puis **tous**
+  les `TlsGetValue(0)` rendent **`1442b4a0`** (le pointeur d'état de module MFC). L'état est **correctement stocké
+  et relu** — pas un échec TLS.
+- **Fait robuste, mesuré côté ARET** (watchpoints matérielles fiables sur notre ELF) : la watchpoint sur `0x51efdc`
+  (= `[0x51efd0+0xc]`) **ne se déclenche jamais** avant la faute ⇒ **le store de création ne s'exécute jamais sous
+  ARET**, alors que sous Wine le champ vaut `0xed63f0`. La création est un `new`+store **gardé par une condition
+  fausse sous ARET** — et cette condition est en **C++ lifté**, pas à la frontière OS (le diff l'a établi) ni TLS.
+- **Pinpoint du writer bloqué par l'outillage Wine** (stub gdb ignore les hw-watchpoints ; sw-watchpoints et
+  winedbg natif se bloquent) — **limite d'outillage documentée, pas de méthode**.
+- **Prochain incrément cadré, tool-based** : étendre le relay au **store de l'allocateur** (`operator new`/`malloc`
+  **avec site d'appel**, des deux côtés) pour repérer la création présente sous Wine et absente sous ARET.
