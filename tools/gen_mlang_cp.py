@@ -33,12 +33,20 @@ FLAGS = {
     "MIMECONTF_MIME_LATEST": 0x20000000, "MIMECONTF_MIME_REGISTRY": 0x40000000,
 }
 
+# Code pages given as a macro rather than a literal (the Unicode family). Values are the
+# standard Windows code page numbers.
+CP_MACROS = {"CP_UNICODE": 1200, "CP_UTF7": 65000, "CP_UTF8": 65001}
+CPNUM = r'(?:\d+|CP_[A-Z0-9_]+)'
+
+def resolve_cp(s):
+    return int(s) if s.isdigit() else CP_MACROS[s]
+
 ENTRY = re.compile(
-    r'\{\s*L"(?P<desc>[^"]*)"\s*,\s*(?P<cp>\d+)\s*,\s*(?P<flags>[^,]+?)\s*,\s*'
+    r'\{\s*L"(?P<desc>[^"]*)"\s*,\s*(?P<cp>' + CPNUM + r')\s*,\s*(?P<flags>[^,]+?)\s*,\s*'
     r'L"(?P<web>[^"]*)"\s*,\s*L"(?P<header>[^"]*)"\s*,\s*L"(?P<body>[^"]*)"', re.S)
 ARR = re.compile(r'static const MIME_CP_INFO (\w+)\[\]\s*=\s*\{(.*?)\n\};', re.S)
 FAM = re.compile(
-    r'\{\s*L"[^"]*"\s*,\s*(?P<famcp>\d+)\s*,\s*ARRAY_SIZE\((?P<arr>\w+)\)\s*,\s*'
+    r'\{\s*L"[^"]*"\s*,\s*(?P<famcp>' + CPNUM + r')\s*,\s*ARRAY_SIZE\((?P<arr>\w+)\)\s*,\s*'
     r'\w+\s*,\s*L"(?P<fixed>[^"]*)"\s*,\s*L"(?P<prop>[^"]*)"', re.S)
 
 def resolve_flags(expr):
@@ -52,15 +60,17 @@ def main():
         sys.exit(f"Wine mlang.c not found at {SRC} (set WINE_MLANG_C)")
     text = open(SRC).read()
     arrays = {name: body for name, body in ARR.findall(text)}
-    fam = {m.group("arr"): (int(m.group("famcp")), m.group("fixed"), m.group("prop"))
+    fam = {m.group("arr"): (resolve_cp(m.group("famcp")), m.group("fixed"), m.group("prop"))
            for m in FAM.finditer(text)}
     rows = []
+    raw_total = 0                                     # Wine's total_cp = sum of family entries
     for arr_name, body in arrays.items():
         if arr_name not in fam:
             continue                                  # unicode_cp etc. not in mlang_data
         famcp, fixed, prop = fam[arr_name]
         for m in ENTRY.finditer(body):
-            rows.append((int(m.group("cp")), famcp, resolve_flags(m.group("flags")),
+            raw_total += 1
+            rows.append((resolve_cp(m.group("cp")), famcp, resolve_flags(m.group("flags")),
                          m.group("desc"), m.group("web"), m.group("header"),
                          m.group("body"), fixed, prop))
     # De-dup by codepage (a cp appears once); keep first, stable order by cp.
@@ -79,6 +89,9 @@ def main():
         f.write("struct aret_mlang_cp {\n"
                 "    uint32_t cp, family_cp, flags;\n"
                 "    const char *desc, *web, *header, *body, *fixed, *prop;\n};\n")
+        # Wine's total_cp counts every family entry (a cp shared by two families counts
+        # twice), which GetNumberOfCodePageInfo returns — distinct from the deduped table.
+        f.write(f"#define ARET_MLANG_TOTAL_CP {raw_total}\n")
         f.write(f"static const struct aret_mlang_cp aret_mlang_cps[] = {{\n")
         for cp, famcp, fl, desc, web, hdr, body, fixed, prop in rows:
             f.write(f"    {{ {cp}, {famcp}, 0x{fl:x}, {c(desc)}, {c(web)}, "

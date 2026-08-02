@@ -41,7 +41,11 @@ Trois **couches** (branchement → comportement), et pour le comportement trois 
 ### `tools/gen_mlang_cp.py` — table de code pages mlang (couche comportement, forme LÉGÈRE) ✅
 - **Entrée** : `dlls/mlang/mlang.c` de Wine (récupéré via `curl` github raw ; `WINE_MLANG_C=<path>`).
 - **Sortie** : `runtime/aret_hle/mlang_cp_table.h` (**70 code pages** : cp, family cp, flags, desc, charsets, fonts).
-- **Consommé par** : `u32_ml_GetCodePageInfo` (`aret_win32.c`) → remplit `MIMECPINFO`, miroir de `fill_cp_info`.
+- **Consommé par** : `u32_ml_GetCodePageInfo` (`MIMECPINFO`, miroir de `fill_cp_info`) **et** `u32_ml_GetFamilyCodePage`
+  (search-loop de Wine, forme MOYENNE = port de LOGIQUE). **73 code pages** (les macros `CP_UNICODE/UTF7/UTF8` résolues,
+  UTF-8 65001 inclus — corrigé grâce à l'oracle).
+- **⚠️ Leçons oracle (2026-08-02)** : extraire de **la version de Wine == l'oracle** ; l'oracle **corrige** l'extraction
+  (a rendu UTF-8 ; a rejeté `GetNumberOfCodePageInfo` dont le `total_cp` runtime=73 ≠ parse source=74, non livré).
 - **Câblage build** : `mlang_cp_table.h` embarqué (`include_str!`) + écrit dans l'out-dir (`src/builder/mod.rs`).
 - **Ré-exécuter** : `python3 tools/gen_mlang_cp.py`.
 - **Portes** : `winecorpus/ole_mlang_getcpinfo` **bit-identique Wine** + hash inchangé + audit PASS.

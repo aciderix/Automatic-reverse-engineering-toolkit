@@ -6475,3 +6475,24 @@ Détail : **70 §6** (roadmap). Résumé :
   instruction** (watchpoint gdb sur l'adresse runtime de `0x51efdc` dans l'ELF ARET, ou instrumentation du store
   `0x42e8fa`) — incrément de forensics dédié. **Acquis de la session** : mlang (activation + `GetCodePageInfo`
   depuis Wine) a tenu de bout en bout et déplacé le driver jusqu'à ce mur racine.
+
+### 2026-08-02 — [I5][COM][INFRA] **Phase C brique 3 — forme MOYENNE prouvée : `GetFamilyCodePage` portée de la LOGIQUE de Wine ; l'oracle corrige l'extracteur (UTF-8 récupéré)**
+
+- **Forme moyenne** (doc 82) : porter un **corps de fonction** Wine, pas juste une table. `u32_ml_GetFamilyCodePage`
+  reproduit la boucle de recherche de Wine (`GetFamilyCodePage` : scanne le cp, rend le family cp, S_OK ; S_FALSE si
+  ptr null ou cp inconnu) sur notre table extraite. **Bit-identique Wine** (`family(28591)→1252`, `932→932`,
+  `65001→1200`, inconnu→S_FALSE).
+- **⭐ L'ORACLE A RENDU L'EXTRACTION MEILLEURE** — deux constats attrapés par winediff, exactement le rôle de la porte :
+  1. **UTF-8 manquait** : l'extracteur ignorait la famille Unicode (`CP_UNICODE`/`CP_UTF7`/`CP_UTF8` = code pages en
+     **macro**, pas en littéral) ⇒ `gen_mlang_cp.py` résout désormais ces macros ⇒ table **70 → 73 code pages**, dont
+     **UTF-8 (65001)**. `GetCodePageInfo(65001)` est maintenant **bit-identique Wine** (cp 65001, family 1200) — un
+     vrai trou comblé (WinMerge peut interroger l'UTF-8).
+  2. **`GetNumberOfCodePageInfo` NON livré** : le `total_cp` du **runtime** Wine (73) ne se réconcilie pas avec un
+     parse **statique** de `mlang_data` (74) — une valeur que Wine dérive au chargement. Plutôt qu'expédier un compte
+     qui **diverge de l'oracle** (§0), on **ne le modélise pas** (reste stub instrument-first). L'oracle a évité de
+     livrer une valeur devinée.
+- **Leçon pipeline** (doc 82) : (a) extraire de **la même version de Wine que l'oracle** ; (b) l'oracle **valide et
+  corrige** l'extraction — un parse de source n'est pas fiable seul (macros, valeurs dérivées au runtime). Automatiser
+  retire l'écriture, **pas la preuve**.
+- **Portes** : `ole_mlang_family`, `ole_mlang_getcpinfo`, `ole_mlang_activate` **bit-identiques Wine** ; hash inchangé ;
+  stdcall_audit PASS.

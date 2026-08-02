@@ -5,6 +5,7 @@ struct aret_mlang_cp {
     uint32_t cp, family_cp, flags;
     const char *desc, *web, *header, *body, *fixed, *prop;
 };
+#define ARET_MLANG_TOTAL_CP 74
 static const struct aret_mlang_cp aret_mlang_cps[] = {
     { 37, 1252, 0x20060408, "IBM EBCDIC (US-Canada)", "ibm037", "ibm037", "ibm037", "Courier New", "Arial" },
     { 424, 1255, 0x20040408, "Hebrew (424)", "ibm424", "ibm424", "ibm424", "Miriam Fixed", "David" },
@@ -34,6 +35,7 @@ static const struct aret_mlang_cp aret_mlang_cps[] = {
     { 950, 950, 0x3006070f, "Chinese Traditional (Big5)", "big5", "big5", "big5", "MingLiu", "New MingLiu" },
     { 1006, 1256, 0x20040408, "Arabic (1006)", "ibm1006", "ibm1006", "ibm1006", "Simplified Arabic Fixed", "Simplified Arabic" },
     { 1026, 1254, 0x20060408, "IBM EBCDIC (Turkish Latin-5)", "ibm1026", "ibm1026", "ibm1026", "Courier New", "Arial" },
+    { 1200, 1200, 0x3006060c, "Unicode", "unicode", "unicode", "unicode", "Courier New", "Arial" },
     { 1250, 1250, 0x2006070b, "Central European (Windows)", "windows-1250", "windows-1250", "windows-1250", "Courier New", "Arial" },
     { 1251, 1251, 0x2004070b, "Cyrillic (Windows)", "windows-1251", "windows-1251", "windows-1251", "Courier New", "Arial" },
     { 1252, 1252, 0x2006070f, "Western European (Windows)", "windows-1252", "windows-1252", "iso-8859-1", "Courier New", "Arial" },
@@ -76,4 +78,6 @@ static const struct aret_mlang_cp aret_mlang_cps[] = {
     { 51932, 932, 0x3006070f, "Japanese (EUC)", "euc-jp", "euc-jp", "euc-jp", "MS Gothic", "MS PGothic" },
     { 52936, 936, 0x3006070b, "Chinese Simplified (HZ)", "hz-gb-2312", "hz-gb-2312", "hz-gb-2312", "Simsun", "Simsun" },
     { 54936, 936, 0x2006070f, "Chinese Simplified (GB18030)", "GB18030", "GB18030", "GB18030", "Simsun", "Simsun" },
+    { 65000, 1200, 0x30060509, "Unicode (UTF-7)", "utf-7", "utf-7", "utf-7", "Courier New", "Arial" },
+    { 65001, 1200, 0x3006070b, "Unicode (UTF-8)", "utf-8", "utf-8", "utf-8", "Courier New", "Arial" },
 };

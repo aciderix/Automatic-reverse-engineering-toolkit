@@ -7613,6 +7613,11 @@ static uint32_t u32_ml_release(uint32_t esp) { (void)esp; return g_mlang_refs > 
  * calls is identified by a single rebuild instead of guessed. */
 #define ML_STUB(name) static uint32_t u32_ml_##name(uint32_t esp) { (void)esp; \
     aret_unmodelled("IMultiLanguage::" #name); return 0x80004001u; }
+/* GetNumberOfCodePageInfo: left instrument-first. Wine's runtime total_cp (73) does not
+ * match a naive source count of mlang_data (74) — a value it derives at load time that a
+ * static extraction does not reproduce. Rather than ship a count that diverges from the
+ * oracle (§0), we do not model it until the discrepancy is understood. (The oracle caught
+ * this — the point of verifying.) */
 ML_STUB(GetNumberOfCodePageInfo)
 /* GetCodePageInfo(uiCodePage, PMIMECPINFO) — fills MIMECPINFO from the Wine-extracted
  * table, mirroring Wine's fnIMultiLanguage_GetCodePageInfo + fill_cp_info exactly (fields
@@ -7640,7 +7645,18 @@ static uint32_t u32_ml_GetCodePageInfo(uint32_t esp) {
     }
     return 1;                                        /* S_FALSE: unknown code page */
 }
-ML_STUB(GetFamilyCodePage)
+/* GetFamilyCodePage(uiCodePage, *puiFamilyCodePage) — ported from Wine's GetFamilyCodePage:
+ * scan the table for the code page, return its family code page (S_OK); S_FALSE if the
+ * pointer is NULL or the code page is unknown. The table keeps each cp's FIRST family in
+ * mlang_data order, matching Wine's first-match. */
+static uint32_t u32_ml_GetFamilyCodePage(uint32_t esp) {
+    uint32_t cp = WU(1);
+    uint32_t *out = (uint32_t *)(uintptr_t)WU(2);
+    if (!out) return 1;                              /* S_FALSE */
+    for (unsigned i = 0; i < sizeof(aret_mlang_cps) / sizeof(aret_mlang_cps[0]); i++)
+        if (aret_mlang_cps[i].cp == cp) { *out = aret_mlang_cps[i].family_cp; return 0; }
+    return 1;                                        /* S_FALSE */
+}
 ML_STUB(EnumCodePages)
 ML_STUB(GetCharsetInfo)
 ML_STUB(IsConvertible)
