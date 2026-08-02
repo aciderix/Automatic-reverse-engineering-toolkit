@@ -6355,3 +6355,23 @@ Détail : **70 §6** (roadmap). Résumé :
 - ⚠️ **Note environnement** : après un redémarrage du conteneur, `/tmp` est devenu read-only ⇒ `winediff.sh` (qui y
   crée ses dossiers via `mktemp`) échoue. Contournement : `TMPDIR=<scratchpad>` pour les portes, comparaison
   directe pour les fixtures. Non lié au code.
+
+### 2026-08-02 — [I12][INFRA][ABI] **Phase A — générateur `@N` : `stdcall_pops` dérivé des import-libs (963 → 10 140), merge additif, hash inchangé**
+
+- **Outil** `tools/gen_stdcall_pops.py` (checked-in, ré-exécutable) : dérive la table `@N` des **import-libs mingw
+  du cœur système** (33 DLL), la vérité terrain du callee-pop stdcall (`_Name@N`).
+- **Contradictions mesurées et résolues** : sur **12 773** fonctions du cœur, **17** contradictoires — **15 sont
+  `Script*`** (gdi32 expose des stubs `@0`, usp10 est le vrai propriétaire ⇒ ordre de préférence usp10 avant gdi32),
+  2 symboles RPC/NDR internes. (Le jeu *complet* de libs a 71 contradictions, quasi toutes des versions DirectX
+  `d3dx9_24..43` — d'où la restriction au cœur.)
+- **Merge ADDITIF (clé de soundness)** : les 963 entrées faites-main sont **gardées verbatim** ; le générateur
+  n'AJOUTE que les noms absents. ⇒ le **hash comportemental ne peut pas changer** et aucun appelant ne peut régresser.
+  Mesuré : **0 conflit**, **+9177** `@N` prouvés (963 → **10 140**). Les nouveaux `@N` viennent des **mêmes import-libs
+  contre lesquelles les binaires sont liés** ⇒ le `@N` d'ARET = celui avec lequel le binaire a été construit,
+  **correct par construction**.
+- **Portes qui ont pu tourner** : **hash transpile inchangé** `19acad982194bf07` ; **stdcall_audit PASS** ; `aret
+  --run` correct (x87_round vérifié à la main). ⚠️ **Le full winediff N'A PAS PU tourner** : après le redémarrage du
+  conteneur, `/tmp` est **read-only**, ce qui casse **Wine lui-même** (il y crée son socket serveur → segfault/abort,
+  sortie vide) et le harnais parallèle. Le `0/211` observé est **l'oracle mort, pas le code** (la sortie ARET est
+  correcte). ⇒ **à re-confirmer par un winediff complet dans un environnement sain** (ou via l'oracle Windows réel).
+  La nature additive + même-source rend la régression quasi-impossible, mais la porte reste à rejouer.
