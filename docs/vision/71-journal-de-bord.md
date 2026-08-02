@@ -6375,3 +6375,8 @@ Détail : **70 §6** (roadmap). Résumé :
   sortie vide) et le harnais parallèle. Le `0/211` observé est **l'oracle mort, pas le code** (la sortie ARET est
   correcte). ⇒ **à re-confirmer par un winediff complet dans un environnement sain** (ou via l'oracle Windows réel).
   La nature additive + même-source rend la régression quasi-impossible, mais la porte reste à rejouer.
+
+- **✅ Winediff re-joué et VERT (Phase A confirmée)** : la panne était un `/tmp` **transitoirement** read-only
+  (pression disque des builds concurrents) qui tuait Wine ; une fois `/tmp` rétabli, le full winediff donne
+  **210/211** (seul rouge = `gdi_uifont`, environnemental). ⇒ les 9177 `@N` ajoutés **ne régressent aucune fixture**
+  — la porte ABI est verte, comme le prédisait le merge additif.
