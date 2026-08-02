@@ -6096,3 +6096,26 @@ Détail : **70 §6** (roadmap). Résumé :
   éliminé le lift comme suspect **avant** d'ouvrir gdb sérieusement. Le réflexe inverse (gdb d'abord) échoue ici,
   parce que l'`__esp` modélisé n'est pas celui de l'hôte (70 §7) — mais la watchpoint sur une **adresse guest
   identity-mappée** marche parfaitement, elle.
+
+### 2026-08-01 — [DIAG][CORRECTION] **⚠️ L'entrée précédente désigne la MAUVAISE globale — `0x51ef18+0xc`, pas `0x51efd0+0xc`**
+
+- **Erreur à corriger avant qu'elle coûte une session** : l'entrée « le mur `0x10` n'est pas le lift » identifie la
+  globale fautive comme `0x51efd0+0xc`. **C'est faux.** Le site d'appel dans `sub_42e14e` lit `[esi + 0xc]`, et la
+  trace donne pour cette frame `ecx = 0x51efd0` **mais `esi = 0x51ef18`**. J'ai lu `ecx` là où il fallait lire `esi`.
+  La globale nulle est **`0x51ef18 + 0xc` = `0x51ef24`**.
+- **Ce que l'erreur a coûté**, et c'est instructif : une watchpoint matérielle posée sur `0x51efdc` qui « ne se
+  déclenche jamais » — un résultat **vrai mais sans rapport**, que j'ai interprété comme une preuve. Puis une
+  recherche statique de l'écrivain de `0x51efd0+0xc`, tout aussi hors sujet, dont le résultat négatif **confirmait**
+  la fausse piste. **Deux mesures concordantes sur le mauvais objet ressemblent exactement à deux mesures
+  concordantes sur le bon.**
+- **Règle à retenir, et elle manquait** : dans une trace de registres, *vérifier de quel registre vient réellement
+  l'opérande avant de croiser avec la trace*. La signature liftée est
+  `sub_X(__esp, eax, ecx, edx, ebp, esi, edi, ebx)` — la position **6** est `esi`. Le C généré nomme les paramètres
+  `v34`, `v21`… : il faut **remonter la signature**, pas deviner par proximité. C'est la version « registres » du
+  piège déjà connu sur les compteurs (« qualifier la NATURE avant d'en tirer une cause », 70 §7).
+- **Ce qui reste vrai de l'entrée précédente** : la fonction fautive est bien `sub_42eca8`, elle déréférence bien
+  `this->+0x10`, `0x10` est bien un **offset de champ** et non une adresse, et **le lift est fidèle** — le site
+  d'appel charge et passe exactement ce que le flux d'instructions dit. Seule l'identité de la globale change.
+- **État mesuré de la bonne cible** : `0x51ef18` est référencée **172 fois** dans le `.text` d'origine (globale
+  très utilisée), et **aucun** accès direct à `0x51ef24` n'existe — l'écriture passe donc par un `this`, comme pour
+  l'autre. Watchpoint sur `0x51ef24` en cours ; c'est elle qui tranchera.
