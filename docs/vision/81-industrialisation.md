@@ -660,3 +660,29 @@ source unique.
 
 **État** : analyse seule (aucune génération commitée). La table `stdcall_pops` reste faite-main et **prouvée**
 (stdcall_audit). À décider avant d'engager la Phase A.
+
+## I13 — Réutiliser Wine SANS dépendance runtime : la ligne transpile-vs-source, prouvée sur mlang (2026-08-02)
+
+**Décision d'architecture (validée utilisateur).** Deux natures de binaire, deux traitements :
+- **Le code RÉEL** (application + ses DLL : `WinMergeU.exe`, `mfc90u.dll`, `msvcr90.dll`, plugins…) → **on TRANSPILE**
+  (lifting PE, `--with-dll`). C'est notre machinerie de base.
+- **La surface OS que Wine RÉIMPLÉMENTE** (kernel32, shell32, mlang, gdi32…) → **on part du C SOURCE de Wine**, PAS
+  de son binaire. Mesuré (doc 70 §5.0) : le builtin PE de Wine est un **relais-stub** (0 thunk/forwarder) — le
+  transpiler ne donne **rien**. Le comportement vit dans le `.c`. (Et le `.so` Wine est déjà natif : le lier =
+  dépendance runtime = **rejeté**.)
+
+**Autonomie garantie.** Wine sert **à la compilation** (source de données ou de code), jamais **à l'exécution** :
+ce qu'on extrait est **compilé DANS** l'ELF/WASM. Aucun Wine chargé au runtime. Trois intensités : **légère**
+(extraire une table de données), **moyenne** (porter un corps de fonction), **lourde** (compiler des DLL Wine
+entières + porter une fois le plancher `ntdll`/win32u, ~131 syscalls — un milestone). Licence : Wine est LGPL/GPL
+(obligations de distribution) — décision produit, pas blocage technique (le binaire est autonome quoi qu'il arrive).
+
+**Spike PROUVÉ (forme légère) — mlang `GetCodePageInfo`.** `tools/gen_mlang_cp.py` **extrait mécaniquement** la
+table de code pages de `dlls/mlang/mlang.c` de Wine (descriptions, noms MIME web/header/body, polices, flags
+`MIMECONTF_*` résolus en numérique) → `runtime/aret_hle/mlang_cp_table.h` (**70 code pages**, compilé dans le
+binaire). `IMultiLanguage::GetCodePageInfo` remplit `MIMECPINFO` depuis cette table, miroir exact de
+`fill_cp_info` (offsets MSVC fixes ; `bGDICharset` dérivé du family cp comme Wine). **Résultat : bit-identique
+Wine** (`ole_mlang_getcpinfo` : flags `0x2006070f`, desc, charsets, fonts, GDI charset, S_FALSE sur cp inconnu),
+hash inchangé, audit PASS. ⇒ **la preuve que « puiser dans le C de Wine, compilé, autonome » est rentable et
+sound.** Prochaine intensité (moyenne) : porter des corps, pas juste des tables ; puis (lourde) le plancher ntdll
+si on veut des DLL entières.

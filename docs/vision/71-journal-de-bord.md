@@ -6428,3 +6428,22 @@ Détail : **70 §6** (roadmap). Résumé :
   PMIMECPINFO)` (remplir la struct `MIMECPINFO` — description, family/web/header/body charset, GDI charset — par une
   table de codepages), vérifié contre l'oracle ; d'abord logger le `uiCodePage` que WinMerge passe pour cibler la
   donnée. Le design instrument-first a payé : un seul rebuild, le mur exact est nommé.
+
+### 2026-08-02 — [I5][GUI][COM][INFRA] **Phase C brique 2 — `GetCodePageInfo` rempli depuis une table EXTRAITE de Wine (autonome), bit-identique Wine**
+
+- **Spike « corps depuis Wine, compilé dans le binaire autonome »** (doc 81 §I13), forme **légère** (extraction de
+  données). `tools/gen_mlang_cp.py` parse `dlls/mlang/mlang.c` de Wine → `runtime/aret_hle/mlang_cp_table.h`
+  (**70 code pages** : cp, family cp, flags `MIMECONTF_*` résolus, description, charsets web/header/body, polices).
+  Aucun Wine au runtime — la table est **compilée dans l'ELF**.
+- `u32_ml_GetCodePageInfo` remplit `MIMECPINFO` depuis la table, **miroir exact de `fill_cp_info` de Wine** : offsets
+  MSVC fixes (dwFlags@0, cp@4, family@8, wszDescription@12[64], Web@140[50], Header@240, Body@340, FixedFont@440[32],
+  PropFont@504, bGDICharset@568), `bGDICharset` dérivé du family cp (comme `TranslateCharsetInfo`), S_OK trouvé /
+  **S_FALSE** cp inconnu (échec défini).
+- **Câblage build** : `mlang_cp_table.h` embarqué (`include_str!`) et écrit dans l'out-dir à côté des autres sources
+  HLE (`src/builder/mod.rs`), sinon `aret_win32.c` ne le trouvait pas à la compilation.
+- **Vérif** : `winecorpus/ole_mlang_getcpinfo.c` = **bit-identique Wine** (cp 1252 : flags `0x2006070f`, desc
+  « Western European (Windows) », web `windows-1252`, body `iso-8859-1`, fonts Courier New/Arial, GDI charset 0 ;
+  cp inconnu → S_FALSE) ; `ole_mlang_activate` toujours vert ; hash transpile inchangé ; stdcall_audit PASS.
+- **Enseignement** : première preuve concrète que **puiser dans le C de Wine, extrait mécaniquement et compilé dans
+  le binaire autonome, est rentable et sound** — exactement l'automatisation des *corps* discutée. Rebuild WinMerge
+  en cours pour le mur suivant.

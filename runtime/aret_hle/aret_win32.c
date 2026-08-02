@@ -7568,6 +7568,30 @@ static const uint8_t CLSID_CMultiLanguage_b[16] =
     { 0xE2,0x23,0x5C,0x27, 0x47,0x37, 0xD0,0x11, 0x9F,0xEA,0x00,0xAA,0x00,0x3F,0x86,0x46 };
 static int u32_guid_eq(const uint8_t *g, const uint8_t *ref) { return g && memcmp(g, ref, 16) == 0; }
 
+/* Code-page data EXTRACTED from Wine's dlls/mlang/mlang.c (tools/gen_mlang_cp.py) and
+ * compiled in — no Wine at runtime. Defines aret_mlang_cps[]. */
+#include "mlang_cp_table.h"
+
+/* GDI charset for a family code page, mirroring Wine's fill_cp_info (TranslateCharsetInfo
+ * on the family cp; DEFAULT_CHARSET=1 otherwise). Self-contained (u32_tci is defined later
+ * in this file), values identical to it. */
+static uint32_t u32_family_gdi_charset(uint32_t cp) {
+    switch (cp) {
+        case 1252: return 0;   /* ANSI */      case 1250: return 238; case 1251: return 204;
+        case 1253: return 161; case 1254: return 162; case 1255: return 177;
+        case 1256: return 178; case 1257: return 186; case 1258: return 163;
+        case 874:  return 222; case 932:  return 128; case 936:  return 134;
+        case 949:  return 129; case 950:  return 136; case 1361: return 130;
+        default:   return 1;   /* DEFAULT_CHARSET */
+    }
+}
+/* Copy an ASCII string into a guest UTF-16 buffer of `cap` WCHARs (NUL-terminated). */
+static void u32_ml_putw(uint16_t *dst, const char *s, int cap) {
+    int i = 0;
+    for (; s[i] && i < cap - 1; i++) dst[i] = (unsigned char)s[i];
+    dst[i] = 0;
+}
+
 static uint32_t g_mlang_refs = 1;
 static uint32_t g_mlang_vtbl[18];
 static uint32_t g_mlang_obj;   /* holds the vtable pointer; the object handed out is &g_mlang_obj */
@@ -7590,7 +7614,32 @@ static uint32_t u32_ml_release(uint32_t esp) { (void)esp; return g_mlang_refs > 
 #define ML_STUB(name) static uint32_t u32_ml_##name(uint32_t esp) { (void)esp; \
     aret_unmodelled("IMultiLanguage::" #name); return 0x80004001u; }
 ML_STUB(GetNumberOfCodePageInfo)
-ML_STUB(GetCodePageInfo)
+/* GetCodePageInfo(uiCodePage, PMIMECPINFO) — fills MIMECPINFO from the Wine-extracted
+ * table, mirroring Wine's fnIMultiLanguage_GetCodePageInfo + fill_cp_info exactly (fields
+ * at their fixed MSVC offsets; bGDICharset from the family cp). S_OK if found, S_FALSE
+ * otherwise (an unknown code page is a defined "not available", not a guess). */
+static uint32_t u32_ml_GetCodePageInfo(uint32_t esp) {
+    uint32_t cp = WU(1);
+    uint8_t *o = (uint8_t *)(uintptr_t)WU(2);
+    if (!o) return 0x80070057u;                     /* E_INVALIDARG (never reached in practice) */
+    for (unsigned i = 0; i < sizeof(aret_mlang_cps) / sizeof(aret_mlang_cps[0]); i++) {
+        const struct aret_mlang_cp *e = &aret_mlang_cps[i];
+        if (e->cp != cp) continue;
+        memset(o, 0, 572);                           /* sizeof(MIMECPINFO), 4-aligned */
+        *(uint32_t *)(o + 0) = e->flags;
+        *(uint32_t *)(o + 4) = e->cp;
+        *(uint32_t *)(o + 8) = e->family_cp;
+        u32_ml_putw((uint16_t *)(o + 12),  e->desc,   64);   /* wszDescription  */
+        u32_ml_putw((uint16_t *)(o + 140), e->web,    50);   /* wszWebCharset   */
+        u32_ml_putw((uint16_t *)(o + 240), e->header, 50);   /* wszHeaderCharset*/
+        u32_ml_putw((uint16_t *)(o + 340), e->body,   50);   /* wszBodyCharset  */
+        u32_ml_putw((uint16_t *)(o + 440), e->fixed,  32);   /* wszFixedWidthFont */
+        u32_ml_putw((uint16_t *)(o + 504), e->prop,   32);   /* wszProportionalFont */
+        o[568] = (uint8_t)u32_family_gdi_charset(e->family_cp);   /* bGDICharset */
+        return 0;                                    /* S_OK */
+    }
+    return 1;                                        /* S_FALSE: unknown code page */
+}
 ML_STUB(GetFamilyCodePage)
 ML_STUB(EnumCodePages)
 ML_STUB(GetCharsetInfo)

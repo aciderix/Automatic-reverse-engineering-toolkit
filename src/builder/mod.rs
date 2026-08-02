@@ -27,6 +27,9 @@ const HLE_C: &str = include_str!("../../runtime/aret_hle/aret_hle.c");
 const CRT_C: &str = include_str!("../../runtime/aret_hle/aret_crt.c");
 /// Win32 layer (kernel32 subset → native POSIX); strong defs override weak stubs.
 const WIN32_C: &str = include_str!("../../runtime/aret_hle/aret_win32.c");
+/// Code-page table extracted from Wine's mlang.c (tools/gen_mlang_cp.py), #included by
+/// aret_win32.c for IMultiLanguage::GetCodePageInfo. Compiled in; no Wine at runtime.
+const MLANG_CP_TABLE_H: &str = include_str!("../../runtime/aret_hle/mlang_cp_table.h");
 
 pub struct TranspileReport {
     pub out_dir: std::path::PathBuf,
@@ -1318,6 +1321,7 @@ pub fn transpile(
     write("aret_hle.c", HLE_C)?;
     write("aret_crt.c", CRT_C)?;
     write("aret_win32.c", WIN32_C)?;
+    write("mlang_cp_table.h", MLANG_CP_TABLE_H)?;
     write("aret_stubs.c", &stubs)?;
     // Every IAT slot, as a VA -> import-shim trampoline, so an indirect call
     // through the slot (a function pointer the program copied out of it) resolves
