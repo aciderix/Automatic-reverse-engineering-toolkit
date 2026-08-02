@@ -601,6 +601,23 @@ pub(crate) fn expr_c(e: &Expr) -> String {
                     let na: Vec<String> = a.iter().map(|x| format!("(uint32_t)({x})")).collect();
                     format!("{}({})", n, na.join(", "))
                 }
+                // Relay wrapping (--relay): an HLE shim call becomes
+                // `aret_relay("Name", (uint32_t)(esp), aret_Name(esp))`. The wrapper
+                // returns the shim's value unchanged, so the expression's meaning is
+                // identical; the only effect is a runtime-gated log line. Needs the
+                // esp argument (a[0]) to read the call's stack args, so it only wraps
+                // the shims that take one.
+                CallTarget::Named(n)
+                    if relay_enabled() && is_relayable_shim(n) && !a.is_empty() =>
+                {
+                    format!(
+                        "aret_relay(\"{}\", (uint32_t)({}), {}({}))",
+                        n.strip_prefix("aret_").unwrap_or(n),
+                        a[0],
+                        n,
+                        a.join(", ")
+                    )
+                }
                 CallTarget::Named(n) => format!("{}({})", n, a.join(", ")),
                 CallTarget::Indirect(e) => {
                     // Shared-stack/transpile mode: a function pointer holds the
@@ -663,6 +680,15 @@ thread_local! {
     /// (the call chain + register state leading to the crash). Off by default so the
     /// default product is byte-identical (no push calls emitted). Purely additive.
     static TRACE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+
+    /// Import-relay mode (`--relay`, doc 81 §4 execution diff): when on, every HLE
+    /// shim call `aret_X(esp)` is wrapped in `aret_relay("X", esp, aret_X(esp))`,
+    /// which — at runtime, only if `ARET_RELAY` is set — logs the API name, its first
+    /// argument words read off the modelled stack, and the return value, in a format
+    /// that lines up with Wine's `WINEDEBUG=+relay`. The point is to diff the two
+    /// traces and find the FIRST divergence between our HLE and Wine on a real binary,
+    /// instead of walking a null object back by hand. Off by default → byte-identical.
+    static RELAY: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
 /// Enable/disable execution-trace emission (`--trace`) for the current thread.
@@ -672,6 +698,36 @@ pub fn set_trace(on: bool) {
 
 pub(crate) fn trace_enabled() -> bool {
     TRACE.with(|c| c.get())
+}
+
+/// Enable/disable import-relay emission (`--relay`) for the current thread.
+pub fn set_relay(on: bool) {
+    RELAY.with(|c| c.set(on));
+}
+
+pub(crate) fn relay_enabled() -> bool {
+    RELAY.with(|c| c.get())
+}
+
+/// Runtime helpers that are emitted as `aret_*`/`__*` Named calls into lifted bodies
+/// but are NOT Win32/CRT imports — excluded from the relay so the trace is API calls,
+/// not internal plumbing. Over-inclusion elsewhere is harmless (the wrapper returns
+/// its value unchanged and the differ ignores unknown names), so this list only needs
+/// to cover the ones that would be noise or recurse.
+pub(crate) fn is_relayable_shim(n: &str) -> bool {
+    if !n.starts_with("aret_") {
+        return false;
+    }
+    !matches!(
+        n,
+        "aret_call"
+            | "aret_relay"
+            | "aret_unmodelled"
+            | "aret_unimpl"
+            | "aret_partial"
+            | "aret_noop"
+            | "aret_trace_push"
+    )
 }
 
 /// Enable/disable shared machine-stack emission for the current thread.

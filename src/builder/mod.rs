@@ -1115,6 +1115,10 @@ pub fn transpile(
     // record (VA + esp + regs) dumped by the runtime on a crash, to reconstruct the call
     // chain leading to a late corruption. Off by default → default build byte-identical.
     emit::set_trace(std::env::var_os("ARET_TRACE").is_some());
+    // Import-relay build (doc 81 §4 execution diff): wrap every HLE shim call in a
+    // runtime-gated relay log, comparable to Wine's +relay. Off unless ARET_RELAY is
+    // set at BUILD time; when off, byte-identical output (no wrapper emitted).
+    emit::set_relay(std::env::var_os("ARET_RELAY").is_some());
     // Partition recovered functions at the host/translate frontier and make it
     // *structural*: a host-backed function (libm/CRT/glue recognized by symbol) is
     // NOT translated — its body would be dead for direct calls (redirected to the

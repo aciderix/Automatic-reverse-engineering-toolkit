@@ -126,6 +126,11 @@ uint64_t aret_call(uint32_t va, uint64_t esp, uint64_t a, uint64_t c, uint64_t d
 void aret_trace_push(uint32_t va, uint32_t esp, uint32_t eax, uint32_t ecx, uint32_t edx,
                      uint32_t ebp, uint32_t esi, uint32_t edi, uint32_t ebx);
 void aret_trace_dump(void);
+/* Import relay (--relay build, doc 81 §4): wrap a shim call so, when ARET_RELAY is set
+ * at runtime, the API name + first stack arg words + return value are logged in a form
+ * that lines up with Wine's WINEDEBUG=+relay. Returns `ret` unchanged (zero behavioural
+ * effect); the whole thing is a no-op — just returns ret — when ARET_RELAY is unset. */
+uint32_t aret_relay(const char *name, uint32_t esp, uint32_t ret);
 /* Runtime x87 stack under/overflow: flush stdout, report op/index/depth, dump the
  * trace, abort. Same loud failure as the old bare trap, but diagnostic. */
 void aret_x87_stack_error(const char *op, int i, int depth) __attribute__((noreturn));

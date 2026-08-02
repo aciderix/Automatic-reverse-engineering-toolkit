@@ -2474,6 +2474,31 @@ void aret_trace_dump(void) {
     fprintf(stderr, "=== end trace ===\n");
 }
 
+/* Import relay (doc 81 §4). Logs one line per HLE shim call, chosen to line up with
+ * Wine's `WINEDEBUG=+relay`, so the two traces of the SAME binary diff directly and
+ * the first differing line is the first place our HLE and Wine disagree.
+ *
+ * Format: `NNNN:Call NAME(a0,a1,a2,a3) ret=CALLER` then `NNNN:Ret  NAME() retval=RET`,
+ * where NNNN is a per-call ordinal (Wine uses a thread id there; we use a counter,
+ * and the differ ignores that column). The four arg words are read off the modelled
+ * stack at [esp..esp+12] — enough to key almost every API, and never a fault because
+ * esp points into the shared machine stack. Everything is gated on ARET_RELAY so an
+ * ordinary run pays nothing but the branch. */
+static int g_relay = -1;
+static unsigned long g_relay_seq = 0;
+uint32_t aret_relay(const char *name, uint32_t esp, uint32_t ret) {
+    if (g_relay < 0) g_relay = getenv("ARET_RELAY") ? 1 : 0;
+    if (!g_relay) return ret;
+    const uint32_t *a = (const uint32_t *)(uintptr_t)esp;
+    unsigned long seq = ++g_relay_seq;
+    /* Reading the stack is safe: esp is inside aret_stack. Guard the very top so the
+     * last frame's short read cannot walk off the mapping. */
+    uint32_t a0 = a ? a[0] : 0, a1 = a ? a[1] : 0, a2 = a ? a[2] : 0, a3 = a ? a[3] : 0;
+    fprintf(stderr, "%04lx:Call %s(%08x,%08x,%08x,%08x)\n", seq, name, a0, a1, a2, a3);
+    fprintf(stderr, "%04lx:Ret  %s() retval=%08x\n", seq, name, ret);
+    return ret;
+}
+
 void aret_unmodelled(const char *insn) {
     fprintf(stderr, "ARET: reached an unmodelled instruction: %s\n", insn);
     fprintf(stderr, "ARET: aborting — translation is incomplete here; refusing to guess.\n");

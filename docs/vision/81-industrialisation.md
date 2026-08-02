@@ -585,3 +585,35 @@ affiché. On priorise par la donnée.
   prouvé** plutôt que déduit. **Enfin, la route bon marché a été mesurée AVANT de coder** : `msvcr90.dll`
   (2900 exports, 0 thunk, 0 forwarder, n'importe que KERNEL32) exporte la fonction ⇒ le Levier 1 s'applique
   peut-être ici aussi. *Mesurer avant de coder s'applique aussi au choix entre « écrire » et « lifter ».*
+
+### I11 — Diff d'exécution ARET↔Wine (relay) ✅ **FAIT (2026-08-01)** · *le levier général du §4*
+- **Problème.** La classe de murs « MFC abandonne » (un retour HLE incorrect en amont) se remontait à la main, un
+  objet nul à la fois, sur le plus dur des binaires. Le §4 réclamait depuis le début un **diff d'exécution** ; le voici.
+- **Proposition livrée.** Les deux moteurs logguent chaque appel qui **franchit la surface Win32/CRT**, dans un
+  format qui s'aligne, et `bench/relaydiff.py` marche les deux séquences en parallèle pour pointer la **première
+  divergence**. Côté ARET : build **et** run avec `ARET_RELAY=1` — chaque shim `aret_X(esp)` est enveloppé dans
+  `aret_relay("X", esp, aret_X(esp))` (gaté à la compile **et** au runtime, **hash `19acad982194bf07` inchangé** sans
+  le flag). Côté Wine : **gratuit** — `WINEDEBUG=+relay` logue déjà nom+args+retour ; `+loaddll` donne la carte des
+  modules.
+- **Le vrai travail était l'ALIGNEMENT, et chaque obstacle a livré une règle** :
+  1. Wine exécute un **vrai processus** (loader + CRT + DllMain de 78 modules) ⇒ **209 353** appels programme contre
+     **7 858** pour ARET. → alignement `difflib` sur la **séquence de noms**, la plomberie asymétrique devient des
+     insertions absorbées.
+  2. Wine logue la **plomberie interne** Win32→Win32 (`GetVersion`→`RtlGetVersion`) qu'ARET, monolithique, ne fait
+     pas. → filtrage par **module de l'appelant** (carte `+loaddll`) : on jette les appels dont l'appelant est un DLL
+     système monolithique.
+  3. **Aligner sur `(nom, arg0)` était FAUX** : handles et pointeurs **diffèrent** entre deux runs (allocateurs
+     distincts), donc `GetDeviceCaps(hdc)` n'aligne jamais. → aligner sur le **nom seul**, et ne **juger un retour
+     que quand `arg0` correspond** (mêmes entrées → sortie différente = vrai bug ; entrées différentes = muet).
+  4. **`retour 0` n'est pas « nul »** : `GetSysColor(6)=0` est du **noir légitime**. → la catégorie « handle nul d'un
+     côté » ne s'applique qu'aux **API créatrices** (`Create*`/`Load*`/`GetDC`/…), pas aux couleurs/métriques.
+- **⭐ Premier constat sur WinMerge, et il réoriente le diagnostic** : **aucune** divergence de flot réelle ni
+  d'API créatrice nul-vs-non-nul avant le crash ; les 38 divergences de valeur sont **bénignes** (nos `GetSysColor`/
+  `GetSystemMetrics` rendent des **constantes Win95** différentes des thèmes modernes de Wine). **Mais** le point de
+  synchro est `ARET#292 / Wine#22861` : ARET atteint l'init GUI de MFC après **292** appels, Wine après **22 861**.
+  ⇒ **ARET saute ~22 000 appels d'initialisation** — l'objet nul `[0x51efd0+0xc]` est presque certainement créé
+  dans l'un d'eux. **La divergence est AVANT la synchro**, pas dans un mauvais retour d'API isolé. C'est exactement
+  le genre de réorientation qu'un outil général donne et que la forensics mono-objet ne pouvait pas voir.
+- **Conformité §0.** Gaté, off par défaut, hash inchangé ; les filtres de bruit (heap/lock/pointer-obfuscation)
+  sont **documentés comme ne pouvant masquer une divergence** (ils ne portent pas de valeur sur laquelle un
+  programme bifurque). Purement diagnostic.
