@@ -6335,3 +6335,23 @@ Détail : **70 §6** (roadmap). Résumé :
   sources ouvertes, compilé DANS le binaire** (autonome), pas lier Winelib au runtime (dépendance Wine = refusé) :
   win32metadata → tuyauterie (`@N`/signatures) ; sources Wine (C portable des DLL user-mode) → comportement, avec un
   plancher `ntdll`/win32u fini (~131 syscalls NT) porté une fois. À analyser au prochain incrément.
+
+### 2026-08-02 — [I5][HLE][LARGEUR] **Cluster CLI tier-2 (wallsweep, après tier-1) — 7 shims, bit-identiques Wine**
+
+- Suite directe du tier-1 (même méthode « largeur d'abord »). Après le tier-1, la nouvelle tête du gauntlet était
+  `popen/pclose` (8, laissé — process enfant), puis `TerminateProcess`/`GetFinalPathNameByHandleA` (5),
+  `DebugBreak`/`ReadConsoleW` (4), `BCryptGenRandom`/`MoveFileExA` (3).
+- **Implémenté (sound)** : `TerminateProcess` (kill dur du process courant via `_exit`, sinon échec défini — pas
+  d'enfants), `DebugBreak` (aucun debugger → **abort bruyant**, fidèle au comportement Windows sans debugger),
+  `ReadConsoleW`/`ReadConsoleA` (**gardés `isatty`** comme la famille console : FALSE sur handle redirigé, comme
+  Windows/Wine), `MoveFileExA`/`MoveFileExW` (rename honorant `MOVEFILE_REPLACE_EXISTING` — sans le flag et cible
+  existante → échec, fidèle), `BCryptGenRandom` (**vraie entropie** via `getentropy`, portable WASI — 256 o/appel ;
+  échec `STATUS_UNSUCCESSFUL` plutôt qu'un buffer prévisible, qui serait un faux silencieux pour du crypto).
+- **Vérif & portes** : `winecorpus/crt_console_cluster2.c` **bit-identique Wine** (comparaison directe : `bcrypt
+  s1:0 s2:0 nonzero:1 differ:1 / movefileex ok:1 moved:1 / readconsole ok:0` des deux côtés) ; `stdcall_audit`
+  **PASS** (`@N` ajoutés : `ReadConsoleW/A@20`, `MoveFileExW@12`, `BCryptGenRandom@16`, `DebugBreak@0` ;
+  `TerminateProcess@8`/`MoveFileExA@12` préexistants) ; **hash transpile inchangé** `19acad982194bf07` ; `-lbcrypt`
+  ajouté au link winediff. Tous ces shims sont **portables Linux + WASM** (calcul/fichiers/WASI).
+- ⚠️ **Note environnement** : après un redémarrage du conteneur, `/tmp` est devenu read-only ⇒ `winediff.sh` (qui y
+  crée ses dossiers via `mktemp`) échoue. Contournement : `TMPDIR=<scratchpad>` pour les portes, comparaison
+  directe pour les fixtures. Non lié au code.

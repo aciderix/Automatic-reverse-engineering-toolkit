@@ -120,7 +120,7 @@ run_one() {
   # Link the common Win32 libs a guard might reference (version info, OLE/COM,
   # BSTR, common controls). Harmless for programs that use none — the imports are
   # demand-loaded.
-  if ! "$MINGW" -O1 -w $xcflags "$src" $imp_lib $res_obj -lversion -lole32 -loleaut32 -luuid -luser32 -lgdi32 -lcomctl32 -lwinspool -llz32 -lshlwapi -lshell32 -o "$WD/$name.exe" 2>"$WD/err"; then
+  if ! "$MINGW" -O1 -w $xcflags "$src" $imp_lib $res_obj -lversion -lole32 -loleaut32 -luuid -luser32 -lgdi32 -lcomctl32 -lwinspool -llz32 -lshlwapi -lshell32 -lbcrypt -o "$WD/$name.exe" 2>"$WD/err"; then
     echo "FAIL  $name (PE build: $(head -1 "$WD/err"))"; return 1
   fi
   # Optional per-program arguments: one per line in winecorpus/NAME.args. Passed

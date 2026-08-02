@@ -114,6 +114,62 @@ uint32_t aret_ExitProcess(uint32_t esp) {
     return 0;
 }
 
+/* TerminateProcess(hProcess, uExitCode) -> BOOL. A HARD kill (no CRT cleanup / atexit),
+ * so _exit, not exit. We run a single process: the current-process pseudo-handle
+ * (GetCurrentProcess() == -1) terminates us; any other handle names a child we never
+ * created (CreateProcess is a sound failure), so there is nothing to kill -> FALSE. */
+uint32_t aret_TerminateProcess(uint32_t esp) {
+    if (arg(esp, 0) == 0xFFFFFFFFu) { fflush(NULL); _exit((int)arg(esp, 1)); }
+    g_last_error = 6; /* ERROR_INVALID_HANDLE */
+    return 0;
+}
+
+/* DebugBreak() -> void. A breakpoint for an attached debugger. With none attached (our
+ * case) Windows raises EXCEPTION_BREAKPOINT which, unhandled, terminates the process.
+ * We do the faithful thing: report and abort loudly rather than silently continue past
+ * a point the program marked as "stop here". */
+uint32_t aret_DebugBreak(uint32_t esp) {
+    (void)esp;
+    fflush(stdout);
+    fprintf(stderr, "ARET: DebugBreak() with no debugger attached -> terminating\n");
+    abort();
+    return 0;
+}
+
+/* ReadConsoleW/A(hConsole, buf, nToRead, *pRead, reserved) -> BOOL. A console-input API:
+ * it succeeds only on a real console. On a redirected/piped handle Windows returns FALSE
+ * (a program that redirects stdin uses ReadFile instead), so we gate on isatty() and read
+ * from the underlying fd when it IS a terminal — bytes widened to WCHAR for the W form,
+ * matching how the rest of the HLE widens console/byte input. */
+uint32_t aret_ReadConsoleW(uint32_t esp) {
+    int fd = std_fd(arg(esp, 0));
+    uint16_t *buf = (uint16_t *)(uintptr_t)arg(esp, 1);
+    uint32_t nchars = arg(esp, 2);
+    uint32_t pread_out = arg(esp, 3);
+    if (!buf || !isatty(fd)) { if (pread_out) *(uint32_t *)(uintptr_t)pread_out = 0; return 0; }
+    uint32_t got = 0;
+    for (; got < nchars; got++) {
+        unsigned char c;
+        ssize_t n = read(fd, &c, 1);
+        if (n <= 0) break;
+        buf[got] = c;
+        if (c == '\n') { got++; break; }
+    }
+    if (pread_out) *(uint32_t *)(uintptr_t)pread_out = got;
+    return 1;
+}
+uint32_t aret_ReadConsoleA(uint32_t esp) {
+    int fd = std_fd(arg(esp, 0));
+    char *buf = (char *)(uintptr_t)arg(esp, 1);
+    uint32_t n = arg(esp, 2);
+    uint32_t pread_out = arg(esp, 3);
+    if (!buf || !isatty(fd)) { if (pread_out) *(uint32_t *)(uintptr_t)pread_out = 0; return 0; }
+    ssize_t got = read(fd, buf, n);
+    if (got < 0) got = 0;
+    if (pread_out) *(uint32_t *)(uintptr_t)pread_out = (uint32_t)got;
+    return 1;
+}
+
 uint32_t aret_GetLastError(uint32_t esp) { (void)esp; return g_last_error; }
 uint32_t aret_SetLastError(uint32_t esp) { g_last_error = arg(esp, 0); return 0; }
 
@@ -1483,6 +1539,50 @@ uint32_t aret_MoveFileA(uint32_t esp) {
     translate_path((const char *)(uintptr_t)arg(esp, 0), from, sizeof from);
     translate_path((const char *)(uintptr_t)arg(esp, 1), to, sizeof to);
     return (uint32_t)(rename(from, to) == 0);
+}
+/* Shared body for MoveFileEx: POSIX rename() always replaces an existing target, but
+ * Win32 fails without MOVEFILE_REPLACE_EXISTING (1) — so honour that flag explicitly to
+ * stay faithful (a program relying on the no-clobber default must see the failure). */
+static uint32_t aret_movefileex(const char *win_from, const char *win_to, uint32_t flags) {
+    char from[1024], to[1024];
+    translate_path(win_from, from, sizeof from);
+    translate_path(win_to, to, sizeof to);
+    if (!(flags & 0x1u)) {                 /* no MOVEFILE_REPLACE_EXISTING */
+        struct stat st;
+        if (stat(to, &st) == 0) { g_last_error = 183; return 0; } /* ERROR_ALREADY_EXISTS */
+    }
+    return (uint32_t)(rename(from, to) == 0);
+}
+/* MoveFileExA(from, to, dwFlags) -> BOOL. */
+uint32_t aret_MoveFileExA(uint32_t esp) {
+    return aret_movefileex((const char *)(uintptr_t)arg(esp, 0),
+                           (const char *)(uintptr_t)arg(esp, 1), arg(esp, 2));
+}
+/* MoveFileExW(from, to, dwFlags) -> BOOL. */
+uint32_t aret_MoveFileExW(uint32_t esp) {
+    char from[1024], to[1024];
+    aret_w2n((const uint16_t *)(uintptr_t)arg(esp, 0), from, sizeof from);
+    aret_w2n((const uint16_t *)(uintptr_t)arg(esp, 1), to, sizeof to);
+    return aret_movefileex(from, to, arg(esp, 2));
+}
+/* BCryptGenRandom(hAlgorithm, pbBuffer, cbBuffer, dwFlags) -> NTSTATUS. Fill the buffer
+ * with real OS entropy (getrandom, /dev/urandom fallback). 0 = STATUS_SUCCESS; on failure
+ * STATUS_UNSUCCESSFUL rather than a buffer of predictable bytes (a guessed "random" value
+ * would be a silent-wrong result for anything security-relevant). */
+uint32_t aret_BCryptGenRandom(uint32_t esp) {
+    unsigned char *buf = (unsigned char *)(uintptr_t)arg(esp, 1);
+    uint32_t len = arg(esp, 2);
+    if (!buf) return 0xC0000001u; /* STATUS_UNSUCCESSFUL */
+    /* getentropy is in <unistd.h> on both glibc and wasi-libc (so this stays WASM-
+     * portable), capped at 256 bytes per call. */
+    uint32_t done = 0;
+    while (done < len) {
+        size_t chunk = len - done;
+        if (chunk > 256) chunk = 256;
+        if (getentropy(buf + done, chunk) != 0) break;
+        done += (uint32_t)chunk;
+    }
+    return done == len ? 0u : 0xC0000001u;
 }
 uint32_t aret_WritePrivateProfileStringA(uint32_t esp) {
     const char *section = (const char *)(uintptr_t)arg(esp, 0);
