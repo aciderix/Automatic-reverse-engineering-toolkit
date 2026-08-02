@@ -1,0 +1,104 @@
+# A REAL Windows data watchpoint, to find the writer of a memory location that our
+# transpiled binary leaves untouched (doc 71, the WinMerge 0x10 wall).
+#
+# WHY THIS EXISTS. The diagnosis narrowed the wall to a single fact: a lazily-created
+# MFC object at [0x51efd0+0xc] is written under real Windows/Wine but never under ARET
+# (its create path is guarded by a condition false on our side). To fix it we need to
+# see WHICH function writes that field on a real system, and under what condition.
+# That is a hardware data breakpoint ("ba w4 <addr>") — and in the Linux sandbox every
+# Wine debugging route fails: the gdb stub ignores hardware watchpoints, software ones
+# and native winedbg hang. A real windows-latest runner has cdb and real debug
+# registers, so the watchpoint just works. Same philosophy as windows-oracle.yml: use
+# a real Windows to measure what Wine cannot.
+#
+# The target has NO ASLR (DllCharacteristics lacks DYNAMICBASE), so 0x51efdc is the
+# real runtime address — the exact one from the static analysis. The binary is pinned
+# by sha256 so the addresses in the captured stack map 1:1 onto our disassembly.
+name: windows-watchpoint
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - '.github/workflows/windows-watchpoint.yml'
+
+jobs:
+  watchpoint:
+    runs-on: windows-latest
+    steps:
+      - name: Fetch WinMerge 2.14.0 portable (pinned by sha256)
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          # WinMerge 2.14.0 portable (contains WinMergeU.exe + mfc90u/msvcr90/msvcp90).
+          $urls = @(
+            'https://downloads.sourceforge.net/project/winmerge/stable/2.14.0/WinMerge-2.14.0-exe.zip',
+            'https://master.dl.sourceforge.net/project/winmerge/stable/2.14.0/WinMerge-2.14.0-exe.zip'
+          )
+          $ok = $false
+          foreach ($u in $urls) {
+            try { Invoke-WebRequest -Uri $u -OutFile wm.zip -MaximumRedirection 5; $ok = $true; break }
+            catch { Write-Host "download failed: $u" }
+          }
+          if (-not $ok) { throw 'all download mirrors failed' }
+          Expand-Archive -Path wm.zip -DestinationPath wm -Force
+          $exe = Get-ChildItem -Path wm -Recurse -Filter WinMergeU.exe | Select-Object -First 1
+          if (-not $exe) { throw 'WinMergeU.exe not found in archive' }
+          "WM_DIR=$($exe.DirectoryName)" | Out-File -FilePath $env:GITHUB_ENV -Append
+          $h = (Get-FileHash -Algorithm SHA256 $exe.FullName).Hash.ToLower()
+          Write-Host "WinMergeU.exe sha256 = $h"
+          # The address analysis was done against exactly this build. A mismatch means
+          # the addresses would be wrong, so fail loudly rather than measure the wrong
+          # binary (doc 70 section 7: qualify what you measure before drawing a cause).
+          $want = 'cb886017f996154becdbbaaa34548d18db209a1c25dbd518c8f13dc3411a6a6e'
+          if ($h -ne $want) { throw "sha256 mismatch: got $h want $want — addresses would not match the analysis" }
+
+      - name: Locate cdb (Windows SDK debugger)
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $cand = @(
+            'C:\Program Files (x86)\Windows Kits\10\Debuggers\x86\cdb.exe',
+            'C:\Program Files (x86)\Windows Kits\10\Debuggers\x64\cdb.exe'
+          )
+          $cdb = $cand | Where-Object { Test-Path $_ } | Select-Object -First 1
+          if (-not $cdb) {
+            choco install windbg -y --no-progress | Out-Null
+            $cdb = (Get-ChildItem 'C:\Program Files*' -Recurse -Filter cdb.exe -ErrorAction SilentlyContinue |
+                    Select-Object -First 1).FullName
+          }
+          if (-not $cdb) { throw 'cdb.exe not found' }
+          Write-Host "cdb = $cdb"
+          "CDB=$cdb" | Out-File -FilePath $env:GITHUB_ENV -Append
+
+      - name: Watch the writer of [0x51efd0+0xc] = 0x51efdc
+        timeout-minutes: 8
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          # cdb stops at the initial breakpoint (image mapped, before entry), then runs
+          # this -c command string:
+          #   ba w4 0x51efdc  set a HARDWARE breakpoint on any 4-byte write to the field
+          #   g               run until it fires (the write happens during MFC startup,
+          #                   before any user interaction, so a headless runner reaches it)
+          #   r; k 30         registers + the call stack = the WRITER and its callers
+          #   u eip-20 L10    the instruction that wrote it, in context
+          #   dd 0x51efd0 L4  the object header + the field, now populated
+          #   q               quit (kills the process)
+          # NO -g on the command line: that would skip the initial break where the ba is
+          # set. The 8-minute step timeout bounds the "never fires" case rather than
+          # letting cdb hang for hours.
+          $cmd = 'ba w4 0x51efdc; g; .echo ===WRITER===; r; k 30; .echo ===INSN===; u eip-20 L10; .echo ===FIELD===; dd 0x51efd0 L4; q'
+          Push-Location "$env:WM_DIR"
+          & "$env:CDB" -c $cmd WinMergeU.exe 2>&1 |
+            Tee-Object -FilePath "$env:GITHUB_WORKSPACE\watchpoint.txt"
+          Pop-Location
+          Write-Host "----- tail -----"
+          Get-Content "$env:GITHUB_WORKSPACE\watchpoint.txt" | Select-Object -Last 70
+
+      - name: Publish the writer stack
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-watchpoint
+          path: watchpoint.txt
