@@ -6219,3 +6219,44 @@ Détail : **70 §6** (roadmap). Résumé :
   winedbg natif se bloquent) — **limite d'outillage documentée, pas de méthode**.
 - **Prochain incrément cadré, tool-based** : étendre le relay au **store de l'allocateur** (`operator new`/`malloc`
   **avec site d'appel**, des deux côtés) pour repérer la création présente sous Wine et absente sous ARET.
+
+### 2026-08-02 — [I11][DIAG][CORRECTION] **Mur `0x10` RECADRÉ : l'objet n'est PAS « paresseux gardé par une condition fausse » — c'est un GLOBAL `_initterm` construit inconditionnellement, et la divergence est CONFINÉE à UN constructeur, entre deux instructions connues**
+
+- **Graphe d'objets réconcilié (fin de la confusion `0x51ef18` vs `0x51efd0`)** — les deux adresses des vieilles
+  entrées « correction » désignaient **le même objet à deux niveaux** :
+  - **`0x51ef18`** = objet **externe** (global), vtable `0x4d0b94`, constructeur **`0x44aabd`** ;
+  - **`0x51efd0`** = `0x51ef18 + 0xb8` = **sous-objet membre**, vtable `0x4cab90`, constructeur **`0x42e884`**
+    (le caller `0x44aafd` fait `lea 0xb8(%esi),%ecx` avant `call 0x42e884` → `this = externe+0xb8`) ;
+  - **`0x51efdc`** = `0x51efd0 + 0xc` = **le champ**, écrit **une seule fois**, à l'instruction **`0x42e8fa`**
+    (`mov %eax,0xc(%esi)`) après `operator new(0x18)` (`0x42e8d8` → thunk mfc90u `0x4aab98`) et le
+    constructeur du sous-objet alloué (`call 0x470022`).
+- **⭐ CORRECTION de fond des entrées des 2026-08-01** : le champ **n'est PAS** « à initialisation paresseuse,
+  chemin de création gardé par une condition fausse ». Le writer `0x44aabd` est appelé depuis **`0x4bb39a`**
+  (`mov $0x51ef18,%ecx ; call 0x44aabd ; push $dtor ; call 0x4ac427`=atexit) — motif **exact** d'une entrée de la
+  **table de constructeurs globaux `_initterm`**. L'objet est donc **construit inconditionnellement au démarrage
+  CRT**, comme sous Wine. **Il n'y a aucune « condition fausse » à trouver.**
+- **Divergence CONFINÉE, et bornée par le flot de contrôle** : sous ARET la vtable `0x4cab90` **est** écrite en
+  `0x51efd0` (mesuré, watchpoint) ⇒ `_initterm` **a** exécuté `0x44aabd`→`0x42e884` jusqu'à **`0x42e89c`**. Le
+  champ n'est jamais écrit ⇒ `0x42e884` n'atteint **jamais** `0x42e8fa`. Or les **deux** bras du test
+  `new==0` (`je 0x42e8f4`) **convergent** sur `0x42e8fa` (l'un stocke le pointeur, l'autre stocke 0) : le store
+  est donc inévitable **sauf si un appel intermédiaire ne rend pas la main normalement**. Suspects, tous entre
+  `0x42e89c` et `0x42e8fa` : `call *0x4bd65c` ×2 (import mfc90u, ~50 sites), `call 0x402132` ×2 (ctor membre
+  local), `operator new` (`0x4aab98`, import mfc90u), `call 0x470022` (ctor du sous-objet). ⇒ **le mur est un
+  appel dans du code mfc90u LIFTÉ (ou un ctor membre) qui, sous ARET, déroute au lieu de retourner** — pas une
+  garde applicative, pas la frontière OS (le diff relay l'avait déjà écarté), pas TLS.
+- **Oracle Windows réel (GitHub Actions) — l'infra MARCHE, la mesure a été bornée** : le workflow
+  `windows-watchpoint.yml` télécharge WinMerge 2.14.0 (sha256 vérifié `cb886017…`), installe VC90, localise `cdb`
+  — **les 4 premières étapes vertes** (le correctif `curl -L` + `vcredist2008` du run #1 a tenu). Mais l'étape de
+  watch a **timeouté à 8 min sans déclencher** : le log montre **tout** le stack MFC/GUI chargé (MFC90ENU,
+  COMCTL32, ole32, OLEAUT32, UxTheme, MSCTF…) puis un **idle** — WinMerge **sans argument** entre dans sa boucle
+  de messages sans jamais exercer le writer. **Deux causes, toutes deux comprises** : (1) `ba w4` posée au
+  **break initial du loader** ntdll est **non fiable** (les registres de debug sont réinitialisés à la création
+  des threads) ; (2) headless-sans-argument, l'objet global est pourtant construit **au CRT-init** (avant la
+  boucle) — donc la voie robuste est un **breakpoint LOGICIEL sur l'instruction writer exacte** `bp 0x42e8fa`
+  (pas d'ASLR ⇒ adresse runtime = adresse statique), qui se déclenche **en quelques secondes** au démarrage. À
+  retenir : *un point d'arrêt matériel posé trop tôt ne watch rien ; sur cible sans ASLR, préférer `bp` sur
+  l'adresse exacte du writer, prouvée statiquement.*
+- **Prochaine mesure, tool-based et en bac à sable (pas Wine)** : build ARET de WinMerge avec **`ARET_TRACE=1`**
+  (traceur I1, ring-buffer vidé au crash) → la **queue de trace** dira **lequel** des appels intermédiaires de
+  `0x42e884` fut le dernier entré avant la faute `0x42e14e`, donc **quel** appel mfc90u lifté déroute. Mesure en
+  cours.

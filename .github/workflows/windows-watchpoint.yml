@@ -75,24 +75,29 @@ jobs:
           Write-Host "cdb = $cdb"
           "CDB=$cdb" | Out-File -FilePath $env:GITHUB_ENV -Append
 
-      - name: Watch the writer of [0x51efd0+0xc] = 0x51efdc
-        timeout-minutes: 8
+      - name: Break at the writer 0x42e8fa (the field store, gated on esi=0x51efd0)
+        timeout-minutes: 4
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
-          # cdb stops at the initial breakpoint (image mapped, before entry), then runs
-          # this -c command string:
-          #   ba w4 0x51efdc  set a HARDWARE breakpoint on any 4-byte write to the field
-          #   g               run until it fires (the write happens during MFC startup,
-          #                   before any user interaction, so a headless runner reaches it)
-          #   r; k 30         registers + the call stack = the WRITER and its callers
-          #   u eip-20 L10    the instruction that wrote it, in context
-          #   dd 0x51efd0 L4  the object header + the field, now populated
-          #   q               quit (kills the process)
-          # NO -g on the command line: that would skip the initial break where the ba is
-          # set. The 8-minute step timeout bounds the "never fires" case rather than
-          # letting cdb hang for hours.
-          $cmd = 'ba w4 0x51efdc; g; .echo ===WRITER===; r; k 30; .echo ===INSN===; u eip-20 L10; .echo ===FIELD===; dd 0x51efd0 L4; q'
+          # LESSON from run #2 (doc 71, 2026-08-02): a HARDWARE watchpoint (`ba w4`) set at
+          # the initial ntdll loader break is UNRELIABLE -- the debug registers are reset
+          # when the process's threads spin up, so it silently watches nothing and the step
+          # just times out. And WinMerge with no argument idles in its message loop.
+          #
+          # The field is written by a GLOBAL _initterm constructor at STARTUP (0x51ef18 is a
+          # _initterm-table entry; its member subobject 0x51efd0's ctor 0x42e884 stores the
+          # field at 0x42e8fa). So a SOFTWARE breakpoint on the exact writer instruction
+          # 0x42e8fa (no ASLR => runtime addr == static addr) fires within seconds of launch,
+          # before any GUI idle. We gate it on esi=0x51efd0 (the ctor may build other
+          # instances of the same class) and, when it hits, dump eax (the value being stored
+          # = the operator-new'd sub-object), the field, and the call stack = the writer.
+          #   bp 0x42e884  ".echo ===CTOR-ENTER===; r ecx; g"   (log each entry with this=ecx)
+          #   bp 0x42e8fa  gated on esi==0x51efd0: dump eax/esi, the field, the stack, quit
+          #   g            run to the breakpoints
+          $store = 'bp 0x42e8fa "j (@esi=0x51efd0) ''.echo ===STORE===; r eax,esi; .echo --field--; dd 0x51efd0 L4; .echo --stack--; kb 16; q''; ''g''"'
+          $enter = 'bp 0x42e884 ".echo ===CTOR-ENTER this=; r ecx; g"'
+          $cmd = "$store; $enter; g"
           Push-Location "$env:WM_DIR"
           & "$env:CDB" -c $cmd WinMergeU.exe 2>&1 |
             Tee-Object -FilePath "$env:GITHUB_WORKSPACE\watchpoint.txt"
