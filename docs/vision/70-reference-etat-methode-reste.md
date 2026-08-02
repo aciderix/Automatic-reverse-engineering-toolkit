@@ -489,7 +489,12 @@ recompilabilité **100 %** · WASM **7/7**.
   `readme/read-me=-1` — que l'ordinal ratait).
 - **Formatage wide** : **`%ls`/`%S`/`%lc`/`%C`** dans le formateur narrow (`aret_vformat` : lit une chaîne/car
   **16-bit**, largeur/précision correctes) ; **formateur wide `aret_wvformat`** (sortie 16-bit, réutilise la logique
-  numérique éprouvée puis élargit) branché sur **`wsprintfW`** (user32) / **`_snwprintf`** (sém. troncature MS :
+  numérique éprouvée puis élargit) branché sur **`wsprintfW`** (user32) / **`swprintf_s`/`vswprintf_s`** (2026-08-01,
+  capacité **balayée** 0..8 : capacité 0 ⇒ tampon **intact** ; trop petite ⇒ **zéro-remplissage d'exactement
+  `capacité` unités** ; ça rentre ⇒ texte + NUL, retour = **longueur**. ⚠️ Les jumelles **étroites**
+  `sprintf_s`/`vsprintf_s` sont **refusées** : sous Wine elles laissent une sortie **partielle** en échec et, à
+  l'ajustement exact, rendent un **succès sans terminateur** — incohérent avec la version large ⇒ **abort**, question
+  au runner Windows) / **`_snwprintf`** (sém. troncature MS :
   `-1` si tronqué, pas de NUL sur remplissage exact) / **`_vsnwprintf`** (va_list = pointeur d'args). **`swprintf`
   NON modélisé** (signature ambiguë selon le CRT : `(buf,fmt,…)` legacy vs `(buf,count,fmt,…)` C99 que Wine utilise
   — deviner mis-parse les args, Wine lui-même faute) → **abort sound**. Gardé `winecorpus/crt_wideprintf.c`

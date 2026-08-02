@@ -5880,3 +5880,33 @@ Détail : **70 §6** (roadmap). Résumé :
   CRT `*_s` wide, prochain incrément. À noter : `swprintf` **tout court** reste **non modélisé** (signature
   ambiguë, 70 §4.5), mais `swprintf_s` est **sans ambiguïté** (`buf, count, fmt, …`) — donc implémentable, et le
   refus de deviner sur l'un n'empêche pas de servir l'autre.
+
+### 2026-08-01 — [HLE-CRT][ORACLE] **`swprintf_s`/`vswprintf_s` livrées, `sprintf_s`/`vsprintf_s` REFUSÉES — et c'est `objdump` qui a sauvé la mesure**
+
+- **Mur** : après `GetThreadDesktop`, WinMerge demande `swprintf_s`. Note d'entrée : `swprintf` **tout court** reste
+  **non modélisé** (signature ambiguë selon le CRT, 70 §4.5) — mais `swprintf_s` n'a **qu'une** forme
+  (`buf, count, fmt, …`). *Refuser de deviner sur l'une n'empêche pas de servir l'autre* : ce sont deux questions
+  différentes, pas un principe de prudence global.
+- **⚠️ La règle du 70 §7 a payé immédiatement, et deux fois.** Ma 1ʳᵉ sonde compilait sans `.def` : `objdump -p`
+  montre que **rien n'était importé** — mingw fournit ses propres corps pour plusieurs `*_s`, donc je mesurais
+  **mingw des deux côtés** et j'allais encoder un contrat qui n'est pas celui du CRT. 2ᵉ tentative avec un `.def` :
+  `objdump` montre que **seules les versions étroites** se sont liées (mingw garde les larges). Ce n'est qu'à la
+  3ᵉ, par la route `<wchar.h>` + `MINGW_HAS_SECURE_API`, que `swprintf_s` (ordinal **1106**) et `vswprintf_s`
+  (**1137**) apparaissent réellement dans la table d'imports. **Vérifier l'import n'est pas une formalité : c'est
+  la différence entre mesurer le CRT et mesurer son propre compilateur.**
+- **Contrat mesuré** (capacité **balayée** 0..8 sur un résultat de 5 caractères, tampon empoisonné) : capacité 0 ⇒
+  −1 et tampon **totalement intact** ; capacité trop petite ⇒ −1 et **zéro-remplissage d'exactement `capacité`
+  unités** (ni `dst[0]` seul, ni tout le tableau) ; ça rentre ⇒ le texte, son NUL, et le retour est la **longueur**.
+  Un shim qui n'écrirait que le terminateur en échec satisferait tout appelant qui relit une chaîne.
+- **⭐ Et les jumelles ÉTROITES sont refusées, délibérément.** Forcées vers msvcrt par un `.def`, `sprintf_s`/
+  `vsprintf_s` de Wine font **autre chose des deux côtés** : elles laissent une **sortie partielle** en échec au
+  lieu de zéro-remplir, et à l'ajustement **exact** elles rendent un **succès** (5) en écrivant cinq caractères et
+  **aucun terminateur** — que la version large, elle, refuse (il lui faut 6). **Deux fonctions d'une même famille
+  en désaccord sur l'emplacement du NUL, c'est la signature d'un dérapage d'implémentation, pas d'un contrat** —
+  même profil que `PathIsUNCServerA` et que `StrChrW` sur le terminateur. Donc **abort bruyant** plutôt que
+  reproduire ça depuis un seul oracle, et la question part au runner Windows
+  (`bench/winoracle/crt_sprintfs_disputed.c`). Si Windows se comporte comme la version large, le code large sert
+  les deux ; s'il rend vraiment une longueur sans terminer, il vaut mieux le savoir **avant** qu'un programme en
+  dépende.
+- **Vérifié** : `winecorpus/crt_swprintf_s.c` bit-identique Wine, difftest 272/272, hash `19acad982194bf07`
+  inchangé, audit stdcall PASS (ces fonctions sont **cdecl** — pas de `@N`).

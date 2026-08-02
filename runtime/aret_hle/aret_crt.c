@@ -593,6 +593,62 @@ uint32_t aret_snwprintf(uint32_t esp) {
     size_t n = aret_wvformat(tmp, 8192, fmt, va);
     return aret_wsn_finish(dst, cap, tmp, n);
 }
+/* swprintf_s(dst, sizeOfBuffer, fmt, ...) and vswprintf_s(dst, sizeOfBuffer, fmt,
+ * arglist) — the secure wide sprintf with NO separate count.
+ *
+ * Note the contrast with `swprintf` two comments above, which stays a sound abort:
+ * that one's signature is CRT-version ambiguous, so guessing mis-parses arguments.
+ * `swprintf_s` has exactly one shape (`buf, count, fmt, …`), so refusing to guess on
+ * the first does not stop us serving the second — different questions, different
+ * answers.
+ *
+ * MEASURED against Wine's msvcrt by sweeping the capacity 0..8 on a 5-character
+ * result, on a poisoned buffer, and the failure path is the whole point:
+ *   - capacity 0 leaves the buffer COMPLETELY untouched and returns -1;
+ *   - a capacity between 1 and 5 (too small) returns -1 and ZERO-FILLS exactly
+ *     `capacity` units — not just `dst[0]`, and not the whole array. A shim that
+ *     wrote only the terminator would look right to any caller that reads a string;
+ *   - it fits -> the text plus its NUL, and the return is the LENGTH, not the size.
+ * ⚠️ The narrow twins `sprintf_s`/`vsprintf_s` are deliberately NOT implemented
+ * here. Measured through a `.def`-forced msvcrt import, Wine's narrow versions do
+ * something else entirely — they leave PARTIAL output on failure instead of
+ * zero-filling, and at an exact fit they return the length while writing NO
+ * terminator, which no caller could use safely. That is self-inconsistent with the
+ * wide twin, so it is not a contract we are willing to reproduce from one oracle:
+ * they stay a loud abort and the question goes to the Windows runner
+ * (bench/winoracle/crt_sprintfs_disputed.c). */
+static uint32_t aret_wsprintf_s_finish(uint16_t *dst, size_t cap,
+                                       const uint16_t *tmp, size_t n) {
+    if (!dst || cap == 0) return (uint32_t)-1;      /* buffer untouched: measured */
+    if (n < cap) {
+        memcpy(dst, tmp, n * 2);
+        dst[n] = 0;
+        return (uint32_t)n;
+    }
+    for (size_t i = 0; i < cap; i++) dst[i] = 0;    /* exactly `cap` units, measured */
+    return (uint32_t)-1;
+}
+uint32_t aret_swprintf_s(uint32_t esp) {
+    uint16_t *dst = (uint16_t *)AP(0);
+    size_t cap = AU(1);
+    const uint16_t *fmt = (const uint16_t *)AP(2);
+    const uint32_t *va = &((const uint32_t *)(uintptr_t)esp)[3];
+    static uint16_t tmp[8192];
+    if (!fmt) return (uint32_t)-1;
+    size_t n = aret_wvformat(tmp, 8192, fmt, va);
+    return aret_wsprintf_s_finish(dst, cap, tmp, n);
+}
+uint32_t aret_vswprintf_s(uint32_t esp) {
+    uint16_t *dst = (uint16_t *)AP(0);
+    size_t cap = AU(1);
+    const uint16_t *fmt = (const uint16_t *)AP(2);
+    const uint32_t *va = (const uint32_t *)(uintptr_t)AU(3);
+    static uint16_t tmp[8192];
+    if (!fmt) return (uint32_t)-1;
+    size_t n = aret_wvformat(tmp, 8192, fmt, va);
+    return aret_wsprintf_s_finish(dst, cap, tmp, n);
+}
+
 /* _snwprintf_s(dst, sizeOfBuffer, count, fmt, ...) — the secure wide snprintf.
  * MEASURED against Wine across nine shapes, which is what separates FOUR regimes that
  * a single "truncate and return -1" implementation would blur together:
