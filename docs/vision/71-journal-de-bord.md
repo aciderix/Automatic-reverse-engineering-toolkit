@@ -6455,3 +6455,23 @@ Détail : **70 §6** (roadmap). Résumé :
   lifté (un objet attendu non-nul). Forensics de null-deref (type du premier mur `0x10`, autre objet) → prochain
   incrément **instrument-first** (build `ARET_TRACE` : quelle fonction, quel objet null). ⇒ mlang n'est plus le mur ;
   la brique COM + l'extraction-Wine ont tenu de bout en bout sur le vrai driver.
+
+### 2026-08-02 — [I5][LIFT][DIAG] **RECONNEXION : le mur WinMerge post-mlang EST le mur `0x51efdc` d'origine — le champ reste null, et le constructeur a pourtant tourné**
+
+- **Trace ARET_TRACE au crash** (`0xC0000005 at 0x10`) : `sub_42e14e` (le consommateur) lit `[0x51efd0+0xc]`, le met
+  dans ecx, appelle `sub_42eca8` avec **ecx=0** ⇒ déréférence `[null+0x10]` ⇒ faute. **C'est exactement le mur
+  `0x51efdc` du tout début** — pas franchi, seulement **enfin atteint** maintenant que shell32 + mlang ont dégagé
+  l'amont (le crash était sur `SHGetSpecialFolderLocation` avant). ⚠️ Correction d'une conclusion antérieure erronée
+  (« le champ est derrière nous ») : il ne l'était pas.
+- **Paradoxe mesuré (dump ring complet)** : `sub_42e884` (constructeur du sous-objet `0x51efd0`, membre `+0xb8` du
+  global `_initterm` `0x51ef18`) **a tourné** (count 1), et `sub_470022` (le sous-ctor de l'objet alloué stocké en
+  `+0xc`, appelé **après** `operator new(0x18)`) **a tourné aussi** (count 1). Les ctors de membres s'enchaînent
+  (`+0x10`, `+0x14`, `+0x1c`…). **Pourtant `[0x51efd0+0xc]` est null** à la consommation.
+- **Hypothèses restantes (bug FIN de lift, pas HLE)** : (a) le store `0x42e8fa` écrit `eax=0` parce que l'`operator
+  new`/`sub_470022` **mfc90u lifté** rend 0 ; (b) `esi` (=this) n'est pas préservé à travers les appels sous
+  `_EH_prolog3` ⇒ le store part à une mauvaise adresse ; (c) un write ultérieur re-zéroe `+0xc`. Toutes dans du
+  **code mfc90u lifté sous EH**.
+- **BORNÉ → PIVOT** : mur **précisément localisé et reconnecté**, mais le trancher exige une mesure **niveau
+  instruction** (watchpoint gdb sur l'adresse runtime de `0x51efdc` dans l'ELF ARET, ou instrumentation du store
+  `0x42e8fa`) — incrément de forensics dédié. **Acquis de la session** : mlang (activation + `GetCodePageInfo`
+  depuis Wine) a tenu de bout en bout et déplacé le driver jusqu'à ce mur racine.
