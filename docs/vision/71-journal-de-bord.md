@@ -5943,3 +5943,32 @@ Détail : **70 §6** (roadmap). Résumé :
   SEH-establish) est **gaté sur l'import `_except_handler3`/`__CxxFrameHandler*`** — un import
   `_except_handler4_common` ne réveille pas forcément ce gate. Ce n'est donc pas gratuit, mais c'est **une mesure**
   et pas un chantier : à tenter avant de coder.
+
+### 2026-08-01 — [LIFT-DLL][EH] **La route bon marché du I4 est MESURÉE et REJETÉE — et la règle du Levier 1 gagne sa troisième correction**
+
+- **Essai** : lifter `msvcr90.dll` (2900 exports, 0 thunk, 0 forwarder, n'importe que KERNEL32) pour servir
+  `_except_handler4_common` comme lifter shell32 a servi `SHGetSpecialFolderLocation`.
+- **Le routage marche** : la fonction **disparaît** de la liste des imports non implémentés et le lift passe de
+  43686 à **46524 fonctions**. Techniquement, l'appel atteint bien du code lifté.
+- **Mais le programme meurt en `exit(255)`, proprement, SANS AUCUNE SORTIE** — ni stdout ni stderr, et gdb confirme
+  une sortie **normale**, pas une faute. Or la version sans `msvcr90` imprimait déjà son premier message (le
+  `partially modelled` du chargement de police) bien plus loin dans l'init MFC. ⇒ il meurt **plus tôt qu'avant**,
+  donc dans le démarrage.
+- **Hypothèse, affichée comme telle** : une DLL **CRT n'est pas une bibliothèque feuille**. Lifter shell32 ou mlang
+  est **additif** — l'app leur demandait déjà des services que le HLE ne rendait pas. Lifter le CRT **substitue
+  tout un sous-système** que le HLE implémente déjà bien (démarrage, tas, stdio, locale) par du code lifté, d'un
+  seul coup, sans que rien n'ait été vérifié de cet ensemble. Non prouvé dans le détail (on ne sait pas *quelle*
+  étape du démarrage échoue) ; ce qui est **mesuré**, c'est le routage réussi et la mort anticipée.
+- **⭐ Troisième correction de la règle du Levier 1 en deux jours**, et la plus utile :
+  1. compter les `__wine_spec_imp_` (thunks) — **incomplet** ;
+  2. compter **aussi** les forwarders PE — corrigé le 2026-08-01 (ole32 : 133 forwarders) ;
+  3. **et même « la DLL contient du vrai code » ne dit pas que la lifter soit un bon échange.** La métrique répond
+     à « y a-t-il une implémentation dedans ? », pas à « remplacer notre HLE par elle est-il un progrès ? ».
+     Le discriminant est **feuille vs sous-système** : additif ⇒ oui ; substitution d'une couche déjà couverte et
+     déjà vérifiée ⇒ non.
+- **Idée cadrée qui rendrait la route réelle** (pour plus tard, pas engagée) : le loader route **tous** les imports
+  de l'app que la DLL liftée exporte. Une option « lifter cette DLL mais ne router que **ces noms-là** » rendrait le
+  Levier 1 utilisable **chirurgicalement** — on prendrait `_except_handler4_common` de msvcr90 en laissant le reste
+  du CRT au HLE. Petit changement dans `resolve_module_imports` (un filtre de noms), gros gain de portée.
+- **Conclusion pour I4** : la brique se **code à la main**, avec l'encodage XOR **déjà prouvé** et les quatre
+  questions ouvertes listées dans `bench/eh/eh4_probe.c`. Le détour a coûté une mesure et a rapporté une règle.
