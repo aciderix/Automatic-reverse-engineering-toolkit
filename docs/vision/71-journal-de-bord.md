@@ -5910,3 +5910,36 @@ Détail : **70 §6** (roadmap). Résumé :
   dépende.
 - **Vérifié** : `winecorpus/crt_swprintf_s.c` bit-identique Wine, difftest 272/272, hash `19acad982194bf07`
   inchangé, audit stdcall PASS (ces fonctions sont **cdecl** — pas de `@N`).
+
+### 2026-08-01 — [EH][I4][ORACLE] **`_except_handler4_common` : l'encodage v4 PROUVÉ dans les deux sens — et une route bon marché mesurée avant d'écrire le handler**
+
+- **Mur** : après `swprintf_s`, WinMerge réclame `_except_handler4_common`. C'est le chantier **I4** du doc 81, que
+  le document externe mettait en **priorité 1** et qu'on a **refusé de construire spéculativement**. La mesure le
+  réclame maintenant — pour la **deuxième** fois (déjà atteint le 2026-07-26). La priorisation par la donnée a tenu :
+  il arrive quand un binaire l'exige, pas quand un document l'annonce.
+- **Méthode imposée par le §I4 : instrument-first.** Harnais conservé dans `bench/eh/eh4_probe.{c,def}` —
+  **sonde de mesure, ni fixture ni porte** — pour que la prochaine session ne le reconstruise pas.
+- **⭐ Fait PROUVÉ (dans les deux sens, une exécution chacun)** : le champ `scopetable` de la registration record est
+  **XOR-encodé avec `*cookie`**.
+  - stocké **en clair** ⇒ la faute tombe à `stored ^ cookie` (`edi = &tbl ^ cookie`, adresse `0x12748644`) ;
+  - stocké **XOR'é** ⇒ `edi = 0x0040d040` = **`&tbl` exactement**.
+  Une seule direction n'aurait pas tranché ; une coïncidence doit survivre aux **deux**. L'observable a été choisi
+  pour que *aucune* des deux réponses ne soit muette (les deux plantent, mais à des adresses qui **disent laquelle**).
+- **Confirmé aussi, lu sur l'oracle et non supposé** : la signature `(ULONG *cookie, void (*check_cookie)(void),
+  EXCEPTION_RECORD*, FRAME*, CONTEXT*, void**)` — les symboles de Wine impriment les noms **et les valeurs** des
+  paramètres dans la backtrace ; et le layout `{prev, handler, scopetable, trylevel, _ebp, xpointers}` est accepté,
+  cohérent avec le `funclet ebp = EstablisherFrame + 16` de la brique C.
+- **Explicitement NON deviné** (chacun demande sa propre expérience, et c'est écrit dans l'en-tête de la sonde) :
+  `trylevel` est-il encodé lui aussi ; que valent `gs_cookie_offset`/`eh_cookie_offset` **= -2** (sentinelle MSVC
+  « absent », ou vrai offset ?) ; où commence le tableau de `ScopeRecord` après l'en-tête de quatre `int` ; le
+  protocole du callback `check_cookie`. Le run XOR est parti dans un appel à `0xfffffffe`, ce qui est **compatible**
+  avec un niveau mal décodé mais n'en est **pas une preuve** — donc rien n'est encodé sur cette base.
+- **⭐ Et avant d'écrire le handler à la main, la route bon marché a été MESURÉE** (règle des deux commandes,
+  70 §5.0) : `msvcr90.dll`, qui expédie **à côté de WinMerge**, fait **2900 exports, 0 thunk, 0 forwarder**,
+  n'importe **que KERNEL32**, et exporte `_except_handler4_common` **directement**. C'est le profil exact de
+  `mlang`/`shell32` — donc le Levier 1 s'applique, et un `--with-dll` peut servir cette fonction comme il a servi
+  `SHGetSpecialFolderLocation`. **Réserve honnête** : le handler lifté devra marcher **notre** `fs:[0]` synthétique
+  (modélisé, donc a priori OK) **et** provoquer le transfert non-local, dont le mécanisme (setjmp injecté au
+  SEH-establish) est **gaté sur l'import `_except_handler3`/`__CxxFrameHandler*`** — un import
+  `_except_handler4_common` ne réveille pas forcément ce gate. Ce n'est donc pas gratuit, mais c'est **une mesure**
+  et pas un chantier : à tenter avant de coder.

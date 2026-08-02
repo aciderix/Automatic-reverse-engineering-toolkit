@@ -570,3 +570,18 @@ affiché. On priorise par la donnée.
   stabiliser. **Deux cellules de plus mises en file pour l'oracle Windows** (`StrChrW` sur le terminateur, et une
   taille requise qui dépend de la réussite dans `GetUserObjectInformationA`) : le rythme auquel un second oracle
   fait remonter des questions **sur du code déjà vert** ne faiblit pas.
+
+- **2026-08-01 (I5 — `swprintf_s` ; ⭐ I4 — la mesure réclame la brique, et l'encodage v4 est PROUVÉ)** — Deux choses.
+  (1) `swprintf_s`/`vswprintf_s` livrées, **jumelles étroites refusées** : sous Wine `sprintf_s` laisse une sortie
+  **partielle** en échec et rend un **succès sans terminateur** à l'ajustement exact, ce que la version large
+  refuse. Deux fonctions d'une même famille en désaccord sur l'emplacement du NUL = **dérapage d'implémentation**,
+  pas contrat ⇒ abort, question au runner. **Et la règle « vérifier l'import à l'`objdump` » (70 §7) a payé DEUX
+  fois dans le même incrément** : ma 1ʳᵉ sonde n'importait **rien** (mingw fournit ses propres `*_s`), la 2ᵉ ne
+  liait que les étroites ; sans ce contrôle j'encodais le comportement de **mon compilateur** comme contrat du CRT.
+  (2) **I4 est désormais réclamé par la mesure, pour la deuxième fois** — et c'est le point d'industrialisation :
+  le document externe le mettait en **priorité 1**, on a refusé de le construire spéculativement, il arrive quand
+  un binaire l'exige. **Méthode instrument-first appliquée** : l'encodage XOR de la scope table v4 est **prouvé
+  dans les deux sens** (harnais conservé en `bench/eh/eh4_probe.c`), et **tout le reste est listé comme non
+  prouvé** plutôt que déduit. **Enfin, la route bon marché a été mesurée AVANT de coder** : `msvcr90.dll`
+  (2900 exports, 0 thunk, 0 forwarder, n'importe que KERNEL32) exporte la fonction ⇒ le Levier 1 s'applique
+  peut-être ici aussi. *Mesurer avant de coder s'applique aussi au choix entre « écrire » et « lifter ».*
