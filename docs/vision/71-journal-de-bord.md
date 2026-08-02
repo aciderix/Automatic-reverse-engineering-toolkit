@@ -6401,3 +6401,22 @@ Détail : **70 §6** (roadmap). Résumé :
   `system("exit 0")`→0) ; hash transpile inchangé ; stdcall_audit PASS (tout cdecl, aucun `@N`).
 - **Reste Phase B (frontière dure, NON fait)** : `CreateProcess`/`_spawn`/`_cwait` d'un vrai `.exe` enfant —
   échec sound maintenu (pas de chargeur PE enfant), conforme doc 70 §8.3.
+
+### 2026-08-02 — [I5][GUI][COM] **Phase C (brique 1) — activation COM de mlang : `IMultiLanguage` en objet HLE, IUnknown bit-identique Wine**
+
+- **Mur** : WinMerge/MFC appellent `CoCreateInstance(CLSID_CMultiLanguage, IID_IMultiLanguage)` au démarrage (charset).
+  mlang est un **service feuille** (tables de jeux de caractères), et le builtin Wine est un **relais-stub** (0
+  thunk/forwarder, le piège shlwapi) ⇒ on **modélise l'objet en HLE** plutôt que de lifter.
+- **Brique 1 = ACTIVATION + IUnknown** (sur le modèle IMalloc) : `aret_CoCreateInstance` sert `CLSID_CMultiLanguage`
+  via un objet HLE dont la **vtable (18 slots) passe par les VA synthétiques** (`g_delay_res` + `aret_call`, comme
+  IMalloc). GUIDs comparés sur **16 octets** (le tail d'IMultiLanguage `9FEA-00AA003F8646` n'est pas celui d'IUnknown,
+  donc le raccourci Data1+tail-fixe de `u32_iid_eq` ne s'applique pas). QI rend self pour IUnknown/IMultiLanguage,
+  **E_NOINTERFACE** pour le reste (IMultiLanguage2/3 non modélisés = vraie réponse).
+- **Instrument-first (doc 81 I5)** : les **15 méthodes d'interface** sont des stubs qui **se nomment eux-mêmes et
+  abortent** (`aret_unmodelled("IMultiLanguage::GetCharsetInfo")`…), pour qu'**un seul rebuild WinMerge révèle la
+  PREMIÈRE méthode réellement appelée**, ensuite implémentée contre l'oracle. Aucune méthode devinée.
+- **Vérif** : `winecorpus/ole_mlang_activate.c` = **bit-identique Wine** (cocreate S_OK + non-null, QI IUnknown S_OK,
+  QI étranger → E_NOINTERFACE) ; hash transpile inchangé ; stdcall_audit PASS. ⚠️ Refcounts exacts **non** comparés
+  (l'objet HLE est un singleton sans état, un vrai CMultiLanguage se détruit à 0 — non observable ici).
+- **Prochain incrément** : rebuild WinMerge (mesure en cours) → nom de la 1ʳᵉ méthode `IMultiLanguage` appelée →
+  l'implémenter (charset via table de codepages / iconv), vérifiée contre l'oracle.

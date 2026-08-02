@@ -7552,10 +7552,102 @@ static const uint8_t u32_iid_classfactory[16] = {
     0xC0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x46,
 };
 
+/* ---- mlang: IMultiLanguage COM object (CLSID_CMultiLanguage) ----------------
+ * WinMerge/MFC activate CoCreateInstance(CLSID_CMultiLanguage, IID_IMultiLanguage) at
+ * startup for charset detection/conversion. mlang is a LEAF service (charset tables),
+ * not a subsystem, and Wine's builtin mlang PE is a relay stub (0 thunks/forwarders,
+ * the shlwapi trap) — so we model the object in HLE rather than lift it. This brick is
+ * the ACTIVATION + IUnknown; the 15 interface methods NAME THEMSELVES and abort
+ * (instrument-first, doc 81 I5), so a WinMerge rebuild reveals the first one actually
+ * called, which is then implemented against the real-Windows/Wine oracle. GUIDs are the
+ * full 16 bytes (IMultiLanguage's tail is 9FEA-00AA003F8646, not the IUnknown C000 tail,
+ * so u32_iid_eq's Data1+fixed-tail shortcut cannot be used here). */
+static const uint8_t IID_IMultiLanguage_b[16] =
+    { 0xE1,0x23,0x5C,0x27, 0x47,0x37, 0xD0,0x11, 0x9F,0xEA,0x00,0xAA,0x00,0x3F,0x86,0x46 };
+static const uint8_t CLSID_CMultiLanguage_b[16] =
+    { 0xE2,0x23,0x5C,0x27, 0x47,0x37, 0xD0,0x11, 0x9F,0xEA,0x00,0xAA,0x00,0x3F,0x86,0x46 };
+static int u32_guid_eq(const uint8_t *g, const uint8_t *ref) { return g && memcmp(g, ref, 16) == 0; }
+
+static uint32_t g_mlang_refs = 1;
+static uint32_t g_mlang_vtbl[18];
+static uint32_t g_mlang_obj;   /* holds the vtable pointer; the object handed out is &g_mlang_obj */
+
+static uint32_t u32_ml_qi(uint32_t esp) {
+    const uint8_t *iid = (const uint8_t *)(uintptr_t)WU(1);
+    uint32_t *out = (uint32_t *)(uintptr_t)WU(2);
+    if (u32_iid_eq(iid, 0) || u32_guid_eq(iid, IID_IMultiLanguage_b)) {   /* IUnknown | IMultiLanguage */
+        if (out) *out = (uint32_t)(uintptr_t)&g_mlang_obj;
+        g_mlang_refs++;
+        return 0;                                     /* S_OK */
+    }
+    if (out) *out = 0;                                 /* IMultiLanguage2/3 not modelled yet */
+    return 0x80004002u;                                /* E_NOINTERFACE */
+}
+static uint32_t u32_ml_addref(uint32_t esp)  { (void)esp; return ++g_mlang_refs; }
+static uint32_t u32_ml_release(uint32_t esp) { (void)esp; return g_mlang_refs > 1 ? --g_mlang_refs : 1; }
+/* Instrument-first stubs: each names itself and aborts, so the first method WinMerge
+ * calls is identified by a single rebuild instead of guessed. */
+#define ML_STUB(name) static uint32_t u32_ml_##name(uint32_t esp) { (void)esp; \
+    aret_unmodelled("IMultiLanguage::" #name); return 0x80004001u; }
+ML_STUB(GetNumberOfCodePageInfo)
+ML_STUB(GetCodePageInfo)
+ML_STUB(GetFamilyCodePage)
+ML_STUB(EnumCodePages)
+ML_STUB(GetCharsetInfo)
+ML_STUB(IsConvertible)
+ML_STUB(ConvertString)
+ML_STUB(ConvertStringToUnicode)
+ML_STUB(ConvertStringFromUnicode)
+ML_STUB(ConvertStringReset)
+ML_STUB(GetRfc1766FromLcid)
+ML_STUB(GetLcidFromRfc1766)
+ML_STUB(EnumRfc1766)
+ML_STUB(GetRfc1766Info)
+ML_STUB(CreateConvertCharset)
+
+static uint32_t u32_get_mlang(void) {
+    if (!g_mlang_obj) {
+        static const struct { uint32_t (*fn)(uint32_t); uint16_t pop; } meth[18] = {
+            { u32_ml_qi, 12 }, { u32_ml_addref, 4 }, { u32_ml_release, 4 },
+            { u32_ml_GetNumberOfCodePageInfo, 8 }, { u32_ml_GetCodePageInfo, 12 },
+            { u32_ml_GetFamilyCodePage, 12 }, { u32_ml_EnumCodePages, 12 },
+            { u32_ml_GetCharsetInfo, 12 }, { u32_ml_IsConvertible, 12 },
+            { u32_ml_ConvertString, 28 }, { u32_ml_ConvertStringToUnicode, 28 },
+            { u32_ml_ConvertStringFromUnicode, 28 }, { u32_ml_ConvertStringReset, 4 },
+            { u32_ml_GetRfc1766FromLcid, 12 }, { u32_ml_GetLcidFromRfc1766, 12 },
+            { u32_ml_EnumRfc1766, 8 }, { u32_ml_GetRfc1766Info, 12 },
+            { u32_ml_CreateConvertCharset, 16 },
+        };
+        for (int i = 0; i < 18; i++) {
+            if (g_delay_res_n >= 64) { aret_unmodelled("mlang: no synthetic VA left for IMultiLanguage vtable"); return 0; }
+            uint32_t va = DELAY_VA_BASE + (uint32_t)g_delay_res_n;
+            g_delay_res[g_delay_res_n].va = va;
+            g_delay_res[g_delay_res_n].shim = meth[i].fn;
+            g_delay_res[g_delay_res_n].pop = meth[i].pop;
+            g_delay_res_n++;
+            g_mlang_vtbl[i] = va;
+        }
+        g_mlang_obj = (uint32_t)(uintptr_t)g_mlang_vtbl;
+    }
+    return (uint32_t)(uintptr_t)&g_mlang_obj;
+}
+
 uint32_t aret_CoCreateInstance(uint32_t esp) {
     uint32_t rclsid = WU(0), punk = WU(1), ctx = WU(2), riid = WU(3), ppv = WU(4);
     if (!ppv) return 0x80004003u;                     /* E_POINTER */
     *(uint32_t *)(uintptr_t)ppv = 0;                  /* COM: clear on every path */
+
+    /* mlang: served by an HLE object (leaf service; Wine's builtin is a relay stub). */
+    if ((ctx & 0x3u) && u32_guid_eq((const uint8_t *)(uintptr_t)rclsid, CLSID_CMultiLanguage_b)) {
+        const uint8_t *iid = (const uint8_t *)(uintptr_t)riid;
+        if (u32_iid_eq(iid, 0) || u32_guid_eq(iid, IID_IMultiLanguage_b)) {
+            uint32_t obj = u32_get_mlang();
+            if (!obj) return 0x80004005u;             /* E_FAIL: no VA left */
+            *(uint32_t *)(uintptr_t)ppv = obj;
+            return 0;                                 /* S_OK */
+        }
+        return 0x80004002u;                           /* E_NOINTERFACE (IMultiLanguage2/3) */
+    }
 
     /* THE ACTIVATION PATH, served entirely by LIFTED code.
      *
