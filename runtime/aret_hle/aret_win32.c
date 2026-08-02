@@ -4982,6 +4982,10 @@ uint32_t aret_GetSystemMetrics(uint32_t esp) {
     case 46: return 2;    /* SM_CYEDGE */
     case 49: return 16;   /* SM_CXSMICON */
     case 50: return 16;   /* SM_CYSMICON */
+    case 54: case 55: return 18; /* SM_CXMENUSIZE / SM_CYMENUSIZE (measured vs Wine) */
+    case 68: case 69: return 4;  /* SM_CXDRAG / SM_CYDRAG — drag threshold, fixed 4px
+                                  * (measured vs Wine; surfaced by the relay diff on
+                                  * WinMerge as returning 0 where Windows returns 4). */
     case 71: case 72: return 13; /* SM_CXMENUCHECK / SM_CYMENUCHECK (measured vs Wine) */
     default: return 0;
     }
