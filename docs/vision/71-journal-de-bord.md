@@ -6380,3 +6380,24 @@ Détail : **70 §6** (roadmap). Résumé :
   (pression disque des builds concurrents) qui tuait Wine ; une fois `/tmp` rétabli, le full winediff donne
   **210/211** (seul rouge = `gdi_uifont`, environnemental). ⇒ les 9177 `@N` ajoutés **ne régressent aucune fixture**
   — la porte ABI est verte, comme le prédisait le merge additif.
+
+### 2026-08-02 — [I5][HLE-CRT][LARGEUR] **Phase B (part sound) — sous-processus via le shell hôte : `popen`/`pclose`/`system`/`_pipe`, bit-identique Wine**
+
+- **Mur mesuré** (wallsweep) : `popen`/`pclose` bloquent **8** binaires du gauntlet (le plus large après le tier CRT).
+- **Modèle SOUND (correct-ou-bruyant, §0)** : `popen`/`system` exécutent une **chaîne de commande** via le shell
+  hôte (`/bin/sh -c`). Une commande **portable** (sort, grep, echo, un helper) rend le **bon** résultat ; une
+  commande **Windows-only** (dir, copy) ou un **`.exe` nommé** échoue à s'exec ⇒ le programme voit un **échec réel**,
+  jamais un faux silencieux. ⇒ **la frontière dure « on ne peut pas lancer un enfant PE » est PRÉSERVÉE** (un `.exe`
+  ne s'exec toujours pas) ; `CreateProcess`/`_spawn` restent des **échecs sound**. Le shell-mapping ne concerne que
+  l'abstraction « commande », pas le chargement d'un PE.
+- **Intégration FILE** : `popen` enveloppe le fd du tube dans une **FILE msvcrt-layout HLE** (`alloc_dynfile`), et une
+  **table latérale** retient le `FILE*` hôte pour que `pclose` **récupère l'enfant** (`pclose`) et rende son **code de
+  sortie**. `fread`/`fgets`/`fclose` marchent dessus sans changement.
+- **Bonus correctif** : l'`aret_system` préexistant (aret_crt.c) rendait le **wait-status brut** de `system()` ; corrigé
+  pour rendre le **code de sortie** (`(st>>8)&0xff` = WEXITSTATUS), conforme à msvcrt (invisible pour `exit 0`, faux
+  pour tout code non nul).
+- **`_pipe(int[2],size,mode)`** → `pipe()` réel.
+- **Vérif** : `winecorpus/crt_subprocess.c` = **bit-identique Wine** (`_popen("echo test123")`→`test123`,
+  `system("exit 0")`→0) ; hash transpile inchangé ; stdcall_audit PASS (tout cdecl, aucun `@N`).
+- **Reste Phase B (frontière dure, NON fait)** : `CreateProcess`/`_spawn`/`_cwait` d'un vrai `.exe` enfant —
+  échec sound maintenu (pas de chargeur PE enfant), conforme doc 70 §8.3.

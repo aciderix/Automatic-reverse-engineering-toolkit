@@ -1222,8 +1222,16 @@ uint32_t aret_difftime(uint32_t esp) {
     __aret_x87_ret = difftime((time_t)(int32_t)AU(0), (time_t)(int32_t)AU(1)); __aret_x87_ret_valid = 1;
     return 0;
 }
-/* system(cmd): faithfully forward — the original program intends to run it. */
-uint32_t aret_system(uint32_t esp) { return (uint32_t)system(ACS(0)); }
+/* system(cmd): forward to the host shell (the program intends to run it). msvcrt returns
+ * the command's EXIT CODE, not the raw wait-status, so extract it (WEXITSTATUS == (st>>8)
+ * & 0xff on Linux; done inline to avoid a sys/wait.h dependency here). NULL command ->
+ * non-zero ("a command processor is available"). */
+uint32_t aret_system(uint32_t esp) {
+    const char *cmd = ACS(0);
+    if (!cmd) return 1;
+    int st = system(cmd);
+    return st < 0 ? (uint32_t)-1 : (uint32_t)((st >> 8) & 0xff);
+}
 
 /* tmpnam([s]): a unique temporary name. msvcrt returns a bare name (used under
  * the temp dir); a monotonic counter suffices and is path-translated on open. */

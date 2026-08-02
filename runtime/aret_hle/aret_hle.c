@@ -20,6 +20,7 @@
 #include <fnmatch.h>
 #ifndef __wasm__
 #include <sys/mman.h> /* WASI has no real file mmap; file mapping is native-only */
+#include <sys/wait.h> /* WIFEXITED/WEXITSTATUS for popen/pclose/system child status */
 #endif
 
 /* Read stdcall/cdecl argument `i` (a 32-bit word) from the modelled stack. */
@@ -445,6 +446,52 @@ static void free_dynfile(uint32_t file) {
     uintptr_t f = (uintptr_t)file, b = (uintptr_t)aret_dynfile;
     if (f >= b && f < b + sizeof(aret_dynfile))
         aret_dyn_used[(f - b) / ARET_FILE_SIZE] = 0;
+}
+
+/* popen/pclose/system: run a command through the host shell (/bin/sh -c), so a program
+ * that shells out to a portable command gets its real output/exit code. A Windows-only
+ * command (dir, copy) or a PE named as the command fails to exec -> the program sees a
+ * REAL failure (correct-or-loud, never silent-wrong), and the "cannot run a PE child"
+ * hard boundary is preserved (a .exe still cannot exec). popen's pipe fd is wrapped in an
+ * HLE FILE so fread/fgets/fclose work on it; a side table remembers the host FILE* so
+ * pclose can reap the child and return its exit status. */
+#define ARET_NPOPEN 32
+static struct { uint32_t file; FILE *host; } aret_popen_tab[ARET_NPOPEN];
+uint32_t aret_popen(uint32_t esp) {
+    const char *cmd = (const char *)(uintptr_t)arg(esp, 0);
+    const char *mode = (const char *)(uintptr_t)arg(esp, 1);
+    if (!cmd) return 0;
+    char hm[2] = { (mode && strchr(mode, 'w')) ? 'w' : 'r', 0 }; /* strip b/t: host wants r|w */
+    FILE *hf = popen(cmd, hm);
+    if (!hf) return 0;
+    uint32_t f = alloc_dynfile(fileno(hf));
+    if (!f) { pclose(hf); return 0; }
+    for (int i = 0; i < ARET_NPOPEN; i++)
+        if (!aret_popen_tab[i].host) { aret_popen_tab[i].file = f; aret_popen_tab[i].host = hf; break; }
+    return f;
+}
+uint32_t aret_pclose(uint32_t esp) {
+    uint32_t file = arg(esp, 0);
+    for (int i = 0; i < ARET_NPOPEN; i++) {
+        if (aret_popen_tab[i].host && aret_popen_tab[i].file == file) {
+            FILE *hf = aret_popen_tab[i].host;
+            aret_popen_tab[i].host = 0; aret_popen_tab[i].file = 0;
+            free_dynfile(file);
+            int st = pclose(hf);                /* reaps the child + closes the fd */
+            return st < 0 ? (uint32_t)-1 : (uint32_t)(WIFEXITED(st) ? WEXITSTATUS(st) : -1);
+        }
+    }
+    return (uint32_t)-1;                          /* not one of ours */
+}
+/* (system() lives in aret_crt.c — it forwards to the host shell too.) */
+/* _pipe(int fds[2], unsigned size, int textmode) -> 0 / -1. Real anonymous pipe. */
+uint32_t aret_pipe(uint32_t esp) {
+    int *fds = (int *)(uintptr_t)arg(esp, 0);
+    if (!fds) return (uint32_t)-1;
+    int p[2];
+    if (pipe(p) != 0) return (uint32_t)-1;
+    fds[0] = p[0]; fds[1] = p[1];
+    return 0;
 }
 
 /* One byte from a synthetic stream, honouring a pending ungetc pushback; -1 at
