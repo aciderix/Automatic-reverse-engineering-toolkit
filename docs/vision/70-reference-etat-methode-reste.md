@@ -1072,6 +1072,22 @@ une frame peut n'avoir qu'une UnwindMap sans try). Portes : difftest **272/272**
 **4/4**. **Reste** : rethrow (`throw;`), catch-by-value copy-ctor non trivial, driver réel WinZip `WZ32.DLL` (v1 `__CxxFrameHandler`,
 mêmes offsets), MFC (FishTank).
 
+### P3.9bis — EH MSVC : `_except_handler4_common` (/GS, scope-table v4) ✅ FAIT (2026-08-01)
+Le handler SEH des binaires **MSVC /GS modernes** (WinMerge/MFC90 l'importe **seul**). Mesuré instrument-first
+(sondes `bench/eh/probes/`, doc 81 §I4) puis implémenté : il ne diffère de `_except_handler3` que par **trois**
+choses, et **partage tout le reste** (un seul corps `aret_seh_dispatch`, paramétré) — (1) record/frame arrivent en
+args **2/3** ; (2) le pointeur de scope-table est **XOR-encodé avec `*cookie`** et la table s'ouvre par un en-tête
+de **4 `int`** (`gs_cookie_offset`, `gs_cookie_xor`, `eh_cookie_offset`, `eh_cookie_xor`) avant les
+enregistrements ; (3) ⚠️ **le terminateur de chaîne est `-2`, pas `-1`** — réutiliser le `-1` de v3 lirait
+l'enregistrement **avant** le tableau sur toute frame sans `__try` actif et **appellerait** le 3ᵉ `int` de
+l'en-tête (qui vaut `-2`) comme filtre. **Identiques (mesuré, pas supposé)** : ebp du filtre = `frame+16`,
+`EXCEPTION_POINTERS` publié en `[frame-4]` (le champ `xpointers` de la frame v4, à +20, reste **intact**).
+`trylevel` est **en clair**, pas encodé. `check_cookie` n'est **jamais** appelé par Wine (même cookie GS faux) —
+en file pour l'oracle Windows. **Gate élargi** : `uses_seh` reconnaît désormais `_except_handler4_common`, sans
+quoi le `setjmp` d'establish n'était pas injecté et le transfert n'aurait **jamais** eu lieu — en silence. Gardé
+`winecorpus/seh_handler4.{c,def}` (chemins sans transfert ; `EXECUTE_HANDLER` est partagé avec P3.9 et gardé par
+ehdiff).
+
 ### P3.9 — EH MSVC : brick C — `__except_handler3` réel (SEH scope-table) ✅ FAIT (2026-07-25)
 `__try/__except/__finally` MSVC bit-identique Wine (`bench/eh/seh_except.c` → `a=42 b=1 c=3 d=5 fin=110`). `aret_except_handler3`
 lit la registration `{prev,handler,scopetable,trylevel}`, marche la scope-table `{EnclosingLevel,FilterFunc,HandlerFunc}[trylevel]`,

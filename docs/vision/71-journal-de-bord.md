@@ -5972,3 +5972,44 @@ Détail : **70 §6** (roadmap). Résumé :
   du CRT au HLE. Petit changement dans `resolve_module_imports` (un filtre de noms), gros gain de portée.
 - **Conclusion pour I4** : la brique se **code à la main**, avec l'encodage XOR **déjà prouvé** et les quatre
   questions ouvertes listées dans `bench/eh/eh4_probe.c`. Le détour a coûté une mesure et a rapporté une règle.
+
+### 2026-08-01 — [EH][I4] **✅ `_except_handler4_common` IMPLÉMENTÉ — trois différences avec la brique C, toutes mesurées, dont un piège qui aurait été invisible**
+
+- **Les quatre questions ouvertes sont fermées**, chacune par une expérience à observable **non muet** (les deux
+  réponses possibles produisent une sortie différente, aucune n'est un silence) :
+  1. **`trylevel` est stocké EN CLAIR**, pas encodé — prouvé dans les deux sens avec un cookie de 4 et une table de
+     8 niveaux, de sorte que la réponse « clair » (2) **et** la réponse « encodé » (6) soient toutes deux des
+     indices valides avec leur propre filtre. Aucun des deux cas ne peut planter ⇒ le résultat est lisible, pas déduit.
+  2. **`gs_cookie_offset`/`eh_cookie_offset` = -2 signifie « absent »**, et — mesuré — **Wine n'appelle JAMAIS
+     `check_cookie`**, même avec un cookie GS délibérément faux.
+  3. **Disposition** : en-tête de **quatre `int`** puis les enregistrements `{EnclosingLevel, FilterFunc,
+     HandlerFunc}` de 12 octets, parcourus depuis `trylevel` via `EnclosingLevel`.
+  4. **`EXCEPTION_POINTERS` va en `[frame-4]` et l'ebp du filtre est `frame+16`** — donc **identiques à la brique C**
+     alors que la frame v4 possède un champ `xpointers` à +20 que Wine laisse **intact**. Le champ à l'air évident
+     est le mauvais ; seule la mesure le dit.
+- **⭐ LE PIÈGE : le terminateur de chaîne est `-2`, pas `-1`.** Réutiliser le `-1` de v3 lirait un enregistrement
+  **avant** le tableau sur **chaque** frame sans `__try` actif — et le troisième `int` de l'en-tête vaut justement
+  `-2`, donc il serait lu comme **adresse de filtre** et **appelé**. C'est exactement l'appel sauvage vers
+  `0xfffffffe` que la sonde a produit avant que le terminateur soit mesuré, et j'avais d'abord noté ce plantage
+  comme « compatible avec un `trylevel` mal décodé, mais pas une preuve » — ce qui était la bonne prudence :
+  l'explication réelle était ailleurs. **Un tel bug se serait présenté comme une erreur de lifting**, pas comme une
+  erreur de handler.
+- **Implémentation** : `_except_handler3` et `_except_handler4_common` partagent désormais **un seul corps**
+  (`aret_seh_dispatch` + `aret_seh_dispatch_search`) paramétré par *(base des enregistrements, terminateur)*. Écrire
+  deux fois la marche, l'unwind local/global et le transfert aurait été deux fois la surface de bug pour zéro
+  différence sémantique — les seules différences réelles sont les positions d'arguments, le XOR + l'en-tête, et le
+  terminateur.
+- **⚠️ Un gate qu'il fallait ouvrir, et qui aurait échoué EN SILENCE** : l'injection du `setjmp` au SEH-establish est
+  conditionnée aux imports (`uses_seh`), et un binaire MSVC /GS moderne n'importe **que** `_except_handler4_common`.
+  Sans l'ajouter à cette liste, le handler aurait fonctionné parfaitement et le transfert n'aurait **jamais eu lieu**
+  — un mode d'échec bien pire qu'un abort.
+- **Sondes conservées, mais SORTIES du répertoire gardé** (`bench/eh/probes/`, README dédié) : `ehdiff.sh` compile
+  tout `bench/eh/*.c` par la chaîne clang/MSVC, et ces harnais demandent mingw + un `.def`. Laissés en place ils
+  faisaient virer la porte au rouge **pour une raison que personne ne doit corriger** — précisément ce que le 70 §7
+  interdit (« une porte instable est pire qu'une porte lente »). Attrapé par la porte elle-même, en une exécution.
+- **Vérifié** : `winecorpus/seh_handler4.{c,def}` bit-identique Wine **du premier coup** (marche des filtres, passe
+  d'unwind avec `__finally`, terminateur), **ehdiff 6/6** (le refactor ne régresse pas la brique C), difftest
+  272/272, hash `19acad982194bf07` inchangé.
+- **Périmètre honnête** : la fixture couvre les chemins **sans transfert**. `EXECUTE_HANDLER` (unwind global +
+  longjmp) est **partagé mot pour mot** avec `_except_handler3` et gardé par `ehdiff` ; il n'est pas testable sur une
+  frame fabriquée à la main, qui n'a pas fait de vrai `mov fs:[0]` et n'a donc pas de `setjmp` où revenir.

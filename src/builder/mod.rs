@@ -368,15 +368,23 @@ fn uses_setjmp(prog: &Program) -> bool {
         .any(|raw| is_setjmp_intrinsic(&ir::build::sanitize_import(raw)))
 }
 
-/// Does this program use table-driven exception handling — SEH (`_except_handler3`,
-/// __try/__except) or C++ (`__CxxFrameHandler`/`2`/`3`, throw/catch)? Both dispatch
-/// through the same non-local transfer: a handler longjmps to a setjmp the lifter must
-/// inject at the SEH-establish (`mov fs:[0],reg`). Gates that injection + its runtime
-/// declarations (so a binary using neither stays byte-identical).
+/// Does this program use table-driven exception handling — SEH (`_except_handler3`
+/// or its /GS successor `_except_handler4_common`, __try/__except) or C++
+/// (`__CxxFrameHandler`/`2`/`3`, throw/catch)? All of them dispatch through the same
+/// non-local transfer: a handler longjmps to a setjmp the lifter must inject at the
+/// SEH-establish (`mov fs:[0],reg`). Gates that injection + its runtime declarations
+/// (so a binary using none of them stays byte-identical).
+///
+/// `_except_handler4_common` had to be added here explicitly: a modern MSVC /GS binary
+/// imports **only** that one, so the gate would otherwise stay closed and the handler
+/// would have nowhere to longjmp to — the handler itself working perfectly and the
+/// transfer silently never happening.
 fn uses_seh(prog: &Program) -> bool {
     prog.imports.values().any(|raw| {
         let s = ir::build::sanitize_import(raw);
-        s == "aret_except_handler3" || s.starts_with("aret_CxxFrameHandler")
+        s == "aret_except_handler3"
+            || s == "aret_except_handler4_common"
+            || s.starts_with("aret_CxxFrameHandler")
     })
 }
 

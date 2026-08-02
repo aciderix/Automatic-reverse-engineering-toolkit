@@ -3358,12 +3358,15 @@ static uint32_t aret_seh_funclet(uint32_t va, uint32_t ebp) {
 /* Run the __finally blocks for the levels in (to, from]: from the current trylevel `from`
  * down to — but not including — `to`, following EnclosingLevel. A scope entry is a
  * __finally when FilterFunc==0 (HandlerFunc is then the cleanup block). */
-static void aret_seh_local_unwind(uint32_t scopetable, int from, int to, uint32_t ebp) {
-    for (int lvl = from; lvl != -1 && lvl != to; ) {
-        const uint32_t *e = (const uint32_t *)(uintptr_t)(scopetable + (uint32_t)lvl * 12u);
+static void aret_seh_local_unwind_n(uint32_t recs, int from, int to, uint32_t ebp, int end) {
+    for (int lvl = from; lvl != end && lvl != to; ) {
+        const uint32_t *e = (const uint32_t *)(uintptr_t)(recs + (uint32_t)lvl * 12u);
         if (e[1] == 0 && e[2] != 0) aret_seh_funclet(e[2], ebp);   /* __finally cleanup */
         lvl = (int)e[0];
     }
+}
+static void aret_seh_local_unwind(uint32_t scopetable, int from, int to, uint32_t ebp) {
+    aret_seh_local_unwind_n(scopetable, from, to, ebp, -1);
 }
 /* Global unwind: pop fs:[0] from its head up to (not incl.) `target`, calling each
  * intervening handler with EH_UNWINDING so its __finally blocks run (same walk as
@@ -3382,34 +3385,81 @@ static void aret_seh_global_unwind(uint32_t esp, uint32_t target) {
         teb[0] = next; frame = next;
     }
 }
-uint32_t aret_except_handler3(uint32_t esp) {
-    uint32_t recp = arg(esp, 0), framep = arg(esp, 1);
+static uint32_t aret_seh_dispatch_search(uint32_t esp, uint32_t recp, uint32_t framep,
+                                         uint32_t ctxp, uint32_t recs, int end, uint32_t ebp);
+/* Shared dispatch core for BOTH scope-table SEH handlers. `recs` is the base of the
+ * ScopeRecord array (the table itself for v3; 16 bytes past it for v4, whose table
+ * opens with a four-int cookie header) and `end` is the level value that terminates
+ * the enclosing chain (-1 for v3, **-2** for v4). Everything else — the walk, the
+ * funclet ebp, where EXCEPTION_POINTERS is published, the unwind semantics and the
+ * return values — is identical in the two, which is why they share this body rather
+ * than being written twice. Each of those "identical" claims was measured, not
+ * assumed (bench/eh/eh4_probe.c). */
+static uint32_t aret_seh_dispatch(uint32_t esp, uint32_t recp, uint32_t framep,
+                                  uint32_t ctxp, uint32_t recs, int end) {
     uint32_t *rec = (uint32_t *)(uintptr_t)recp;
-    uint32_t *frame = (uint32_t *)(uintptr_t)framep;          /* {prev, handler, scopetable, trylevel} */
+    uint32_t *frame = (uint32_t *)(uintptr_t)framep;
     uint32_t flags = rec ? rec[1] : 0;
-    uint32_t scopetable = frame[2];
     uint32_t ebp = framep + 16;                          /* funclet ebp = EstablisherFrame + 16 */
     if (flags & (ARET_EH_UNWINDING | ARET_EH_EXIT_UNWIND)) {
-        aret_seh_local_unwind(scopetable, (int)frame[3], -1, ebp);   /* run all __finally */
+        aret_seh_local_unwind_n(recs, (int)frame[3], end, ebp, end); /* run all __finally */
         return 1;                                                     /* ExceptionContinueSearch */
     }
+    return aret_seh_dispatch_search(esp, recp, framep, ctxp, recs, end, ebp);
+}
+uint32_t aret_except_handler3(uint32_t esp) {
+    uint32_t recp = arg(esp, 0), framep = arg(esp, 1);
+    uint32_t *frame = (uint32_t *)(uintptr_t)framep;          /* {prev, handler, scopetable, trylevel} */
+    return aret_seh_dispatch(esp, recp, framep, arg(esp, 2), frame[2], -1);
+}
+/* `_except_handler4_common(cookie, check_cookie, rec, frame, ctx, dispatcher)` —
+ * the MSVC /GS ("v4") scope-table handler. MEASURED against Wine's msvcrt through a
+ * forced import (bench/eh/eh4_probe.c); it differs from `_except_handler3` in
+ * exactly three things, and in nothing else:
+ *   1. the record and frame arrive at argument 2 and 3, not 0 and 1;
+ *   2. the frame's scope-table pointer is **XOR-encoded with `*cookie`**, and the
+ *      table opens with a four-int header {gs_cookie_offset, gs_cookie_xor,
+ *      eh_cookie_offset, eh_cookie_xor} before the records;
+ *   3. the chain terminator is **-2**, not -1.
+ * That third one is the trap: reusing v3's -1 would walk one record BEFORE the
+ * array on every frame with no active try — the header's third int is -2, so it
+ * would be read as a filter address and CALLED. That is exactly the wild call the
+ * probe produced before the terminator was measured, and it would have looked like
+ * a lifting bug rather than a handler bug.
+ * ⚠️ `check_cookie` is never invoked: measured, Wine does not validate the GS cookie
+ * here even when it is deliberately wrong. We match the oracle we have, and a
+ * corrupted frame still fails loudly downstream (a bad table means a wild call, not
+ * a wrong value). Flagged for the Windows runner, since real Windows aborts. */
+uint32_t aret_except_handler4_common(uint32_t esp) {
+    uint32_t cookiep = arg(esp, 0);
+    uint32_t recp = arg(esp, 2), framep = arg(esp, 3), ctxp = arg(esp, 4);
+    uint32_t *frame = (uint32_t *)(uintptr_t)framep;
+    uint32_t cookie = cookiep ? *(const uint32_t *)(uintptr_t)cookiep : 0;
+    uint32_t table = frame[2] ^ cookie;
+    return aret_seh_dispatch(esp, recp, framep, ctxp, table + 16, -2);
+}
+static uint32_t aret_seh_dispatch_search(uint32_t esp, uint32_t recp, uint32_t framep,
+                                         uint32_t ctxp, uint32_t recs, int end, uint32_t ebp) {
+    uint32_t *frame = (uint32_t *)(uintptr_t)framep;
     /* GetExceptionInformation: an __except filter reads a PEXCEPTION_POINTERS from
-     * [establisher_ebp - 0x14] = [EstablisherFrame - 4]; _except_handler3 must publish it
+     * [establisher_ebp - 0x14] = [EstablisherFrame - 4]; the handler must publish it
      * there before calling filters (else the filter double-derefs an unpopulated slot and
      * faults). The pointer is a 2-word EXCEPTION_POINTERS {ExceptionRecord, ContextRecord}
-     * — everything is 32-bit here (the recompiled program is -m32). */
+     * — everything is 32-bit here (the recompiled program is -m32). MEASURED to be the
+     * same slot for v4, whose frame ALSO has an `xpointers` field at +20 that Wine leaves
+     * untouched — so the obvious-looking field is the wrong one. */
     static uint32_t xp[2];
-    xp[0] = recp; xp[1] = arg(esp, 2) /* ContextRecord */;
+    xp[0] = recp; xp[1] = ctxp /* ContextRecord */;
     *(uint32_t *)(uintptr_t)(framep - 4) = (uint32_t)(uintptr_t)xp;
-    for (int lvl = (int)frame[3]; lvl != -1; ) {
-        const uint32_t *e = (const uint32_t *)(uintptr_t)(scopetable + (uint32_t)lvl * 12u);
+    for (int lvl = (int)frame[3]; lvl != end; ) {
+        const uint32_t *e = (const uint32_t *)(uintptr_t)(recs + (uint32_t)lvl * 12u);
         int enclosing = (int)e[0];
         if (e[1] != 0) {                                             /* __except (has a filter) */
             int32_t d = (int32_t)aret_seh_funclet(e[1], ebp);
             if (d < 0) return 0;                                     /* CONTINUE_EXECUTION */
             if (d > 0) {                                             /* EXECUTE_HANDLER */
                 aret_seh_global_unwind(esp, framep);
-                aret_seh_local_unwind(scopetable, (int)frame[3], lvl, ebp); /* this frame's __finally */
+                aret_seh_local_unwind_n(recs, (int)frame[3], lvl, ebp, end); /* this frame's __finally */
                 frame[3] = (uint32_t)enclosing;                      /* trylevel := enclosing */
                 g_seh_frame = framep; g_seh_handler_va = e[2]; g_seh_ebp = ebp; g_seh_is_cxx = 0;  /* __except handler funclet */
                 aret_longjmp_do(framep, lvl + 1);                    /* -> establisher setjmp */
