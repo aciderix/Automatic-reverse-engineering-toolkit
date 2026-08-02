@@ -617,3 +617,46 @@ affiché. On priorise par la donnée.
 - **Conformité §0.** Gaté, off par défaut, hash inchangé ; les filtres de bruit (heap/lock/pointer-obfuscation)
   sont **documentés comme ne pouvant masquer une divergence** (ils ne portent pas de valeur sur laquelle un
   programme bifurque). Purement diagnostic.
+
+## I12 — Auto-génération des shims « en gros » : analyse mesurée (2026-08-02)
+
+**Question (utilisateur).** Peut-on générer *tous* les shims d'un coup depuis Wine/Windows, au lieu de les écrire
+un par un ? Idée clé (correcte) : **générer DEPUIS les sources, compilé DANS le binaire** — pas lier Winelib au
+runtime (ça exigerait Wine installé = casse l'autonomie, refusé). Trois usages à ne pas confondre :
+1. **Winelib au runtime** = dépendance Wine → **écarté** (contre l'étoile « natif, autonome »).
+2. **Générer/porter depuis les sources Wine** (Wine = source de build) → **autonome**. Léger (Wine comme
+   référence, on porte le corps) ou lourd (compiler le `.c` Wine dans le HLE + porter le plancher fini
+   `ntdll`/win32u, ~131 syscalls NT, doc 70 §5.0). Mieux que **lifter** le PE builtin Wine (relais-stub, piège
+   `shlwapi`).
+3. **win32metadata** → la **tuyauterie** (signatures/`@N`) auto-générée.
+
+**Deux couches distinctes.** (a) *Tuyauterie* = `@N`/arités/signatures (branchement) ; (b) *comportement* = le
+corps. La (a) s'auto-génère ; la (b) reste à implémenter (porté de Wine ou main), **vérifié contre l'oracle**.
+
+**Mesure décisive (prototype de générateur `@N`, 2026-08-02).** Depuis les import-libs mingw : **6487** `@N`
+prouvés hors-ligne (vs **958** à la main, ×6,8). Diff contre la table actuelle : **940/943 identiques** (99,7 %).
+**MAIS** les 3 écarts prouvent que **les import-libs mingw se contredisent** — même symbole, `@N` différent selon
+la lib :
+
+| fonction | libusp10 | libgdi32 | vrai (4 args) | table ARET |
+|---|---|---|---|---|
+| `ScriptBreak` | @16 ✓ | @0 ✗ | @16 | @16 ✓ |
+| `ScriptStringCPtoX` | @16 ✓ | @20 ✗ | @16 | @16 ✓ |
+| `ScriptStringXtoCP` | @16 ✓ | @20 ✗ | @16 | @16 ✓ |
+
+`libgdi32` porte des doublons **faux** ; un générateur naïf aurait injecté **3 dérives d'esp**. La table faite-main
+avait la bonne valeur. **Leçon (§0 « mesurer, pas affirmer ») : la vérité terrain n'est PAS une décoration `@N`
+(elles divergent), c'est la SIGNATURE TYPÉE** — `@N = Σ tailles des args`. C'est ce que **win32metadata** fournit
+sans ambiguïté (+ les types pour scaffolder les corps). Les libs mingw = **contre-contrôle** (le 940/943), pas
+source unique.
+
+**Plan par phases (recommandé).**
+- **A (rapide, offline+réseau OK)** : `stdcall_pops` **candidat** calculé par **signature** (win32metadata /
+  windows-rs, texte parseable) ; **diff obligatoire** vs table actuelle, chaque écart vérifié (jamais swap
+  aveugle) ; portes hash-transpile + winediff. ⇒ 6487 `@N`, la classe « `@N` manquant » disparaît.
+- **B** : win32metadata → **stubs de signature** (arité, A/W, out-params) = squelettes de shims.
+- **C (grand levier)** : **corps** portés des sources Wine, compilés dans l'ELF autonome, vérifiés contre
+  l'**oracle Windows réel** (`windows-oracle.yml`, qui casse la circularité Wine-oracle/Wine-impl).
+
+**État** : analyse seule (aucune génération commitée). La table `stdcall_pops` reste faite-main et **prouvée**
+(stdcall_audit). À décider avant d'engager la Phase A.
