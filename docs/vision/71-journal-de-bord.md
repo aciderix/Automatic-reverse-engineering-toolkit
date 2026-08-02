@@ -6447,3 +6447,11 @@ Détail : **70 §6** (roadmap). Résumé :
 - **Enseignement** : première preuve concrète que **puiser dans le C de Wine, extrait mécaniquement et compilé dans
   le binaire autonome, est rentable et sound** — exactement l'automatisation des *corps* discutée. Rebuild WinMerge
   en cours pour le mur suivant.
+
+- **⭐ Rebuild WinMerge : `GetCodePageInfo` FRANCHI**, WinMerge avance encore. Aucune autre méthode `IMultiLanguage`
+  appelée (mes stubs nommés ne se déclenchent pas), donc l'objet mlang + `GetCodePageInfo` (rempli depuis Wine)
+  **suffisent** au chemin courant. Le **nouveau mur** n'est plus une lacune HLE nommée mais une **faute matérielle** :
+  `aret: unhandled hardware exception 0xc0000005 at 0x10` = **déréférencement d'un pointeur NULL à +0x10** dans du C++
+  lifté (un objet attendu non-nul). Forensics de null-deref (type du premier mur `0x10`, autre objet) → prochain
+  incrément **instrument-first** (build `ARET_TRACE` : quelle fonction, quel objet null). ⇒ mlang n'est plus le mur ;
+  la brique COM + l'extraction-Wine ont tenu de bout en bout sur le vrai driver.
