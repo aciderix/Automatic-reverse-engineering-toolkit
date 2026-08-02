@@ -69,8 +69,12 @@ Trois **couches** (branchement → comportement), et pour le comportement trois 
    forensics **instrument-first** (build `ARET_TRACE` → fonction + objet null). *(Chantier profondeur.)*
 2. **Signatures / stubs** (couche 2) : générer les squelettes de shims + le marshalling A/W depuis les entêtes
    mingw (clang AST) ou win32metadata. *(Multiplicateur ; pas commencé.)*
-3. ✅ **FAIT — Corps Wine forme MOYENNE** (`GetFamilyCodePage`, bit-identique Wine). Prolonger sur des corps plus gros
-   (ex. une fonction `shlwapi`/`msvcrt` avec algorithme) pour éprouver la montée en taille.
+3. ✅ **FAIT — Corps Wine forme MOYENNE, deux tailles** : `GetFamilyCodePage` (petite boucle) **puis**
+   `StrFromTimeIntervalW/A` (shlwapi, **corps entier à algorithme** + sa chaîne de 3 aides internes
+   `WriteReverseNum`/`FormatSignificant`/`WriteTimeClass` + chaînes ressource), les deux **bit-identiques Wine**.
+   La montée en taille rend visible le **coût cas-par-cas** : chaque corps traîne son propre arbre de dépendances,
+   et l'oracle **tranche les cas-limites** (débordement `WideCharToMultiByte` : `cchMax` octets sans NUL ; quirk `iRet`
+   toujours 0 pour la variante A). *(La forme LOURDE — §4 — est ce qui casse ce coût par-corps.)*
 4. **Corps Wine — forme LOURDE** : compiler une DLL Wine entière + **porter une fois le plancher `ntdll`/win32u**
    (~131 syscalls, doc 70 §5.0) → couverture massive. *(Milestone.)*
 

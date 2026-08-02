@@ -3917,6 +3917,103 @@ ARET_PATH_ROOT_FAMILY(A, char)
 ARET_PATH_ROOT_FAMILY(W, uint16_t)
 #undef ARET_PATH_ROOT_FAMILY
 
+/* StrFromTimeIntervalW/A [SHLWAPI] — ported from Wine's dlls/shlwapi/string.c.
+ *
+ * MEDIUM form of Wine reuse (doc 82): a whole function BODY with real algorithm,
+ * not a data table. Formats a millisecond duration as " H hr M min S sec", writing
+ * `iDigits` significant digits of the first non-zero class (hours/minutes/seconds)
+ * and zeroing — not rounding — the rest; if digits remain, the next class follows.
+ * Faithful transcription of the SHLWAPI_WriteReverseNum / _FormatSignificant /
+ * _WriteTimeClass chain. The class unit strings are Wine's shlwapi resources
+ * IDS_TIME_INTERVAL_{HOURS,MINUTES,SECONDS} = " hr"/" min"/" sec" (leading space —
+ * "always writing a leading space before the time interval begins"). Verified
+ * bit-identical Wine by winecorpus/str_time_interval. */
+
+/* Write a decimal number backwards from `out` (which starts at the NUL slot); returns
+ * a pointer to the slot BEFORE the first digit (mirrors SHLWAPI_WriteReverseNum). */
+static uint16_t *u32_write_reverse_num(uint16_t *out, uint32_t num) {
+    *out-- = 0;
+    do {
+        uint32_t d = num % 10;
+        *out-- = (uint16_t)('0' + d);
+        num = (num - d) / 10;
+    } while (num > 0);
+    return out;
+}
+
+/* Zero the non-significant digits, return the count of significant digits remaining
+ * (mirrors SHLWAPI_FormatSignificant). */
+static int u32_format_significant(uint16_t *num, int digits) {
+    while (*num) {
+        num++;
+        if (--digits == 0) {
+            while (*num) *num++ = '0';
+            return 0;
+        }
+    }
+    return digits;
+}
+
+/* Append " <digits> <unit>" for one time class onto `out`; returns remaining digits
+ * (mirrors SHLWAPI_WriteTimeClass, with LoadStringW(unit) into buff+32). */
+static int u32_write_time_class(uint16_t *out, uint32_t val, const char *unit, int digits) {
+    uint16_t buff[64], *o = buff + 32;
+    o = u32_write_reverse_num(o, val);
+    digits = u32_format_significant(o + 1, digits);
+    *o = ' ';
+    uint16_t *u = buff + 32;                 /* right after the last digit (the old NUL) */
+    while (*unit) *u++ = (uint16_t)(unsigned char)*unit++;
+    *u = 0;
+    uint16_t *e = out; while (*e) e++;        /* lstrcatW(out, o) */
+    while (*o) *e++ = *o++;
+    *e = 0;
+    return digits;
+}
+
+static int u32_strfromtime_w(uint16_t *out, uint32_t cchMax, uint32_t dwMS, int iDigits) {
+    int iRet = 0;
+    if (out && cchMax) {
+        uint16_t copy[128];
+        uint32_t hrs, mins;
+        if (!iDigits || cchMax == 1) { *out = 0; return 0; }
+        dwMS = (dwMS + 500) / 1000;
+        hrs = dwMS / 3600; dwMS -= hrs * 3600;
+        mins = dwMS / 60;  dwMS -= mins * 60;
+        copy[0] = 0;
+        if (hrs)             iDigits = u32_write_time_class(copy, hrs,  " hr",  iDigits);
+        if (mins && iDigits) iDigits = u32_write_time_class(copy, mins, " min", iDigits);
+        if (iDigits)                   u32_write_time_class(copy, dwMS, " sec", iDigits);
+        uint32_t i = 0;                           /* lstrcpynW(out, copy, cchMax) */
+        for (; copy[i] && i + 1 < cchMax; i++) out[i] = copy[i];
+        out[i] = 0;
+        iRet = (int)i;                            /* lstrlenW(out) */
+    }
+    return iRet;
+}
+
+uint32_t aret_StrFromTimeIntervalW(uint32_t esp) {
+    return (uint32_t)u32_strfromtime_w((uint16_t *)WP(0), WU(1), WU(2), WI(3));
+}
+
+/* Wine QUIRK preserved: StrFromTimeIntervalA never updates iRet, so it ALWAYS
+ * returns 0 (it delegates to the W form, then narrows via WideCharToMultiByte). */
+uint32_t aret_StrFromTimeIntervalA(uint32_t esp) {
+    char *out = WS(0);
+    uint32_t cchMax = WU(1);
+    if (out && cchMax) {
+        uint16_t buff[128];
+        u32_strfromtime_w(buff, 128, WU(2), WI(3));
+        /* WideCharToMultiByte(CP_ACP,0,buff,-1,out,cchMax,0,0) of ASCII: copies the
+         * terminating NUL when it fits; on OVERFLOW writes exactly cchMax bytes and
+         * does NOT force a NUL (measured against Wine — the tail stays uninitialised). */
+        for (uint32_t i = 0; i < cchMax; i++) {
+            out[i] = (char)buff[i];
+            if (buff[i] == 0) break;
+        }
+    }
+    return 0;
+}
+
 /* shlwapi path family, wave 3: EXTENSIONS, COMPONENTS, ROOT COMPARISON.
  *
  * Eleven functions taken as a BLOCK rather than one runtime wall at a time — the

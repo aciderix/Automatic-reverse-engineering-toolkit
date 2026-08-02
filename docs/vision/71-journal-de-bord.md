@@ -6496,3 +6496,22 @@ Détail : **70 §6** (roadmap). Résumé :
   retire l'écriture, **pas la preuve**.
 - **Portes** : `ole_mlang_family`, `ole_mlang_getcpinfo`, `ole_mlang_activate` **bit-identiques Wine** ; hash inchangé ;
   stdcall_audit PASS.
+
+### 2026-08-02 — [I5][HLE-WIN32][INFRA] **Forme MOYENNE approfondie — `StrFromTimeIntervalW/A` (shlwapi) portée de Wine, corps entier à algorithme + sa chaîne de 3 aides ; l'oracle tranche un cas-limite subtil**
+
+- **Montée en taille de la forme MOYENNE** (doc 82) : après `GetFamilyCodePage` (petite boucle), on porte un **corps
+  entier avec algorithme** — `StrFromTimeIntervalW` formate une durée ms en `" H hr M min S sec"` avec `iDigits`
+  chiffres **significatifs** sur la première classe non nulle (les autres mis à **zéro**, pas arrondis). Transcription
+  fidèle de la chaîne Wine `SHLWAPI_WriteReverseNum` / `_FormatSignificant` / `_WriteTimeClass` (`u32_write_reverse_num`
+  / `u32_format_significant` / `u32_write_time_class`) + les chaînes ressource `IDS_TIME_INTERVAL_*` = `" hr"/" min"/" sec"`.
+- **⭐ Le coût « au cas par cas » rendu visible** : une fonction traîne **son propre arbre de dépendances** — ici **3 aides
+  internes** + 3 chaînes ressource. C'est exactement ce que la forme MOYENNE paie à chaque corps (à opposer à la forme
+  LOURDE qui règle le plancher une fois pour toutes). Réponse à la question utilisateur : **le portage est CAS PAR CAS**,
+  piloté par le mur mesuré, chaque corps vérifié individuellement contre l'oracle.
+- **⭐ L'oracle tranche un cas-limite** que le portage « à la lecture » aurait raté : la variante **A** délègue au **W**
+  puis narrow via `WideCharToMultiByte(CP_ACP,-1)`. J'avais d'abord clampé à `cchMax-1`+NUL ; **sonde directe Wine** :
+  `WideCharToMultiByte` en **débordement** écrit **exactement `cchMax` octets SANS NUL** (queue laissée telle quelle) et
+  rend 0. Corrigé pour refléter cette sémantique → **bit-identique**. Aussi préservé : le **quirk Wine** que
+  `StrFromTimeIntervalA` **rend toujours 0** (il n'actualise jamais `iRet`).
+- **Portes** : `winecorpus/str_time_interval` (22 cas : exemple documenté 138h43m15s × iDigits 1..7, arrondis 499/500 ms,
+  classes isolées, clamps `cchMax`, variante A) **bit-identique Wine** ; hash inchangé `19acad982194bf07` ; stdcall_audit PASS.
