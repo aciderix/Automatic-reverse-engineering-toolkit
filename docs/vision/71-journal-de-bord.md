@@ -6576,3 +6576,27 @@ Détail : **70 §6** (roadmap). Résumé :
   plutôt qu'écrit.
 - **Portes** : winediff **6/6** bit-identiques ; hash transpile **inchangé** `19acad982194bf07` (le hash est
   comportemental sur le code app transpilé, pas sur la source HLE) ; stdcall_audit **PASS** (`DeleteFileA@4` déjà tabulé).
+
+### 2026-08-02 — [I13][INFRA][LOURD] **Forme LOURDE ouverte et MESURÉE : `rtlstr.c` de ntdll compile INCHANGÉ → 46 fonctions `Rtl*`, plancher fini de 12 primitives (`tools/gen_wine_heavy.py`)**
+
+- **Le milestone démarré par la mesure** (§5.0), pas par du code câblé. Question make-or-break : *peut-on compiler du
+  `.c` Wine entier tel quel ?* Réponse mesurée : **OUI**. `dlls/ntdll/rtlstr.c` (1945 l., 43 exports) compile en objet
+  i686 **sans une ligne modifiée** → **46 fonctions définies** (Init/Copy/Compare/Duplicate/Upcase/Format… de chaîne).
+- **Le plancher est FINI et petit** (le cœur de l'économie « forme lourde ») : 22 symboles indéfinis = **7 libc**
+  (memcpy/…/wcslen) + **3 heap** (`GetProcessHeap`/`RtlAllocateHeap`/`RtlFreeHeap`) — **déjà dans le HLE** — + **12 à
+  porter une fois** : les conversions NLS (`RtlMultiByteToUnicodeN`, `RtlUnicodeToMultiByteN`,
+  `RtlUpcaseUnicodeToMultiByteN`, `…OemN`, les `…Size`) + `RtlCompareUnicodeStrings`. C'est **exactement** la bascule
+  cas-par-cas → en-gros : un fichier = 46 fonctions d'un coup, contre 1 corps à la fois en forme moyenne.
+- **Comment on fait compiler du `.c` Wine sans lier Wine** : (a) **shim de compat** (`tools/wine_heavy/`, mon code) —
+  `wine/debug.h`→`TRACE`/`FIXME` no-op + `debugstr_*` stubs, `ddk/ntddk.h` **vide** (mingw le tire via `wdm.h` absent ;
+  rtlstr n'en a besoin de rien), `ntdll_misc.h`→`ARRAY_SIZE`+limites 64-bit ; (b) **forward-decls extraites du fichier
+  lui-même** (mingw `winternl.h` ne déclare qu'un sous-ensemble des `Rtl*` ⇒ use-before-def sinon) — signatures **prises
+  du fichier**, jamais devinées ; (c) `-isystem` les entêtes NT de mingw (elles suffisent pour les types).
+- **Checké-in et reproductible** (`tools/gen_wine_heavy.py` + `tools/wine_heavy/`) — **motivé par un wipe du conteneur**
+  qui a effacé le probe scratchpad en cours : l'outil de mesure de la forme lourde survit désormais à l'éphémère. Coût
+  **par-fichier mesuré** : l'outil signale ce que chaque fichier réclame en plus (`wcstring.c` : 2 typedefs msvcrt).
+- **§0 respecté** : c'est une **mesure de faisabilité build-time**, rien n'est exécuté, rien deviné, **rien câblé** dans
+  le binaire (hash inchangé). **Reste (prochain cran)** : câbler l'objet `rtlstr.o` dans le build HLE, fournir/router les
+  12 primitives (sous-ensemble ASCII via `MultiByteToWideChar` existant, abort sound au-delà), prouver ≥1 `Rtl*`
+  bit-identique Wine. **Borne honnête** : la forme lourde complète (DLL entières + plancher `ntdll` complet) reste
+  multi-sessions ; ce cran en **prouve la faisabilité** et en **mesure le plancher**.

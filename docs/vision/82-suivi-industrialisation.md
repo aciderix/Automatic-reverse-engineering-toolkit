@@ -64,6 +64,19 @@ Trois **couches** (branchement → comportement), et pour le comportement trois 
   équivalent au `…A` fait-main (ex. `DeleteFileA`). Compile+run vérifiés (thunk généré, NULL propagé).
 - **Ré-exécuter** : `python3 tools/gen_win32_sigs.py --check` (ou `--skeleton …`, `--marshal DeleteFileA …`).
 
+### `tools/gen_wine_heavy.py` — mesure/prépare la forme LOURDE (compiler du `.c` Wine entier) 🚧 spike
+- **Entrée** : un `.c` ntdll de Wine (nom → récupéré du miroir `wine-9.0`, ou chemin local).
+- **Fait** : (1) **splice des forward-decls** extraites des définitions `RET WINAPI Name(...)` du fichier lui-même
+  (mingw `winternl.h` n'en déclare qu'un sous-ensemble ⇒ use-before-def sinon) ; (2) **compile INCHANGÉ** contre les
+  entêtes NT de mingw + le shim de compat **checké-in** `tools/wine_heavy/` (`wine/debug.h`→no-op `TRACE`/`FIXME`,
+  `ddk/ntddk.h` vide, `ARRAY_SIZE`, limites 64-bit) ; (3) **rapporte** les fonctions **définies** + le **plancher**
+  (symboles indéfinis) classé libc / heap / à-porter.
+- **Mesuré** : `rtlstr.c` → **46 fonctions**, plancher = **12 primitives** à porter (conversions NLS +
+  `RtlCompareUnicodeStrings`) ; libc/heap déjà dans le HLE. Coût **par-fichier** (l'outil signale ce qui manque, ex.
+  `wcstring.c` : 2 typedefs msvcrt).
+- **Nature** : **mesure de faisabilité build-time** (§5.0), rien d'exécuté/deviné, rien câblé encore. **Ré-exécuter** :
+  `python3 tools/gen_wine_heavy.py rtlstr.c`.
+
 ### `tools/gen_mlang_cp.py` — table de code pages mlang (couche comportement, forme LÉGÈRE) ✅
 - **Entrée** : `dlls/mlang/mlang.c` de Wine (récupéré via `curl` github raw ; `WINE_MLANG_C=<path>`).
 - **Sortie** : `runtime/aret_hle/mlang_cp_table.h` (**70 code pages** : cp, family cp, flags, desc, charsets, fonts).
@@ -106,8 +119,15 @@ Trois **couches** (branchement → comportement), et pour le comportement trois 
    La montée en taille rend visible le **coût cas-par-cas** : chaque corps traîne son propre arbre de dépendances,
    et l'oracle **tranche les cas-limites** (débordement `WideCharToMultiByte` : `cchMax` octets sans NUL ; quirk `iRet`
    toujours 0 pour la variante A). *(La forme LOURDE — §4 — est ce qui casse ce coût par-corps.)*
-4. **Corps Wine — forme LOURDE** : compiler une DLL Wine entière + **porter une fois le plancher `ntdll`/win32u**
-   (~131 syscalls, doc 70 §5.0) → couverture massive. *(Milestone.)*
+4. **Corps Wine — forme LOURDE** : compiler du `.c` Wine entier + **porter une fois le plancher `ntdll`/win32u**
+   → couverture massive. *(Milestone.)* **🚧 OUVERTE ET MESURÉE (2026-08-02, `tools/gen_wine_heavy.py`)** : `rtlstr.c`
+   de ntdll **compile INCHANGÉ** en objet i686 → **46 fonctions `Rtl*` réelles d'un coup**, sur un plancher **fini de 12
+   primitives à porter** (conversions NLS `RtlMultiByteToUnicodeN`… + `RtlCompareUnicodeStrings`) — le reste du plancher
+   (libc, heap) **existe déjà** dans le HLE. Shim de compat Wine (`tools/wine_heavy/` : `wine/debug.h`→no-op, `ddk/ntddk.h`
+   vide, `ARRAY_SIZE`/limites 64-bit) **checké-in** (survit au conteneur éphémère — motivé par un wipe). Le coût est
+   **par-fichier mesuré** (`wcstring.c` réclame 2 typedefs msvcrt de plus — l'outil le signale). **Reste** : câbler l'objet
+   dans le build HLE, fournir/router les 12 primitives (sous-ensemble ASCII via `MultiByteToWideChar` existant, abort sound
+   au-delà), prouver ≥1 fonction bit-identique Wine. C'est ce qui **casse le coût cas-par-cas** de la forme moyenne.
 
 ---
 
