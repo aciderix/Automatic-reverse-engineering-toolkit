@@ -81,8 +81,15 @@ Trois **couches** (branchement → comportement), et pour le comportement trois 
   sortie **bit-identique au vrai ntdll de Wine** (init/convert/upcase/compare/int-to-char). ⇒ « compiler du `.c` Wine +
   porter un petit plancher → ça tourne CORRECTEMENT ». **Piège ABI trouvé et résolu** : le plancher doit avoir **une seule
   convention** (mingw ne déclare qu'un sous-ensemble des primitives en `NTAPI`, laissant le reste **implicite=cdecl** ⇒
-  mismatch stdcall/cdecl = dérive esp = crash) → **`ntdll_floor.h`** déclare **tout le plancher `NTAPI`**. **Reste** :
-  câbler dans le build HLE + router les imports app.
+  mismatch stdcall/cdecl = dérive esp = crash) → **`ntdll_floor.h`** déclare **tout le plancher `NTAPI`**.
+- **⭐⭐ PROUVÉ DANS LE MODÈLE DE BUILD RÉEL D'ARET** (`tools/wine_heavy/proof_native.sh`) : ARET compile son HLE avec **`cc`
+  natif → ELF natif** (pas mingw ; Linux n'a **pas** `winnt.h`). `rtlstr.c` compile quand même par `cc -m32` avec une **couche
+  NT-types autonome checkée-in** (`tools/wine_heavy/native/` : ~50 typedefs + 9 `STATUS_*` + flags + macros `Rtl*Memory`/`min`)
+  **+ `-fshort-wchar`** (le `wchar_t` natif est 32-bit, le `WCHAR` Windows 16-bit) **+ `wcslen`/`wcschr` 16-bit dans le
+  plancher** (celles de glibc sont 32-bit). Lié et exécuté comme **ELF Linux natif (AUCUN Wine au runtime)** → **bit-identique
+  à l'oracle Wine**. ⇒ **tous les inconnus d'intégration levés** : la forme lourde marche dans le build réel d'ARET, autonome.
+  **Reste** : câbler dans `src/builder/mod.rs` (flags par-fichier, source Wine vendorée, adaptateurs `aret_Rtl*` esp→appel,
+  gating sur imports `Rtl*`) + fixture winediff.
 
 ### `tools/gen_mlang_cp.py` — table de code pages mlang (couche comportement, forme LÉGÈRE) ✅
 - **Entrée** : `dlls/mlang/mlang.c` de Wine (récupéré via `curl` github raw ; `WINE_MLANG_C=<path>`).

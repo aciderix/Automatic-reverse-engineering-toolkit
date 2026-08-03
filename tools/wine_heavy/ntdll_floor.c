@@ -40,3 +40,7 @@ long NTAPI RtlCompareUnicodeStrings(const WCHAR*s1,ULONG l1,const WCHAR*s2,ULONG
 void* NTAPI GetProcessHeap(void){ static char h; return &h; }
 void* NTAPI RtlAllocateHeap(void*h,ULONG f,size_t n){(void)h;(void)f;return malloc(n);}
 void* NTAPI RtlFreeHeap(void*h,ULONG f,void*p){(void)h;(void)f;free(p);return 0;}
+/* 16-bit wide-string primitives: glibc's wcslen/wcschr assume 32-bit wchar_t, but Windows
+ * WCHAR is 16-bit. On native these MUST be 16-bit-aware (ARET's HLE has aret_wcslen etc.). */
+size_t wcslen(const uint16_t *s){ size_t n=0; while(s[n]) n++; return n; }
+uint16_t *wcschr(const uint16_t *s, uint16_t c){ for(;;s++){ if(*s==c) return (uint16_t*)s; if(!*s) return 0; } }

@@ -6621,3 +6621,26 @@ Détail : **70 §6** (roadmap). Résumé :
 - **§0** : preuve en **harnais autonome** (rien câblé dans le binaire ARET, hash inchangé). Sous-ensemble **ASCII** prouvé
   (0-127 exact) ; 128-255/codepages = **hors sous-ensemble** (tables NLS, abort sound à l'intégration). **Reste** : câbler
   `rtlstr.o` dans le build HLE + router les imports app `Rtl*` → forme lourde en production.
+
+### 2026-08-02 — [I13][INFRA][LOURD] **Forme LOURDE prouvée dans le MODÈLE DE BUILD RÉEL d'ARET : `cc` natif, ELF autonome, bit-identique Wine — tous les inconnus d'intégration levés**
+
+- **La preuve précédente utilisait mingw** (qui a les entêtes Windows). Or **ARET compile son HLE avec `cc` natif → ELF
+  natif**, et Linux n'a **pas** `winnt.h`. Question décisive d'intégration : peut-on compiler `rtlstr.c` en **natif** ?
+  **OUI, prouvé** (`tools/wine_heavy/proof_native.sh`) : `cc -m32` + une **couche NT-types autonome** (`tools/wine_heavy/
+  native/`, checkée-in) → objet natif → lié au plancher → **ELF Linux qui tourne SANS Wine** → **bit-identique à l'oracle
+  Wine**.
+- **Trois inconnus levés, chacun une leçon d'intégration** :
+  1. **Couche NT-types autonome** : `nt_types.h` (~50 typedefs `WCHAR`/`NTSTATUS`/`UNICODE_STRING`/… + 9 `STATUS_*` + flags
+     `IS_TEXT_UNICODE_*` + macros `RtlZeroMemory`/`min`), avec des redirections `windef.h`/`winnt.h`/`winternl.h`→`nt_types.h`.
+     Surface **finie et petite** (convergence en 4 itérations de compile).
+  2. **`-fshort-wchar` obligatoire** : le `wchar_t` natif fait **32 bits**, le `WCHAR` Windows **16**. Sans lui, les
+     littéraux `L"…"` de Wine seraient 32-bit ⇒ décalés. (Flag **par-fichier** pour l'objet Wine.)
+  3. **`wcslen`/`wcschr` 16-bit dans le plancher** : `-fshort-wchar` change le **compilateur**, PAS la **glibc** — `wcslen`
+     de glibc reste **32-bit** et lisait la longueur de travers (`RtlInitUnicodeString(L"Foo")`). Le plancher fournit des
+     versions 16-bit (ARET a `aret_wcslen`). Attrapé par la **mesure** (`equal(ci)` faux) — pas par le compile.
+- **Aussi confirmé** : `-O0 -fno-pie -no-pie` (les flags réels d'ARET) donnent le run correct (une build `-O1 -pie` du
+  harnais crashait — artefact de harnais, pas ARET).
+- **Checké-in reproductible** : `tools/wine_heavy/native/` + `proof_native.sh` (`NATIVE PROOF PASS`) + `proof.sh` (mingw)
+  toujours vert. **Reste (dernier cran d'intégration)** : `src/builder/mod.rs` — flags par-fichier (`-fshort-wchar -I native`),
+  source Wine vendorée + splice, adaptateurs `aret_Rtl*(esp)` (dépaquettent esp → appellent le `Rtl*` compilé), gating sur
+  imports `Rtl*`, plancher routé vers les conversions ARET (ASCII ; abort sound au-delà), fixture winediff.
