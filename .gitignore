@@ -18,3 +18,4 @@ bench/.cache/*
 !bench/.cache/busybox-w32-FRP-5579-g5749feb35.exe
 !bench/.cache/sqlite3-3400100.exe
 !bench/.cache/winetest.exe
+tools/__pycache__/
