@@ -6600,3 +6600,24 @@ Détail : **70 §6** (roadmap). Résumé :
   12 primitives (sous-ensemble ASCII via `MultiByteToWideChar` existant, abort sound au-delà), prouver ≥1 `Rtl*`
   bit-identique Wine. **Borne honnête** : la forme lourde complète (DLL entières + plancher `ntdll` complet) reste
   multi-sessions ; ce cran en **prouve la faisabilité** et en **mesure le plancher**.
+
+### 2026-08-02 — [I13][INFRA][LOURD] **Forme LOURDE — mécanique PROUVÉE bout-en-bout : `rtlstr.o` (Wine compilé) + plancher ASCII 12-primitives = bit-identique au vrai ntdll de Wine**
+
+- **Le cran décisif** : pas seulement « ça compile », mais « **ça tourne correctement** ». `tools/wine_heavy/proof.sh`
+  compile `rtlstr.c` **inchangé** → `rtlstr.o` (46 fn), le lie à `tools/wine_heavy/ntdll_floor.c` (mon **plancher ASCII de
+  12 primitives** : conversions NLS byte↔u16 exactes sur 0-127, heap→hôte, `RtlCompareUnicodeStrings`), exécute sous Wine,
+  et **diffe** contre le **même driver lié au vrai ntdll de Wine**. **Bit-identique** sur `RtlInitAnsiString` /
+  `RtlAnsiStringToUnicodeString` / `RtlUnicodeStringToAnsiString` / `RtlIntegerToChar` / `RtlEqualUnicodeString` — le
+  plancher (conversions + heap + compare) est exercé.
+- **⭐ Piège ABI trouvé PAR L'EXÉCUTION** (crash, puis résolu) : le plancher doit avoir **une seule convention d'appel**.
+  mingw ne déclare qu'un **sous-ensemble** des primitives (`RtlAllocateHeap`/`RtlFreeHeap`/`RtlUnicodeToMultiByteSize` en
+  `NTAPI`), laissant les autres **implicites=cdecl** ⇒ `rtlstr.o` appelait la moitié en stdcall, l'autre en cdecl ⇒
+  **mismatch = dérive esp = page fault** (exactement la famille de bugs la plus coûteuse d'ARET, cf. 70). Fix propre :
+  **`tools/wine_heavy/ntdll_floor.h`** déclare **tout le plancher `NTAPI`** (inclus par le shim de compat) ⇒ le `.c` Wine
+  appelle **tout** en stdcall, plancher défini tout-stdcall, cohérent. Leçon réutilisable pour l'intégration HLE : **un
+  `.c` Wine compilé contre les entêtes mingw hérite de conventions incohérentes pour son plancher** — livrer les protos du
+  plancher **avec** le fichier.
+- **Checké-in reproductible** : `ntdll_floor.{c,h}` + `proof_driver.c` + `proof.sh` (`PROOF PASS` en une commande).
+- **§0** : preuve en **harnais autonome** (rien câblé dans le binaire ARET, hash inchangé). Sous-ensemble **ASCII** prouvé
+  (0-127 exact) ; 128-255/codepages = **hors sous-ensemble** (tables NLS, abort sound à l'intégration). **Reste** : câbler
+  `rtlstr.o` dans le build HLE + router les imports app `Rtl*` → forme lourde en production.

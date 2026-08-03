@@ -76,6 +76,13 @@ Trois **couches** (branchement → comportement), et pour le comportement trois 
   `wcstring.c` : 2 typedefs msvcrt).
 - **Nature** : **mesure de faisabilité build-time** (§5.0), rien d'exécuté/deviné, rien câblé encore. **Ré-exécuter** :
   `python3 tools/gen_wine_heavy.py rtlstr.c`.
+- **⭐ MÉCANIQUE PROUVÉE bout-en-bout** (`tools/wine_heavy/proof.sh`, 2026-08-02) : `rtlstr.c` compilé **inchangé** +
+  **plancher ASCII de 12 primitives** (`tools/wine_heavy/ntdll_floor.c`, sous-ensemble sound) → lié → exécuté sous Wine →
+  sortie **bit-identique au vrai ntdll de Wine** (init/convert/upcase/compare/int-to-char). ⇒ « compiler du `.c` Wine +
+  porter un petit plancher → ça tourne CORRECTEMENT ». **Piège ABI trouvé et résolu** : le plancher doit avoir **une seule
+  convention** (mingw ne déclare qu'un sous-ensemble des primitives en `NTAPI`, laissant le reste **implicite=cdecl** ⇒
+  mismatch stdcall/cdecl = dérive esp = crash) → **`ntdll_floor.h`** déclare **tout le plancher `NTAPI`**. **Reste** :
+  câbler dans le build HLE + router les imports app.
 
 ### `tools/gen_mlang_cp.py` — table de code pages mlang (couche comportement, forme LÉGÈRE) ✅
 - **Entrée** : `dlls/mlang/mlang.c` de Wine (récupéré via `curl` github raw ; `WINE_MLANG_C=<path>`).
@@ -125,9 +132,11 @@ Trois **couches** (branchement → comportement), et pour le comportement trois 
    primitives à porter** (conversions NLS `RtlMultiByteToUnicodeN`… + `RtlCompareUnicodeStrings`) — le reste du plancher
    (libc, heap) **existe déjà** dans le HLE. Shim de compat Wine (`tools/wine_heavy/` : `wine/debug.h`→no-op, `ddk/ntddk.h`
    vide, `ARRAY_SIZE`/limites 64-bit) **checké-in** (survit au conteneur éphémère — motivé par un wipe). Le coût est
-   **par-fichier mesuré** (`wcstring.c` réclame 2 typedefs msvcrt de plus — l'outil le signale). **Reste** : câbler l'objet
-   dans le build HLE, fournir/router les 12 primitives (sous-ensemble ASCII via `MultiByteToWideChar` existant, abort sound
-   au-delà), prouver ≥1 fonction bit-identique Wine. C'est ce qui **casse le coût cas-par-cas** de la forme moyenne.
+   **par-fichier mesuré** (`wcstring.c` réclame 2 typedefs msvcrt de plus — l'outil le signale).
+   **✅ MÉCANIQUE PROUVÉE bout-en-bout** (`tools/wine_heavy/proof.sh`) : `rtlstr.c` compilé inchangé + **plancher ASCII
+   12-primitives** (`ntdll_floor.c`) → lié → exécuté sous Wine → **bit-identique au vrai ntdll de Wine**. Piège ABI résolu
+   (plancher **tout NTAPI** via `ntdll_floor.h` — sinon mismatch stdcall/cdecl = dérive esp). **Reste** : câbler l'objet
+   dans le build HLE + router les imports app (abort sound hors ASCII). C'est ce qui **casse le coût cas-par-cas**.
 
 ---
 

@@ -12,4 +12,5 @@
 #define I64_MAX  9223372036854775807LL
 #define UI64_MAX 0xffffffffffffffffULL
 #endif
+#include "ntdll_floor.h"   /* port-once floor prototypes, all NTAPI (one calling convention) */
 #endif
