@@ -133,14 +133,36 @@ Trois **couches** (branchement → comportement), et pour le comportement trois 
    La montée en taille rend visible le **coût cas-par-cas** : chaque corps traîne son propre arbre de dépendances,
    et l'oracle **tranche les cas-limites** (débordement `WideCharToMultiByte` : `cchMax` octets sans NUL ; quirk `iRet`
    toujours 0 pour la variante A). *(La forme LOURDE — §4 — est ce qui casse ce coût par-corps.)*
-### Plancher ntdll Nt* (le milestone « DLL entières ») — 🚧 ENGAGÉ, registre en tête
-- **Registre Nt\*** ✅ **première tranche** (2026-08-02) : `NtCreateKey`/`NtOpenKey`/`NtSetValueKey`/`NtQueryValueKey`
-  (`KeyValuePartialInformation`)/`NtDeleteValueKey`/`NtClose` **backés par le même `g_reg`** que les `Reg*` d'advapi32.
-  Parse `OBJECT_ATTRIBUTES` (RootDirectory + `UNICODE_STRING`), mappe `\Registry\Machine|User\…` → racines, remplit
-  `KEY_VALUE_PARTIAL_INFORMATION`, NTSTATUS (`OBJECT_NAME_NOT_FOUND`/`BUFFER_OVERFLOW`/`BUFFER_TOO_SMALL`). **Registre VIDE
-  par conception (§0)** ⇒ prouvé en **round-trip** (create→set→query, comme les `Reg*`), **bit-identique Wine**
-  (`winecorpus/win32_ntreg`). **Reste du plancher Nt\*** : `NtQueryKey`/`NtEnumerateKey/Value`, fichiers (`NtCreateFile`…),
-  et la variante **real-ABI dans le plancher** pour que des DLL Wine compilées appellent ces Nt\*.
+### 🎯 Plancher ntdll Nt* — ROADMAP COMPLÈTE (le milestone « DLL user-mode entières »)
+
+> **But** : porter **une fois** le plancher syscall `Nt*` d'ntdll (≈**131** `Nt*`, doc 70 §5.0 — la chaîne user-mode
+> Wine y bute) pour que **des DLL Wine compilées** (forme lourde) s'exécutent en autonome. **Méthode invariante** :
+> chaque `Nt*` est **mesuré vs Wine** (§0), backé par l'état HLE existant quand il y en a un (registre `g_reg`, FS, fibers),
+> **round-trip** quand l'état ARET démarre vide (registre), **`aret_partial`/abort** sur tout sous-cas non modélisé.
+> **Deux formes par `Nt*`** : (a) **shim app-facing** `aret_Nt*(esp)` (une app importe le `Nt*` directement) ; (b)
+> **real-ABI dans le plancher** `wine_heavy` (une DLL Wine **compilée** l'appelle en interne). Le cœur logique est partagé.
+
+**Tranches (dans l'ordre) :**
+1. **Registre — écriture/lecture** ✅ **FAIT (2026-08-02)** : `NtCreateKey`/`NtOpenKey`/`NtSetValueKey`/`NtQueryValueKey`
+   (`KeyValuePartialInformation`)/`NtDeleteValueKey`/`NtClose`, backés par `g_reg` (mêmes handles que les `Reg*`). Parse
+   `OBJECT_ATTRIBUTES` + `\Registry\Machine|User\…`, remplit `KEY_VALUE_PARTIAL_INFORMATION`, NTSTATUS. Prouvé **round-trip**,
+   bit-identique Wine (`winecorpus/win32_ntreg`).
+2. **Registre — énumération/info** 🔜 : `NtQueryKey` (`KeyBasic/FullInformation`), `NtEnumerateKey`, `NtEnumerateValueKey`,
+   `NtQueryValueKey` autres classes (`KeyValueFull/Basic`), `NtFlushKey`, `NtDeleteKey`. Même `g_reg`, mesure Wine des structs.
+3. **Fichiers** 🔜 (le gros des 131) : `NtCreateFile`/`NtOpenFile`/`NtReadFile`/`NtWriteFile`/`NtClose`/
+   `NtQueryInformationFile`/`NtSetInformationFile`/`NtQueryDirectoryFile`/`NtDeviceIoControlFile`, backés par le VFS/fd
+   POSIX existant (comme `CreateFile`/`ReadFile`). `OBJECT_ATTRIBUTES` chemin `\??\C:\…`/`\Device\…` → `translate_path`.
+   `IO_STATUS_BLOCK`, `FILE_*_INFORMATION`. Mesure Wine ; round-trip write→read.
+4. **Divers à la demande** 🔜 : `NtQuerySystemInformation`, `NtQueryPerformanceCounter`, `NtDelayExecution` (≈Sleep, fibers),
+   `NtQueryInformationProcess`/`Thread`, `NtAllocateVirtualMemory` (≈VirtualAlloc), `NtProtectVirtualMemory`… **piloté par la
+   mesure** (`--mode walls`/besoin d'un driver), pas spéculatif.
+5. **Variante real-ABI dans le plancher** 🔜 : exposer le cœur logique de chaque `Nt*` en fonction NTAPI liable, ajoutée à
+   `wine_heavy` (comme les conversions `aret_cp1252_*`), pour que `rtlstr.c`+`version.c`+… **compilés** appellent ces `Nt*`.
+6. **Driver de bout en bout** 🔜 : **`version.c`** de ntdll (lit le registre → version OS) vendoré + adaptateurs + fixture,
+   **bit-identique Wine** = première **DLL-source Wine entière non-chaîne** en production. Puis d'autres fichiers, puis DLL.
+
+**Invariants** : registre/état vide ⇒ prouver en round-trip ; jamais une valeur système devinée ; hash inchangé (additif) ;
+`@N` Nt\* déjà dans `stdcall_pops` (audit) ; chaque tranche = fixture winediff + entrée 71 + maj ici.
 
 4. **Corps Wine — forme LOURDE** : compiler du `.c` Wine entier + **porter une fois le plancher `ntdll`/win32u**
    → couverture massive. *(Milestone.)* **🚧 OUVERTE ET MESURÉE (2026-08-02, `tools/gen_wine_heavy.py`)** : `rtlstr.c`
