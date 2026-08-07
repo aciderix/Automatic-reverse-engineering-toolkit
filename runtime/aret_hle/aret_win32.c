@@ -536,6 +536,148 @@ uint32_t aret_NtDeleteValueKey(uint32_t esp) {
  * RegCloseKey/CloseHandle. (A follow-up can route non-registry handles to their real close.) */
 uint32_t aret_NtClose(uint32_t esp) { (void)esp; return NT_STATUS_SUCCESS; }
 
+/* ---- Nt* registry tranche 2: enumeration / info (NtQueryKey/NtEnumerateKey/
+ * NtEnumerateValueKey/NtFlushKey/NtDeleteKey), same g_reg tree. Struct layouts and buffer/
+ * ordering semantics MEASURED vs Wine (scratchpad ntenum_probe):
+ *   - MaxNameLen/MaxValueNameLen are in BYTES (chars*2), MaxValueDataLen in bytes;
+ *   - out-of-range index -> STATUS_NO_MORE_ENTRIES;
+ *   - key-info (Query/EnumerateKey): len<fixed -> BUFFER_TOO_SMALL, fixed<=len<need -> BUFFER_OVERFLOW;
+ *   - value-ENUM (EnumerateValueKey): any len<need -> BUFFER_OVERFLOW (no TOO_SMALL regime) --
+ *     genuinely a different Wine code path from NtQueryValueKey (which keeps the TOO_SMALL regime);
+ *   - Wine enumerates subkeys AND values in case-insensitive (upcased) SORTED order, not
+ *     creation order -> we sort by an upcased-ASCII compare (bit-identical Wine on the proven
+ *     ASCII subset; names are stored narrow). LastWriteTime is environmental -> written 0,
+ *     the fixture excludes it. ---- */
+#define NT_STATUS_NO_MORE_ENTRIES 0x8000001Au
+
+/* Widen an ASCII key/value name to the UTF-16 the Nt* structs return (round-trip exact in the
+ * proven ASCII subset). Returns the number of WCHARs written (no NUL). */
+static int u32_reg_widen(const char *s, uint16_t *out, int cap) {
+    int i = 0; for (; s[i] && i < cap; i++) out[i] = (uint16_t)(uint8_t)s[i]; return i;
+}
+/* Case-insensitive compare the way Wine orders the registry: upcase ASCII 'a'-'z' -> 'A'-'Z'
+ * (so '_'(0x5F) sorts AFTER letters, matching RtlCompareUnicodeString case-insensitive, unlike
+ * a tolower compare). */
+static int u32_reg_ncmp(const char *a, const char *b) {
+    for (;; a++, b++) {
+        unsigned ca = (unsigned char)*a, cb = (unsigned char)*b;
+        if (ca >= 'a' && ca <= 'z') ca -= 32;
+        if (cb >= 'a' && cb <= 'z') cb -= 32;
+        if (ca != cb) return (int)ca - (int)cb;
+        if (!ca) return 0;
+    }
+}
+/* The idx-th live subkey of key k in Wine's SORTED order -> child index, or -1. */
+static int u32_reg_nth_subkey(int k, uint32_t idx) {
+    int ids[U32_MAX_REGKEY]; int n = 0;
+    for (int i = U32_REG_ROOTS; i < U32_MAX_REGKEY; i++)
+        if (g_reg[i].used && g_reg[i].parent == k) ids[n++] = i;
+    for (int a = 1; a < n; a++) { int t = ids[a], b = a - 1;
+        while (b >= 0 && u32_reg_ncmp(g_reg[ids[b]].name, g_reg[t].name) > 0) { ids[b + 1] = ids[b]; b--; }
+        ids[b + 1] = t; }
+    return idx < (uint32_t)n ? ids[idx] : -1;
+}
+/* The idx-th live value of key k in Wine's SORTED order -> val ptr, or NULL. */
+static struct u32_regval *u32_reg_nth_value(int k, uint32_t idx) {
+    struct u32_regkey *K = &g_reg[k];
+    int ids[U32_MAX_REGVAL]; int n = 0;
+    for (int i = 0; i < U32_MAX_REGVAL; i++) if (K->val[i].used) ids[n++] = i;
+    for (int a = 1; a < n; a++) { int t = ids[a], b = a - 1;
+        while (b >= 0 && u32_reg_ncmp(K->val[ids[b]].name, K->val[t].name) > 0) { ids[b + 1] = ids[b]; b--; }
+        ids[b + 1] = t; }
+    return idx < (uint32_t)n ? &K->val[ids[idx]] : NULL;
+}
+/* Fill a KEY_BASIC/NODE/FULL_INFORMATION for key kidx into info[0..length). LastWriteTime=0
+ * (environmental). Shared by NtQueryKey (self) and NtEnumerateKey (a subkey). */
+static uint32_t u32_fill_key_info(uint32_t cls, int kidx, uint32_t info, uint32_t length, uint32_t presult) {
+    uint8_t *o = (uint8_t *)(uintptr_t)info;
+    uint16_t wn[U32_REGNAME]; int wl = u32_reg_widen(g_reg[kidx].name, wn, U32_REGNAME);
+    uint32_t namelen = 2u * (uint32_t)wl;
+    uint32_t fixed, need, noff = 0;
+    if (cls == 0)      { fixed = 16; noff = 16; need = 16 + namelen; }   /* KeyBasicInformation */
+    else if (cls == 1) { fixed = 24; noff = 24; need = 24 + namelen; }   /* KeyNodeInformation  */
+    else if (cls == 2) { fixed = 44;            need = 44;           }   /* KeyFullInformation  */
+    else { aret_partial("NtQueryKey/NtEnumerateKey: only KeyBasic/Node/FullInformation modelled"); return NT_STATUS_INVALID_HANDLE; }
+    if (presult) *(uint32_t *)(uintptr_t)presult = need;
+    if (length < fixed) return NT_STATUS_BUFFER_TOO_SMALL;
+    if (cls == 2) {                              /* Full: fixed-only, no variable part */
+        uint32_t nsub = 0, maxname = 0, nval = 0, maxvname = 0, maxvdata = 0;
+        for (int i = U32_REG_ROOTS; i < U32_MAX_REGKEY; i++) if (g_reg[i].used && g_reg[i].parent == kidx) {
+            nsub++; uint32_t l = 2u * (uint32_t)strlen(g_reg[i].name); if (l > maxname) maxname = l; }
+        struct u32_regkey *K = &g_reg[kidx];
+        for (int i = 0; i < U32_MAX_REGVAL; i++) if (K->val[i].used) {
+            nval++; uint32_t l = 2u * (uint32_t)strlen(K->val[i].name); if (l > maxvname) maxvname = l;
+            if (K->val[i].len > maxvdata) maxvdata = K->val[i].len; }
+        memset(o, 0, 44);
+        *(uint32_t *)(o + 12) = 0xFFFFFFFFu;     /* ClassOffset (no class) */
+        *(uint32_t *)(o + 20) = nsub;   *(uint32_t *)(o + 24) = maxname;
+        *(uint32_t *)(o + 32) = nval;   *(uint32_t *)(o + 36) = maxvname; *(uint32_t *)(o + 40) = maxvdata;
+        return NT_STATUS_SUCCESS;
+    }
+    memset(o, 0, fixed);
+    if (cls == 0)      { *(uint32_t *)(o + 12) = namelen; }
+    else /* node */    { *(uint32_t *)(o + 12) = 0xFFFFFFFFu; *(uint32_t *)(o + 20) = namelen; }
+    uint32_t avail = length - noff, cpy = namelen < avail ? namelen : avail;
+    if (cpy) memcpy(o + noff, wn, cpy);          /* partial-name write on overflow is contract-undefined */
+    return cpy < namelen ? NT_STATUS_BUFFER_OVERFLOW : NT_STATUS_SUCCESS;
+}
+/* Fill a KEY_VALUE_BASIC/FULL/PARTIAL_INFORMATION for value v (Enumerate path: any short buffer
+ * -> BUFFER_OVERFLOW, no TOO_SMALL). */
+static uint32_t u32_fill_value_info_enum(uint32_t cls, struct u32_regval *v, uint32_t info, uint32_t length, uint32_t presult) {
+    uint8_t *o = (uint8_t *)(uintptr_t)info;
+    uint16_t wn[U32_REGNAME]; int wl = u32_reg_widen(v->name, wn, U32_REGNAME);
+    uint32_t namelen = 2u * (uint32_t)wl, dataoff = 0, need;
+    if (cls == 0)      { need = 12 + namelen; }                          /* KeyValueBasicInformation   */
+    else if (cls == 1) { dataoff = 20 + namelen; need = dataoff + v->len; } /* KeyValueFullInformation */
+    else if (cls == 2) { need = 12 + v->len; }                          /* KeyValuePartialInformation */
+    else { aret_partial("NtEnumerateValueKey: only KeyValueBasic/Full/PartialInformation modelled"); return NT_STATUS_INVALID_HANDLE; }
+    if (presult) *(uint32_t *)(uintptr_t)presult = need;
+    if (length < need) return NT_STATUS_BUFFER_OVERFLOW;                 /* enum: no TOO_SMALL regime */
+    if (cls == 0) {                              /* TitleIndex, Type, NameLength, Name */
+        *(uint32_t *)(o + 0) = 0; *(uint32_t *)(o + 4) = v->type; *(uint32_t *)(o + 8) = namelen;
+        if (namelen) memcpy(o + 12, wn, namelen);
+    } else if (cls == 1) {                        /* + DataOffset, DataLength, Name, Data */
+        *(uint32_t *)(o + 0) = 0; *(uint32_t *)(o + 4) = v->type; *(uint32_t *)(o + 8) = dataoff;
+        *(uint32_t *)(o + 12) = v->len; *(uint32_t *)(o + 16) = namelen;
+        if (namelen) memcpy(o + 20, wn, namelen);
+        if (v->len) memcpy(o + dataoff, v->data, v->len);
+    } else {                                      /* Partial: TitleIndex, Type, DataLength, Data */
+        *(uint32_t *)(o + 0) = 0; *(uint32_t *)(o + 4) = v->type; *(uint32_t *)(o + 8) = v->len;
+        if (v->len) memcpy(o + 12, v->data, v->len);
+    }
+    return NT_STATUS_SUCCESS;
+}
+uint32_t aret_NtQueryKey(uint32_t esp) {
+    /* (KeyHandle@0, KeyInformationClass@1, KeyInformation@2, Length@3, ResultLength@4) */
+    int k = u32_reg_idx(WU(0)); if (k < 0) return NT_STATUS_INVALID_HANDLE;
+    return u32_fill_key_info(WU(1), k, WU(2), WU(3), WU(4));
+}
+uint32_t aret_NtEnumerateKey(uint32_t esp) {
+    /* (KeyHandle@0, Index@1, KeyInformationClass@2, KeyInformation@3, Length@4, ResultLength@5) */
+    int k = u32_reg_idx(WU(0)); if (k < 0) return NT_STATUS_INVALID_HANDLE;
+    int child = u32_reg_nth_subkey(k, WU(1));
+    if (child < 0) return NT_STATUS_NO_MORE_ENTRIES;
+    return u32_fill_key_info(WU(2), child, WU(3), WU(4), WU(5));
+}
+uint32_t aret_NtEnumerateValueKey(uint32_t esp) {
+    /* (KeyHandle@0, Index@1, KeyValueInformationClass@2, KeyValueInformation@3, Length@4, ResultLength@5) */
+    int k = u32_reg_idx(WU(0)); if (k < 0) return NT_STATUS_INVALID_HANDLE;
+    struct u32_regval *v = u32_reg_nth_value(k, WU(1));
+    if (!v) return NT_STATUS_NO_MORE_ENTRIES;
+    return u32_fill_value_info_enum(WU(2), v, WU(3), WU(4), WU(5));
+}
+uint32_t aret_NtFlushKey(uint32_t esp) {
+    /* (KeyHandle@0) — in-memory tree, flush is a no-op like RegFlushKey; validate the handle. */
+    int k = u32_reg_idx(WU(0)); if (k < 0) return NT_STATUS_INVALID_HANDLE;
+    return NT_STATUS_SUCCESS;
+}
+uint32_t aret_NtDeleteKey(uint32_t esp) {
+    /* (KeyHandle@0) — delete the key this handle refers to (subtree), like RegDeleteKey by handle. */
+    int k = u32_reg_idx(WU(0)); if (k < 0) return NT_STATUS_INVALID_HANDLE;
+    if (k < U32_REG_ROOTS) return NT_STATUS_INVALID_HANDLE;   /* a hive root is not deletable */
+    u32_reg_del_subtree(k); return NT_STATUS_SUCCESS;
+}
+
 /* ExpandEnvironmentStringsA(src, dst, size): substitute %NAME% with getenv(NAME),
  * copy literals through. Returns the length written including the NUL (or the
  * required size if dst is too small / NULL), matching the Win32 contract. */

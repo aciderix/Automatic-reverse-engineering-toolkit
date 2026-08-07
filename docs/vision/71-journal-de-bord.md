@@ -6754,3 +6754,34 @@ Détail : **70 §6** (roadmap). Résumé :
 - **Reste du plancher Nt\*** : `NtQueryKey`/`NtEnumerateKey`/`NtEnumerateValueKey`, la surface **fichier** (`NtCreateFile`/
   `NtReadFile`…), et la variante **real-ABI dans le plancher** `wine_heavy` pour que des DLL Wine compilées (ex. `version.c`)
   appellent ces Nt\* — c'est ce qui ouvre « DLL user-mode entières ».
+
+### 2026-08-07 — [I13][HLE-WIN32][LOURD] **Plancher Nt\* tranche 2 — énumération/info registre : `NtQueryKey`/`NtEnumerateKey`/`NtEnumerateValueKey`/`NtFlushKey`/`NtDeleteKey`, bit-identique Wine**
+
+- **Suite directe de la tranche 1** (même `g_reg`). Cinq syscalls ajoutés (`aret_win32.c`), **strictement additifs** :
+  `NtQueryKey`/`NtEnumerateKey` (classes `KeyBasic`=0/`KeyNode`=1/`KeyFull`=2), `NtEnumerateValueKey`
+  (`KeyValueBasic`=0/`KeyValueFull`=1/`KeyValuePartial`=2), `NtFlushKey` (no-op sur l'arbre en mémoire, comme
+  `RegFlushKey`), `NtDeleteKey` (supprime le sous-arbre du handle, refuse une racine de ruche).
+- **⭐ Tout MESURÉ sous Wine avant d'écrire** (§0, `scratchpad/ntenum_probe.c`, longueurs de noms/données **contrôlées**
+  pour trancher octets-vs-caractères) — trois quirks qu'une transcription aurait ratés :
+  1. **`MaxNameLen`/`MaxValueNameLen` sont en OCTETS** (chars×2), `MaxValueDataLen` en octets, dans `KEY_FULL_INFORMATION`
+     — alors que `RegQueryInfoKey` (couche Win32) les rend en **caractères** ; la couche Nt diverge.
+  2. **Deux régimes de petit tampon DISTINCTS** : l'info-**clé** (`NtQueryKey`/`NtEnumerateKey`) fait
+     `len<fixe → BUFFER_TOO_SMALL` puis `fixe≤len<besoin → BUFFER_OVERFLOW` ; l'**énum-valeur** (`NtEnumerateValueKey`)
+     rend **`BUFFER_OVERFLOW` pour tout `len<besoin`** (pas de régime TOO_SMALL) — un **chemin de code Wine différent**
+     de `NtQueryValueKey` (qui, lui, garde le TOO_SMALL, mesuré tranche 1). Sous-cas classe inconnue = `aret_partial`.
+  3. **Wine énumère sous-clés ET valeurs en ordre TRIÉ case-insensible (upcasé), pas en ordre de création** (mesuré :
+     Zebra/Alpha/Mango créés → énumérés Alpha/Mango/Zebra). `g_reg` est ordonné par insertion ⇒ tri à la volée par un
+     compare **upcase-ASCII** (`'a'-'z'→'A'-'Z'`, si bien que `'_'`(0x5F) trie **après** les lettres, comme
+     `RtlCompareUnicodeString` case-insensible, contrairement à un compare `tolower`). Bit-identique Wine sur le
+     sous-ensemble ASCII prouvé (les noms sont stockés étroits). `LastWriteTime` = **environnemental** ⇒ écrit 0, exclu
+     du fixture.
+- **Fixture `winecorpus/win32_ntenum`** : crée l'arbre en ordre **délibérément non-alphabétique** (pour PROUVER le tri),
+  énumère les 3 classes clé + 3 classes valeur, teste hors-borne (`STATUS_NO_MORE_ENTRIES` 0x8000001A), les contrats de
+  petit tampon (statut+`ResultLength` seuls — le contenu est indéfini sur overflow), puis `NtDeleteKey`+re-comptage et
+  `NtFlushKey`. **ntdll uniquement** (pas d'advapi32 dans le lien winediff ; préfixe winediff neuf = registre vide, comme
+  tranche 1). **Bit-identique Wine.**
+- **Portes** : `win32_ntenum` **bit-identique Wine** ; `win32_ntreg` (tranche 1) non régressé ; hash **inchangé**
+  `19acad982194bf07` ; audit PASS (les `@N` Nt\* déjà dans `stdcall_pops`) ; winediff complet vert.
+- **Reste du plancher Nt\*** (doc 82) : `NtQueryValueKey` autres classes **à la demande**, puis la surface **fichier**
+  (`NtCreateFile`/`NtReadFile`…, tranche 3), les **divers** (tranche 4), la variante **real-ABI dans `wine_heavy`**
+  (tranche 5) et le driver bout-en-bout `version.c` (tranche 6).

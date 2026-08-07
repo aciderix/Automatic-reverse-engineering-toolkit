@@ -147,8 +147,15 @@ Trois **couches** (branchement → comportement), et pour le comportement trois 
    (`KeyValuePartialInformation`)/`NtDeleteValueKey`/`NtClose`, backés par `g_reg` (mêmes handles que les `Reg*`). Parse
    `OBJECT_ATTRIBUTES` + `\Registry\Machine|User\…`, remplit `KEY_VALUE_PARTIAL_INFORMATION`, NTSTATUS. Prouvé **round-trip**,
    bit-identique Wine (`winecorpus/win32_ntreg`).
-2. **Registre — énumération/info** 🔜 : `NtQueryKey` (`KeyBasic/FullInformation`), `NtEnumerateKey`, `NtEnumerateValueKey`,
-   `NtQueryValueKey` autres classes (`KeyValueFull/Basic`), `NtFlushKey`, `NtDeleteKey`. Même `g_reg`, mesure Wine des structs.
+2. **Registre — énumération/info** ✅ **FAIT (2026-08-07)** : `NtQueryKey` (`KeyBasic/Node/FullInformation`),
+   `NtEnumerateKey`, `NtEnumerateValueKey` (`KeyValueBasic/Full/PartialInformation`), `NtFlushKey`, `NtDeleteKey`, même
+   `g_reg`. **3 quirks mesurés vs Wine** (jamais devinés) : (a) `MaxNameLen`/`MaxValueNameLen` en **octets** (chars×2) au
+   niveau Nt, pas en caractères comme `RegQueryInfoKey` ; (b) **deux régimes petit-tampon distincts** — info-clé =
+   `TOO_SMALL` puis `OVERFLOW`, énum-valeur = **`OVERFLOW` toujours** (chemin Wine différent de `NtQueryValueKey`) ;
+   (c) énumération en **ordre trié case-insensible upcasé**, pas ordre de création (`g_reg` insertion-ordonné ⇒ tri à la
+   volée, compare upcase-ASCII). `LastWriteTime` environnemental = 0, exclu. Prouvé round-trip bit-identique Wine
+   (`winecorpus/win32_ntenum`, création non-alphabétique pour prouver le tri). Reste à la demande : `NtQueryValueKey`
+   autres classes (non appelé par un driver mesuré).
 3. **Fichiers** 🔜 (le gros des 131) : `NtCreateFile`/`NtOpenFile`/`NtReadFile`/`NtWriteFile`/`NtClose`/
    `NtQueryInformationFile`/`NtSetInformationFile`/`NtQueryDirectoryFile`/`NtDeviceIoControlFile`, backés par le VFS/fd
    POSIX existant (comme `CreateFile`/`ReadFile`). `OBJECT_ATTRIBUTES` chemin `\??\C:\…`/`\Device\…` → `translate_path`.
