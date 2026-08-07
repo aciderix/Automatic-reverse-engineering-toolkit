@@ -8218,6 +8218,31 @@ int aret_cp1252_from_wc(char *dst, const uint16_t *src, int n) {
     }
     return used;
 }
+/* Same, for the OEM code page (CP437, GetOEMCP()=437) — measured tables (tools/gen_cp437.py).
+ * The single source of truth for MultiByteToWideChar/WideCharToMultiByte(CP_OEMCP) and the
+ * ntdll Rtl*Oem* floor. Bit-identical Wine incl. best-fit + default char. */
+#include "cp437_tables.h"
+void aret_cp437_to_wc(uint16_t *dst, const char *src, int n) {
+    for (int i = 0; i < n; i++) dst[i] = aret_cp437_fwd[(unsigned char)src[i]];
+}
+static int aret_cp437_rev_byte(uint16_t cp) {
+    int lo = 0, hi = (int)(sizeof aret_cp437_rev_tab / sizeof aret_cp437_rev_tab[0]) - 1;
+    while (lo <= hi) {
+        int m = (lo + hi) / 2; uint16_t c = aret_cp437_rev_tab[m].cp;
+        if (c == cp) return aret_cp437_rev_tab[m].b;
+        if (c < cp) lo = m + 1; else hi = m - 1;
+    }
+    return -1;
+}
+int aret_cp437_from_wc(char *dst, const uint16_t *src, int n) {
+    int used = 0;
+    for (int i = 0; i < n; i++) {
+        int b = aret_cp437_rev_byte(src[i]);
+        if (b < 0) { b = 0x3F; used = 1; }
+        dst[i] = (char)b;
+    }
+    return used;
+}
 /* Render an ANSI string with the DC's selected font into the DC's 32bpp DIB
  * surface, bit-identically to Wine: FreeType mono raster (the rasterizer Wine
  * uses) + Wine's usWinAscent baseline + mono blend; OPAQUE background fills the

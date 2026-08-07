@@ -6722,3 +6722,17 @@ Détail : **70 §6** (roadmap). Résumé :
   `ntdll_rtlstr` non régressés ; hash **inchangé** `19acad982194bf07` ; audit PASS ; proofs verts.
 - **Reste** : **OEM CP437** (forward `RtlOemToUnicodeN` + reverse `RtlUnicodeToOemN`, best-fit mesuré comme CP1252) et
   l'**upcase-Unicode** (`RtlUpcaseUnicodeToMultiByteN` >127) — mesures Wine déjà prises.
+
+### 2026-08-02 — [I13][HLE][LOURD] **OEM (CP437) terminé forward + reverse : tables mesurées sous Wine, kernel32 `CP_OEMCP` + plancher ntdll unifiés — bit-identique Wine**
+
+- **OEM = CP437** (GetOEMCP()=437), traité exactement comme CP1252 : `tools/gen_cp437.py` **mesure sous Wine** la table
+  **forward** (256 octets → UTF16 via `MultiByteToWideChar(437)`) et **reverse best-fit** (balayage 65536 → 727 entrées via
+  `WideCharToMultiByte(437)`), header `runtime/aret_hle/cp437_tables.h` embarqué.
+- **Unifié** : `aret_cp437_to_wc`/`aret_cp437_from_wc` (aret_win32.c) alimentent **le plancher ntdll**
+  (`RtlOemToUnicodeN`/`RtlUnicodeToOemN`) **et** kernel32 (`MultiByteToWideChar`/`WideCharToMultiByte(CP_OEMCP=1/437)`).
+  Défaut `'?'` + `lpUsedDefaultChar` comme CP1252.
+- **Portes** : `win_cp437` **bit-identique Wine** (forward+reverse, kernel32+ntdll : Ç↔0x80, α→0xE0, ▓→0xB2, best-fit,
+  défaut) ; `win_cp1252`/`win_cp1252_rev`/`ntdll_rtlstr` non régressés ; hash **inchangé** ; audit PASS ; proofs verts.
+- **Bilan conversions** : ANSI(CP1252) et OEM(CP437), **forward ET reverse**, **modélisés bit-identique Wine** (tables
+  mesurées), une seule source de vérité partagée kernel32 ↔ ntdll. **Reste** : upcase-Unicode >127 (petit sous-cran), puis
+  le **plancher Nt\*** (registre, ~131 syscalls) pour « DLL entières ».

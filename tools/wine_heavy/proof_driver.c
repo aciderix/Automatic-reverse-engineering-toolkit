@@ -28,3 +28,5 @@ void aret_unimpl(const char *m){ fprintf(stderr, "aret_unimpl: %s\n", m); abort(
  * the proofs exercise ASCII, where CP1252 == identity). */
 void aret_cp1252_to_wc(unsigned short *d, const char *s, int n){ for(int i=0;i<n;i++) d[i]=(unsigned char)s[i]; }
 int aret_cp1252_from_wc(char *d, const unsigned short *s, int n){ for(int i=0;i<n;i++) d[i]=(char)(s[i]&0xFF); return 0; }
+void aret_cp437_to_wc(unsigned short *d, const char *s, int n){ for(int i=0;i<n;i++) d[i]=(unsigned char)s[i]; }
+int aret_cp437_from_wc(char *d, const unsigned short *s, int n){ for(int i=0;i<n;i++) d[i]=(char)(s[i]&0xFF); return 0; }

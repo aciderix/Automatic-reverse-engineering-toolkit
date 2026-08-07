@@ -155,7 +155,10 @@ Trois **couches** (branchement → comportement), et pour le comportement trois 
    (`winecorpus/win_cp1252`). **✅ inverse (UTF16→ANSI) TERMINÉ** : `WideCharToMultiByte`(CP_ACP) + le plancher ntdll
    (`RtlUnicodeToMultiByteN`) partagent `aret_cp1252_from_wc` avec la **table best-fit de Wine MESURÉE** (`tools/gen_cp1252.py`
    balaie les 65536 code points → 696 entrées ; le reste = char défaut `?`, `lpUsedDefaultChar` posé) — **bit-identique Wine**
-   incl. best-fit (Ā→A, ⁄→/) et défaut (`winecorpus/win_cp1252_rev`). **Reste** (sous-cran) : **OEM** (CP437) et l'upcase-Unicode. **🚧 PLAN B ouvert + MESURÉ (2026-08-02)** : `gen_wine_heavy.py` profilé sur 5 fichiers ntdll — chacun a
+   incl. best-fit (Ā→A, ⁄→/) et défaut (`winecorpus/win_cp1252_rev`). **✅ OEM (CP437) TERMINÉ** : `tools/gen_cp437.py`
+   mesure les tables forward (256) + reverse best-fit (727) sous Wine ; `RtlOemToUnicodeN`/`RtlUnicodeToOemN` + kernel32
+   `CP_OEMCP` partagent `aret_cp437_to_wc`/`aret_cp437_from_wc` — **bit-identique Wine** (`winecorpus/win_cp437`, Ç↔0x80,
+   α→0xE0, ▓→0xB2, best-fit+défaut). **Reste** (petit sous-cran) : l'**upcase-Unicode** (`RtlUpcase*ToMultiByte/Oem` >127). **🚧 PLAN B ouvert + MESURÉ (2026-08-02)** : `gen_wine_heavy.py` profilé sur 5 fichiers ntdll — chacun a
    un **coût de shim incrémental** (mesuré, pas deviné) : `version.c`/`large_int.c` tirent `ddk/wdm.h` + conflits
    `_Interlocked*` ; `wcstring.c`/`string.c` réclament les typedefs msvcrt (`__msvcrt_long`…). Shim rendu plus robuste
    (`ntdll_misc.h` inclut `<winternl.h>` avant les prototypes du plancher ⇒ `NTSTATUS` garanti pour tout fichier), `rtlstr.c`

@@ -24,6 +24,8 @@ static void ascii_only_w(const WCHAR*s,ULONG n){ for(ULONG i=0;i<n;i++) if(s[i]>
  * whole system uses. Full CP1252, bit-identical Wine on 0x00-0xFF (the ANSI-forward direction). */
 extern void aret_cp1252_to_wc(WCHAR *dst, const char *src, int n);
 extern int aret_cp1252_from_wc(char *dst, const WCHAR *src, int n);
+extern void aret_cp437_to_wc(WCHAR *dst, const char *src, int n);   /* OEM forward */
+extern int aret_cp437_from_wc(char *dst, const WCHAR *src, int n);  /* OEM reverse */
 
 NTSTATUS NTAPI RtlMultiByteToUnicodeN(WCHAR*d,ULONG dl,ULONG*rl,const char*s,ULONG sl){
     ULONG n=sl; if(n*2>dl)n=dl/2; aret_cp1252_to_wc(d,s,(int)n);
@@ -32,18 +34,21 @@ NTSTATUS NTAPI RtlMultiByteToUnicodeN(WCHAR*d,ULONG dl,ULONG*rl,const char*s,ULO
 NTSTATUS NTAPI RtlUnicodeToMultiByteN(char*d,ULONG dl,ULONG*rl,const WCHAR*s,ULONG sb){
     ULONG n=sb/2; if(n>dl)n=dl; aret_cp1252_from_wc(d,s,(int)n);
     if(rl)*rl=n; return OK; }
-/* Upcase-reverse (Unicode upcase table not modelled beyond ASCII) and OEM (CP437, follow-up)
- * stay ASCII-exact + sound abort. */
+/* OEM(CP437) forward & reverse: full CP437 + Wine best-fit via the shared aret_cp437_*. */
+NTSTATUS NTAPI RtlOemToUnicodeN(WCHAR*d,ULONG dl,ULONG*rl,const char*s,ULONG sl){
+    ULONG n=sl; if(n*2>dl)n=dl/2; aret_cp437_to_wc(d,s,(int)n);
+    if(rl)*rl=n*2; return OK; }
+NTSTATUS NTAPI RtlUnicodeToOemN(char*d,ULONG dl,ULONG*rl,const WCHAR*s,ULONG sb){
+    ULONG n=sb/2; if(n>dl)n=dl; aret_cp437_from_wc(d,s,(int)n);
+    if(rl)*rl=n; return OK; }
+/* Upcase-reverse variants need the Unicode upcase table (not modelled beyond ASCII) -> stay
+ * ASCII-exact + sound abort; a follow-up lifts them. */
 NTSTATUS NTAPI RtlUpcaseUnicodeToMultiByteN(char*d,ULONG dl,ULONG*rl,const WCHAR*s,ULONG sb){
     ULONG n=sb/2; if(n>dl)n=dl; ascii_only_w(s,n); for(ULONG i=0;i<n;i++)d[i]=(char)(up(s[i])&0xFF);
     if(rl)*rl=n; return OK; }
-NTSTATUS NTAPI RtlOemToUnicodeN(WCHAR*d,ULONG dl,ULONG*rl,const char*s,ULONG sl){
-    ULONG n=sl; if(n*2>dl)n=dl/2; ascii_only_b(s,n); for(ULONG i=0;i<n;i++)d[i]=(unsigned char)s[i];
-    if(rl)*rl=n*2; return OK; }
-NTSTATUS NTAPI RtlUnicodeToOemN(char*d,ULONG dl,ULONG*rl,const WCHAR*s,ULONG sb){
-    return RtlUnicodeToMultiByteN(d,dl,rl,s,sb); }
 NTSTATUS NTAPI RtlUpcaseUnicodeToOemN(char*d,ULONG dl,ULONG*rl,const WCHAR*s,ULONG sb){
-    return RtlUpcaseUnicodeToMultiByteN(d,dl,rl,s,sb); }
+    ULONG n=sb/2; if(n>dl)n=dl; ascii_only_w(s,n); for(ULONG i=0;i<n;i++)d[i]=(char)(up(s[i])&0xFF);
+    if(rl)*rl=n; return OK; }
 NTSTATUS NTAPI RtlMultiByteToUnicodeSize(ULONG*sz,const char*s,ULONG l){(void)s;*sz=l*2;return OK;}
 NTSTATUS NTAPI RtlUnicodeToMultiByteSize(ULONG*sz,const WCHAR*s,ULONG b){(void)s;*sz=b/2;return OK;}
 ULONG NTAPI RtlOemStringToUnicodeSize(const STRING*s){ return (s->Length+1)*sizeof(WCHAR); }

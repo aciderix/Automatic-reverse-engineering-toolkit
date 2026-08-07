@@ -3067,7 +3067,9 @@ uint32_t aret_MultiByteToWideChar(uint32_t esp) {
      * bit-identical Wine on 0x80-0xFF). Other single-byte pages keep the Latin-1 identity
      * (ASCII-exact) they always had. */
     extern void aret_cp1252_to_wc(uint16_t *, const char *, int);
+    extern void aret_cp437_to_wc(uint16_t *, const char *, int);
     if (cp == 0 || cp == 1252) aret_cp1252_to_wc(dst, src, w);
+    else if (cp == 1 || cp == 437) aret_cp437_to_wc(dst, src, w);   /* CP_OEMCP */
     else for (int i = 0; i < w; i++) dst[i] = (unsigned char)src[i];
     return (uint32_t)w;
 }
@@ -3086,8 +3088,10 @@ uint32_t aret_WideCharToMultiByte(uint32_t esp) {
      * bit-identical Wine, incl. lpUsedDefaultChar). Other single-byte pages keep the Latin-1
      * truncation they had. */
     extern int aret_cp1252_from_wc(char *, const uint16_t *, int);
-    if (cp == 0 || cp == 1252) {
-        int used = aret_cp1252_from_wc(dst, src, w);
+    extern int aret_cp437_from_wc(char *, const uint16_t *, int);
+    if (cp == 0 || cp == 1252 || cp == 1 || cp == 437) {
+        int used = (cp == 1 || cp == 437) ? aret_cp437_from_wc(dst, src, w)
+                                          : aret_cp1252_from_wc(dst, src, w);
         uint32_t pused = arg(esp, 7);          /* lpUsedDefaultChar (LPBOOL) */
         if (pused) *(int *)(uintptr_t)pused = used;
     } else {
