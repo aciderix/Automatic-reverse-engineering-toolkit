@@ -20,10 +20,15 @@ static WCHAR up(WCHAR c){ return (c>='a'&&c<='z')?c-32:c; }
  * converts non-ASCII text; the NLS-table port lifts this. */
 static void ascii_only_b(const char*s,ULONG n){ for(ULONG i=0;i<n;i++) if((unsigned char)s[i]>0x7f) aret_unimpl("ntdll floor: non-ASCII codepage conversion (NLS tables not modelled)"); }
 static void ascii_only_w(const WCHAR*s,ULONG n){ for(ULONG i=0;i<n;i++) if(s[i]>0x7f) aret_unimpl("ntdll floor: non-ASCII codepage conversion (NLS tables not modelled)"); }
+/* Shared ANSI(CP1252)->UTF16, provided by the HLE (aret_win32.c) — the single conversion the
+ * whole system uses. Full CP1252, bit-identical Wine on 0x00-0xFF (the ANSI-forward direction). */
+extern void aret_cp1252_to_wc(WCHAR *dst, const char *src, int n);
 
 NTSTATUS NTAPI RtlMultiByteToUnicodeN(WCHAR*d,ULONG dl,ULONG*rl,const char*s,ULONG sl){
-    ULONG n=sl; if(n*2>dl)n=dl/2; ascii_only_b(s,n); for(ULONG i=0;i<n;i++)d[i]=(unsigned char)s[i];
+    ULONG n=sl; if(n*2>dl)n=dl/2; aret_cp1252_to_wc(d,s,(int)n);
     if(rl)*rl=n*2; return OK; }
+/* Reverse (UTF16->ANSI) and OEM(CP437) are not yet routed to a modelled table -> ASCII-exact,
+ * sound abort beyond (a follow-up increment lifts these, verified vs Wine). */
 NTSTATUS NTAPI RtlUnicodeToMultiByteN(char*d,ULONG dl,ULONG*rl,const WCHAR*s,ULONG sb){
     ULONG n=sb/2; if(n>dl)n=dl; ascii_only_w(s,n); for(ULONG i=0;i<n;i++)d[i]=(char)(s[i]&0xFF);
     if(rl)*rl=n; return OK; }
@@ -31,7 +36,8 @@ NTSTATUS NTAPI RtlUpcaseUnicodeToMultiByteN(char*d,ULONG dl,ULONG*rl,const WCHAR
     ULONG n=sb/2; if(n>dl)n=dl; ascii_only_w(s,n); for(ULONG i=0;i<n;i++)d[i]=(char)(up(s[i])&0xFF);
     if(rl)*rl=n; return OK; }
 NTSTATUS NTAPI RtlOemToUnicodeN(WCHAR*d,ULONG dl,ULONG*rl,const char*s,ULONG sl){
-    return RtlMultiByteToUnicodeN(d,dl,rl,s,sl); }
+    ULONG n=sl; if(n*2>dl)n=dl/2; ascii_only_b(s,n); for(ULONG i=0;i<n;i++)d[i]=(unsigned char)s[i];
+    if(rl)*rl=n*2; return OK; }
 NTSTATUS NTAPI RtlUnicodeToOemN(char*d,ULONG dl,ULONG*rl,const WCHAR*s,ULONG sb){
     return RtlUnicodeToMultiByteN(d,dl,rl,s,sb); }
 NTSTATUS NTAPI RtlUpcaseUnicodeToOemN(char*d,ULONG dl,ULONG*rl,const WCHAR*s,ULONG sb){

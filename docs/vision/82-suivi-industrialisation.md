@@ -148,8 +148,12 @@ Trois **couches** (branchement → comportement), et pour le comportement trois 
    ntdll vers ces corps Wine. Un vrai PE importe `RtlInitAnsiString`/`RtlAnsiStringToUnicodeString`/`RtlIntegerToChar`/… →
    ARET les sert depuis Wine compilé → **bit-identique Wine** (`winecorpus/ntdll_rtlstr`). Hors i386 (64-bit/wasm) les corps
    Wine ne sont pas liés ⇒ adaptateurs = **abort sound** (garde `#if __i386__`). Hash inchangé, audit PASS. **⇒ la forme
-   lourde tourne en production, autonome.** **Prolonger** : router le plancher NLS vers les conversions ARET (>127 → abort
-   sound au lieu de l'identité ASCII), vendorer d'autres fichiers ntdll (`wcstring.c`…), puis des DLL user-mode entières.
+   lourde tourne en production, autonome.**
+   **✅ PLAN A (conversion CP1252 unifiée, 2026-08-02)** : `MultiByteToWideChar`(CP_ACP) de kernel32 **et** le plancher ntdll
+   (`RtlMultiByteToUnicodeN`) partagent désormais **une seule** conversion `aret_cp1252_to_wc` (table CP1252 `u32_ansi_cp`
+   déjà dans le HLE) → **>127 réellement modélisé** (€, guillemets courbes, tirets…), **bit-identique Wine sur les 256 octets**
+   (`winecorpus/win_cp1252`). **Reste** (sous-cran) : le sens **inverse** (UTF16→ANSI) et **OEM** (CP437) restent ASCII-exact
+   + abort sound. **Prolonger (plan B)** : vendorer d'autres fichiers ntdll (`wcstring.c`…), puis des DLL user-mode entières.
 
 ---
 

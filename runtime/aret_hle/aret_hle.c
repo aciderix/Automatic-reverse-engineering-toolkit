@@ -3054,6 +3054,7 @@ uint32_t aret_IsDBCSLeadByte(uint32_t esp) { (void)esp; return 0; }
  * srclen < 0 means a NUL-terminated string (the terminator is included); a zero
  * destination length means "measure" (return the count that would be written). */
 uint32_t aret_MultiByteToWideChar(uint32_t esp) {
+    uint32_t cp = arg(esp, 0);
     const char *src = (const char *)(uintptr_t)arg(esp, 2);
     int srclen = (int)arg(esp, 3);
     uint16_t *dst = (uint16_t *)(uintptr_t)arg(esp, 4);
@@ -3062,7 +3063,12 @@ uint32_t aret_MultiByteToWideChar(uint32_t esp) {
     int n = (srclen < 0) ? (int)strlen(src) + 1 : srclen;
     if (dstlen == 0 || !dst) return (uint32_t)n;
     int w = n < dstlen ? n : dstlen;
-    for (int i = 0; i < w; i++) dst[i] = (unsigned char)src[i];
+    /* CP_ACP(0)/CP1252: the modelled ANSI page, full CP1252 (shared aret_cp1252_to_wc,
+     * bit-identical Wine on 0x80-0xFF). Other single-byte pages keep the Latin-1 identity
+     * (ASCII-exact) they always had. */
+    extern void aret_cp1252_to_wc(uint16_t *, const char *, int);
+    if (cp == 0 || cp == 1252) aret_cp1252_to_wc(dst, src, w);
+    else for (int i = 0; i < w; i++) dst[i] = (unsigned char)src[i];
     return (uint32_t)w;
 }
 uint32_t aret_WideCharToMultiByte(uint32_t esp) {

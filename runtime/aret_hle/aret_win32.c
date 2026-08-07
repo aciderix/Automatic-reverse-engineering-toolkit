@@ -8185,6 +8185,13 @@ static uint32_t u32_ansi_cp(unsigned char b) {
         0x02DC,0x2122,0x0161,0x203A,0x0153,0x009D,0x017E,0x0178 };
     return (b >= 0x80 && b <= 0x9F) ? hi[b - 0x80] : (uint32_t)b;
 }
+/* Shared ANSI(CP1252) -> UTF-16 conversion: the SINGLE source of truth for kernel32's
+ * MultiByteToWideChar (CP_ACP) and the ntdll Rtl*ToUnicode floor (runtime/wine_heavy).
+ * Full CP1252 via u32_ansi_cp -> bit-identical Wine on every byte 0x00-0xFF, not just ASCII.
+ * Non-static so the separately-compiled Wine floor object links against it. */
+void aret_cp1252_to_wc(uint16_t *dst, const char *src, int n) {
+    for (int i = 0; i < n; i++) dst[i] = (uint16_t)u32_ansi_cp((unsigned char)src[i]);
+}
 /* Render an ANSI string with the DC's selected font into the DC's 32bpp DIB
  * surface, bit-identically to Wine: FreeType mono raster (the rasterizer Wine
  * uses) + Wine's usWinAscent baseline + mono blend; OPAQUE background fills the

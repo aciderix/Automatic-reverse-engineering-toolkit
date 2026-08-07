@@ -6668,3 +6668,22 @@ Détail : **70 §6** (roadmap). Résumé :
 - **Portes** : `ntdll_rtlstr` bit-identique Wine ; hash **inchangé** `19acad982194bf07` ; stdcall_audit PASS (les `@N` `Rtl*`
   venaient déjà de `gen_stdcall_pops`) ; `proof.sh`+`proof_native.sh` toujours verts. **Prolonger** : router le plancher vers
   les conversions ARET (>127 modélisé), vendorer d'autres fichiers ntdll, puis des DLL user-mode entières.
+
+### 2026-08-02 — [I13][HLE][LOURD] **Plan A — conversion CP1252 UNIFIÉE : kernel32 `MultiByteToWideChar` et le plancher ntdll partagent une seule table, >127 réellement modélisé, bit-identique Wine sur 256 octets**
+
+- **Le plancher ne devine plus, et kernel32 non plus** : `aret_MultiByteToWideChar`(CP_ACP) faisait l'**identité Latin-1**
+  (juste sur l'ASCII, faux sur 0x80-0x9F — € rendu `0x00AC` au lieu de `U+20AC`). Or ARET **avait déjà** la table CP1252
+  exacte (`u32_ansi_cp`, utilisée par le rendu de texte). Plan A = **une seule** fonction partagée `aret_cp1252_to_wc`
+  (non-static, dans `aret_win32.c`) que **kernel32** `MultiByteToWideChar` **et** le **plancher ntdll**
+  (`RtlMultiByteToUnicodeN`, donc `RtlAnsiStringToUnicodeString`…) appellent — **une seule source de vérité** pour l'ANSI→UTF16.
+- **>127 réellement modélisé** : les 128 octets hauts (0x80-0xFF) rendent maintenant les vrais points de code CP1252 (€,
+  guillemets courbes ‘’“”, tirets –—, œ/Œ, š/Š…) — **bit-identique Wine sur les 256 octets** (`winecorpus/win_cp1252`, via
+  kernel32 **et** ntdll). L'objet Wine compilé, découpant `RtlAnsiStringToUnicodeString`, s'appuie sur la même table.
+- **Borne honnête (sous-cran suivant)** : le sens **inverse** (`RtlUnicodeToMultiByteN`, `WideCharToMultiByte`) et l'**OEM**
+  (CP437, `RtlOemToUnicodeN`) restent **ASCII-exact + abort sound** — l'inverse exige la table réverse + le best-fit de Wine
+  (chantier borné à part). Le `ascii_only_*` du plancher garde ces chemins sound (arrêt bruyant hors ASCII).
+- **Détail toolchain** : le plancher (compilé séparément, `-fshort-wchar`) appelle `aret_cp1252_to_wc` du HLE (lié ensemble).
+  Les proofs autonomes (`proof*.sh`, sans HLE) fournissent un `aret_cp1252_to_wc` identité dans leur driver (ASCII = CP1252
+  sur ce sous-ensemble).
+- **Portes** : `win_cp1252` **bit-identique Wine** ; `ntdll_rtlstr` non régressé ; hash **inchangé** ; audit PASS ; les deux
+  proofs verts. *(winediff complet en cours — le changement ne touche que les octets 0x80-0x9F de CP_ACP.)*

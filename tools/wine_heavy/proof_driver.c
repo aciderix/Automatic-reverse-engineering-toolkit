@@ -24,3 +24,6 @@ int main(void){
 /* standalone harness: the floor's sound-abort hook (ARET's HLE provides the real one). */
 #include <stdlib.h>
 void aret_unimpl(const char *m){ fprintf(stderr, "aret_unimpl: %s\n", m); abort(); }
+/* standalone harness: the shared ANSI->UTF16 converter (ARET's HLE provides the CP1252 one;
+ * the proofs exercise ASCII, where CP1252 == identity). */
+void aret_cp1252_to_wc(unsigned short *d, const char *s, int n){ for(int i=0;i<n;i++) d[i]=(unsigned char)s[i]; }
