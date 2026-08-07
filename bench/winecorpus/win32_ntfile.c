@@ -89,6 +89,27 @@ int main(void){
     h=NULL; s=NtOpenFile(&h,GENERIC_READ|SYNCHRONIZE,&na,&io,FILE_SHARE_READ,opts);
     printf("open-missing s=0x%08lX\n",(unsigned long)s);
 
+    /* NtSetInformationFile: truncate (FileEndOfFile) + seek (FilePosition) */
+    h=NULL; s=NtCreateFile(&h,GENERIC_READ|GENERIC_WRITE|SYNCHRONIZE,&oa,&io,NULL,FILE_ATTRIBUTE_NORMAL,
+                           FILE_SHARE_READ|FILE_SHARE_WRITE,FILE_OVERWRITE_IF,opts,NULL,0);
+    char ten[]="0123456789"; NtWriteFile(h,NULL,NULL,NULL,&io,ten,10,NULL,NULL);
+    LARGE_INTEGER eof; eof.QuadPart=4;
+    s=NtSetInformationFile(h,&io,&eof,8,FileEndOfFileInformation);
+    printf("set-eof s=0x%08lX Info=%lu\n",(unsigned long)s,(unsigned long)io.Information);
+    unsigned char si2[32]; NtQueryInformationFile(h,&io,si2,sizeof si2,FileStandardInformation);
+    printf("after-eof EOF=%llu\n",(unsigned long long)*(long long*)(si2+8));
+    LARGE_INTEGER pos; pos.QuadPart=2;
+    s=NtSetInformationFile(h,&io,&pos,8,FilePositionInformation);
+    printf("set-pos s=0x%08lX Info=%lu\n",(unsigned long)s,(unsigned long)io.Information);
+    char rb[16]; memset(rb,0,sizeof rb);
+    s=NtReadFile(h,NULL,NULL,NULL,&io,rb,8,NULL,NULL);   /* from pos 2 of a 4-byte file -> "23" */
+    printf("read-at-pos s=0x%08lX Info=%lu buf=[%.*s]\n",(unsigned long)s,(unsigned long)io.Information,(int)io.Information,rb);
+    LARGE_INTEGER grow; grow.QuadPart=8;
+    NtSetInformationFile(h,&io,&grow,8,FileEndOfFileInformation);
+    NtQueryInformationFile(h,&io,si2,sizeof si2,FileStandardInformation);
+    printf("after-grow EOF=%llu\n",(unsigned long long)*(long long*)(si2+8));
+    NtClose(h);
+
     DeleteFileW(L"C:\\aret_ntfile.bin");
     return 0;
 }

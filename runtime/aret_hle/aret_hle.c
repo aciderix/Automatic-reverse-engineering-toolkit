@@ -1283,6 +1283,28 @@ uint32_t aret_NtQueryInformationFile(uint32_t esp) {
     aret_partial("NtQueryInformationFile: only FileStandard/PositionInformation modelled");
     return NT_ST_INVALID_PARAMETER;
 }
+uint32_t aret_NtSetInformationFile(uint32_t esp) {
+    /* (FileHandle@0, IoStatusBlock@1, FileInformation@2, Length@3, FileInformationClass@4).
+     * FileEndOfFile(20)=ftruncate, FilePosition(14)=lseek; Information=0 on success (measured Wine). */
+    int fd = (int)arg(esp, 0);
+    uint32_t piosb = arg(esp, 1), info = arg(esp, 2), length = arg(esp, 3), cls = arg(esp, 4);
+    if (cls == 20) {                                           /* FileEndOfFileInformation */
+        if (length < 8) { u32_iosb_set(piosb, NT_ST_INFO_LENGTH_MISMATCH, 0); return NT_ST_INFO_LENGTH_MISMATCH; }
+        int64_t eof = *(const int64_t *)(uintptr_t)info;
+        if (ftruncate(fd, (off_t)eof) != 0) { u32_iosb_set(piosb, NT_ST_INVALID_HANDLE, 0); return NT_ST_INVALID_HANDLE; }
+        u32_iosb_set(piosb, NT_ST_SUCCESS, 0);
+        return NT_ST_SUCCESS;
+    }
+    if (cls == 14) {                                           /* FilePositionInformation */
+        if (length < 8) { u32_iosb_set(piosb, NT_ST_INFO_LENGTH_MISMATCH, 0); return NT_ST_INFO_LENGTH_MISMATCH; }
+        int64_t pos = *(const int64_t *)(uintptr_t)info;
+        if (lseek(fd, (off_t)pos, SEEK_SET) < 0) { u32_iosb_set(piosb, NT_ST_INVALID_HANDLE, 0); return NT_ST_INVALID_HANDLE; }
+        u32_iosb_set(piosb, NT_ST_SUCCESS, 0);
+        return NT_ST_SUCCESS;
+    }
+    aret_partial("NtSetInformationFile: only FileEndOfFile/PositionInformation modelled");
+    return NT_ST_INVALID_PARAMETER;
+}
 
 /* Win16-era file API (_lopen/_lcreat/_lclose/_lread/_lwrite/_llseek + _hread/
  * _hwrite): an HFILE is a POSIX fd in this model, so these map straight onto

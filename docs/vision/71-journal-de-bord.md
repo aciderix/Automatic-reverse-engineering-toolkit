@@ -6813,5 +6813,10 @@ Détail : **70 §6** (roadmap). Résumé :
   **Bit-identique Wine** (AllocationSize incluse — le préfixe ARET partage le FS hôte de Wine).
 - **Portes** : `win32_ntfile` **bit-identique Wine** ; hash **inchangé** ; audit PASS (`@N` Nt\* fichier déjà dans
   `stdcall_pops`) ; winediff complet vert.
-- **Reste tranche 3** : `NtSetInformationFile` (dont `FileDispositionInformation` = delete-on-close, `FilePosition`,
-  `FileEndOfFile`), `NtQueryDirectoryFile` (énumération), `NtDeviceIoControlFile` — au besoin mesuré. Puis tranches 4-6.
+- **`NtSetInformationFile` ajouté (même jour)** : `FileEndOfFileInformation`(20) = `ftruncate` (réduit **et** agrandit,
+  zéro-fill), `FilePositionInformation`(14) = `lseek` ; `Information`=0 au succès (mesuré). Fixture étendue
+  (truncate→EOF=4→seek 2→read « 23 »→grow→EOF=8), bit-identique Wine. `FileDispositionInformation` (delete-on-close)
+  **différé** — il exige que `NtClose` traite le delete en attente (le no-op actuel ne le déclencherait pas → serait un
+  faux) ; à faire avec le raffinement fd/close de `NtClose`.
+- **Reste tranche 3** : `FileDispositionInformation` (avec close), `NtQueryDirectoryFile` (énumération),
+  `NtDeviceIoControlFile` — au besoin mesuré. Puis tranches 4-6.

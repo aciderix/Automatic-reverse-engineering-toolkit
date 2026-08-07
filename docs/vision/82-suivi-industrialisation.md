@@ -162,8 +162,10 @@ Trois **couches** (branchement → comportement), et pour le comportement trois 
    Wine** : disposition NT(0-5)→`Information` (CREATED/OPENED/OVERWRITTEN/SUPERSEDED selon existence), `ByteOffset` explicite
    **avance** la position (lseek+read, pas pread), 0-octet sur demande >0 = `END_OF_FILE`, `AllocationSize`=`st_blocks*512`
    (formule stat de Wine, sound+portable), IOSB non touché sur échec. Bornes sound (`RootDirectory`-relatif, `\Device\`/UNC,
-   classes autres = `aret_partial`). Round-trip bit-identique Wine (`winecorpus/win32_ntfile`). **Reste** : `NtSetInformation
-   File` (delete-on-close/EndOfFile/Position), `NtQueryDirectoryFile`, `NtDeviceIoControlFile` — au besoin mesuré.
+   classes autres = `aret_partial`). **+ `NtSetInformationFile`** : `FileEndOfFile`(20)=`ftruncate`,
+   `FilePosition`(14)=`lseek`. Round-trip bit-identique Wine (`winecorpus/win32_ntfile`). **Reste** :
+   `FileDispositionInformation` (delete-on-close, exige le raffinement `NtClose`/fd), `NtQueryDirectoryFile`,
+   `NtDeviceIoControlFile` — au besoin mesuré.
 4. **Divers à la demande** 🔜 : `NtQuerySystemInformation`, `NtQueryPerformanceCounter`, `NtDelayExecution` (≈Sleep, fibers),
    `NtQueryInformationProcess`/`Thread`, `NtAllocateVirtualMemory` (≈VirtualAlloc), `NtProtectVirtualMemory`… **piloté par la
    mesure** (`--mode walls`/besoin d'un driver), pas spéculatif.
