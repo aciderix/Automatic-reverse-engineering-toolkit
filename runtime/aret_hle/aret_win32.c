@@ -8192,6 +8192,32 @@ static uint32_t u32_ansi_cp(unsigned char b) {
 void aret_cp1252_to_wc(uint16_t *dst, const char *src, int n) {
     for (int i = 0; i < n; i++) dst[i] = (uint16_t)u32_ansi_cp((unsigned char)src[i]);
 }
+/* Reverse: UTF-16 -> ANSI(CP1252) with Wine's exact best-fit, MEASURED (tools/gen_cp1252.py:
+ * sweep of WideCharToMultiByte(CP_ACP) over all 65536 code points). A code point absent from
+ * the table maps to the default char '?' (0x3F) — exactly Wine's lpUsedDefaultChar path.
+ * The SINGLE source of truth for WideCharToMultiByte(CP_ACP) and the ntdll Rtl*ToMultiByte
+ * floor; bit-identical Wine (kernel32 == ntdll, measured). */
+#include "cp1252_rev_table.h"
+static int aret_cp1252_rev_byte(uint16_t cp) { /* byte, or -1 if unmappable */
+    int lo = 0, hi = (int)(sizeof aret_cp1252_rev_tab / sizeof aret_cp1252_rev_tab[0]) - 1;
+    while (lo <= hi) {
+        int m = (lo + hi) / 2; uint16_t c = aret_cp1252_rev_tab[m].cp;
+        if (c == cp) return aret_cp1252_rev_tab[m].b;
+        if (c < cp) lo = m + 1; else hi = m - 1;
+    }
+    return -1;
+}
+/* Returns 1 if any code point was unmappable (substituted with the default char '?') — this is
+ * exactly Wine's lpUsedDefaultChar. U+003F itself IS in the table, so it does NOT set the flag. */
+int aret_cp1252_from_wc(char *dst, const uint16_t *src, int n) {
+    int used = 0;
+    for (int i = 0; i < n; i++) {
+        int b = aret_cp1252_rev_byte(src[i]);
+        if (b < 0) { b = 0x3F; used = 1; }
+        dst[i] = (char)b;
+    }
+    return used;
+}
 /* Render an ANSI string with the DC's selected font into the DC's 32bpp DIB
  * surface, bit-identically to Wine: FreeType mono raster (the rasterizer Wine
  * uses) + Wine's usWinAscent baseline + mono blend; OPAQUE background fills the

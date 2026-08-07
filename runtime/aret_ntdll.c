@@ -47,6 +47,28 @@ unsigned char NTAPI RtlCreateUnicodeStringFromAsciiz(void *, const char *);
 long     NTAPI RtlAppendUnicodeStringToString(void *, const void *);
 long     NTAPI RtlAppendUnicodeToString(void *, const void *);
 unsigned char NTAPI RtlPrefixString(const void *, const void *, unsigned char);
+/* NLS conversions (the floor, runtime/wine_heavy/ntdll_floor.c) — apps import these directly too. */
+long NTAPI RtlMultiByteToUnicodeN(void *, unsigned long, unsigned long *, const void *, unsigned long);
+long NTAPI RtlUnicodeToMultiByteN(void *, unsigned long, unsigned long *, const void *, unsigned long);
+long NTAPI RtlUpcaseUnicodeToMultiByteN(void *, unsigned long, unsigned long *, const void *, unsigned long);
+long NTAPI RtlOemToUnicodeN(void *, unsigned long, unsigned long *, const void *, unsigned long);
+long NTAPI RtlUnicodeToOemN(void *, unsigned long, unsigned long *, const void *, unsigned long);
+long NTAPI RtlUpcaseUnicodeToOemN(void *, unsigned long, unsigned long *, const void *, unsigned long);
+long NTAPI RtlMultiByteToUnicodeSize(unsigned long *, const void *, unsigned long);
+long NTAPI RtlUnicodeToMultiByteSize(unsigned long *, const void *, unsigned long);
+unsigned long NTAPI RtlOemStringToUnicodeSize(const void *);
+unsigned long NTAPI RtlUnicodeStringToOemSize(const void *);
+
+uint32_t aret_RtlMultiByteToUnicodeN(uint32_t esp) { return (uint32_t)RtlMultiByteToUnicodeN(NP(0), NA(1), (unsigned long *)NP(2), NP(3), NA(4)); }
+uint32_t aret_RtlUnicodeToMultiByteN(uint32_t esp) { return (uint32_t)RtlUnicodeToMultiByteN(NP(0), NA(1), (unsigned long *)NP(2), NP(3), NA(4)); }
+uint32_t aret_RtlUpcaseUnicodeToMultiByteN(uint32_t esp) { return (uint32_t)RtlUpcaseUnicodeToMultiByteN(NP(0), NA(1), (unsigned long *)NP(2), NP(3), NA(4)); }
+uint32_t aret_RtlOemToUnicodeN(uint32_t esp) { return (uint32_t)RtlOemToUnicodeN(NP(0), NA(1), (unsigned long *)NP(2), NP(3), NA(4)); }
+uint32_t aret_RtlUnicodeToOemN(uint32_t esp) { return (uint32_t)RtlUnicodeToOemN(NP(0), NA(1), (unsigned long *)NP(2), NP(3), NA(4)); }
+uint32_t aret_RtlUpcaseUnicodeToOemN(uint32_t esp) { return (uint32_t)RtlUpcaseUnicodeToOemN(NP(0), NA(1), (unsigned long *)NP(2), NP(3), NA(4)); }
+uint32_t aret_RtlMultiByteToUnicodeSize(uint32_t esp) { return (uint32_t)RtlMultiByteToUnicodeSize((unsigned long *)NP(0), NP(1), NA(2)); }
+uint32_t aret_RtlUnicodeToMultiByteSize(uint32_t esp) { return (uint32_t)RtlUnicodeToMultiByteSize((unsigned long *)NP(0), NP(1), NA(2)); }
+uint32_t aret_RtlOemStringToUnicodeSize(uint32_t esp) { return (uint32_t)RtlOemStringToUnicodeSize(NP(0)); }
+uint32_t aret_RtlUnicodeStringToOemSize(uint32_t esp) { return (uint32_t)RtlUnicodeStringToOemSize(NP(0)); }
 
 uint32_t aret_RtlInitString(uint32_t esp)  { RtlInitString(NP(0), (const char *)NP(1)); return 0; }
 uint32_t aret_RtlInitAnsiString(uint32_t esp) { RtlInitAnsiString(NP(0), (const char *)NP(1)); return 0; }
@@ -83,5 +105,9 @@ STUB(RtlIntegerToChar) STUB(RtlIntegerToUnicodeString) STUB(RtlCharToInteger) ST
 STUB(RtlCreateUnicodeString) STUB(RtlCreateUnicodeStringFromAsciiz)
 STUB(RtlAppendUnicodeStringToString) STUB(RtlAppendUnicodeToString)
 STUB(RtlPrefixString)
+STUB(RtlMultiByteToUnicodeN) STUB(RtlUnicodeToMultiByteN) STUB(RtlUpcaseUnicodeToMultiByteN)
+STUB(RtlOemToUnicodeN) STUB(RtlUnicodeToOemN) STUB(RtlUpcaseUnicodeToOemN)
+STUB(RtlMultiByteToUnicodeSize) STUB(RtlUnicodeToMultiByteSize)
+STUB(RtlOemStringToUnicodeSize) STUB(RtlUnicodeStringToOemSize)
 #undef STUB
 #endif

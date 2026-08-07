@@ -6701,3 +6701,24 @@ Détail : **70 §6** (roadmap). Résumé :
   **« compiler des DLL user-mode entières » reste le milestone** (doc 80 §1.2) — il exige de **porter une fois le plancher
   `ntdll` Nt\*** (~131 syscalls, dont le registre), travail **soutenu multi-sessions**. Chaque fichier ajouté suit la recette
   `rtlstr.c` (vendorer + adaptateurs + fixture) **une fois son plancher disponible**. C'est la borne réelle de Plan B.
+
+### 2026-08-02 — [I13][HLE][LOURD] **Sens INVERSE terminé (abort ≠ ne pas terminer) : `WideCharToMultiByte`(CP_ACP) + plancher ntdll partagent la table best-fit de Wine MESURÉE — bit-identique Wine**
+
+- **« abort sound ≠ ne pas terminer »** (utilisateur) : l'inverse UTF16→ANSI(CP1252) est **modélisé**, pas aborté.
+  `aret_cp1252_from_wc` (aret_win32.c) alimente **kernel32** `WideCharToMultiByte`(CP_ACP) **et** le plancher ntdll
+  (`RtlUnicodeToMultiByteN`) — **une seule source de vérité**.
+- **⭐ Table best-fit MESURÉE, pas devinée** (§0) : `tools/gen_cp1252.py` **balaie les 65536 code points sous Wine**
+  (`WideCharToMultiByte(CP_ACP)`) et retient ceux qui **ne tombent pas** sur le char défaut ⇒ **696 entrées** =
+  la table exacte de Wine (slots CP1252 + **best-fit** : Ā→'A', ⁄→'/', ¼→'BC'…). Absent de la table ⇒ char défaut
+  `'?'` (0x3F) + `lpUsedDefaultChar` posé — **exactement** le contrat Windows (mesuré : kernel32 ≡ ntdll). Header
+  généré `runtime/aret_hle/cp1252_rev_table.h` (embarqué, binaire autonome), recherche binaire.
+- **`lpUsedDefaultChar` respecté** : `aret_cp1252_from_wc` rend 1 si un code point était **non mappable** (U+003F lui-même
+  est **dans** la table ⇒ ne pose pas le flag). `WideCharToMultiByte` écrit `*lpUsedDefaultChar`. Attrapé par l'oracle
+  (bytes déjà bit-identiques, seul le flag divergeait).
+- **Adaptateurs conversion ajoutés** : un vrai PE importe **directement** `RtlUnicodeToMultiByteN`/`RtlMultiByteToUnicodeN`/
+  les `*Size`/`*Oem*` ⇒ 10 adaptateurs `aret_Rtl*` de plus (`aret_ntdll.c`) routent vers le plancher. (Sans ça, la fixture
+  abortait `unimplemented import RtlUnicodeToMultiByteN`.)
+- **Portes** : `win_cp1252_rev` **bit-identique Wine** (kernel32 + ntdll, exact + best-fit + défaut) ; `win_cp1252`/
+  `ntdll_rtlstr` non régressés ; hash **inchangé** `19acad982194bf07` ; audit PASS ; proofs verts.
+- **Reste** : **OEM CP437** (forward `RtlOemToUnicodeN` + reverse `RtlUnicodeToOemN`, best-fit mesuré comme CP1252) et
+  l'**upcase-Unicode** (`RtlUpcaseUnicodeToMultiByteN` >127) — mesures Wine déjà prises.

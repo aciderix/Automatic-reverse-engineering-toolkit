@@ -23,15 +23,17 @@ static void ascii_only_w(const WCHAR*s,ULONG n){ for(ULONG i=0;i<n;i++) if(s[i]>
 /* Shared ANSI(CP1252)->UTF16, provided by the HLE (aret_win32.c) — the single conversion the
  * whole system uses. Full CP1252, bit-identical Wine on 0x00-0xFF (the ANSI-forward direction). */
 extern void aret_cp1252_to_wc(WCHAR *dst, const char *src, int n);
+extern int aret_cp1252_from_wc(char *dst, const WCHAR *src, int n);
 
 NTSTATUS NTAPI RtlMultiByteToUnicodeN(WCHAR*d,ULONG dl,ULONG*rl,const char*s,ULONG sl){
     ULONG n=sl; if(n*2>dl)n=dl/2; aret_cp1252_to_wc(d,s,(int)n);
     if(rl)*rl=n*2; return OK; }
-/* Reverse (UTF16->ANSI) and OEM(CP437) are not yet routed to a modelled table -> ASCII-exact,
- * sound abort beyond (a follow-up increment lifts these, verified vs Wine). */
+/* Reverse UTF16->ANSI(CP1252): full CP1252 + Wine best-fit via the shared aret_cp1252_from_wc. */
 NTSTATUS NTAPI RtlUnicodeToMultiByteN(char*d,ULONG dl,ULONG*rl,const WCHAR*s,ULONG sb){
-    ULONG n=sb/2; if(n>dl)n=dl; ascii_only_w(s,n); for(ULONG i=0;i<n;i++)d[i]=(char)(s[i]&0xFF);
+    ULONG n=sb/2; if(n>dl)n=dl; aret_cp1252_from_wc(d,s,(int)n);
     if(rl)*rl=n; return OK; }
+/* Upcase-reverse (Unicode upcase table not modelled beyond ASCII) and OEM (CP437, follow-up)
+ * stay ASCII-exact + sound abort. */
 NTSTATUS NTAPI RtlUpcaseUnicodeToMultiByteN(char*d,ULONG dl,ULONG*rl,const WCHAR*s,ULONG sb){
     ULONG n=sb/2; if(n>dl)n=dl; ascii_only_w(s,n); for(ULONG i=0;i<n;i++)d[i]=(char)(up(s[i])&0xFF);
     if(rl)*rl=n; return OK; }

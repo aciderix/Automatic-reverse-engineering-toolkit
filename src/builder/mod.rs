@@ -30,6 +30,9 @@ const WIN32_C: &str = include_str!("../../runtime/aret_hle/aret_win32.c");
 /// Code-page table extracted from Wine's mlang.c (tools/gen_mlang_cp.py), #included by
 /// aret_win32.c for IMultiLanguage::GetCodePageInfo. Compiled in; no Wine at runtime.
 const MLANG_CP_TABLE_H: &str = include_str!("../../runtime/aret_hle/mlang_cp_table.h");
+/// CP1252 reverse (UTF16->ANSI) table, MEASURED from Wine (tools/gen_cp1252.py), #included by
+/// aret_win32.c for WideCharToMultiByte(CP_ACP) and the ntdll floor. Compiled in; no Wine at runtime.
+const CP1252_REV_TABLE_H: &str = include_str!("../../runtime/aret_hle/cp1252_rev_table.h");
 /// Heavy-form (doc 82): ntdll Rtl* adapters that route imports to the REAL Wine bodies
 /// compiled from `runtime/wine_heavy/rtlstr.c`. Discovered as normal shims; compiled with
 /// standard flags (it treats wide strings as opaque guest pointers).
@@ -1336,6 +1339,7 @@ pub fn transpile(
     write("aret_win32.c", WIN32_C)?;
     write("aret_ntdll.c", NTDLL_C)?;
     write("mlang_cp_table.h", MLANG_CP_TABLE_H)?;
+    write("cp1252_rev_table.h", CP1252_REV_TABLE_H)?;
     // Heavy-form (doc 82): the vendored Wine ntdll source + its ASCII floor + the
     // self-contained NT-types layer, written under out_dir/wine_heavy/ so the special
     // -fshort-wchar compile below can find the shim headers via -I.

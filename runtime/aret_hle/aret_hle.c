@@ -3072,6 +3072,7 @@ uint32_t aret_MultiByteToWideChar(uint32_t esp) {
     return (uint32_t)w;
 }
 uint32_t aret_WideCharToMultiByte(uint32_t esp) {
+    uint32_t cp = arg(esp, 0);
     const uint16_t *src = (const uint16_t *)(uintptr_t)arg(esp, 2);
     int srclen = (int)arg(esp, 3);
     char *dst = (char *)(uintptr_t)arg(esp, 4);
@@ -3081,7 +3082,17 @@ uint32_t aret_WideCharToMultiByte(uint32_t esp) {
     if (srclen < 0) { n = 0; while (src[n]) n++; n++; } else n = srclen;
     if (dstlen == 0 || !dst) return (uint32_t)n;
     int w = n < dstlen ? n : dstlen;
-    for (int i = 0; i < w; i++) dst[i] = (char)(src[i] & 0xff);
+    /* CP_ACP(0)/CP1252: full CP1252 reverse + Wine best-fit (shared aret_cp1252_from_wc,
+     * bit-identical Wine, incl. lpUsedDefaultChar). Other single-byte pages keep the Latin-1
+     * truncation they had. */
+    extern int aret_cp1252_from_wc(char *, const uint16_t *, int);
+    if (cp == 0 || cp == 1252) {
+        int used = aret_cp1252_from_wc(dst, src, w);
+        uint32_t pused = arg(esp, 7);          /* lpUsedDefaultChar (LPBOOL) */
+        if (pused) *(int *)(uintptr_t)pused = used;
+    } else {
+        for (int i = 0; i < w; i++) dst[i] = (char)(src[i] & 0xff);
+    }
     return (uint32_t)w;
 }
 /* GetCommandLineA/W: rebuild the command line from the real argv (the native
