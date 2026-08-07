@@ -6686,4 +6686,18 @@ Détail : **70 §6** (roadmap). Résumé :
   Les proofs autonomes (`proof*.sh`, sans HLE) fournissent un `aret_cp1252_to_wc` identité dans leur driver (ASCII = CP1252
   sur ce sous-ensemble).
 - **Portes** : `win_cp1252` **bit-identique Wine** ; `ntdll_rtlstr` non régressé ; hash **inchangé** ; audit PASS ; les deux
-  proofs verts. *(winediff complet en cours — le changement ne touche que les octets 0x80-0x9F de CP_ACP.)*
+  proofs verts. winediff **216/218** (les 2 rouges = `gdi_uifont` env connu + `ole_mlang` flake Wine-COM sous Xvfb, pas de régression).
+
+### 2026-08-02 — [I13][INFRA][LOURD] **Plan B — mesuré : la tuyauterie généralise, mais chaque fichier ntdll a un coût de shim propre ; « DLL entières » bute sur le plancher Nt\* (= milestone)**
+
+- **Mesure §5.0 avant de coder** : `gen_wine_heavy.py` profilé sur `rtlstr/version/large_int/rtl/wcstring/string`. Verdict
+  **par-fichier**, pas d'intuition : `rtlstr.c` = **self-contained** (46 fn, plancher fini, **déjà en production**) ; les
+  autres tirent des dépendances **distinctes et parfois profondes** — `version.c` lit le **registre** ⇒
+  `KEY_VALUE_PARTIAL_INFORMATION`/`NtQueryValueKey` (le **plancher syscall Nt\***, doc 70 §5.0) ; `large_int.c`/`version.c`
+  tirent `ddk/wdm.h` (conflits `_Interlocked*`) ; `wcstring.c`/`string.c` réclament les typedefs msvcrt.
+- **Shim rendu plus robuste** (réutilisable) : `ntdll_misc.h` inclut `<winternl.h>` avant les protos du plancher (`NTSTATUS`
+  garanti partout), + shims **vides** `ddk/wdm.h` et `ddk/ntddk.h`. `rtlstr.c` reste vert ; `proof.sh` vert.
+- **Conclusion honnête** : la forme lourde **tourne en production** pour les fichiers self-contained (chaînes), mais
+  **« compiler des DLL user-mode entières » reste le milestone** (doc 80 §1.2) — il exige de **porter une fois le plancher
+  `ntdll` Nt\*** (~131 syscalls, dont le registre), travail **soutenu multi-sessions**. Chaque fichier ajouté suit la recette
+  `rtlstr.c` (vendorer + adaptateurs + fixture) **une fois son plancher disponible**. C'est la borne réelle de Plan B.

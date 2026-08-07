@@ -153,7 +153,12 @@ Trois **couches** (branchement → comportement), et pour le comportement trois 
    (`RtlMultiByteToUnicodeN`) partagent désormais **une seule** conversion `aret_cp1252_to_wc` (table CP1252 `u32_ansi_cp`
    déjà dans le HLE) → **>127 réellement modélisé** (€, guillemets courbes, tirets…), **bit-identique Wine sur les 256 octets**
    (`winecorpus/win_cp1252`). **Reste** (sous-cran) : le sens **inverse** (UTF16→ANSI) et **OEM** (CP437) restent ASCII-exact
-   + abort sound. **Prolonger (plan B)** : vendorer d'autres fichiers ntdll (`wcstring.c`…), puis des DLL user-mode entières.
+   + abort sound. **🚧 PLAN B ouvert + MESURÉ (2026-08-02)** : `gen_wine_heavy.py` profilé sur 5 fichiers ntdll — chacun a
+   un **coût de shim incrémental** (mesuré, pas deviné) : `version.c`/`large_int.c` tirent `ddk/wdm.h` + conflits
+   `_Interlocked*` ; `wcstring.c`/`string.c` réclament les typedefs msvcrt (`__msvcrt_long`…). Shim rendu plus robuste
+   (`ntdll_misc.h` inclut `<winternl.h>` avant les prototypes du plancher ⇒ `NTSTATUS` garanti pour tout fichier), `rtlstr.c`
+   toujours vert. ⇒ **la tuyauterie généralise, mais « DLL user-mode entières » = milestone** (expansion shim/plancher
+   soutenue, multi-sessions), conforme au 80 §1.2. Chaque fichier ajouté suit `rtlstr.c` : vendorer + adaptateurs + fixture.
 
 ---
 
