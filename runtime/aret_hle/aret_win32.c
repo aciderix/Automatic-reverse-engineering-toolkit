@@ -444,6 +444,98 @@ uint32_t aret_RegDeleteKeyW(uint32_t esp) {
     if (k < 0 || k < U32_REG_ROOTS) return 2;
     u32_reg_del_subtree(k); return 0;
 }
+
+/* ---- ntdll Nt* registry: the syscall floor beneath advapi32 Reg*, on the SAME g_reg tree.
+ * ARET's registry is empty by design (sound, §0): a system key that was never written this run
+ * is absent, so Nt* reads of pre-existing keys return STATUS_OBJECT_NAME_NOT_FOUND — a round-trip
+ * (create -> set -> query) is what matches Wine, exactly like the Reg* model. Nt handles are the
+ * same opaque values as HKEY (u32_reg_hkey). Measured vs Wine (win32_ntreg). ---- */
+#define NT_STATUS_SUCCESS               0u
+#define NT_STATUS_INVALID_HANDLE        0xC0000008u
+#define NT_STATUS_OBJECT_NAME_NOT_FOUND 0xC0000034u
+#define NT_STATUS_BUFFER_OVERFLOW       0x80000005u
+#define NT_STATUS_BUFFER_TOO_SMALL      0xC0000023u
+
+/* Narrow a UNICODE_STRING* (Length@0 bytes, Buffer@4) into an ASCII buffer. */
+static void u32_us_narrow(uint32_t pus, char *out, int cap) {
+    out[0] = 0;
+    if (!pus) return;
+    uint16_t len = *(const uint16_t *)(uintptr_t)pus;             /* bytes */
+    const uint16_t *w = (const uint16_t *)(uintptr_t)*(const uint32_t *)(uintptr_t)(pus + 4);
+    int n = len / 2, i = 0;
+    if (w) for (; i < n && i < cap - 1; i++) out[i] = (char)(w[i] & 0xFF);
+    out[i] = 0;
+}
+/* Resolve an OBJECT_ATTRIBUTES* (RootDirectory@4, ObjectName@8) to a g_reg key index. An
+ * absolute name starts "\Registry\Machine|User\..."; a relative name walks from RootDirectory. */
+static int u32_nt_reg_resolve(uint32_t poa, int create, uint32_t *disp) {
+    if (!poa) return -1;
+    uint32_t root = *(const uint32_t *)(uintptr_t)(poa + 4);
+    uint32_t pname = *(const uint32_t *)(uintptr_t)(poa + 8);
+    char name[512]; u32_us_narrow(pname, name, sizeof name);
+    if (root) return u32_reg_walk(root, name, create, disp);
+    const char *p = name;
+    if (*p == '\\') p++;
+    if (!strncasecmp(p, "Registry", 8)) { p += 8; while (*p == '\\') p++; }
+    uint32_t hive;
+    if (!strncasecmp(p, "Machine", 7)) { hive = 0x80000002u; p += 7; }
+    else if (!strncasecmp(p, "User", 4)) { hive = 0x80000003u; p += 4; }
+    else return -1;                       /* unmodelled hive -> caller returns NOT_FOUND */
+    while (*p == '\\') p++;
+    return u32_reg_walk(hive, p, create, disp);
+}
+uint32_t aret_NtCreateKey(uint32_t esp) {
+    /* (KeyHandle@0, DesiredAccess@1, ObjectAttributes@2, TitleIndex@3, Class@4, Options@5, Disposition@6) */
+    uint32_t disp = 0; int k = u32_nt_reg_resolve(WU(2), 1, &disp);
+    if (k < 0) return NT_STATUS_OBJECT_NAME_NOT_FOUND;
+    if (WU(0)) *(uint32_t *)(uintptr_t)WU(0) = u32_reg_hkey(k);
+    if (WU(6)) *(uint32_t *)(uintptr_t)WU(6) = disp;   /* REG_CREATED_NEW_KEY(1)/OPENED_EXISTING(2) */
+    return NT_STATUS_SUCCESS;
+}
+uint32_t aret_NtOpenKey(uint32_t esp) {
+    /* (KeyHandle@0, DesiredAccess@1, ObjectAttributes@2) */
+    int k = u32_nt_reg_resolve(WU(2), 0, NULL);
+    if (k < 0) return NT_STATUS_OBJECT_NAME_NOT_FOUND;
+    if (WU(0)) *(uint32_t *)(uintptr_t)WU(0) = u32_reg_hkey(k);
+    return NT_STATUS_SUCCESS;
+}
+uint32_t aret_NtSetValueKey(uint32_t esp) {
+    /* (KeyHandle@0, ValueName@1, TitleIndex@2, Type@3, Data@4, DataSize@5) */
+    char vn[256]; u32_us_narrow(WU(1), vn, sizeof vn);
+    return u32_reg_setval(WU(0), vn, WU(3), WU(4), WU(5)) == 0
+        ? NT_STATUS_SUCCESS : NT_STATUS_INVALID_HANDLE;
+}
+uint32_t aret_NtQueryValueKey(uint32_t esp) {
+    /* (KeyHandle@0, ValueName@1, InfoClass@2, Info@3, Length@4, ResultLength@5).
+     * Only KeyValuePartialInformation(2) modelled: { TitleIndex, Type, DataLength, Data[] }. */
+    if (WU(2) != 2) { aret_partial("NtQueryValueKey: only KeyValuePartialInformation modelled"); return NT_STATUS_INVALID_HANDLE; }
+    int k = u32_reg_idx(WU(0));
+    if (k < 0) return NT_STATUS_INVALID_HANDLE;
+    char vn[256]; u32_us_narrow(WU(1), vn, sizeof vn);
+    struct u32_regval *v = u32_reg_findval(k, vn, 0);
+    if (!v) return NT_STATUS_OBJECT_NAME_NOT_FOUND;
+    uint32_t need = 12 + v->len;                       /* 3 ULONG header + data */
+    if (WU(5)) *(uint32_t *)(uintptr_t)WU(5) = need;
+    uint32_t info = WU(0 + 3), len = WU(4);
+    if (len < 12) return NT_STATUS_BUFFER_TOO_SMALL;    /* not even the header fits */
+    uint32_t *pi = (uint32_t *)(uintptr_t)info;
+    pi[0] = 0; pi[1] = v->type; pi[2] = v->len;
+    uint32_t cap = len - 12, copy = v->len < cap ? v->len : cap;
+    if (copy) memcpy((uint8_t *)(uintptr_t)info + 12, v->data, copy);
+    return copy < v->len ? NT_STATUS_BUFFER_OVERFLOW : NT_STATUS_SUCCESS;
+}
+uint32_t aret_NtDeleteValueKey(uint32_t esp) {
+    /* (KeyHandle@0, ValueName@1) */
+    int k = u32_reg_idx(WU(0)); if (k < 0) return NT_STATUS_INVALID_HANDLE;
+    char vn[256]; u32_us_narrow(WU(1), vn, sizeof vn);
+    struct u32_regval *v = u32_reg_findval(k, vn, 0);
+    if (!v) return NT_STATUS_OBJECT_NAME_NOT_FOUND;
+    v->used = 0; return NT_STATUS_SUCCESS;
+}
+/* NtClose is generic (keys/files/events). Keys persist in g_reg; modelled as success, like
+ * RegCloseKey/CloseHandle. (A follow-up can route non-registry handles to their real close.) */
+uint32_t aret_NtClose(uint32_t esp) { (void)esp; return NT_STATUS_SUCCESS; }
+
 /* ExpandEnvironmentStringsA(src, dst, size): substitute %NAME% with getenv(NAME),
  * copy literals through. Returns the length written including the NUL (or the
  * required size if dst is too small / NULL), matching the Win32 contract. */

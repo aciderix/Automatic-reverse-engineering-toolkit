@@ -6736,3 +6736,21 @@ Détail : **70 §6** (roadmap). Résumé :
 - **Bilan conversions** : ANSI(CP1252) et OEM(CP437), **forward ET reverse**, **modélisés bit-identique Wine** (tables
   mesurées), une seule source de vérité partagée kernel32 ↔ ntdll. **Reste** : upcase-Unicode >127 (petit sous-cran), puis
   le **plancher Nt\*** (registre, ~131 syscalls) pour « DLL entières ».
+
+### 2026-08-02 — [I13][HLE-WIN32][LOURD] **Plancher ntdll Nt\* ENGAGÉ — registre : `NtCreateKey`/`NtOpenKey`/`NtSetValueKey`/`NtQueryValueKey`/`NtDeleteValueKey`/`NtClose` backés par `g_reg`, bit-identique Wine**
+
+- **Le milestone « plancher Nt\* » démarre par le registre** (l'exemple de l'utilisateur). Les syscalls Nt\* registre
+  routent sur le **même `g_reg`** que les `Reg*` d'advapi32 (mêmes handles `u32_reg_hkey`, mêmes valeurs).
+- **ABI Nt\* mappée** : parse `OBJECT_ATTRIBUTES` (RootDirectory@4, ObjectName@8 = `UNICODE_STRING`), résout un nom absolu
+  `\Registry\Machine|User\…` vers la racine (HKLM/HKU) puis `u32_reg_walk`, ou relatif depuis RootDirectory ; remplit
+  `KEY_VALUE_PARTIAL_INFORMATION` `{TitleIndex,Type,DataLength,Data}` ; codes **NTSTATUS** (`SUCCESS`/`OBJECT_NAME_NOT_FOUND`
+  `0xC0000034`/`BUFFER_OVERFLOW` `0x80000005`/`BUFFER_TOO_SMALL`/`INVALID_HANDLE`).
+- **Sound §0** : le registre ARET est **vide par conception** (jamais une valeur non écrite) ⇒ un Nt\* qui lit une clé
+  système absente rend `OBJECT_NAME_NOT_FOUND` ; on prouve donc en **round-trip** (create→set→query→reopen→delete), comme
+  le modèle `Reg*`. `NtQueryValueKey` avec buffer trop petit rend `BUFFER_OVERFLOW` + `ResultLength` (mesuré Wine).
+  `NtQueryValueKey` d'une classe ≠ `KeyValuePartialInformation` = `aret_partial` (sous-cas non modélisé, pas deviné).
+- **Portes** : `winecorpus/win32_ntreg` (create/set/query/reopen/buffer-overflow/delete/close) **bit-identique Wine** ;
+  hash **inchangé** ; audit PASS (les `@N` Nt\* venaient de `gen_stdcall_pops` ntdll).
+- **Reste du plancher Nt\*** : `NtQueryKey`/`NtEnumerateKey`/`NtEnumerateValueKey`, la surface **fichier** (`NtCreateFile`/
+  `NtReadFile`…), et la variante **real-ABI dans le plancher** `wine_heavy` pour que des DLL Wine compilées (ex. `version.c`)
+  appellent ces Nt\* — c'est ce qui ouvre « DLL user-mode entières ».

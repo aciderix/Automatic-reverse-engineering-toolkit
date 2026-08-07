@@ -133,6 +133,15 @@ Trois **couches** (branchement → comportement), et pour le comportement trois 
    La montée en taille rend visible le **coût cas-par-cas** : chaque corps traîne son propre arbre de dépendances,
    et l'oracle **tranche les cas-limites** (débordement `WideCharToMultiByte` : `cchMax` octets sans NUL ; quirk `iRet`
    toujours 0 pour la variante A). *(La forme LOURDE — §4 — est ce qui casse ce coût par-corps.)*
+### Plancher ntdll Nt* (le milestone « DLL entières ») — 🚧 ENGAGÉ, registre en tête
+- **Registre Nt\*** ✅ **première tranche** (2026-08-02) : `NtCreateKey`/`NtOpenKey`/`NtSetValueKey`/`NtQueryValueKey`
+  (`KeyValuePartialInformation`)/`NtDeleteValueKey`/`NtClose` **backés par le même `g_reg`** que les `Reg*` d'advapi32.
+  Parse `OBJECT_ATTRIBUTES` (RootDirectory + `UNICODE_STRING`), mappe `\Registry\Machine|User\…` → racines, remplit
+  `KEY_VALUE_PARTIAL_INFORMATION`, NTSTATUS (`OBJECT_NAME_NOT_FOUND`/`BUFFER_OVERFLOW`/`BUFFER_TOO_SMALL`). **Registre VIDE
+  par conception (§0)** ⇒ prouvé en **round-trip** (create→set→query, comme les `Reg*`), **bit-identique Wine**
+  (`winecorpus/win32_ntreg`). **Reste du plancher Nt\*** : `NtQueryKey`/`NtEnumerateKey/Value`, fichiers (`NtCreateFile`…),
+  et la variante **real-ABI dans le plancher** pour que des DLL Wine compilées appellent ces Nt\*.
+
 4. **Corps Wine — forme LOURDE** : compiler du `.c` Wine entier + **porter une fois le plancher `ntdll`/win32u**
    → couverture massive. *(Milestone.)* **🚧 OUVERTE ET MESURÉE (2026-08-02, `tools/gen_wine_heavy.py`)** : `rtlstr.c`
    de ntdll **compile INCHANGÉ** en objet i686 → **46 fonctions `Rtl*` réelles d'un coup**, sur un plancher **fini de 12
