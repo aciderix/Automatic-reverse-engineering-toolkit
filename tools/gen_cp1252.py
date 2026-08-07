@@ -23,7 +23,7 @@ SWEEP = r'''
 #include <windows.h>
 #include <stdio.h>
 int main(void){
-    for(unsigned c=1;c<=0xFFFF;c++){
+    for(unsigned c=0;c<=0xFFFF;c++){
         unsigned short w=(unsigned short)c; char b[4]={0}; BOOL used=0;
         int n=WideCharToMultiByte(CP_ACP,0,(WCHAR*)&w,1,b,4,NULL,&used);
         if(n==1 && !used) printf("%u %u\n", c, (unsigned char)b[0]);

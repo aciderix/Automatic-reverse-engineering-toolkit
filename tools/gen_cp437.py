@@ -28,7 +28,7 @@ int main(void){
         printf("F %u %u\n", b, n==1?w:0x3F);
     }
     /* reverse: every code point -> OEM byte, skip the default-char misses */
-    for(unsigned c=1;c<=0xFFFF;c++){
+    for(unsigned c=0;c<=0xFFFF;c++){
         unsigned short w=(unsigned short)c; char o[4]={0}; BOOL used=0;
         int n=WideCharToMultiByte(437,0,(WCHAR*)&w,1,o,4,NULL,&used);
         if(n==1 && !used) printf("R %u %u\n", c, (unsigned char)o[0]);
