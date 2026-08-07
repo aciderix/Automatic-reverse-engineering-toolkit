@@ -156,10 +156,14 @@ Trois **couches** (branchement → comportement), et pour le comportement trois 
    volée, compare upcase-ASCII). `LastWriteTime` environnemental = 0, exclu. Prouvé round-trip bit-identique Wine
    (`winecorpus/win32_ntenum`, création non-alphabétique pour prouver le tri). Reste à la demande : `NtQueryValueKey`
    autres classes (non appelé par un driver mesuré).
-3. **Fichiers** 🔜 (le gros des 131) : `NtCreateFile`/`NtOpenFile`/`NtReadFile`/`NtWriteFile`/`NtClose`/
-   `NtQueryInformationFile`/`NtSetInformationFile`/`NtQueryDirectoryFile`/`NtDeviceIoControlFile`, backés par le VFS/fd
-   POSIX existant (comme `CreateFile`/`ReadFile`). `OBJECT_ATTRIBUTES` chemin `\??\C:\…`/`\Device\…` → `translate_path`.
-   `IO_STATUS_BLOCK`, `FILE_*_INFORMATION`. Mesure Wine ; round-trip write→read.
+3. **Fichiers** 🚧 (le gros des 131) — **première tranche ✅ FAIT (2026-08-07)** : `NtCreateFile`/`NtOpenFile`/`NtReadFile`/
+   `NtWriteFile`/`NtQueryInformationFile` (classes `FileStandard`/`FilePosition`), backés par le **même modèle fd POSIX**
+   que `CreateFile`/`ReadFile` (**HANDLE == fd**) + `translate_path` ; nom `\??\C:\…`/`\DosDevices\…` strippé. **Mesuré vs
+   Wine** : disposition NT(0-5)→`Information` (CREATED/OPENED/OVERWRITTEN/SUPERSEDED selon existence), `ByteOffset` explicite
+   **avance** la position (lseek+read, pas pread), 0-octet sur demande >0 = `END_OF_FILE`, `AllocationSize`=`st_blocks*512`
+   (formule stat de Wine, sound+portable), IOSB non touché sur échec. Bornes sound (`RootDirectory`-relatif, `\Device\`/UNC,
+   classes autres = `aret_partial`). Round-trip bit-identique Wine (`winecorpus/win32_ntfile`). **Reste** : `NtSetInformation
+   File` (delete-on-close/EndOfFile/Position), `NtQueryDirectoryFile`, `NtDeviceIoControlFile` — au besoin mesuré.
 4. **Divers à la demande** 🔜 : `NtQuerySystemInformation`, `NtQueryPerformanceCounter`, `NtDelayExecution` (≈Sleep, fibers),
    `NtQueryInformationProcess`/`Thread`, `NtAllocateVirtualMemory` (≈VirtualAlloc), `NtProtectVirtualMemory`… **piloté par la
    mesure** (`--mode walls`/besoin d'un driver), pas spéculatif.

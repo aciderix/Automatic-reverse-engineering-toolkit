@@ -1147,6 +1147,143 @@ uint32_t aret_CreateFileW(uint32_t esp) {
     return aret_open_named(name, arg(esp, 1), arg(esp, 4));
 }
 
+/* ---- ntdll Nt* file floor (doc 82 tranche 3): NtCreateFile/NtOpenFile/NtReadFile/NtWriteFile/
+ * NtQueryInformationFile, the syscalls beneath kernel32 CreateFile/ReadFile — backed by the SAME
+ * POSIX fd model (a HANDLE IS an fd here) and translate_path. An NT object name \??\C:\... or
+ * \DosDevices\C:\... is stripped to a Win path then translated. IO_STATUS_BLOCK is {Status@0,
+ * Information@4} (32-bit). Struct layouts, disposition->Information, offset advance and status
+ * codes are MEASURED vs Wine (scratchpad ntfile_probe/allocsz); AllocationSize = st_blocks*512
+ * exactly as Wine computes it from stat (host-portable — both sides stat the same-content file).
+ * A create/write/read round-trip matches Wine, whose own filesystem round-trips too. ---- */
+#define NT_ST_SUCCESS               0u
+#define NT_ST_INFO_LENGTH_MISMATCH  0xC0000004u
+#define NT_ST_INVALID_HANDLE        0xC0000008u
+#define NT_ST_INVALID_PARAMETER     0xC000000Du
+#define NT_ST_END_OF_FILE           0xC0000011u
+#define NT_ST_OBJECT_NAME_NOT_FOUND 0xC0000034u
+#define NT_ST_OBJECT_NAME_COLLISION 0xC0000035u
+/* CreateDisposition (NT numbering, distinct from Win32) and the Information (create result). */
+enum { NT_FILE_SUPERSEDE=0, NT_FILE_OPEN=1, NT_FILE_CREATE=2, NT_FILE_OPEN_IF=3, NT_FILE_OVERWRITE=4, NT_FILE_OVERWRITE_IF=5 };
+enum { NT_FILE_SUPERSEDED=0, NT_FILE_OPENED=1, NT_FILE_CREATED=2, NT_FILE_OVERWRITTEN=3 };
+
+static void u32_iosb_set(uint32_t piosb, uint32_t status, uint32_t info) {
+    if (!piosb) return;
+    *(uint32_t *)(uintptr_t)piosb = status;
+    *(uint32_t *)(uintptr_t)(piosb + 4) = info;
+}
+/* OBJECT_ATTRIBUTES* (RootDirectory@4, ObjectName@8=UNICODE_STRING*) -> a Win path (C:\...).
+ * Returns 1 modelled, 0 unmodelled namespace, -1 relative-to-dir-handle (caller aborts). */
+static int u32_nt_file_path(uint32_t poa, char *win, size_t cap) {
+    if (!poa) return 0;
+    if (*(const uint32_t *)(uintptr_t)(poa + 4)) return -1;      /* RootDirectory-relative: out of slice */
+    uint32_t pname = *(const uint32_t *)(uintptr_t)(poa + 8);
+    if (!pname) return 0;
+    uint16_t blen = *(const uint16_t *)(uintptr_t)pname;         /* bytes */
+    const uint16_t *w = (const uint16_t *)(uintptr_t)*(const uint32_t *)(uintptr_t)(pname + 4);
+    char nt[1024]; int n = blen / 2, i = 0;
+    if (w) for (; i < n && i < (int)sizeof nt - 1; i++) nt[i] = (char)(w[i] & 0xFF);
+    nt[i] = 0;
+    const char *p = nt;
+    if (!strncmp(p, "\\??\\", 4)) p += 4;
+    else if (!strncasecmp(p, "\\DosDevices\\", 12)) p += 12;
+    else return 0;                                              /* \Device\..., UNC \\ : not this slice */
+    snprintf(win, cap, "%s", p);
+    return 1;
+}
+/* Shared open core for NtCreateFile/NtOpenFile. Returns NTSTATUS; on success writes fd->*pfh and
+ * the create Information (OPENED/CREATED/…). */
+static uint32_t u32_nt_open(uint32_t poa, uint32_t desired, uint32_t disp, uint32_t pfh, uint32_t *pinfo) {
+    char win[1024];
+    int ns = u32_nt_file_path(poa, win, sizeof win);
+    if (ns == -1) { aret_partial("NtCreateFile/NtOpenFile: RootDirectory-relative path not modelled"); return NT_ST_INVALID_PARAMETER; }
+    if (ns == 0)  { aret_partial("NtCreateFile/NtOpenFile: unmodelled object namespace (not \\??\\ / \\DosDevices\\)"); return NT_ST_INVALID_PARAMETER; }
+    char path[1024]; translate_path(win, path, sizeof path);
+    int existed = access(path, F_OK) == 0;
+    int rd = (desired & GENERIC_READ_FLAG)  || (desired & 0x1);   /* GENERIC_READ | FILE_READ_DATA */
+    int wr = (desired & GENERIC_WRITE_FLAG) || (desired & 0x6);   /* GENERIC_WRITE | WRITE_DATA|APPEND */
+    int flags = (rd && wr) ? O_RDWR : (wr ? O_WRONLY : O_RDONLY);
+    uint32_t info;
+    switch (disp) {
+        case NT_FILE_SUPERSEDE:    flags |= O_CREAT | O_TRUNC; info = existed ? NT_FILE_SUPERSEDED : NT_FILE_CREATED; break;
+        case NT_FILE_OPEN:         if (!existed) return NT_ST_OBJECT_NAME_NOT_FOUND; info = NT_FILE_OPENED; break;
+        case NT_FILE_CREATE:       if (existed) return NT_ST_OBJECT_NAME_COLLISION; flags |= O_CREAT | O_EXCL; info = NT_FILE_CREATED; break;
+        case NT_FILE_OPEN_IF:      flags |= O_CREAT; info = existed ? NT_FILE_OPENED : NT_FILE_CREATED; break;
+        case NT_FILE_OVERWRITE:    if (!existed) return NT_ST_OBJECT_NAME_NOT_FOUND; flags |= O_TRUNC; info = NT_FILE_OVERWRITTEN; break;
+        case NT_FILE_OVERWRITE_IF: flags |= O_CREAT | O_TRUNC; info = existed ? NT_FILE_OVERWRITTEN : NT_FILE_CREATED; break;
+        default: aret_partial("NtCreateFile: unknown CreateDisposition"); return NT_ST_INVALID_PARAMETER;
+    }
+    if (flags & O_CREAT) make_parents(path);
+    int fd = open(path, flags, 0666);
+    if (fd < 0) return NT_ST_OBJECT_NAME_NOT_FOUND;              /* defined failure (perm/EXCL race/…) */
+    if (pfh) *(uint32_t *)(uintptr_t)pfh = (uint32_t)fd;
+    if (pinfo) *pinfo = info;
+    return NT_ST_SUCCESS;
+}
+uint32_t aret_NtCreateFile(uint32_t esp) {
+    /* (FileHandle@0, DesiredAccess@1, ObjectAttributes@2, IoStatusBlock@3, AllocationSize@4,
+     *  FileAttributes@5, ShareAccess@6, CreateDisposition@7, CreateOptions@8, EaBuffer@9, EaLength@10) */
+    uint32_t info = 0;
+    uint32_t s = u32_nt_open(arg(esp, 2), arg(esp, 1), arg(esp, 7), arg(esp, 0), &info);
+    if (s == NT_ST_SUCCESS) u32_iosb_set(arg(esp, 3), NT_ST_SUCCESS, info);
+    return s;                                                    /* on failure Wine leaves the IOSB untouched */
+}
+uint32_t aret_NtOpenFile(uint32_t esp) {
+    /* (FileHandle@0, DesiredAccess@1, ObjectAttributes@2, IoStatusBlock@3, ShareAccess@4, OpenOptions@5) */
+    uint32_t info = 0;
+    uint32_t s = u32_nt_open(arg(esp, 2), arg(esp, 1), NT_FILE_OPEN, arg(esp, 0), &info);
+    if (s == NT_ST_SUCCESS) u32_iosb_set(arg(esp, 3), NT_ST_SUCCESS, info);
+    return s;
+}
+uint32_t aret_NtReadFile(uint32_t esp) {
+    /* (FileHandle@0, Event@1, ApcRoutine@2, ApcContext@3, IoStatusBlock@4, Buffer@5, Length@6, ByteOffset@7, Key@8) */
+    int fd = (int)arg(esp, 0);
+    uint32_t piosb = arg(esp, 4); void *buf = (void *)(uintptr_t)arg(esp, 5);
+    uint32_t len = arg(esp, 6), poff = arg(esp, 7);
+    if (poff) { int64_t off = *(const int64_t *)(uintptr_t)poff; if (off >= 0) lseek(fd, (off_t)off, SEEK_SET); }
+    ssize_t n = read(fd, buf, len);
+    if (n < 0) { u32_iosb_set(piosb, NT_ST_INVALID_HANDLE, 0); return NT_ST_INVALID_HANDLE; }
+    if (n == 0 && len > 0) { u32_iosb_set(piosb, NT_ST_END_OF_FILE, 0); return NT_ST_END_OF_FILE; }
+    u32_iosb_set(piosb, NT_ST_SUCCESS, (uint32_t)n);
+    return NT_ST_SUCCESS;
+}
+uint32_t aret_NtWriteFile(uint32_t esp) {
+    /* same arg layout as NtReadFile; Buffer is the source */
+    int fd = (int)arg(esp, 0);
+    uint32_t piosb = arg(esp, 4); const void *buf = (const void *)(uintptr_t)arg(esp, 5);
+    uint32_t len = arg(esp, 6), poff = arg(esp, 7);
+    if (poff) { int64_t off = *(const int64_t *)(uintptr_t)poff; if (off >= 0) lseek(fd, (off_t)off, SEEK_SET); }
+    ssize_t n = write(fd, buf, len);
+    if (n < 0) { u32_iosb_set(piosb, NT_ST_INVALID_HANDLE, 0); return NT_ST_INVALID_HANDLE; }
+    u32_iosb_set(piosb, NT_ST_SUCCESS, (uint32_t)n);
+    return NT_ST_SUCCESS;
+}
+uint32_t aret_NtQueryInformationFile(uint32_t esp) {
+    /* (FileHandle@0, IoStatusBlock@1, FileInformation@2, Length@3, FileInformationClass@4) */
+    int fd = (int)arg(esp, 0);
+    uint32_t piosb = arg(esp, 1), info = arg(esp, 2), length = arg(esp, 3), cls = arg(esp, 4);
+    uint8_t *o = (uint8_t *)(uintptr_t)info;
+    if (cls == 5) {                                             /* FileStandardInformation */
+        if (length < 24) { u32_iosb_set(piosb, NT_ST_INFO_LENGTH_MISMATCH, 0); return NT_ST_INFO_LENGTH_MISMATCH; }
+        struct stat st; if (fstat(fd, &st) != 0) { u32_iosb_set(piosb, NT_ST_INVALID_HANDLE, 0); return NT_ST_INVALID_HANDLE; }
+        memset(o, 0, 24);
+        *(int64_t *)(o + 0) = (int64_t)st.st_blocks * 512;       /* AllocationSize (Wine's stat formula) */
+        *(int64_t *)(o + 8) = (int64_t)st.st_size;              /* EndOfFile */
+        *(uint32_t *)(o + 16) = (uint32_t)st.st_nlink;          /* NumberOfLinks */
+        o[20] = 0;                                             /* DeletePending */
+        o[21] = S_ISDIR(st.st_mode) ? 1 : 0;                   /* Directory */
+        u32_iosb_set(piosb, NT_ST_SUCCESS, 24);
+        return NT_ST_SUCCESS;
+    }
+    if (cls == 14) {                                           /* FilePositionInformation */
+        if (length < 8) { u32_iosb_set(piosb, NT_ST_INFO_LENGTH_MISMATCH, 0); return NT_ST_INFO_LENGTH_MISMATCH; }
+        *(int64_t *)(o + 0) = (int64_t)lseek(fd, 0, SEEK_CUR);  /* CurrentByteOffset */
+        u32_iosb_set(piosb, NT_ST_SUCCESS, 8);
+        return NT_ST_SUCCESS;
+    }
+    aret_partial("NtQueryInformationFile: only FileStandard/PositionInformation modelled");
+    return NT_ST_INVALID_PARAMETER;
+}
+
 /* Win16-era file API (_lopen/_lcreat/_lclose/_lread/_lwrite/_llseek + _hread/
  * _hwrite): an HFILE is a POSIX fd in this model, so these map straight onto
  * open/read/write/lseek/close, sharing translate_path. HFILE_ERROR = -1. */

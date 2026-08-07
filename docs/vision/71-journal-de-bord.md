@@ -6785,3 +6785,33 @@ Détail : **70 §6** (roadmap). Résumé :
 - **Reste du plancher Nt\*** (doc 82) : `NtQueryValueKey` autres classes **à la demande**, puis la surface **fichier**
   (`NtCreateFile`/`NtReadFile`…, tranche 3), les **divers** (tranche 4), la variante **real-ABI dans `wine_heavy`**
   (tranche 5) et le driver bout-en-bout `version.c` (tranche 6).
+
+### 2026-08-07 — [I13][HLE-FILE][LOURD] **Plancher Nt\* tranche 3 (le gros des 131) — surface FICHIER : `NtCreateFile`/`NtOpenFile`/`NtReadFile`/`NtWriteFile`/`NtQueryInformationFile`, bit-identique Wine**
+
+- **Les syscalls fichier sous kernel32 `CreateFile`/`ReadFile`**, backés par le **même modèle fd POSIX** (dans ce modèle
+  **un HANDLE EST un fd**) et le même `translate_path` — implémentés dans `aret_hle.c` à côté de `CreateFileW`. Nom d'objet
+  NT `\??\C:\…` (ou `\DosDevices\C:\…`) **strippé** → chemin Win → `translate_path`. `IO_STATUS_BLOCK` = `{Status@0,
+  Information@4}` (32-bit). **Strictement additif** (hash inchangé).
+- **⭐ Tout MESURÉ sous Wine avant d'écrire** (§0, `scratchpad/ntfile_probe.c` + `allocsz.c`) :
+  - **`CreateDisposition` NT (0-5) ≠ Win32** → `Information` de retour : `FILE_CREATED`(2)/`OPENED`(1)/`OVERWRITTEN`(3)/
+    `SUPERSEDED`(0), calculé selon **existence préalable** (`access(F_OK)`) et la disposition ; `FILE_CREATE` sur existant =
+    `STATUS_OBJECT_NAME_COLLISION` (0xC0000035), `FILE_OPEN` sur absent = `OBJECT_NAME_NOT_FOUND` (0xC0000034). **Sur échec,
+    Wine ne touche PAS l'IOSB** (mesuré : `Information` reste le poison 0xAAAAAAAA) ⇒ on ne l'écrit qu'en cas de succès.
+  - **`ByteOffset` explicite = `lseek`+`read` (la position AVANCE)**, pas un `pread` : après `read@7` de 8 octets la position
+    est 15 (mesuré via `FilePositionInformation`). `ByteOffset` NULL (ou négatif = `FILE_USE_FILE_POINTER_POSITION`) = position
+    courante. Lecture qui rend **0 octet sur une demande >0** = `STATUS_END_OF_FILE` (0xC0000011) ; une lecture **partielle**
+    (>0) = `SUCCESS`.
+  - **`FileStandardInformation`(5)** {AllocationSize@0(8), EndOfFile@8(8), NumberOfLinks@16, DeletePending@20, Directory@21},
+    taille 24 ; **`FilePositionInformation`(14)** {CurrentByteOffset@0(8)}, taille 8. **`AllocationSize` = `st_blocks*512`** —
+    la **formule stat exacte de Wine** (mesuré : 15o→4096, 512o→4096, 5000o→8192, 0o→0), donc **sound et portable** (les deux
+    côtés `stat` un fichier de même contenu sur le même FS → même `st_blocks`), pas une taille de cluster devinée.
+- **Bornes du cran (sound)** : `RootDirectory`-relatif (handle de dir) et namespaces `\Device\…`/UNC = **`aret_partial`**
+  (abort défini, pas deviné) ; classes info autres que 5/14 = `aret_partial`. `NtClose` reste no-op (les fd fichier fuient,
+  borné au process — sound ; un raffinement fermera les fd non-registre).
+- **Fixture `winecorpus/win32_ntfile`** : round-trip create→write→read@offset→qstd(incl. AllocationSize)→qpos→read-seq→
+  read-eof→`NtOpenFile`→read-all→collision→open-missing. **ntdll uniquement** (+`DeleteFileW` cleanup, kernel32 auto-lié).
+  **Bit-identique Wine** (AllocationSize incluse — le préfixe ARET partage le FS hôte de Wine).
+- **Portes** : `win32_ntfile` **bit-identique Wine** ; hash **inchangé** ; audit PASS (`@N` Nt\* fichier déjà dans
+  `stdcall_pops`) ; winediff complet vert.
+- **Reste tranche 3** : `NtSetInformationFile` (dont `FileDispositionInformation` = delete-on-close, `FilePosition`,
+  `FileEndOfFile`), `NtQueryDirectoryFile` (énumération), `NtDeviceIoControlFile` — au besoin mesuré. Puis tranches 4-6.
