@@ -18,5 +18,6 @@ int main(void){
     UNICODE_STRING x,y; RtlInitUnicodeString(&x,L"Foo"); RtlInitUnicodeString(&y,L"foo");
     printf("equal(ci)=%d equal(cs)=%d\n",RtlEqualUnicodeString(&x,&y,TRUE),RtlEqualUnicodeString(&x,&y,FALSE));
     return 0; }
-/* harness stub for an untested wide-format path (the ARET HLE provides the real one). */
-int _snwprintf_s(WCHAR*b,size_t n,size_t c,const WCHAR*f,...){(void)b;(void)n;(void)c;(void)f;return 0;}
+/* standalone harness: the floor's sound-abort hook (ARET's HLE provides the real one). */
+#include <stdlib.h>
+void aret_unimpl(const char *m){ fprintf(stderr, "aret_unimpl: %s\n", m); abort(); }

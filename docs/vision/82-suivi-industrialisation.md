@@ -140,10 +140,16 @@ Trois **couches** (branchement → comportement), et pour le comportement trois 
    (libc, heap) **existe déjà** dans le HLE. Shim de compat Wine (`tools/wine_heavy/` : `wine/debug.h`→no-op, `ddk/ntddk.h`
    vide, `ARRAY_SIZE`/limites 64-bit) **checké-in** (survit au conteneur éphémère — motivé par un wipe). Le coût est
    **par-fichier mesuré** (`wcstring.c` réclame 2 typedefs msvcrt de plus — l'outil le signale).
-   **✅ MÉCANIQUE PROUVÉE bout-en-bout** (`tools/wine_heavy/proof.sh`) : `rtlstr.c` compilé inchangé + **plancher ASCII
-   12-primitives** (`ntdll_floor.c`) → lié → exécuté sous Wine → **bit-identique au vrai ntdll de Wine**. Piège ABI résolu
-   (plancher **tout NTAPI** via `ntdll_floor.h` — sinon mismatch stdcall/cdecl = dérive esp). **Reste** : câbler l'objet
-   dans le build HLE + router les imports app (abort sound hors ASCII). C'est ce qui **casse le coût cas-par-cas**.
+   **✅ MÉCANIQUE PROUVÉE bout-en-bout** (`tools/wine_heavy/proof.sh` mingw + `proof_native.sh` = build réel `cc` natif) :
+   `rtlstr.c` compilé inchangé + **plancher ASCII 12-primitives** (`ntdll_floor.c`) → **bit-identique au vrai ntdll de Wine**.
+   **✅✅ CÂBLÉ EN PRODUCTION (2026-08-02)** : `rtlstr.c` est **vendoré** (`runtime/wine_heavy/`), compilé par le builder
+   (`src/builder/mod.rs`) en objets séparés à **flags par-fichier** (`-fshort-wchar`, `-I native/`, `-D__WINESRC__`, natif
+   32-bit) et **lié dans chaque binaire** ; **24 adaptateurs `aret_Rtl*(esp)`** (`runtime/aret_ntdll.c`) routent les imports
+   ntdll vers ces corps Wine. Un vrai PE importe `RtlInitAnsiString`/`RtlAnsiStringToUnicodeString`/`RtlIntegerToChar`/… →
+   ARET les sert depuis Wine compilé → **bit-identique Wine** (`winecorpus/ntdll_rtlstr`). Hors i386 (64-bit/wasm) les corps
+   Wine ne sont pas liés ⇒ adaptateurs = **abort sound** (garde `#if __i386__`). Hash inchangé, audit PASS. **⇒ la forme
+   lourde tourne en production, autonome.** **Prolonger** : router le plancher NLS vers les conversions ARET (>127 → abort
+   sound au lieu de l'identité ASCII), vendorer d'autres fichiers ntdll (`wcstring.c`…), puis des DLL user-mode entières.
 
 ---
 

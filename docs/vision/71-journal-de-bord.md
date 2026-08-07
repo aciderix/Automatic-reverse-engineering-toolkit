@@ -6644,3 +6644,27 @@ Détail : **70 §6** (roadmap). Résumé :
   toujours vert. **Reste (dernier cran d'intégration)** : `src/builder/mod.rs` — flags par-fichier (`-fshort-wchar -I native`),
   source Wine vendorée + splice, adaptateurs `aret_Rtl*(esp)` (dépaquettent esp → appellent le `Rtl*` compilé), gating sur
   imports `Rtl*`, plancher routé vers les conversions ARET (ASCII ; abort sound au-delà), fixture winediff.
+
+### 2026-08-02 — [I13][INFRA][LOURD][BUILDER] **Forme LOURDE CÂBLÉE EN PRODUCTION : un vrai PE importe ntdll `Rtl*` → ARET les sert depuis Wine COMPILÉ → bit-identique Wine**
+
+- **Le dernier cran** : la forme lourde tourne maintenant dans un binaire ARET réel, pas un harnais. `rtlstr.c` **vendoré**
+  (`runtime/wine_heavy/`, LGPL, spliced), compilé par `src/builder/mod.rs` en objets séparés à **flags par-fichier**
+  (`-fshort-wchar -I native/ -D__WINESRC__`, natif 32-bit) et lié dans chaque binaire ; **24 adaptateurs `aret_Rtl*(esp)`**
+  (`runtime/aret_ntdll.c`, découverts comme shims normaux) dépaquettent la pile stdcall et appellent les corps Wine avec les
+  **pointeurs invités** (mapping 1:1, le contrat de tout shim HLE). Fixture `winecorpus/ntdll_rtlstr` (import de
+  `RtlInitAnsiString`/`RtlAnsiStringToUnicodeString`/`RtlUnicodeStringToAnsiString`/`RtlIntegerToChar`/`RtlCharToInteger`/
+  `RtlEqualUnicodeString`/`RtlCreateUnicodeStringFromAsciiz`) = **bit-identique Wine**.
+- **Détails d'intégration résolus** : (a) **toujours lié** (l'objet Wine ~17 Ko entre dans chaque binaire ; corps atteints
+  seulement si importés — comme le reste du HLE) ; le **hash** est comportemental sur le C transpilé, pas l'ELF ⇒ inchangé.
+  (b) **Garde `#if __i386__`** dans les adaptateurs : hors natif 32-bit (64-bit/wasm) les corps Wine ne sont pas liés ⇒
+  adaptateurs = **abort sound** (pas de symbole indéfini). (c) `_snwprintf_s` (chemin `RtlFormatMessage` non testé) =
+  **stub WEAK** dans le plancher (un vrai CRT l'emporte ; ferme le lien sans corps deviné). (d) `-lntdll` ajouté à la ligne
+  de lien winediff (l'oracle) — placé **après** la source (l'ordre compte pour les archives).
+- **⭐ Soundness §0 renforcée** : le plancher faisait l'**identité Latin-1** pour les octets >127 — un **faux silencieux**
+  (CP-1252 ≠ Latin-1). Corrigé : les conversions NLS **abortent** (`aret_unimpl`) sur tout octet/unité >127 (`ascii_only_*`) —
+  juste sur 0-127, arrêt bruyant au-delà, jamais deviné. Le port des tables NLS lèvera cette borne.
+- **Piège header/lib reconfirmé** : mingw `winternl.h` déclare `RtlEqualUnicodeString` en **cdecl** (sans `NTAPI`) alors que
+  `libntdll` l'exporte `@12` — même skew que `gen_win32_sigs` a trouvé ; la fixture le déclare explicitement `WINAPI`.
+- **Portes** : `ntdll_rtlstr` bit-identique Wine ; hash **inchangé** `19acad982194bf07` ; stdcall_audit PASS (les `@N` `Rtl*`
+  venaient déjà de `gen_stdcall_pops`) ; `proof.sh`+`proof_native.sh` toujours verts. **Prolonger** : router le plancher vers
+  les conversions ARET (>127 modélisé), vendorer d'autres fichiers ntdll, puis des DLL user-mode entières.

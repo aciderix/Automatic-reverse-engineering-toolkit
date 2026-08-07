@@ -21,3 +21,6 @@ int main(void){
     printf("equal(ci)=%d equal(cs)=%d\n",RtlEqualUnicodeString(&x,&y,TRUE),RtlEqualUnicodeString(&x,&y,FALSE));
     return 0;
 }
+/* standalone harness: the floor's sound-abort hook (ARET's HLE provides the real one). */
+#include <stdlib.h>
+void aret_unimpl(const char *m){ fprintf(stderr, "aret_unimpl: %s\n", m); abort(); }

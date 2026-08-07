@@ -30,6 +30,19 @@ const WIN32_C: &str = include_str!("../../runtime/aret_hle/aret_win32.c");
 /// Code-page table extracted from Wine's mlang.c (tools/gen_mlang_cp.py), #included by
 /// aret_win32.c for IMultiLanguage::GetCodePageInfo. Compiled in; no Wine at runtime.
 const MLANG_CP_TABLE_H: &str = include_str!("../../runtime/aret_hle/mlang_cp_table.h");
+/// Heavy-form (doc 82): ntdll Rtl* adapters that route imports to the REAL Wine bodies
+/// compiled from `runtime/wine_heavy/rtlstr.c`. Discovered as normal shims; compiled with
+/// standard flags (it treats wide strings as opaque guest pointers).
+const NTDLL_C: &str = include_str!("../../runtime/aret_ntdll.c");
+/// Heavy-form: a whole Wine ntdll source file compiled UNCHANGED, plus its ASCII floor and
+/// the self-contained NT-types layer it needs (native cc has no winnt.h). These build as
+/// separate objects with per-file flags (`-fshort-wchar`, `-I <shim>`) and link into every
+/// binary; the Rtl* bodies are only reached when the program imports them.
+const WINE_RTLSTR_C: &str = include_str!("../../runtime/wine_heavy/rtlstr.c");
+const WINE_FLOOR_C: &str = include_str!("../../runtime/wine_heavy/ntdll_floor.c");
+const WINE_NT_TYPES_H: &str = include_str!("../../runtime/wine_heavy/native/nt_types.h");
+const WINE_FLOOR_H: &str = include_str!("../../runtime/wine_heavy/native/ntdll_floor.h");
+const WINE_DEBUG_H: &str = include_str!("../../runtime/wine_heavy/native/wine/debug.h");
 
 pub struct TranspileReport {
     pub out_dir: std::path::PathBuf,
@@ -763,7 +776,7 @@ fn collect_undef_subs(irfs: &[ir::types::IrFunction]) -> Vec<u64> {
 /// link time — i.e. it warns and returns 0, a guess. Parsed from the source
 /// (rather than hand-listed) so it never drifts from what is actually shimmed.
 fn implemented_shims() -> std::collections::BTreeSet<String> {
-    let sources = [HLE_C, CRT_C, WIN32_C];
+    let sources = [HLE_C, CRT_C, WIN32_C, NTDLL_C];
     let mut set = std::collections::BTreeSet::new();
     // 1. Direct definitions: `aret_x(uint32_t`.
     for src in sources {
@@ -1321,7 +1334,27 @@ pub fn transpile(
     write("aret_hle.c", HLE_C)?;
     write("aret_crt.c", CRT_C)?;
     write("aret_win32.c", WIN32_C)?;
+    write("aret_ntdll.c", NTDLL_C)?;
     write("mlang_cp_table.h", MLANG_CP_TABLE_H)?;
+    // Heavy-form (doc 82): the vendored Wine ntdll source + its ASCII floor + the
+    // self-contained NT-types layer, written under out_dir/wine_heavy/ so the special
+    // -fshort-wchar compile below can find the shim headers via -I.
+    {
+        let wh = out_dir.join("wine_heavy");
+        std::fs::create_dir_all(wh.join("native/wine"))?;
+        std::fs::create_dir_all(wh.join("native/ddk"))?;
+        std::fs::write(wh.join("rtlstr.c"), WINE_RTLSTR_C)?;
+        std::fs::write(wh.join("ntdll_floor.c"), WINE_FLOOR_C)?;
+        std::fs::write(wh.join("native/nt_types.h"), WINE_NT_TYPES_H)?;
+        std::fs::write(wh.join("native/ntdll_floor.h"), WINE_FLOOR_H)?;
+        std::fs::write(wh.join("native/wine/debug.h"), WINE_DEBUG_H)?;
+        std::fs::write(wh.join("native/ddk/ntddk.h"), "")?;
+        std::fs::write(wh.join("native/ntdll_misc.h"),
+            "#ifndef MISC_H\n#define MISC_H\n#ifndef ARRAY_SIZE\n#define ARRAY_SIZE(a) (sizeof(a)/sizeof((a)[0]))\n#endif\n#include \"ntdll_floor.h\"\n#endif\n")?;
+        for h in ["windef.h", "winnt.h", "winternl.h", "ntstatus.h"] {
+            std::fs::write(wh.join("native").join(h), "#include \"nt_types.h\"\n")?;
+        }
+    }
     write("aret_stubs.c", &stubs)?;
     // Every IAT slot, as a VA -> import-shim trampoline, so an indirect call
     // through the slot (a function pointer the program copied out of it) resolves
@@ -1499,6 +1532,7 @@ pub fn transpile(
         out_dir.join("aret_hle.c"),
         out_dir.join("aret_crt.c"),
         out_dir.join("aret_win32.c"),
+        out_dir.join("aret_ntdll.c"),
         out_dir.join("aret_stubs.c"),
         out_dir.join("aret_dispatch.c"),
         out_dir.join("aret_iat.c"),
@@ -1641,11 +1675,35 @@ pub fn transpile(
             Ok(obj)
         })
         .collect();
-    let objs = objs?;
+    let mut objs = objs?;
     if let Some(c) = &cache {
         let hits = cache_hits.load(std::sync::atomic::Ordering::Relaxed);
         eprintln!("note: {} object(s) compiled, {hits} reused from cache", objs.len() - hits);
         c.trim();
+    }
+
+    // Heavy-form (doc 82): compile the whole Wine ntdll source UNCHANGED, plus its ASCII
+    // floor, as SEPARATE objects with per-file flags the main loop can't carry — -fshort-wchar
+    // (native wchar_t is 32-bit; Windows WCHAR is 16), the self-contained NT-types shim on -I,
+    // and -D__WINESRC__. Native only (wasm returns earlier). Proven bit-identical Wine by
+    // tools/wine_heavy/proof_native.sh; the aret_Rtl* adapters (aret_ntdll.c) route imports here.
+    if !wasm && bits == 32 {
+        let shim = out_dir.join("wine_heavy/native");
+        for stem in ["rtlstr", "ntdll_floor"] {
+            let src = out_dir.join(format!("wine_heavy/{stem}.c"));
+            let obj = out_dir.join(format!("wine_{stem}.o"));
+            let out = Command::new(&cc)
+                .args(["-m32", "-fshort-wchar", "-O0", "-w", "-fno-pie", "-fno-strict-aliasing", "-c", "-D__WINESRC__"])
+                .arg("-I").arg(&shim)
+                .arg(&src).arg("-o").arg(&obj)
+                .output()
+                .with_context(|| format!("failed to run {}", cc))?;
+            if !out.status.success() {
+                bail!("heavy-form compile {} failed:\n{}", src.display(),
+                      String::from_utf8_lossy(&out.stderr).trim());
+            }
+            objs.push(obj);
+        }
     }
 
     let link = Command::new(&cc)
