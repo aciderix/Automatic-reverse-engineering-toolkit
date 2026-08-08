@@ -191,8 +191,12 @@ Trois **couches** (branchement → comportement), et pour le comportement trois 
    `aret_ntreg_*` résolus depuis `aret_win32.c` ; **aucun conflit** de symboles (imports PE → shims `aret_*` ; code Wine
    compilé → `Nt*` nus). **Preuve NATIVE** (`proof_ntreg_native.sh`) : plancher registre real-ABI compilé par `cc` natif,
    ELF autonome sans Wine, bit-identique aux valeurs Wine. **Reste** : un **vrai fichier ntdll de Wine** consommant le
-   registre en interne (`RtlOpenCurrentUser`/`RtlQueryRegistryValues`, choisi par la mesure) vendoré + adaptateur esp +
-   fixture PE = premier bout-en-bout non-chaîne. Puis d'autres fichiers, puis DLL.
+   registre en interne (`RtlpNt*` de `reg.c`, choisi par la mesure) vendoré + adaptateur esp + fixture PE = premier
+   bout-en-bout non-chaîne. **Plancher COMPLET pour `reg.c` ✅ (2026-08-07)** : cœurs enum/delete exposés + wrappers NTAPI
+   (`NtEnumerateKey`/`NtEnumerateValueKey`/`NtDeleteKey`) + stub `NtQueryInformationToken` ; surface Nt\* de `reg.c` (10)
+   entièrement couverte, 2 preuves vertes. **Dernier pas** : étendre le shim NT-types (`OBJECT_ATTRIBUTES`/`ACCESS_MASK`/
+   `RTL_QUERY_REGISTRY_TABLE`/…, surface précisément mesurée), compiler `reg.c` entier, adaptateur `aret_RtlpNt*`, fixture
+   round-trip. Puis d'autres fichiers, puis DLL.
 
 **Invariants** : registre/état vide ⇒ prouver en round-trip ; jamais une valeur système devinée ; hash inchangé (additif) ;
 `@N` Nt\* déjà dans `stdcall_pops` (audit) ; chaque tranche = fixture winediff + entrée 71 + maj ici.

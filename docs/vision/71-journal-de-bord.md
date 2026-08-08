@@ -6911,3 +6911,21 @@ Détail : **70 §6** (roadmap). Résumé :
 - **Reste tranche 6** : un **vrai fichier ntdll de Wine** qui **consomme** le registre en interne (ex. `RtlOpenCurrentUser`/
   `RtlQueryRegistryValues`) vendoré + adaptateur esp + fixture PE ⇒ premier bout-en-bout où un PE atteint la logique Wine
   **compilée** qui appelle le plancher `Nt*`. (`version.c` seul lit peu le registre ; choisir le fichier par la mesure.)
+
+### 2026-08-07 — [I13][INFRA][LOURD] **Tranche 6 (capstone préparé) — plancher registre real-ABI COMPLET pour `reg.c` de Wine ; surface de deps MESURÉE**
+
+- **Fichier driver choisi par la mesure** : `dlls/ntdll/reg.c` de Wine (768 l., récupéré). Il **consomme le registre en
+  interne** via les wrappers exportés `RtlpNtCreateKey`/`RtlpNtSetValueKey`/`RtlpNtQueryValueKey`/`RtlpNtOpenKey`/… qui
+  opèrent sur une clé **fournie par l'appelant** ⇒ **round-trippable** (donc bit-identique malgré un `g_reg` vide, contrairement
+  à `version.c`/`RtlOpenCurrentUser` qui lisent des clés système peuplées).
+- **Surface Nt\* de `reg.c` mesurée** (10) : `NtCreateKey`/`NtOpenKey`/`NtSetValueKey`/`NtQueryValueKey`/`NtDeleteValueKey`/
+  `NtClose` (déjà au plancher) **+ `NtDeleteKey`/`NtEnumerateKey`/`NtEnumerateValueKey`** (cœurs `aret_ntreg_enumkey`/
+  `enumval`/`delkey` **exposés**, wrappers NTAPI **ajoutés** au plancher) **+ `NtQueryInformationToken`** (API token, hors
+  chemin round-trip ⇒ **stub abort sound** pour clore le lien). Le plancher registre real-ABI est donc **complet** pour
+  `reg.c`. Behavior-preserving (`win32_ntenum`/`win32_ntreg` verts, hash inchangé), **les 2 preuves** (mingw + native)
+  toujours vertes (stubs enum/delete ajoutés aux drivers de preuve).
+- **Reste (dernier pas capstone)** : **étendre le shim NT-types autonome** (`native/nt_types.h`) aux types que `reg.c`
+  référence — `PHANDLE`/`ACCESS_MASK`/`OBJECT_ATTRIBUTES`/`PRTL_QUERY_REGISTRY_TABLE`/`KEY_VALUE_*`/`TOKEN_*` — (comme la
+  couche faite pour `rtlstr.c`), compiler `reg.c` entier par `cc` natif, adaptateur esp `aret_RtlpNt*`, fixture PE
+  round-trip. La surface manquante est **précisément mesurée** (erreurs de compile listées) ⇒ pas d'inconnu, juste du
+  volume de typedefs.

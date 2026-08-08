@@ -99,3 +99,8 @@ uint32_t aret_ntreg_queryval(uint32_t hkey,uint32_t pvn,uint32_t cls,uint32_t in
 }
 uint32_t aret_ntreg_delval(uint32_t hkey,uint32_t pvn){ (void)hkey;(void)pvn; return 0; }
 int aret_ntfile_close(uint32_t h){ (void)h; return 0; }
+/* enum/delete referenced by ntdll_ntreg.c but not exercised here -> link stubs. */
+uint32_t aret_ntreg_enumkey(uint32_t a,uint32_t b,uint32_t c,uint32_t d,uint32_t e,uint32_t f){(void)a;(void)b;(void)c;(void)d;(void)e;(void)f;return 0x8000001Au;}
+uint32_t aret_ntreg_enumval(uint32_t a,uint32_t b,uint32_t c,uint32_t d,uint32_t e,uint32_t f){(void)a;(void)b;(void)c;(void)d;(void)e;(void)f;return 0x8000001Au;}
+uint32_t aret_ntreg_delkey(uint32_t a){(void)a;return 0;}
+void aret_unimpl(const char*m){(void)m;}

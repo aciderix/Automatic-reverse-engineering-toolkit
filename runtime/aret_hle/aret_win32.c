@@ -672,19 +672,33 @@ uint32_t aret_NtQueryKey(uint32_t esp) {
     int k = u32_reg_idx(WU(0)); if (k < 0) return NT_STATUS_INVALID_HANDLE;
     return u32_fill_key_info(WU(1), k, WU(2), WU(3), WU(4));
 }
+/* Real-ABI cores for the enum/delete registry Nt* (tranche 6): same g_reg logic, exposed so the
+ * wine_heavy floor's NtEnumerateKey/NtEnumerateValueKey/NtDeleteKey wrappers (compiled Wine reg.c)
+ * route here, like the tranche-5 create/open/set/query cores. */
+uint32_t aret_ntreg_enumkey(uint32_t hkey, uint32_t index, uint32_t cls, uint32_t info, uint32_t length, uint32_t presult) {
+    int k = u32_reg_idx(hkey); if (k < 0) return NT_STATUS_INVALID_HANDLE;
+    int child = u32_reg_nth_subkey(k, index);
+    if (child < 0) return NT_STATUS_NO_MORE_ENTRIES;
+    return u32_fill_key_info(cls, child, info, length, presult);
+}
+uint32_t aret_ntreg_enumval(uint32_t hkey, uint32_t index, uint32_t cls, uint32_t info, uint32_t length, uint32_t presult) {
+    int k = u32_reg_idx(hkey); if (k < 0) return NT_STATUS_INVALID_HANDLE;
+    struct u32_regval *v = u32_reg_nth_value(k, index);
+    if (!v) return NT_STATUS_NO_MORE_ENTRIES;
+    return u32_fill_value_info_enum(cls, v, info, length, presult);
+}
+uint32_t aret_ntreg_delkey(uint32_t hkey) {
+    int k = u32_reg_idx(hkey); if (k < 0) return NT_STATUS_INVALID_HANDLE;
+    if (k < U32_REG_ROOTS) return NT_STATUS_INVALID_HANDLE;   /* a hive root is not deletable */
+    u32_reg_del_subtree(k); return NT_STATUS_SUCCESS;
+}
 uint32_t aret_NtEnumerateKey(uint32_t esp) {
     /* (KeyHandle@0, Index@1, KeyInformationClass@2, KeyInformation@3, Length@4, ResultLength@5) */
-    int k = u32_reg_idx(WU(0)); if (k < 0) return NT_STATUS_INVALID_HANDLE;
-    int child = u32_reg_nth_subkey(k, WU(1));
-    if (child < 0) return NT_STATUS_NO_MORE_ENTRIES;
-    return u32_fill_key_info(WU(2), child, WU(3), WU(4), WU(5));
+    return aret_ntreg_enumkey(WU(0), WU(1), WU(2), WU(3), WU(4), WU(5));
 }
 uint32_t aret_NtEnumerateValueKey(uint32_t esp) {
     /* (KeyHandle@0, Index@1, KeyValueInformationClass@2, KeyValueInformation@3, Length@4, ResultLength@5) */
-    int k = u32_reg_idx(WU(0)); if (k < 0) return NT_STATUS_INVALID_HANDLE;
-    struct u32_regval *v = u32_reg_nth_value(k, WU(1));
-    if (!v) return NT_STATUS_NO_MORE_ENTRIES;
-    return u32_fill_value_info_enum(WU(2), v, WU(3), WU(4), WU(5));
+    return aret_ntreg_enumval(WU(0), WU(1), WU(2), WU(3), WU(4), WU(5));
 }
 uint32_t aret_NtFlushKey(uint32_t esp) {
     /* (KeyHandle@0) — in-memory tree, flush is a no-op like RegFlushKey; validate the handle. */
@@ -693,9 +707,7 @@ uint32_t aret_NtFlushKey(uint32_t esp) {
 }
 uint32_t aret_NtDeleteKey(uint32_t esp) {
     /* (KeyHandle@0) — delete the key this handle refers to (subtree), like RegDeleteKey by handle. */
-    int k = u32_reg_idx(WU(0)); if (k < 0) return NT_STATUS_INVALID_HANDLE;
-    if (k < U32_REG_ROOTS) return NT_STATUS_INVALID_HANDLE;   /* a hive root is not deletable */
-    u32_reg_del_subtree(k); return NT_STATUS_SUCCESS;
+    return aret_ntreg_delkey(WU(0));
 }
 
 /* ExpandEnvironmentStringsA(src, dst, size): substitute %NAME% with getenv(NAME),
