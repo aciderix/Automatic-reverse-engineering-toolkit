@@ -7135,3 +7135,23 @@ Détail : **70 §6** (roadmap). Résumé :
   empty) — **bit-identique Wine**. mingw importe les trois de **msvcrt par ordinal** (1149/1158/1161) ⇒ testable (pas inliné).
 - **Portes** : `crt_wcsscan` bit-identique ; hash **`19acad982194bf07` inchangé** (ajout runtime pur, additif) ; stdcall_audit
   PASS. **Rebuild WinMerge** : mur `wcspbrk` franchi (mur suivant consigné en suivi).
+
+### 2026-08-08 — [I5][LIFT][DEMO] **WinMerge poussé sur 6 murs après le fix racine — de l'init MFC à un crash dans une DLL bundlée liftée (pcre/libexpat)**
+
+- **Suite du fix de récupération** (le `0x10` racine, plusieurs sessions, résolu **généralement**). En enchaînant les murs
+  (chacun mesuré, `ARET_TRACE`), WinMerge/MFC90 avance **bien plus loin** dans l'init GUI. Progression de la session :
+  1. `0xC0000005 at 0x10` — **bug de lift** (ctor rend 0) → ✅ **fix général** (récup `build_function`).
+  2. `wcspbrk` → ✅ **famille wide-string** (`wcspbrk`/`wcsspn`/`wcscspn`, `crt_wcsscan`).
+  3. `pcre_compile` → ✅ **Levier 1** : `pcre.dll` (moteur regex bundlé, vrai code, msvcr90+kernel32) **liftée** (`--with-dll`).
+  4. (au passage) `libexpat.dll` (XML, kernel32 seul) **liftée**.
+  5. `LoadMenuW` → ✅ **stub sound** (menu = cosmétique, NULL = pas de menu).
+  6. `LoadAccelerators`/`TranslateAccelerator` A+W → ✅ **stubs sound** (0 = pas de table / pas un accélérateur ⇒ dispatch normal).
+- **Mur courant** = **crash `0xC0000005 at 0x14ae64cc`** (déréf d'un pointeur tas invalide) **dans une DLL bundlée LIFTÉE**
+  (fonction `sub_1739b26`/`sub_170xxxx`, base haute rebasée = `pcre`/`libexpat`), pas un import manquant. Même signature que
+  le `0x10` (fault → dispatch SEH sur pile scratch → non géré → abort). **Nouvelle forensics dédiée** (comme le `0x10`) :
+  soit un bug de lift dans la DLL fraîchement liftée, soit une fonction `msvcr90` dont pcre dépend et qu'on rend mal.
+- **Bilan** : le **mur racine multi-sessions est tombé** (fix de lift **général**, débloque la classe des ctors/dtors C++
+  MSVC sous EH à `ret` d'épilogue tabulé), et le driver a franchi **6 murs** en une session — de l'init MFC statique jusqu'au
+  cœur GUI. « WinMerge au bout » = jalon **M7-GUI** (multi-sessions) ; ce crash lift dans pcre/libexpat est le prochain cran.
+- **Portes** (tout committé/poussé) : hash `19acad982194bf07` inchangé, difftest 272/272, stdcall_audit PASS, funcdiff 0 div,
+  winediff 228/230, + fixtures `recov_epilog_ret`/`crt_wcsscan` bit-identiques Wine.
