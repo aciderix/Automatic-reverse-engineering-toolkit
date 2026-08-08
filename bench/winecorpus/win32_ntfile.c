@@ -110,6 +110,19 @@ int main(void){
     printf("after-grow EOF=%llu\n",(unsigned long long)*(long long*)(si2+8));
     NtClose(h);
 
+    /* FileDispositionInformation (delete-on-close): create a file, mark for delete, close, reopen -> gone */
+    WCHAR dp[]=L"\\??\\C:\\aret_ntdel.bin"; UNICODE_STRING du; RtlInitUnicodeString(&du,dp);
+    OBJECT_ATTRIBUTES da; InitializeObjectAttributes(&da,&du,OBJ_CASE_INSENSITIVE,NULL,NULL);
+    h=NULL; s=NtCreateFile(&h,GENERIC_WRITE|DELETE|SYNCHRONIZE,&da,&io,NULL,FILE_ATTRIBUTE_NORMAL,0,FILE_OVERWRITE_IF,opts,NULL,0);
+    char dd[]="temp"; NtWriteFile(h,NULL,NULL,NULL,&io,dd,4,NULL,NULL);
+    struct { unsigned char DeleteFile; } fdi; fdi.DeleteFile=1;
+    s=NtSetInformationFile(h,&io,&fdi,1,FileDispositionInformation);
+    printf("set-disp s=0x%08lX Info=%lu\n",(unsigned long)s,(unsigned long)io.Information);
+    NtClose(h);
+    h=NULL; s=NtOpenFile(&h,GENERIC_READ|SYNCHRONIZE,&da,&io,FILE_SHARE_READ,opts);
+    printf("reopen-after-delete s=0x%08lX\n",(unsigned long)s);
+    if (h) NtClose(h);
+
     DeleteFileW(L"C:\\aret_ntfile.bin");
     return 0;
 }

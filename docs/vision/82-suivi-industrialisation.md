@@ -163,9 +163,11 @@ Trois **couches** (branchement → comportement), et pour le comportement trois 
    **avance** la position (lseek+read, pas pread), 0-octet sur demande >0 = `END_OF_FILE`, `AllocationSize`=`st_blocks*512`
    (formule stat de Wine, sound+portable), IOSB non touché sur échec. Bornes sound (`RootDirectory`-relatif, `\Device\`/UNC,
    classes autres = `aret_partial`). **+ `NtSetInformationFile`** : `FileEndOfFile`(20)=`ftruncate`,
-   `FilePosition`(14)=`lseek`. Round-trip bit-identique Wine (`winecorpus/win32_ntfile`). **Reste** :
-   `FileDispositionInformation` (delete-on-close, exige le raffinement `NtClose`/fd), `NtQueryDirectoryFile`,
-   `NtDeviceIoControlFile` — au besoin mesuré.
+   `FilePosition`(14)=`lseek`, **`FileDisposition`(13)=delete-on-close** (`unlink` au `NtClose`). **+ `NtClose` raffiné** :
+   table bornée fd→chemin+delete (peuplée à l'ouverture Nt\*) ⇒ ferme vraiment le fd et honore le delete ; désambiguïsation
+   sûre (handles HLE = bases hautes taguées, fd = petit entier ⇒ n'agit que sur nos fd). Round-trip bit-identique Wine
+   (`winecorpus/win32_ntfile`, `win32_ntreg` non régressé). **Reste** : `NtQueryDirectoryFile`, `NtDeviceIoControlFile`
+   — au besoin mesuré.
 4. **Divers à la demande** 🔜 : `NtQuerySystemInformation`, `NtQueryPerformanceCounter`, `NtDelayExecution` (≈Sleep, fibers),
    `NtQueryInformationProcess`/`Thread`, `NtAllocateVirtualMemory` (≈VirtualAlloc), `NtProtectVirtualMemory`… **piloté par la
    mesure** (`--mode walls`/besoin d'un driver), pas spéculatif.

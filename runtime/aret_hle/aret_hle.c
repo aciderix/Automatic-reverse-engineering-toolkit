@@ -1190,6 +1190,34 @@ static int u32_nt_file_path(uint32_t poa, char *win, size_t cap) {
     snprintf(win, cap, "%s", p);
     return 1;
 }
+/* Nt-opened file handles: fd -> translated host path + pending-delete flag. Lets NtClose honor
+ * FileDispositionInformation (delete-on-close) and actually close the fd (rather than leak it).
+ * Only fds opened through this layer are tracked, so NtClose never touches a std handle or a
+ * tagged HLE handle (registry/event/…) it does not own. Bounded; overflow leaves an fd untracked
+ * (still valid, leaks on close — sound). */
+#define U32_MAX_NTFILE 64
+static struct { int used, fd, del; char path[1024]; } g_ntfile[U32_MAX_NTFILE];
+static int u32_ntfile_slot(int fd) {
+    for (int i = 0; i < U32_MAX_NTFILE; i++) if (g_ntfile[i].used && g_ntfile[i].fd == fd) return i;
+    return -1;
+}
+static void u32_ntfile_register(int fd, const char *path) {
+    int s = u32_ntfile_slot(fd);                        /* fd reused after an untracked close: refresh */
+    if (s < 0) for (int i = 0; i < U32_MAX_NTFILE; i++) if (!g_ntfile[i].used) { g_ntfile[i].used = 1; s = i; break; }
+    if (s < 0) return;                                  /* table full: leave untracked */
+    g_ntfile[s].fd = fd; g_ntfile[s].del = 0;
+    snprintf(g_ntfile[s].path, sizeof g_ntfile[s].path, "%s", path);
+}
+int aret_ntfile_close(uint32_t handle) {
+    int s = u32_ntfile_slot((int)handle);
+    if (s < 0) return 0;
+    int fd = g_ntfile[s].fd, del = g_ntfile[s].del;
+    char path[1024]; snprintf(path, sizeof path, "%s", g_ntfile[s].path);
+    g_ntfile[s].used = 0;
+    close(fd);
+    if (del) unlink(path);                              /* delete-on-close (measured vs Wine) */
+    return 1;
+}
 /* Shared open core for NtCreateFile/NtOpenFile. Returns NTSTATUS; on success writes fd->*pfh and
  * the create Information (OPENED/CREATED/…). */
 static uint32_t u32_nt_open(uint32_t poa, uint32_t desired, uint32_t disp, uint32_t pfh, uint32_t *pinfo) {
@@ -1217,6 +1245,7 @@ static uint32_t u32_nt_open(uint32_t poa, uint32_t desired, uint32_t disp, uint3
     if (fd < 0) return NT_ST_OBJECT_NAME_NOT_FOUND;              /* defined failure (perm/EXCL race/…) */
     if (pfh) *(uint32_t *)(uintptr_t)pfh = (uint32_t)fd;
     if (pinfo) *pinfo = info;
+    u32_ntfile_register(fd, path);                              /* so NtClose can close/delete it */
     return NT_ST_SUCCESS;
 }
 uint32_t aret_NtCreateFile(uint32_t esp) {
@@ -1302,7 +1331,20 @@ uint32_t aret_NtSetInformationFile(uint32_t esp) {
         u32_iosb_set(piosb, NT_ST_SUCCESS, 0);
         return NT_ST_SUCCESS;
     }
-    aret_partial("NtSetInformationFile: only FileEndOfFile/PositionInformation modelled");
+    if (cls == 13) {                                           /* FileDispositionInformation: {BOOLEAN DeleteFile} */
+        if (length < 1) { u32_iosb_set(piosb, NT_ST_INFO_LENGTH_MISMATCH, 0); return NT_ST_INFO_LENGTH_MISMATCH; }
+        int del = *(const uint8_t *)(uintptr_t)info != 0;
+        int s = u32_ntfile_slot(fd);
+        if (s < 0) {                                           /* not our fd (kernel32-opened): learn the path */
+            char lp[64], rp[1024]; snprintf(lp, sizeof lp, "/proc/self/fd/%d", fd);
+            ssize_t n = readlink(lp, rp, sizeof rp - 1);
+            if (n > 0) { rp[n] = 0; u32_ntfile_register(fd, rp); s = u32_ntfile_slot(fd); }
+        }
+        if (s >= 0) g_ntfile[s].del = del;
+        u32_iosb_set(piosb, NT_ST_SUCCESS, 0);
+        return NT_ST_SUCCESS;
+    }
+    aret_partial("NtSetInformationFile: only FileEndOfFile/Position/DispositionInformation modelled");
     return NT_ST_INVALID_PARAMETER;
 }
 

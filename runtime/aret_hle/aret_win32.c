@@ -532,9 +532,11 @@ uint32_t aret_NtDeleteValueKey(uint32_t esp) {
     if (!v) return NT_STATUS_OBJECT_NAME_NOT_FOUND;
     v->used = 0; return NT_STATUS_SUCCESS;
 }
-/* NtClose is generic (keys/files/events). Keys persist in g_reg; modelled as success, like
- * RegCloseKey/CloseHandle. (A follow-up can route non-registry handles to their real close.) */
-uint32_t aret_NtClose(uint32_t esp) { (void)esp; return NT_STATUS_SUCCESS; }
+/* NtClose is generic (keys/files/events). A file fd we opened via the Nt* file layer is really
+ * closed (and its pending delete-on-close honored) by aret_ntfile_close; a registry key / event /
+ * other tagged handle isn't a tracked fd, so that returns 0 and we no-op (keys persist in g_reg,
+ * like RegCloseKey/CloseHandle). */
+uint32_t aret_NtClose(uint32_t esp) { aret_ntfile_close(WU(0)); return NT_STATUS_SUCCESS; }
 
 /* ---- Nt* registry tranche 2: enumeration / info (NtQueryKey/NtEnumerateKey/
  * NtEnumerateValueKey/NtFlushKey/NtDeleteKey), same g_reg tree. Struct layouts and buffer/

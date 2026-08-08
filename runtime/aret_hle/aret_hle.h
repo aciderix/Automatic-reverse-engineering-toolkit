@@ -83,6 +83,11 @@ void aret_unimpl(const char *name);
 /* Modelled API, unmodelled SUB-CASE: warns once and returns a defined failure. */
 void aret_partial(const char *what);
 
+/* NtClose helper (Nt* file floor, doc 82): if `handle` is a file fd we opened via the ntdll
+ * Nt* file layer, close it (honoring a pending FileDispositionInformation delete-on-close) and
+ * return 1; otherwise (registry key, event, ... ) return 0 so the caller no-ops. */
+int aret_ntfile_close(uint32_t handle);
+
 /* An instruction the lifter could not model, reached at run time. Continuing
  * would substitute a no-op for an unknown effect — a silent wrong result — so we
  * fail loud (print the instruction and abort) instead. The transpile report's

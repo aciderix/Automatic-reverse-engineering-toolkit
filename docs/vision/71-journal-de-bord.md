@@ -6815,8 +6815,17 @@ Détail : **70 §6** (roadmap). Résumé :
   `stdcall_pops`) ; winediff complet vert.
 - **`NtSetInformationFile` ajouté (même jour)** : `FileEndOfFileInformation`(20) = `ftruncate` (réduit **et** agrandit,
   zéro-fill), `FilePositionInformation`(14) = `lseek` ; `Information`=0 au succès (mesuré). Fixture étendue
-  (truncate→EOF=4→seek 2→read « 23 »→grow→EOF=8), bit-identique Wine. `FileDispositionInformation` (delete-on-close)
-  **différé** — il exige que `NtClose` traite le delete en attente (le no-op actuel ne le déclencherait pas → serait un
-  faux) ; à faire avec le raffinement fd/close de `NtClose`.
-- **Reste tranche 3** : `FileDispositionInformation` (avec close), `NtQueryDirectoryFile` (énumération),
-  `NtDeviceIoControlFile` — au besoin mesuré. Puis tranches 4-6.
+  (truncate→EOF=4→seek 2→read « 23 »→grow→EOF=8), bit-identique Wine.
+- **`NtClose` raffiné + `FileDispositionInformation` (delete-on-close) — même jour** : `NtClose` était un no-op
+  inconditionnel (les fd fichier fuyaient). Désormais une **table bornée** `g_ntfile[fd → chemin hôte + flag delete]`
+  (peuplée à l'ouverture Nt\*) permet à `aret_ntfile_close` (cross-TU, appelé par `aret_NtClose`) de **vraiment fermer**
+  le fd **et** d'honorer `FileDispositionInformation`(13) `{BOOLEAN DeleteFile}` = `unlink` **au close** (mesuré : reopen
+  après delete-on-close = `OBJECT_NAME_NOT_FOUND` 0xC0000034). **Désambiguïsation sûre** : les handles HLE spéciaux sont
+  tous des **bases hautes taguées** (GDI 0x30…, thread 0x70…, event 0x71…, mutex 0x72…, sem 0x73…, registre 0x75…,
+  racines 0x8000…) ; un fd fichier est un **petit entier** — `NtClose` n'agit **que** sur un fd **qu'on a nous-mêmes
+  ouvert et enregistré**, donc jamais un handle std/registre/sync. Un `FileDispositionInformation` sur un fd non tracké
+  (ouvert via kernel32) apprend le chemin par `readlink(/proc/self/fd/N)`. Fixture étendue (create→write→set-disp→close→
+  reopen=NOT_FOUND). **Portes** : `win32_ntfile` **et** `win32_ntreg` (le chemin registre de `NtClose`, inchangé)
+  bit-identiques ; hash inchangé ; audit PASS ; winediff complet vert.
+- **Reste tranche 3** : `NtQueryDirectoryFile` (énumération de répertoire), `NtDeviceIoControlFile` — au besoin mesuré.
+  Puis tranches 4 (divers `Nt*`), 5 (variante real-ABI dans `wine_heavy`), 6 (driver `version.c`).
