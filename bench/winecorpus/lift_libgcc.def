@@ -1,0 +1,10 @@
+LIBRARY libgcc_s_dw2-1.dll
+EXPORTS
+__divdi3
+__moddi3
+__udivdi3
+__umoddi3
+__muldi3
+__ashldi3
+__lshrdi3
+__ashrdi3

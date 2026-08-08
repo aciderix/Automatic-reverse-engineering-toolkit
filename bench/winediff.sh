@@ -44,6 +44,14 @@ for d in /usr/lib/i386-linux-gnu/wine/i386-windows /usr/lib/wine/i386-windows \
          /opt/wine-stable/lib/wine/i386-windows; do
   [ -d "$d" ] && WINE_PE_DIR="$d" && break
 done
+# mingw runtime DLL dirs (for `NAME.withlocaldll`: lift a real mingw-shipped runtime
+# DLL like libgcc_s_dw2-1.dll / libstdc++-6.dll — NOT a Wine builtin, so it is copied
+# beside the exe and Wine loads that exact file ARET lifts). The measured #1 corpus gap.
+MINGW_DLL_DIRS=()
+for d in /usr/lib/gcc/i686-w64-mingw32/*-win32 /usr/lib/gcc/i686-w64-mingw32/*-posix \
+         /usr/lib/gcc/i686-w64-mingw32/* /usr/i686-w64-mingw32/bin; do
+  [ -d "$d" ] && MINGW_DLL_DIRS+=("$d")
+done
 
 # Program output of `aret --mode transpile --run` is delimited by a marker, each
 # line prefixed "  | ".
@@ -121,6 +129,27 @@ run_one() {
       fi
     done < "$CORPUS/$name.withdll"
     [ -n "$miss" ] && { echo "SKIP  $name ($miss not in $WINE_PE_DIR)"; return 2; }
+  fi
+  # Optional local-DLL lifting (winecorpus/NAME.withlocaldll): one DLL basename per
+  # line, resolved from the mingw runtime dirs and COPIED into $WD so Wine (the oracle)
+  # loads that exact file beside the exe while ARET lifts the same copy via --with-dll.
+  # Unlike .withdll (Wine builtins), this covers mingw-shipped runtime DLLs (libgcc_s,
+  # libstdc++ — the measured #1 corpus gap). SKIP if the toolchain lacks the DLL.
+  if [ -f "$CORPUS/$name.withlocaldll" ]; then
+    if [ ${#MINGW_DLL_DIRS[@]} -eq 0 ]; then echo "SKIP  $name (no mingw runtime dir)"; return 2; fi
+    miss=""
+    while IFS= read -r dll || [ -n "$dll" ]; do
+      [ -z "$dll" ] && continue
+      local found=""
+      for d in "${MINGW_DLL_DIRS[@]}"; do [ -f "$d/$dll" ] && found="$d/$dll" && break; done
+      if [ -n "$found" ]; then
+        cp -f "$found" "$WD/$dll"
+        withdll+=(--with-dll "$dll=$WD/$dll")
+      else
+        miss="$dll"
+      fi
+    done < "$CORPUS/$name.withlocaldll"
+    [ -n "$miss" ] && { echo "SKIP  $name ($miss not in mingw runtime dirs)"; return 2; }
   fi
   # Link the common Win32 libs a guard might reference (version info, OLE/COM,
   # BSTR, common controls). Harmless for programs that use none — the imports are

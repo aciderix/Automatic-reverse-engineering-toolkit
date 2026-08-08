@@ -221,6 +221,21 @@ Trois **couches** (branchement → comportement), et pour le comportement trois 
 > masqué par CPUID ⇒ chemin scalaire liftable, sortie identique par garantie zlib. Détail 71 (2026-08-08).
 > **Reste** : router `ucrtbase`→`msvcrt` par nom (débloque `cabinet`/`xmllite`/`mspatcha`…), au besoin mesuré.
 
+### 🎯 Levier 1 sur le RUNTIME C++ GNU — la lacune n°1 MESURÉE 🚧 (libgcc ✅, libstdc++ = suite)
+
+> **Piloté par la donnée (doc 90).** Le corpus de 1240 vrais PE32 FOSS classe la lacune n°1 **par #binaires** : le runtime
+> C++ GNU (`libstdc++-6.dll` + `libgcc_s`) bloque **37-47 %** des binaires. Réponse = **Levier 1** (lifter, comme zlib).
+> **Test pré-lift §0** (les deux, sur les DLL mingw de l'hôte) : `libgcc_s_dw2-1.dll` = **0 thunk / 0 forwarder**, `.text`
+> ~130 Ko, imports **KERNEL32+msvcrt seuls** ⇒ **liftable MAINTENANT, autonome** ; `libstdc++-6.dll` = 0/0, `.text` ~1,3 Mo,
+> importe **libgcc+KERNEL32+msvcrt** ⇒ liftable **une fois libgcc lifté** (multi-module). Ordre **forcé par la donnée**.
+> **✅ libgcc FAIT (2026-08-08)** : `winecorpus/lift_libgcc.{c,def,withlocaldll}` — les helpers arithmétiques 64 bits
+> (`__divdi3`/`__moddi3`/`__udivdi3`/`__umoddi3`/`__muldi3`/shifts, mesurés bloquants sur ~101 binaires) liftés
+> **bit-identiques Wine** (grille de signe/overflow/wrap + accumulateur). Nouvelle affordance harnais **`NAME.withlocaldll`**
+> (lifte une DLL runtime mingw copiée à côté de l'exe, pas un builtin Wine ; SKIP propre ; inerte si absente). Aucun code
+> Rust/runtime touché ⇒ hash inchangé. Détail 71 (2026-08-08).
+> **Reste** : **libstdc++-6.dll** liftée PAR-DESSUS libgcc (`operator new`/`delete`, `std::string`, iostream, `_Rb_tree`,
+> `std::locale`, EH `__cxa_*`/`_Unwind_*`) = le gros du multiplicateur ; puis re-mesurer le corpus.
+
 4. **Corps Wine — forme LOURDE** : compiler du `.c` Wine entier + **porter une fois le plancher `ntdll`/win32u**
    → couverture massive. *(Milestone.)* **🚧 OUVERTE ET MESURÉE (2026-08-02, `tools/gen_wine_heavy.py`)** : `rtlstr.c`
    de ntdll **compile INCHANGÉ** en objet i686 → **46 fonctions `Rtl*` réelles d'un coup**, sur un plancher **fini de 12

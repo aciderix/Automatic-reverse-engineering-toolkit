@@ -111,3 +111,13 @@ ARET couvre le CRT **C** (msvcrt) ; il ne couvre **pas** le runtime **C++**.
 C'est **le** multiplicateur. **Convergence** : le driver WinMerge (MSVC/MFC) butait déjà sur le **runtime
 C++** (CString, EH) — GNU **et** MSVC pointent la même frontière : **le runtime C++ est LE mur du vrai
 logiciel**. *(Nuance corpus : MSYS2 biaise vers GNU ; un corpus MSVC montrerait msvcp/MFC — même thème.)*
+
+## Suite — la mesure passe à l'ACTE (2026-08-08) : libgcc liftée
+
+La donnée a désigné le runtime C++ GNU comme mur n°1. **Premier pas exécuté** (doctrine §0, « la sélection mesurée de
+la cible EST le travail ») : **test pré-lift §0** sur les deux DLL (présentes sur l'hôte mingw) — `libgcc_s_dw2-1.dll`
+= **0 thunk / 0 forwarder**, imports **KERNEL32+msvcrt seuls** ⇒ **liftable autonome** ; `libstdc++-6.dll` = 0/0,
+importe **libgcc+KERNEL32+msvcrt** ⇒ liftable **par-dessus libgcc**. **libgcc LIFTÉE ✅** : ses helpers arithmétiques
+64 bits (`__divdi3`/`__moddi3`/`__udivdi3`/`__umoddi3`/`__muldi3`/shifts — mesurés bloquants sur ~101 binaires)
+**bit-identiques Wine** (`winecorpus/lift_libgcc`). **Reste** : `libstdc++-6.dll` par-dessus (le multiplicateur), puis
+**re-mesurer** ce corpus (le levier change après chaque vague). Détail : doc 71 (2026-08-08) + doc 82.

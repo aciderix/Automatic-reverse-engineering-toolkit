@@ -7174,3 +7174,34 @@ Détail : **70 §6** (roadmap). Résumé :
   **Bilan WinMerge de la session** : le blocage racine **multi-sessions `0x10` est levé** (fix de lift **général**), et le
   driver a franchi **6 murs** jusqu'au cœur de l'init GUI MFC. « Au bout » = jalon **M7-GUI** (multi-sessions). Prochain cran
   = ce crash CString mfc90u.
+
+### 2026-08-08 — [I13][LIFT-DLL] **🎯 LEVIER 1 sur le RUNTIME C++ GNU (la lacune n°1 MESURÉE) — `libgcc_s_dw2-1.dll` liftée, helpers arithmétiques 64 bits bit-identiques Wine**
+
+- **La mesure a parlé, on agit dessus (doc 90).** Le corpus de 1240 vrais PE32 FOSS a classé la lacune n°1 **par la donnée** :
+  le **runtime C++ GNU** (`libstdc++-6.dll` + `libgcc_s`) bloque **37-47 %** des binaires. Réponse doctrine = **Levier 1**
+  (lifter ces DLL, comme `zlib1.dll`). Premier pas **méthodique et mesurable** exécuté cette entrée.
+- **Test pré-lift §0 (règle 70 §5.0, les DEUX commandes) sur les deux cibles — elles sont sur le disque (mingw hôte)** :
+  | DLL | `.text` | thunks `__wine_spec_imp_` | Forwarder RVA | imports | verdict |
+  |---|---|---|---|---|---|
+  | `libgcc_s_dw2-1.dll` | ~130 Ko (254 exports) | **0** | **0** | **KERNEL32 + msvcrt seuls** | **liftable MAINTENANT, autonome** (imports couverts, comme zlib) |
+  | `libstdc++-6.dll` | ~1,3 Mo (11878 exports) | **0** | **0** | **libgcc + KERNEL32 + msvcrt** | liftable **une fois libgcc lifté** (multi-module) |
+  Du **vrai code** (0 relais-stub) et une **chaîne de deps finie et propre**. L'ordre est **forcé par la donnée** : libgcc
+  d'abord (autonome, et libstdc++ en dépend).
+- **Fixture** `winecorpus/lift_libgcc.{c,def,withlocaldll}` : une app exerce les **helpers arithmétiques 64 bits** de libgcc
+  (`__divdi3`/`__moddi3`/`__udivdi3`/`__umoddi3`/`__muldi3`/`__ashldi3`/`__lshrdi3`/`__ashrdi3` — mesurés bloquants sur
+  ~101 binaires du corpus). Les ops int64 en C émettent `call ___divdi3` etc. ; le `.def` (import-lib dlltool) les **route
+  en IMPORTS** depuis la DLL ⇒ ARET les dispatche vers le **code lifté** (loader multi-modules) ; Wine (l'oracle) charge la
+  **même** libgcc **à côté de l'exe**. Grille discriminante (0, ±1, gros +/-, INT64_MIN/MAX ⇒ signe, cas overflow
+  INT64_MIN/-1, wrap non signé) + un accumulateur XOR/mul/shift. **Sortie bit-identique Wine** (43 lignes, `acc=9f215870ad27af3b`,
+  même sha256). Spike autonome d'abord (§2 reproduire→fixture), puis câblé au harnais.
+- **Nouvelle affordance harnais `NAME.withlocaldll`** (winediff.sh) : `.withdll` ne cherchait que dans le **dir builtin Wine**
+  (comctl32/zlib1) ; libgcc est une **DLL runtime mingw**, pas un builtin. Le nouveau mécanisme résout la DLL dans les
+  **dirs runtime mingw** (`/usr/lib/gcc/i686-w64-mingw32/*`), la **copie à côté de l'exe** (⇒ Wine charge exactement le
+  fichier qu'ARET lifte) et l'ajoute à `--with-dll` ; **SKIP propre** si le toolchain ne l'a pas (comme une porte). Inerte
+  quand le fichier `.withlocaldll` est absent ⇒ **zéro impact** sur les fixtures existantes.
+- **Portes** : `lift_libgcc` **bit-identique** (harnais winediff) ; **aucun code Rust/runtime touché** (3 fixtures + 1
+  affordance bash) ⇒ hash transpile **inchangé** `19acad982194bf07` (vérifié 4/4), difftest/funcdiff inchangés par
+  construction ; winediff complet non régressé (baseline 228/230, 2 rouges connus). Doc 70 §4.5/§5.0 + doc 82 + doc 90 màj.
+- **Reste (plan mesuré)** : **libstdc++-6.dll** liftée PAR-DESSUS libgcc (`--with-dll` multi-module : `operator new`/`delete`,
+  `std::string`, iostream, conteneurs `_Rb_tree`, `std::locale`, EH `__cxa_*`/`_Unwind_*`) = le gros du multiplicateur mesuré ;
+  puis re-mesurer le corpus (le levier change). C'est **le** chantier qui efface la lacune n°1 du vrai logiciel FOSS.

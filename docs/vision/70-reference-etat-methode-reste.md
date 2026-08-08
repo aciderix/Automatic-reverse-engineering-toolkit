@@ -225,7 +225,7 @@ sert désormais de **détecteur** : un warm build qui ne réutilise pas ~tout si
 
 ### État régression (référence — doit rester vert)
 difftest **272/272** · transpile-diff **4/4** (H=`19acad982194bf07`) · winediff
-**228/230** (2 rouges connus, orthogonaux au code : `gdi_uifont` **environnemental** fontconfig i386 ; `ole_mlang`
+**230/232** (2 rouges connus, orthogonaux au code : `gdi_uifont` **environnemental** fontconfig i386 ; `ole_mlang`
 **flake** oracle Wine-COM sous Xvfb concurrent — passe seul) · **heavy-form 5 preuves** (`proof.sh`/`proof_native.sh` rtlstr,
 `proof_ntreg.sh`/`proof_ntreg_native.sh` registre real-ABI, **`proof_reg_native.sh` = `reg.c` de Wine ENTIER**) · **ehdiff 6/6** (SEH `seh_except`
 + C++ `throw_catch`/`throw_dtor`/`throw_across`/`throw_byval`/`throw_static` — throw/catch, destructeur d'unwind, multi-frames, catch-by-value, CRT statique — bit-identiques Wine) · cpudiff vert (per-instruction + séquences génératives) · funcdiff corpus **0 divergence** (lift **~20,6k** scorées /
@@ -562,6 +562,16 @@ recompilabilité **100 %** · WASM **7/7**.
   pclmulqdq/SSE4.2 selon CPUID, qu'ARET **masque** ⇒ chemin scalaire liftable, tandis que Wine prend le SIMD — sortie
   identique par garantie zlib (le lifting n'a pas eu à modéliser pclmulqdq). Gardé `winecorpus/lift_zlib.{c,def,withdll}`
   (3 tampons round-trip, bit-identique Wine ; SKIP propre si `zlib1.dll` absent).
+- **⭐ Levier 1 sur le RUNTIME C++ GNU — la lacune n°1 MESURÉE (2026-08-08, doc 90)** : le corpus de 1240 vrais PE32 FOSS
+  classe **par la donnée** le runtime C++ GNU (`libstdc++-6.dll` + `libgcc_s`) comme mur n°1 (**37-47 %** des binaires).
+  **Test pré-lift §0** (les deux commandes) : `libgcc_s_dw2-1.dll` = **0 thunk / 0 forwarder**, `.text` ~130 Ko, imports
+  **KERNEL32+msvcrt seuls** ⇒ **liftable autonome** ; `libstdc++-6.dll` = 0/0, importe **libgcc+KERNEL32+msvcrt** ⇒ liftable
+  **par-dessus libgcc** (multi-module). **libgcc LIFTÉE ✅** : ses helpers arithmétiques 64 bits (`__divdi3`/`__moddi3`/
+  `__udivdi3`/`__umoddi3`/`__muldi3`/shifts — mesurés bloquants sur ~101 binaires) sortent **bit-identique** à Wine chargeant
+  la même DLL. Nouvelle affordance harnais **`NAME.withlocaldll`** (lifte une DLL runtime mingw copiée à côté de l'exe, pas un
+  builtin Wine ; SKIP propre ; inerte si absente ⇒ 0 impact fixtures existantes). Gardé `winecorpus/lift_libgcc.{c,def,withlocaldll}`.
+  **Reste** : `libstdc++-6.dll` liftée par-dessus (le gros du multiplicateur : `operator new`/`delete`, `std::string`, iostream,
+  `_Rb_tree`, `std::locale`, EH `__cxa_*`/`_Unwind_*`), puis re-mesurer le corpus.
 - **TEB `StackBase`/`StackLimit` = vraies bornes de la pile machine** (`fs:[4]`/`fs:[8]`, 2026-07-17, bug **général**) :
   l'entrée émise (`aret_main.c`) publie `__aret_set_stack_bounds(top=aret_stack+taille, bottom=aret_stack)` avant de
   lancer le programme → un sas CRT MSVC qui lit `fs:[4]` (StackBase) et déréférence `[StackBase-8]` (idiome
