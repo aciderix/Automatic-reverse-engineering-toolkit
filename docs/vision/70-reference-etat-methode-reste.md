@@ -538,6 +538,10 @@ recompilabilité **100 %** · WASM **7/7**.
   Wine au runtime) + `proof_ntreg*.sh`. **Premier fichier ntdll de Wine non-chaîne entier en production** — le milestone
   « DLL user-mode entières » franchi. **Piège §0 attrapé** : une décl **implicite cdecl** d'une fonction plancher stdcall
   déséquilibre la pile ⇒ **tout déclarer NTAPI** ; `RtlCreateUnicodeString` rend **BOOLEAN**.
+  **⇒ DEUX voies « DLL entières » désormais prouvées** : (1) **compiler** la source Wine (ci-dessus, `reg.c` → plancher
+  real-ABI) et (2) **lifter** le binaire — une **DLL binaire liftée** (`--with-dll`, Levier 1) important les `Nt*` ntdll
+  route ses imports via le **loader multi-modules** vers les shims `aret_Nt*` → même `g_reg`, bit-identique Wine
+  (`winecorpus/liftntreg.{c,dll.c}`).
 - **TEB `StackBase`/`StackLimit` = vraies bornes de la pile machine** (`fs:[4]`/`fs:[8]`, 2026-07-17, bug **général**) :
   l'entrée émise (`aret_main.c`) publie `__aret_set_stack_bounds(top=aret_stack+taille, bottom=aret_stack)` avant de
   lancer le programme → un sas CRT MSVC qui lit `fs:[4]` (StackBase) et déréférence `[StackBase-8]` (idiome

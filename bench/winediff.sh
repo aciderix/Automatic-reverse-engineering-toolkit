@@ -95,8 +95,10 @@ run_one() {
   local withdll=() dllname
   if [ -f "$CORPUS/$name.dll.c" ]; then
     dllname="${name}dll.dll"
+    # -lntdll/-ladvapi32 so a companion DLL can import ntdll Nt*/advapi32 Reg* (demand-loaded, so
+    # harmless for DLLs that use neither); ARET lifts the DLL and routes those imports to its shims.
     if ! "$MINGW" -O1 -w -shared "$CORPUS/$name.dll.c" -o "$WD/$dllname" \
-         -Wl,--out-implib,"$WD/$name.dllimp.a" 2>"$WD/err"; then
+         -Wl,--out-implib,"$WD/$name.dllimp.a" -lntdll -ladvapi32 2>"$WD/err"; then
       echo "FAIL  $name (DLL build: $(head -1 "$WD/err"))"; return 1
     fi
     imp_lib="$imp_lib $WD/$name.dllimp.a"       # link the app against the DLL

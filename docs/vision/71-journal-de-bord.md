@@ -6978,3 +6978,20 @@ Détail : **70 §6** (roadmap). Résumé :
   (§3 régression, §4.5 plancher `Nt*` + capstone, §5 « plancher posé »).
 - **Reste** : étendre les cœurs real-ABI aux `Nt*` **fichier** (comme le registre) ; vendorer d'autres fichiers ntdll ; puis
   des DLL user-mode entières via le loader multi-modules (Levier 1).
+
+### 2026-08-07 — [I13][LIFT-DLL][LOURD] **🎯 LEVIER 1 × plancher Nt\* — une DLL binaire LIFTÉE qui importe les syscalls ntdll `Nt*` registre tourne bit-identique Wine**
+
+- **L'autre voie vers « DLL entières » démontrée sur le registre.** Là où le capstone `reg.c` *compile* la **source** Wine,
+  ici ARET **LIFTE une DLL binaire** (`--with-dll`, doc 80 §1.2) dont une fonction exportée fait un **round-trip registre
+  via les syscalls ntdll `Nt*`**. Le **loader multi-modules** résout les imports `Nt*` de la DLL liftée vers les shims
+  `aret_Nt*` d'ARET → **le même `g_reg`**. Wine charge la vraie DLL → vrai ntdll. Les deux round-trip une clé
+  fournie par l'appelant ⇒ **bit-identique** : une **DLL binaire liftée atteint le plancher `Nt*` bout-en-bout**.
+- **Fixtures** `winecorpus/liftntreg.{c,dll.c}` : la DLL exporte `dll_ntreg_roundtrip(v)` = `NtCreateKey`/`NtSetValueKey`/
+  `NtQueryValueKey`(+`RtlInitUnicodeString`, adaptateur heavy-form) ; l'app l'importe et l'appelle. **Aucun code runtime
+  nouveau** — les shims `Nt*` et le loader multi-modules existaient ; c'est leur **intégration** qui est prouvée.
+- **Harnais** : la build de la DLL compagnon lie désormais `-lntdll -ladvapi32` (demand-loaded ⇒ inoffensif pour les DLL
+  qui n'en usent pas, ex. `dll_lifting` non régressé) pour qu'une DLL compagnon puisse **importer** ntdll `Nt*`/advapi32
+  `Reg*`.
+- **Portes** : `liftntreg` bit-identique ; `dll_lifting` (changement harnais) non régressé ; hash **inchangé** ; audit PASS ;
+  winediff complet. **Deux voies « DLL entières » désormais prouvées** : (1) **compiler** la source Wine (`reg.c` → plancher
+  real-ABI) et (2) **lifter** le binaire (imports `Nt*` → shims → `g_reg`).
