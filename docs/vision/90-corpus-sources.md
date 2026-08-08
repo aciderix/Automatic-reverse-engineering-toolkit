@@ -66,3 +66,48 @@ Liens directs de binaires 32-bit (⚠️ `github.com` bloqué par le proxy — p
 ## Comment ça sert la mesure (rappel doctrine)
 
 Corpus varié → `bash bench/wallsweep.sh <dir>` agrège `--mode walls` → **liste finie des murs classés par #binaires bloqués** ⇒ on priorise les fixes par la donnée (jamais à l'intuition). Diversité **compilateur × époque × modèle d'EH** (GCC-DWARF/SJLJ, MSVC-SEH, Clang, Watcom) = ce qui fait ressortir les vraies classes de bugs (comme le `ret` d'épilogue tabulé trouvé sur WinMerge/MSVC). **Un fetcher par source, checksums, idempotent** — on l'écrira quand on lancera la phase corpus.
+
+---
+
+## Résultat du 1er sweep (2026-08-08) — la donnée a parlé
+
+**Corpus** : 1313 binaires PE32 x86 réels (MSYS2 mingw32 = GCC/Clang, + UnxUtils = MSVC6),
+construit par `bench/wallcorpus_fetch.sh`. **1240 analysés** (`--mode walls`, 8-way) —
+**140 (11 %) totalement propres**, 1100 avec des murs.
+
+**Instructions non-liftées = BRUIT (comme attendu, §5.0)** : la tête (`int`/`ud2`/`in`/`insb`/
+`outsb`/`popad`/`daa`/`arpl`/`bound`/`les`/`int3`…) = **data-décodée-en-code** + I/O port privilégié
+⇒ **abort correct**, pas des cibles. *(Seuls `cvtdq2pd` (38 bin) et `pinsrd` (64 bin) = vraies
+lacunes SSE éventuelles, à vérifier au cas par cas.)*
+
+**Imports manquants = LE SIGNAL, et il est SANS APPEL : le RUNTIME C++ GNU domine.** Comptage
+direct sur le corpus : **473/1266 (37 %) importent `libstdc++-6.dll`**, **598/1266 (47 %)
+importent `libgcc`**. Top des imports manquants par #binaires (démanglé) :
+
+| bins | symbole |
+|-----:|---------|
+| 336 | `operator new(unsigned int)` (`_Znwj`) |
+| 281 | `_Unwind_Resume` (dépile EH GCC) |
+| 246 | `std::__throw_length_error` · `operator delete(void*,uint)` |
+| 226 | `std::__throw_logic_error` |
+| 185 | `operator delete(void*)` |
+| 179 | `std::__cxx11::basic_string::_M_create` (et toute la famille `basic_string`) |
+| 177 | `std::__ostream_insert` (iostream) |
+| 168 | `__cxa_begin_catch` (ABI EH Itanium) |
+| 148 | `std::ios_base::Init` · `std::locale` |
+| 131 | `__cxa_throw` |
+| 126 | `std::_Rb_tree_decrement` (map/set) |
+| 101 | `__divdi3`/`__udivdi3` (libgcc 64-bit) |
+|  88 | `__dynamic_cast` |
+
+⇒ **Verdict Levier 0** : pour le vrai logiciel FOSS compilé, **la lacune n°1 (≈37–47 % des binaires)
+est le RUNTIME C++ (libstdc++-6.dll + libgcc_s)** — `operator new`/`delete`, `std::string`, iostream,
+`std::map`/`_Rb_tree`, `std::locale`, EH C++ (`__cxa_*`/`_Unwind_Resume`/`__throw_*`), `dynamic_cast`.
+ARET couvre le CRT **C** (msvcrt) ; il ne couvre **pas** le runtime **C++**.
+
+**Réponse stratégique (doctrine)** : **Levier 1** — **lifter `libstdc++-6.dll` + `libgcc_s_dw2-1.dll`**
+(vraies DLL à vrai code, comme `zlib1.dll` aujourd'hui). Un seul investissement fournit `operator new`,
+`std::string`, iostream, conteneurs, EH — tout — depuis du **code lifté prouvé**, sans écrire 40 shims.
+C'est **le** multiplicateur. **Convergence** : le driver WinMerge (MSVC/MFC) butait déjà sur le **runtime
+C++** (CString, EH) — GNU **et** MSVC pointent la même frontière : **le runtime C++ est LE mur du vrai
+logiciel**. *(Nuance corpus : MSYS2 biaise vers GNU ; un corpus MSVC montrerait msvcp/MFC — même thème.)*
