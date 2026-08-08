@@ -121,3 +121,20 @@ importe **libgcc+KERNEL32+msvcrt** ⇒ liftable **par-dessus libgcc**. **libgcc 
 64 bits (`__divdi3`/`__moddi3`/`__udivdi3`/`__umoddi3`/`__muldi3`/shifts — mesurés bloquants sur ~101 binaires)
 **bit-identiques Wine** (`winecorpus/lift_libgcc`). **Reste** : `libstdc++-6.dll` par-dessus (le multiplicateur), puis
 **re-mesurer** ce corpus (le levier change après chaque vague). Détail : doc 71 (2026-08-08) + doc 82.
+
+## 2e sweep (2026-08-08) — corpus rafraîchi 1256 binaires : le verdict TIENT
+
+Re-mesure sur **1256 PE32 analysés** (1266 collectés, 10 DLL lourdes échouent l'analyse : libpython3.13,
+perl532, libtriton, cobc, flex — hors périmètre) — **140 propres / 1116 avec murs**. **Stable vs le 1er sweep**
+(mêmes têtes, comptes un peu plus hauts) ⇒ la donnée est **reproductible** : le **runtime C++ GNU reste le mur n°1**.
+
+Top imports manquants (démanglé) : `operator new` (**345**), **`_Unwind_Resume` (286)**, `std::__throw_length_error`
+(254), `operator delete(void*,uint)` (251), `std::__throw_logic_error` (234), `basic_string::_M_create` (188),
+`std::__ostream_insert` (183), `operator new[]`/`__cxa_begin_catch` (172), `std::locale`/`ios_base::Init` (~150),
+`__cxa_throw` (137), `_Rb_tree_decrement` (133), **`__divdi3` (110)**. Instructions = bruit confirmé (data-en-code +
+I/O privilégié → abort correct ; seules `pinsrd` 64 / `cvtdq2pd` 40 / `psllq` 38 = lacunes SSE éventuelles).
+
+**⇒ La mesure VALIDE l'incrément du jour** : `_Unwind_Resume` (286 bin) et `__divdi3` (110 bin) sont des symboles
+**libgcc** — le lift `libgcc_s_dw2-1.dll` (2026-08-08, bit-identique Wine) frappe pile dans le top mesuré. Le reste de
+la tête (`operator new/delete`, `std::string`, iostream, `_Rb_tree`, `std::locale`, `__cxa_*`) vit dans
+**`libstdc++-6.dll`** ⇒ le multiplicateur suivant, lifté PAR-DESSUS libgcc.
