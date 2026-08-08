@@ -570,8 +570,13 @@ recompilabilité **100 %** · WASM **7/7**.
   `__udivdi3`/`__umoddi3`/`__muldi3`/shifts — mesurés bloquants sur ~101 binaires) sortent **bit-identique** à Wine chargeant
   la même DLL. Nouvelle affordance harnais **`NAME.withlocaldll`** (lifte une DLL runtime mingw copiée à côté de l'exe, pas un
   builtin Wine ; SKIP propre ; inerte si absente ⇒ 0 impact fixtures existantes). Gardé `winecorpus/lift_libgcc.{c,def,withlocaldll}`.
-  **Reste** : `libstdc++-6.dll` liftée par-dessus (le gros du multiplicateur : `operator new`/`delete`, `std::string`, iostream,
-  `_Rb_tree`, `std::locale`, EH `__cxa_*`/`_Unwind_*`), puis re-mesurer le corpus.
+  **`libstdc++-6.dll` étape 1 ✅ (2026-08-08) — le CHEMIN HEUREUX de la STL liftée bit-identique Wine** : faisabilité mesurée
+  (`--mode walls` : 24 Mo liftés en **12 s**, 6252 fn ; murs résiduels = bruit data-en-code + 30 imports fs/wide-char
+  hors-chemin) puis fixture `winecorpus/lift_libstdcxx.cpp` — `std::string`/`std::vector`+`std::sort`/`std::map`(`_Rb_tree`)
+  **liftés**, **1er cas d'une DLL liftée important une AUTRE DLL liftée** (libstdc++→libgcc), bit-identique (36 s, 6008 fn).
+  Affordance harnais **`.cpp`** (compile g++, SKIP propre sinon). **Reste** : étape 2 **iostream** (`std::cout`/`ios_base::Init`/
+  `locale` — mur locale/ctype à mesurer) ; étape 3 **l'EH C++ Itanium** (`__cxa_*`/`_Unwind_*` à travers frames liftées = le
+  vrai mur, incompatible *shared-stack*/DWARF, brique dédiée) ; puis re-mesurer le corpus.
 - **TEB `StackBase`/`StackLimit` = vraies bornes de la pile machine** (`fs:[4]`/`fs:[8]`, 2026-07-17, bug **général**) :
   l'entrée émise (`aret_main.c`) publie `__aret_set_stack_bounds(top=aret_stack+taille, bottom=aret_stack)` avant de
   lancer le programme → un sas CRT MSVC qui lit `fs:[4]` (StackBase) et déréférence `[StackBase-8]` (idiome
@@ -1399,7 +1404,9 @@ la **vitesse** change.
 - **RESTAURATION TOOLCHAIN après un reset conteneur (2026-07-18, recette vérifiée)** : le reset peut effacer les outils
   **installés à la main** (mingw, wine 32-bit, gcc-multilib, SDL2:i386, polices) — le hook n'installe que z3/SDL2/Xvfb.
   Le **git reste intact** (tout est sur origin). Recette :
-  1. `sudo apt-get install -y gcc-mingw-w64-i686 gcc-multilib g++-multilib` (build fixtures + portes natives `-m32`).
+  1. `sudo apt-get install -y gcc-mingw-w64-i686 g++-mingw-w64-i686 gcc-multilib g++-multilib` (build fixtures + portes
+     natives `-m32` ; **`g++-mingw-w64-i686`** = requis pour les fixtures **C++** qui liftent `libstdc++-6.dll`, GCC 13 dw2 —
+     absent du conteneur de base, une fixture `.cpp` **SKIP** proprement sans lui).
   2. **Wine 32-bit** (bloqué par un skew `libgd3` PPA-sury(amd64) vs Ubuntu(i386)) : d'abord **downgrade** l'amd64 pour
      aligner les arches — `sudo apt-get install -y --allow-downgrades libgd3=2.3.3-9ubuntu5 libgd3:i386=2.3.3-9ubuntu5` —
      puis `sudo apt-get install -y --no-install-recommends wine wine32:i386 wine64`. (Sans le downgrade, `wine32:i386` est

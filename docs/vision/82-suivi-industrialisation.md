@@ -233,8 +233,15 @@ Trois **couches** (branchement → comportement), et pour le comportement trois 
 > **bit-identiques Wine** (grille de signe/overflow/wrap + accumulateur). Nouvelle affordance harnais **`NAME.withlocaldll`**
 > (lifte une DLL runtime mingw copiée à côté de l'exe, pas un builtin Wine ; SKIP propre ; inerte si absente). Aucun code
 > Rust/runtime touché ⇒ hash inchangé. Détail 71 (2026-08-08).
-> **Reste** : **libstdc++-6.dll** liftée PAR-DESSUS libgcc (`operator new`/`delete`, `std::string`, iostream, `_Rb_tree`,
-> `std::locale`, EH `__cxa_*`/`_Unwind_*`) = le gros du multiplicateur ; puis re-mesurer le corpus.
+> **✅ libstdc++ étape 1 FAITE (2026-08-08) — le CHEMIN HEUREUX (sans EH) bit-identique Wine.** Faisabilité mesurée
+> d'abord (`--mode walls` : 24 Mo liftés en **12 s**, 6252 fn, murs résiduels = bruit data-en-code + 30 imports
+> filesystem/wide-char hors-chemin). Fixture `winecorpus/lift_libstdcxx.cpp` : `std::string`/`std::vector`+`std::sort`/
+> `std::map`(`_Rb_tree`) — tout **lifté**, **1er cas d'une DLL liftée important une AUTRE DLL liftée** (libstdc++→libgcc),
+> **bit-identique** (36 s transpile+run, 6008 fn). Outillage : **mingw g++ installé** (absent du conteneur de base) +
+> affordance harnais **`.cpp`** (compile g++, SKIP propre sinon). Aucun code Rust/runtime ⇒ hash inchangé. Détail 71.
+> **Reste** : étape 2 **iostream** (`std::cout`/`ios_base::Init`/`locale` — mur locale/ctype à mesurer) ; étape 3 **l'EH C++
+> Itanium** (`__cxa_*`/`_Unwind_*` à travers frames liftées = le vrai mur, incompatible *shared-stack*/DWARF, brique
+> dédiée) ; puis re-mesurer le corpus.
 
 4. **Corps Wine — forme LOURDE** : compiler du `.c` Wine entier + **porter une fois le plancher `ntdll`/win32u**
    → couverture massive. *(Milestone.)* **🚧 OUVERTE ET MESURÉE (2026-08-02, `tools/gen_wine_heavy.py`)** : `rtlstr.c`

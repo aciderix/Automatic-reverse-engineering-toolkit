@@ -7205,3 +7205,34 @@ Détail : **70 §6** (roadmap). Résumé :
 - **Reste (plan mesuré)** : **libstdc++-6.dll** liftée PAR-DESSUS libgcc (`--with-dll` multi-module : `operator new`/`delete`,
   `std::string`, iostream, conteneurs `_Rb_tree`, `std::locale`, EH `__cxa_*`/`_Unwind_*`) = le gros du multiplicateur mesuré ;
   puis re-mesurer le corpus (le levier change). C'est **le** chantier qui efface la lacune n°1 du vrai logiciel FOSS.
+
+### 2026-08-08 — [I13][LIFT-DLL] **🎯 LEVIER 1 sur `libstdc++-6.dll` — étape 1 : le CHEMIN HEUREUX de la STL liftée bit-identique Wine (std::string/vector/map), 1ʳᵉ DLL liftée important une AUTRE DLL liftée**
+
+- **Suite directe du lift libgcc, sur la lacune n°1 mesurée (doc 90, re-confirmée 1256 bin).** `libstdc++-6.dll` (24 Mo,
+  11878 exports) = le multiplicateur : `operator new`/`delete`, `std::string`, iostream, `_Rb_tree`, `std::locale`, EH C++.
+  Test pré-lift §0 : 0 thunk / 0 forwarder, importe **libgcc + kernel32 + msvcrt** ⇒ liftable **par-dessus libgcc**.
+- **Étape 0 — faisabilité MESURÉE (§0, avant de coder).** `--mode walls --with-dll libstdc++ --with-dll libgcc` : ARET lifte
+  les deux en **12 s**, **6252 fonctions** recouvrées (6008 liftées). Murs résiduels = **bruit** (data-en-code des zones
+  mortes du DLL 24 Mo : `jmp 0x90600000`, `in`/`cli`/`hlt`/`salc`/`push es`/`aam`…) + **30 imports** seulement, tous
+  filesystem/wide-char/condition-variables (`FindFirstVolumeW`/`aligned_malloc`/`wopen`/`wcsftime`…) que le chemin
+  `std::string` **ne touche pas** + 4 appels non résolus (cibles garbage). ⇒ **tractable**.
+- **Étape 1 — le chemin HEUREUX (sans EH) liftée, bit-identique Wine.** Fixture `winecorpus/lift_libstdcxx.cpp` :
+  `std::string` (SSO + alloc tas 40 car + `append`/`replace`/`find`/`substr`/`compare`), `std::vector<int>`
+  (push_back+croissance+`std::sort`+`accumulate`), `std::map<string,int>` (`_Rb_tree` insert/balance/find, parcours trié).
+  Tout passe par du **code libstdc++ LIFTÉ** (operator new→malloc msvcrt, `_M_construct`, `_Rb_tree_*`) dispatché par le
+  loader multi-modules ; **1er cas prouvé d'une DLL liftée qui IMPORTE une AUTRE DLL liftée** (libstdc++→libgcc). Sous Wine
+  la MÊME libstdc++ est chargée à côté de l'exe. **Bit-identique** (`s=11 big=40 … vsum=… msz=6 …`), **36 s** transpile+run
+  (6008 fonctions émises+compilées). L'**EH C++ Itanium** (`throw`/`catch`, `__cxa_*`/`_Unwind_*` à travers frames liftées)
+  = **étape suivante**, brique dédiée (le modèle *shared-stack* d'ARET, esp par valeur, est incompatible avec le dérouleur
+  DWARF qui marche la vraie pile — comme SEH/MSVC, routage conscient de la pile liftée à concevoir). **Volontairement hors
+  fixture.**
+- **Outillage.** (1) **mingw g++ i686 installé** (`g++-mingw-w64-i686`, GCC 13 dw2) — absent du conteneur de base (doc 70 §7
+  disait « pas de mingw g++ ») ⇒ ajouté à la recette de restauration toolchain. (2) **Affordance harnais `.cpp`** : une
+  fixture `NAME.cpp` est compilée avec g++ (découverte élargie `*.c`+`*.cpp`, détection GUI, sélecteur), **SKIP propre** si
+  g++ absent ; + réutilise `.withlocaldll` (libstdc++-6.dll + libgcc_s_dw2-1.dll copiées à côté de l'exe). Inerte pour les
+  fixtures `.c` existantes.
+- **Portes** : `lift_libstdcxx` bit-identique (harnais) ; **aucun code Rust/runtime touché** (1 fixture .cpp + affordance
+  bash) ⇒ hash transpile **inchangé** `19acad982194bf07`, difftest/funcdiff inchangés par construction ; winediff complet
+  non régressé. Doc 70/82/90 màj.
+- **Reste (le chantier)** : étape 2 = **iostream** (`std::cout`/`ios_base::Init`/`locale` — l'init locale/ctype sera un mur à
+  mesurer) ; étape 3 = **l'EH C++ Itanium** (le vrai mur, brique dédiée). Puis re-mesurer le corpus (le levier change).

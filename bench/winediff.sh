@@ -67,7 +67,13 @@ norm() { tr -d '\r'; }   # ignore CRLF-vs-LF line-ending differences
 # ---------------------------------------------------------------------------
 run_one() {
   local name="$1" WD="$2"
-  local src="$CORPUS/$name.c"
+  # C fixture by default; a C++ fixture (NAME.cpp) is compiled with g++ (for lifting the
+  # GNU C++ runtime libstdc++-6.dll, the measured #1 corpus gap). SKIP if g++ is absent.
+  local src="$CORPUS/$name.c" CC="$MINGW"
+  if [ -f "$CORPUS/$name.cpp" ]; then
+    if ! command -v "${MINGW%-gcc}-g++" >/dev/null 2>&1; then echo "SKIP  $name (no mingw g++)"; return 2; fi
+    src="$CORPUS/$name.cpp"; CC="${MINGW%-gcc}-g++"
+  fi
   mkdir -p "$WD" || return 1
   # Optional Windows resource (NAME.rc): compiled with windres and linked in, so
   # tests can embed resources (e.g. a VS_VERSIONINFO block for the version APIs).
@@ -154,7 +160,7 @@ run_one() {
   # Link the common Win32 libs a guard might reference (version info, OLE/COM,
   # BSTR, common controls). Harmless for programs that use none — the imports are
   # demand-loaded.
-  if ! "$MINGW" -O1 -w $xcflags "$src" $imp_lib $res_obj -lversion -lole32 -loleaut32 -luuid -luser32 -lgdi32 -lcomctl32 -lwinspool -llz32 -lshlwapi -lshell32 -lbcrypt -lntdll -o "$WD/$name.exe" 2>"$WD/err"; then
+  if ! "$CC" -O1 -w $xcflags "$src" $imp_lib $res_obj -lversion -lole32 -loleaut32 -luuid -luser32 -lgdi32 -lcomctl32 -lwinspool -llz32 -lshlwapi -lshell32 -lbcrypt -lntdll -o "$WD/$name.exe" 2>"$WD/err"; then
     echo "FAIL  $name (PE build: $(head -1 "$WD/err"))"; return 1
   fi
   # Optional per-program arguments: one per line in winecorpus/NAME.args. Passed
@@ -260,11 +266,11 @@ wine wineboot --init >/dev/null 2>&1 || true
 # Optional single-fixture selection: `winediff.sh NAME` runs just that one.
 sel="${1:-}"
 names=()
-for src in "$CORPUS"/*.c; do
+for src in "$CORPUS"/*.c "$CORPUS"/*.cpp; do
   # Companion DLL sources (NAME.dll.c) are built by their app fixture, not run
-  # standalone — skip them in the main loop.
-  case "$src" in *.dll.c) continue;; esac
-  n="$(basename "$src" .c)"
+  # standalone — skip them in the main loop. A missing glob expands to itself.
+  case "$src" in *.dll.c) continue;; *'/*.c'|*'/*.cpp') continue;; esac
+  n="$(basename "$src")"; n="${n%.cpp}"; n="${n%.c}"
   [ -n "$sel" ] && [ "$n" != "$sel" ] && continue
   names+=("$n")
 done
@@ -294,7 +300,7 @@ gui=(); cli=()
 for n in "${names[@]}"; do
   if [ -f "$CORPUS/$n.serial" ]; then
     gui+=("$n")
-  elif grep -qE 'CreateWindow|DialogBox|CreateDialog' "$CORPUS/$n.c" 2>/dev/null; then
+  elif grep -qE 'CreateWindow|DialogBox|CreateDialog' "$CORPUS/$n.c" "$CORPUS/$n.cpp" 2>/dev/null; then
     gui+=("$n")
   else
     cli+=("$n")
