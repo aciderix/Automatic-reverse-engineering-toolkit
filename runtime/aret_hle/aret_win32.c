@@ -10032,6 +10032,7 @@ uint32_t aret_GetLocaleInfoW(uint32_t esp) {
     buf[len] = 0; return (uint32_t)(len + 1);
 }
 uint32_t aret_LoadMenuA(uint32_t esp)     { (void)esp; return 0; }    /* no menu resource loaded (sound) */
+uint32_t aret_LoadMenuW(uint32_t esp)     { (void)esp; return 0; }    /* idem (W): menu bar is cosmetic here (sound: NULL = no menu) */
 uint32_t aret_PlayEnhMetaFile(uint32_t esp) { (void)esp; return 0; }  /* EMF playback unmodelled (sound fail) */
 uint32_t aret_LocalSize(uint32_t esp) { void *p = WP(0); return p ? (uint32_t)malloc_usable_size(p) : 0; }
 /* Polygon(hdc, POINT*, n): a FILLED polygon. Wine's interior rasterisation (its scanline
