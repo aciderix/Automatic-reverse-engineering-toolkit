@@ -64,6 +64,8 @@ void* NTAPI RtlFreeHeap(void*h,ULONG f,void*p){(void)h;(void)f;free(p);return 0;
  * WCHAR is 16-bit. On native these MUST be 16-bit-aware (ARET's HLE has aret_wcslen etc.). */
 size_t wcslen(const uint16_t *s){ size_t n=0; while(s[n]) n++; return n; }
 uint16_t *wcschr(const uint16_t *s, uint16_t c){ for(;;s++){ if(*s==c) return (uint16_t*)s; if(!*s) return 0; } }
+uint16_t *wcscpy(uint16_t *d, const uint16_t *s){ uint16_t *r=d; while((*d++=*s++)); return r; }
+uint16_t *wcscat(uint16_t *d, const uint16_t *s){ uint16_t *r=d; while(*d) d++; while((*d++=*s++)); return r; }
 /* _snwprintf_s: pulled in by RtlFormatMessage (untested path). Not modelled -> sound abort
  * if ever reached (never on the string paths). WEAK so a real CRT (mingw) or a proof driver
  * overrides it; provides the symbol so the link closes without a guessed body. */

@@ -194,9 +194,13 @@ Trois **couches** (branchement → comportement), et pour le comportement trois 
    registre en interne (`RtlpNt*` de `reg.c`, choisi par la mesure) vendoré + adaptateur esp + fixture PE = premier
    bout-en-bout non-chaîne. **Plancher COMPLET pour `reg.c` ✅ (2026-08-07)** : cœurs enum/delete exposés + wrappers NTAPI
    (`NtEnumerateKey`/`NtEnumerateValueKey`/`NtDeleteKey`) + stub `NtQueryInformationToken` ; surface Nt\* de `reg.c` (10)
-   entièrement couverte, 2 preuves vertes. **Dernier pas** : étendre le shim NT-types (`OBJECT_ATTRIBUTES`/`ACCESS_MASK`/
-   `RTL_QUERY_REGISTRY_TABLE`/…, surface précisément mesurée), compiler `reg.c` entier, adaptateur `aret_RtlpNt*`, fixture
-   round-trip. Puis d'autres fichiers, puis DLL.
+   entièrement couverte, 2 preuves vertes. **🎯 CAPSTONE ✅ FAIT (2026-08-07)** : `reg.c` de Wine **entier** (768 l.,
+   inchangé hors splice) **compile par `cc` natif** contre le shim étendu (`native/reg_types.h` : OBJECT_ATTRIBUTES/
+   KEY_VALUE_*/RTL_QUERY_REGISTRY_TABLE/TOKEN_* + déclarations NTAPI des fonctions plancher/Nt\* appelées), se lie au
+   plancher real-ABI + rtlstr + floor, et **round-trip une clé comme ELF autonome sans Wine**, bit-identique aux valeurs
+   Wine (`proof_reg_native.sh`). **Premier fichier ntdll de Wine non-chaîne entier tournant sur le plancher.** Bug §0
+   attrapé : décl implicite cdecl d'une fonction plancher stdcall → crash → tout déclarer NTAPI. **Reste (pleine prod)** :
+   vendorer `reg.c` + adaptateur esp `aret_RtlpNt*` + fixture PE ⇒ un PE réel atteint la logique Wine compilée-en-ARET.
 
 **Invariants** : registre/état vide ⇒ prouver en round-trip ; jamais une valeur système devinée ; hash inchangé (additif) ;
 `@N` Nt\* déjà dans `stdcall_pops` (audit) ; chaque tranche = fixture winediff + entrée 71 + maj ici.

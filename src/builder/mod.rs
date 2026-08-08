@@ -51,6 +51,7 @@ const WINE_FLOOR_C: &str = include_str!("../../runtime/wine_heavy/ntdll_floor.c"
 /// route to the aret_* esp shims, a different symbol set).
 const WINE_NTREG_C: &str = include_str!("../../runtime/wine_heavy/ntdll_ntreg.c");
 const WINE_NT_TYPES_H: &str = include_str!("../../runtime/wine_heavy/native/nt_types.h");
+const WINE_REG_TYPES_H: &str = include_str!("../../runtime/wine_heavy/native/reg_types.h");
 const WINE_FLOOR_H: &str = include_str!("../../runtime/wine_heavy/native/ntdll_floor.h");
 const WINE_DEBUG_H: &str = include_str!("../../runtime/wine_heavy/native/wine/debug.h");
 
@@ -1359,6 +1360,7 @@ pub fn transpile(
         std::fs::write(wh.join("ntdll_floor.c"), WINE_FLOOR_C)?;
         std::fs::write(wh.join("ntdll_ntreg.c"), WINE_NTREG_C)?;
         std::fs::write(wh.join("native/nt_types.h"), WINE_NT_TYPES_H)?;
+        std::fs::write(wh.join("native/reg_types.h"), WINE_REG_TYPES_H)?;
         std::fs::write(wh.join("native/ntdll_floor.h"), WINE_FLOOR_H)?;
         std::fs::write(wh.join("native/wine/debug.h"), WINE_DEBUG_H)?;
         std::fs::write(wh.join("native/ddk/ntddk.h"), "")?;

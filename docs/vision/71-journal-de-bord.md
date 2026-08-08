@@ -6929,3 +6929,27 @@ Détail : **70 §6** (roadmap). Résumé :
   couche faite pour `rtlstr.c`), compiler `reg.c` entier par `cc` natif, adaptateur esp `aret_RtlpNt*`, fixture PE
   round-trip. La surface manquante est **précisément mesurée** (erreurs de compile listées) ⇒ pas d'inconnu, juste du
   volume de typedefs.
+
+### 2026-08-07 — [I13][INFRA][LOURD] **🎯 CAPSTONE — un FICHIER ntdll de Wine ENTIER non-chaîne (`reg.c`, 768 l.) compilé par `cc` natif tourne sur le plancher Nt\* real-ABI, bit-identique Wine (ELF autonome)**
+
+- **Le milestone « DLL user-mode entières » franchi sur un premier fichier non-chaîne.** `dlls/ntdll/reg.c` de Wine
+  (768 l., **inchangé** hormis le splice des forward-decls) compile par **`cc` natif** contre le shim NT-types autonome
+  d'ARET, se lie au **plancher Nt\* registre real-ABI** (`ntdll_ntreg.c`) + `rtlstr.c` + le plancher ASCII, et **round-trip
+  une clé de registre comme ELF natif SANS Wine au runtime** — piloté par les wrappers exportés `RtlpNtCreateKey`/
+  `RtlpNtSetValueKey`/`RtlpNtQueryValueKey` (opèrent sur une clé fournie par l'appelant ⇒ round-trippable). Sortie
+  **bit-identique** aux valeurs Wine (`create disp=1`, `set 0`, `query type=4/len=4/val=42`).
+- **Shim NT-types étendu** (`native/reg_types.h`, 105 l., inclus par `nt_types.h`, câblé builder) : `OBJECT_ATTRIBUTES`/
+  `ACCESS_MASK`/`PHANDLE`/`LARGE_INTEGER`/`KEY_BASIC/VALUE_PARTIAL/VALUE_FULL_INFORMATION`/`RTL_QUERY_REGISTRY_TABLE`/
+  `TOKEN_USER`/`SID` + constantes `REG_*`/`OBJ_*`/`RTL_REGISTRY_*`/`STATUS_*` + **déclarations NTAPI** des fonctions
+  plancher/rtlstr que `reg.c` appelle (`RtlAllocateHeap`/`FreeHeap`/`GetProcessHeap`/`RtlInitUnicodeString`/…/**et les
+  Nt\* registre**). **Bug attrapé** (§0, le classique heavy-form) : une déclaration **implicite cdecl** (sans prototype)
+  d'une fonction plancher **stdcall** déséquilibre la pile / clobbe `eax` → crash puis retour garbage ; le fix = **tout
+  déclarer NTAPI**. Second : `RtlCreateUnicodeString` rend **BOOLEAN**, pas NTSTATUS (conflit avec le forward-decl de
+  `rtlstr.c`) — corrigé. Plancher : `wcscat`/`wcscpy` 16-bit ajoutés.
+- **Preuve** `tools/wine_heavy/proof_reg_native.sh` (+`.c`) : récupère `reg.c`+`rtlstr.c`, splice, compile+lie natif,
+  exécute l'ELF autonome, diff vs valeurs Wine connues. Le registre de référence en mémoire tient lieu de `g_reg` (dont la
+  justesse propre est prouvée par `win32_ntreg`, cœurs partagés).
+- **Portes** : capstone proof PASS ; `proof_ntreg`(mingw+native) + `proof_native`(rtlstr) toujours PASS avec le shim
+  étendu ; hash **inchangé** ; heavy-form fixtures (`ntdll_rtlstr`) + registre (`win32_ntreg`) verts ; winediff complet.
+- **Reste (pleine production)** : vendorer `reg.c` (`include_str!`) + adaptateur esp `aret_RtlpNt*` + fixture PE ⇒ un
+  **PE réel** important `RtlpNtCreateKey` atteint la logique Wine **compilée-en-ARET**. Puis d'autres fichiers, puis DLL.

@@ -75,4 +75,6 @@ typedef unsigned int UINT; typedef uint32_t LCID,LANGID; typedef float FLOAT; ty
 #ifndef max
 #define max(a,b) (((a)>(b))?(a):(b))
 #endif
+/* Registry/token types + floor NTAPI decls for a whole compiled Wine reg.c (doc 82 tranche 6). */
+#include "reg_types.h"
 #endif
