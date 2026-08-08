@@ -484,53 +484,71 @@ static int u32_nt_reg_resolve(uint32_t poa, int create, uint32_t *disp) {
     while (*p == '\\') p++;
     return u32_reg_walk(hive, p, create, disp);
 }
-uint32_t aret_NtCreateKey(uint32_t esp) {
-    /* (KeyHandle@0, DesiredAccess@1, ObjectAttributes@2, TitleIndex@3, Class@4, Options@5, Disposition@6) */
-    uint32_t disp = 0; int k = u32_nt_reg_resolve(WU(2), 1, &disp);
+/* ---- Real-ABI registry cores (tranche 5): the SAME g_reg logic the esp shims run, exposed as
+ * ordinary (non-static) functions so the wine_heavy floor's NTAPI Nt* wrappers -- i.e. a COMPILED
+ * Wine ntdll .c -- route here. Every argument is a 32-bit address in the shared address space, so
+ * a pointer off the emulated stack and a real pointer from compiled floor code are identical.
+ * The esp shims below are now thin unpackers over these cores (single source of truth). ---- */
+uint32_t aret_ntreg_create(uint32_t poa, uint32_t phkey, uint32_t pdisp) {
+    uint32_t disp = 0; int k = u32_nt_reg_resolve(poa, 1, &disp);
     if (k < 0) return NT_STATUS_OBJECT_NAME_NOT_FOUND;
-    if (WU(0)) *(uint32_t *)(uintptr_t)WU(0) = u32_reg_hkey(k);
-    if (WU(6)) *(uint32_t *)(uintptr_t)WU(6) = disp;   /* REG_CREATED_NEW_KEY(1)/OPENED_EXISTING(2) */
+    if (phkey) *(uint32_t *)(uintptr_t)phkey = u32_reg_hkey(k);
+    if (pdisp) *(uint32_t *)(uintptr_t)pdisp = disp;   /* REG_CREATED_NEW_KEY(1)/OPENED_EXISTING(2) */
     return NT_STATUS_SUCCESS;
 }
-uint32_t aret_NtOpenKey(uint32_t esp) {
-    /* (KeyHandle@0, DesiredAccess@1, ObjectAttributes@2) */
-    int k = u32_nt_reg_resolve(WU(2), 0, NULL);
+uint32_t aret_ntreg_open(uint32_t poa, uint32_t phkey) {
+    int k = u32_nt_reg_resolve(poa, 0, NULL);
     if (k < 0) return NT_STATUS_OBJECT_NAME_NOT_FOUND;
-    if (WU(0)) *(uint32_t *)(uintptr_t)WU(0) = u32_reg_hkey(k);
+    if (phkey) *(uint32_t *)(uintptr_t)phkey = u32_reg_hkey(k);
     return NT_STATUS_SUCCESS;
 }
-uint32_t aret_NtSetValueKey(uint32_t esp) {
-    /* (KeyHandle@0, ValueName@1, TitleIndex@2, Type@3, Data@4, DataSize@5) */
-    char vn[256]; u32_us_narrow(WU(1), vn, sizeof vn);
-    return u32_reg_setval(WU(0), vn, WU(3), WU(4), WU(5)) == 0
-        ? NT_STATUS_SUCCESS : NT_STATUS_INVALID_HANDLE;
+uint32_t aret_ntreg_setval(uint32_t hkey, uint32_t pvalname, uint32_t type, uint32_t data, uint32_t size) {
+    char vn[256]; u32_us_narrow(pvalname, vn, sizeof vn);
+    return u32_reg_setval(hkey, vn, type, data, size) == 0 ? NT_STATUS_SUCCESS : NT_STATUS_INVALID_HANDLE;
 }
-uint32_t aret_NtQueryValueKey(uint32_t esp) {
-    /* (KeyHandle@0, ValueName@1, InfoClass@2, Info@3, Length@4, ResultLength@5).
-     * Only KeyValuePartialInformation(2) modelled: { TitleIndex, Type, DataLength, Data[] }. */
-    if (WU(2) != 2) { aret_partial("NtQueryValueKey: only KeyValuePartialInformation modelled"); return NT_STATUS_INVALID_HANDLE; }
-    int k = u32_reg_idx(WU(0));
+uint32_t aret_ntreg_queryval(uint32_t hkey, uint32_t pvalname, uint32_t infoclass, uint32_t info, uint32_t length, uint32_t presult) {
+    /* Only KeyValuePartialInformation(2) modelled: { TitleIndex, Type, DataLength, Data[] }. */
+    if (infoclass != 2) { aret_partial("NtQueryValueKey: only KeyValuePartialInformation modelled"); return NT_STATUS_INVALID_HANDLE; }
+    int k = u32_reg_idx(hkey);
     if (k < 0) return NT_STATUS_INVALID_HANDLE;
-    char vn[256]; u32_us_narrow(WU(1), vn, sizeof vn);
+    char vn[256]; u32_us_narrow(pvalname, vn, sizeof vn);
     struct u32_regval *v = u32_reg_findval(k, vn, 0);
     if (!v) return NT_STATUS_OBJECT_NAME_NOT_FOUND;
     uint32_t need = 12 + v->len;                       /* 3 ULONG header + data */
-    if (WU(5)) *(uint32_t *)(uintptr_t)WU(5) = need;
-    uint32_t info = WU(0 + 3), len = WU(4);
-    if (len < 12) return NT_STATUS_BUFFER_TOO_SMALL;    /* not even the header fits */
+    if (presult) *(uint32_t *)(uintptr_t)presult = need;
+    if (length < 12) return NT_STATUS_BUFFER_TOO_SMALL;    /* not even the header fits */
     uint32_t *pi = (uint32_t *)(uintptr_t)info;
     pi[0] = 0; pi[1] = v->type; pi[2] = v->len;
-    uint32_t cap = len - 12, copy = v->len < cap ? v->len : cap;
+    uint32_t cap = length - 12, copy = v->len < cap ? v->len : cap;
     if (copy) memcpy((uint8_t *)(uintptr_t)info + 12, v->data, copy);
     return copy < v->len ? NT_STATUS_BUFFER_OVERFLOW : NT_STATUS_SUCCESS;
 }
-uint32_t aret_NtDeleteValueKey(uint32_t esp) {
-    /* (KeyHandle@0, ValueName@1) */
-    int k = u32_reg_idx(WU(0)); if (k < 0) return NT_STATUS_INVALID_HANDLE;
-    char vn[256]; u32_us_narrow(WU(1), vn, sizeof vn);
+uint32_t aret_ntreg_delval(uint32_t hkey, uint32_t pvalname) {
+    int k = u32_reg_idx(hkey); if (k < 0) return NT_STATUS_INVALID_HANDLE;
+    char vn[256]; u32_us_narrow(pvalname, vn, sizeof vn);
     struct u32_regval *v = u32_reg_findval(k, vn, 0);
     if (!v) return NT_STATUS_OBJECT_NAME_NOT_FOUND;
     v->used = 0; return NT_STATUS_SUCCESS;
+}
+uint32_t aret_NtCreateKey(uint32_t esp) {
+    /* (KeyHandle@0, DesiredAccess@1, ObjectAttributes@2, TitleIndex@3, Class@4, Options@5, Disposition@6) */
+    return aret_ntreg_create(WU(2), WU(0), WU(6));
+}
+uint32_t aret_NtOpenKey(uint32_t esp) {
+    /* (KeyHandle@0, DesiredAccess@1, ObjectAttributes@2) */
+    return aret_ntreg_open(WU(2), WU(0));
+}
+uint32_t aret_NtSetValueKey(uint32_t esp) {
+    /* (KeyHandle@0, ValueName@1, TitleIndex@2, Type@3, Data@4, DataSize@5) */
+    return aret_ntreg_setval(WU(0), WU(1), WU(3), WU(4), WU(5));
+}
+uint32_t aret_NtQueryValueKey(uint32_t esp) {
+    /* (KeyHandle@0, ValueName@1, InfoClass@2, Info@3, Length@4, ResultLength@5) */
+    return aret_ntreg_queryval(WU(0), WU(1), WU(2), WU(3), WU(4), WU(5));
+}
+uint32_t aret_NtDeleteValueKey(uint32_t esp) {
+    /* (KeyHandle@0, ValueName@1) */
+    return aret_ntreg_delval(WU(0), WU(1));
 }
 /* NtClose is generic (keys/files/events). A file fd we opened via the Nt* file layer is really
  * closed (and its pending delete-on-close honored) by aret_ntfile_close; a registry key / event /

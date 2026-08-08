@@ -6873,5 +6873,24 @@ Détail : **70 §6** (roadmap). Résumé :
   le fixture `win32_ntvm` prouve le **contrat** (statut, RegionSize arrondi, zéro-init, relecture, free) sans imprimer la
   base. Bit-identique Wine.
 - **Reste tranche 4** : `NtQuerySystemInformation`/`NtQueryPerformanceCounter` (largement environnementaux — contrat à
-  isoler du non-comparable), `NtQueryInformationProcess`/`Thread` — au besoin mesuré. Puis tranches 5 (real-ABI dans
-  `wine_heavy`), 6 (`version.c`).
+  isoler du non-comparable), `NtQueryInformationProcess`/`Thread` — au besoin mesuré.
+
+### 2026-08-07 — [I13][INFRA][LOURD] **Plancher Nt\* tranche 5 — REAL-ABI registre : un `.c` de Wine COMPILÉ appelant `NtCreateKey`/… route sur `g_reg`, prouvé bit-identique Wine**
+
+- **Le pont vers « DLL user-mode entières »** : un fichier ntdll de Wine **compilé** appelle les syscalls registre en
+  **vraie ABI NTAPI** (stdcall, args réels), pas via l'IAT. On expose donc le **cœur logique** des Nt\* registre en
+  fonctions liables.
+- **(a) Cœurs real-ABI exposés** (`aret_win32.c`) : `aret_ntreg_create`/`open`/`setval`/`queryval`/`delval` = **le même
+  code `g_reg`** que les shims esp, désstaticisés (args = adresses 32-bit dans l'espace partagé, donc pointeur-pile-émulée
+  ≡ pointeur-réel-compilé). Les shims esp `aret_NtCreateKey`/… deviennent de **minces unpackers** au-dessus (source
+  unique). **Behavior-preserving** : `win32_ntreg` vert, hash **inchangé**.
+- **(b) Wrappers NTAPI dans le plancher** : `wine_heavy/ntdll_ntreg.c` (fichier **séparé** de `ntdll_floor.c` ⇒ les
+  preuves rtlstr ne changent pas) — `NtCreateKey`/`NtOpenKey`/`NtSetValueKey`/`NtQueryValueKey`/`NtDeleteValueKey`/
+  `NtClose` en NTAPI, chacun `AA(ptr)`→cast→`aret_ntreg_*`. Production : le builder les résoudra depuis `aret_win32.c`.
+- **(c) Preuve autonome** (`proof_ntreg.sh` + `proof_ntreg_driver.c`, **sans réseau**) : un driver appelant les Nt\*
+  registre en vraie ABI, lié (**ours**) au wrapper plancher + un **registre en mémoire de référence** vs (**oracle**) le
+  vrai ntdll de Wine ⇒ **bit-identique** (create/disp, set, query type/len/val, buffer-overflow+ResultLength, reopen).
+  Prouve que les wrappers implémentent correctement l'ABI registre NT (stdcall/ordre d'args/layouts) ; la justesse du
+  cœur `g_reg` lui-même est prouvée par `win32_ntreg` (mêmes cœurs partagés).
+- **Reste** : **tranche 6** = câbler `ntdll_ntreg.c` en **production** (builder) + un vrai fichier ntdll de Wine
+  (`version.c`) comme premier driver bout-en-bout non-chaîne. Étendre les cœurs real-ABI aux Nt\* **fichier** au besoin.

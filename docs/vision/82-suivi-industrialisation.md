@@ -181,8 +181,11 @@ Trois **couches** (branchement → comportement), et pour le comportement trois 
    `MEM_COMMIT` zéro-init), `*RegionSize` arrondi page 4096, `STATUS_SUCCESS` ; adresse non-déterministe ⇒ contrat testé
    (`win32_ntvm`), pas l'adresse. **Reste** : `NtQuerySystemInformation`, `NtQueryPerformanceCounter`,
    `NtQueryInformationProcess`/`Thread`… **piloté par la mesure** (`--mode walls`/besoin d'un driver), pas spéculatif.
-5. **Variante real-ABI dans le plancher** 🔜 : exposer le cœur logique de chaque `Nt*` en fonction NTAPI liable, ajoutée à
-   `wine_heavy` (comme les conversions `aret_cp1252_*`), pour que `rtlstr.c`+`version.c`+… **compilés** appellent ces `Nt*`.
+5. **Variante real-ABI dans le plancher** 🚧 — **registre ✅ FAIT (2026-08-07)** : cœurs `aret_ntreg_*` exposés
+   (`aret_win32.c`, mêmes que les shims esp, behavior-preserving/hash inchangé) + wrappers NTAPI `wine_heavy/ntdll_ntreg.c`
+   (fichier séparé) + **preuve autonome sans réseau** (`proof_ntreg.sh` : driver real-ABI + registre de référence ==
+   vrai ntdll Wine, bit-identique). Prêt à câbler en production (tranche 6). **Reste** : cœurs real-ABI Nt\* **fichier** au
+   besoin.
 6. **Driver de bout en bout** 🔜 : **`version.c`** de ntdll (lit le registre → version OS) vendoré + adaptateurs + fixture,
    **bit-identique Wine** = première **DLL-source Wine entière non-chaîne** en production. Puis d'autres fichiers, puis DLL.
 
