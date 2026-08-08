@@ -45,6 +45,11 @@ const NTDLL_C: &str = include_str!("../../runtime/aret_ntdll.c");
 /// binary; the Rtl* bodies are only reached when the program imports them.
 const WINE_RTLSTR_C: &str = include_str!("../../runtime/wine_heavy/rtlstr.c");
 const WINE_FLOOR_C: &str = include_str!("../../runtime/wine_heavy/ntdll_floor.c");
+/// Real-ABI Nt* registry floor (doc 82 tranche 5/6): NTAPI wrappers routing a COMPILED Wine ntdll
+/// .c's registry syscalls to the shared aret_ntreg_* cores (aret_win32.c). Compiled + linked with
+/// the heavy floor below; its bare Nt* symbols serve compiled Wine code (a PE's own imports still
+/// route to the aret_* esp shims, a different symbol set).
+const WINE_NTREG_C: &str = include_str!("../../runtime/wine_heavy/ntdll_ntreg.c");
 const WINE_NT_TYPES_H: &str = include_str!("../../runtime/wine_heavy/native/nt_types.h");
 const WINE_FLOOR_H: &str = include_str!("../../runtime/wine_heavy/native/ntdll_floor.h");
 const WINE_DEBUG_H: &str = include_str!("../../runtime/wine_heavy/native/wine/debug.h");
@@ -1352,6 +1357,7 @@ pub fn transpile(
         std::fs::create_dir_all(wh.join("native/ddk"))?;
         std::fs::write(wh.join("rtlstr.c"), WINE_RTLSTR_C)?;
         std::fs::write(wh.join("ntdll_floor.c"), WINE_FLOOR_C)?;
+        std::fs::write(wh.join("ntdll_ntreg.c"), WINE_NTREG_C)?;
         std::fs::write(wh.join("native/nt_types.h"), WINE_NT_TYPES_H)?;
         std::fs::write(wh.join("native/ntdll_floor.h"), WINE_FLOOR_H)?;
         std::fs::write(wh.join("native/wine/debug.h"), WINE_DEBUG_H)?;
@@ -1696,7 +1702,7 @@ pub fn transpile(
     // tools/wine_heavy/proof_native.sh; the aret_Rtl* adapters (aret_ntdll.c) route imports here.
     if !wasm && bits == 32 {
         let shim = out_dir.join("wine_heavy/native");
-        for stem in ["rtlstr", "ntdll_floor"] {
+        for stem in ["rtlstr", "ntdll_floor", "ntdll_ntreg"] {
             let src = out_dir.join(format!("wine_heavy/{stem}.c"));
             let obj = out_dir.join(format!("wine_{stem}.o"));
             let out = Command::new(&cc)

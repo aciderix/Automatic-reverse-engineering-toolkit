@@ -6894,3 +6894,20 @@ Détail : **70 §6** (roadmap). Résumé :
   cœur `g_reg` lui-même est prouvée par `win32_ntreg` (mêmes cœurs partagés).
 - **Reste** : **tranche 6** = câbler `ntdll_ntreg.c` en **production** (builder) + un vrai fichier ntdll de Wine
   (`version.c`) comme premier driver bout-en-bout non-chaîne. Étendre les cœurs real-ABI aux Nt\* **fichier** au besoin.
+
+### 2026-08-07 — [I13][INFRA][BUILDER][LOURD] **Tranche 6 (début) — `ntdll_ntreg.c` CÂBLÉ EN PRODUCTION + preuve NATIVE : le plancher registre real-ABI compile et tourne sous `cc` natif (ELF autonome)**
+
+- **Câblage builder** (`src/builder/mod.rs`) : `WINE_NTREG_C = include_str!(ntdll_ntreg.c)`, écrit sous
+  `out_dir/wine_heavy/`, ajouté à la **boucle heavy-form** (`for stem in ["rtlstr","ntdll_floor","ntdll_ntreg"]`) →
+  compilé `-m32 -fshort-wchar -O0 -fno-pie -D__WINESRC__` et lié dans **tout build natif 32-bit**. Ses symboles `Nt*`
+  **nus** servent le code Wine **compilé** ; les imports d'un PE continuent de router vers les shims `aret_*` (jeu de
+  symboles distinct) → **aucun conflit** (vérifié : `win32_ntreg` build+run OK avec `ntreg.o` lié, winediff complet vert).
+  Les cœurs `aret_ntreg_*` sont résolus depuis `aret_win32.c`.
+- **Preuve NATIVE** (`proof_ntreg_native.sh` + `.c`, parité avec `proof_native.sh` de rtlstr) : `ntdll_ntreg.c` compilé
+  par **`cc` natif** (Linux/glibc, `-fshort-wchar` pour un `WCHAR` 16-bit) + driver + registre de référence → **ELF
+  autonome**, exécuté **sans Wine au runtime**, sortie **bit-identique** aux valeurs Wine connues (create/disp, set,
+  query type/len/val, buffer-overflow, reopen). Prouve le plancher registre real-ABI dans **le modèle de build réel
+  d'ARET** — le chemin exact que le builder câble désormais.
+- **Reste tranche 6** : un **vrai fichier ntdll de Wine** qui **consomme** le registre en interne (ex. `RtlOpenCurrentUser`/
+  `RtlQueryRegistryValues`) vendoré + adaptateur esp + fixture PE ⇒ premier bout-en-bout où un PE atteint la logique Wine
+  **compilée** qui appelle le plancher `Nt*`. (`version.c` seul lit peu le registre ; choisir le fichier par la mesure.)

@@ -186,8 +186,13 @@ Trois **couches** (branchement → comportement), et pour le comportement trois 
    (fichier séparé) + **preuve autonome sans réseau** (`proof_ntreg.sh` : driver real-ABI + registre de référence ==
    vrai ntdll Wine, bit-identique). Prêt à câbler en production (tranche 6). **Reste** : cœurs real-ABI Nt\* **fichier** au
    besoin.
-6. **Driver de bout en bout** 🔜 : **`version.c`** de ntdll (lit le registre → version OS) vendoré + adaptateurs + fixture,
-   **bit-identique Wine** = première **DLL-source Wine entière non-chaîne** en production. Puis d'autres fichiers, puis DLL.
+6. **Driver de bout en bout** 🚧 — **câblage builder ✅ FAIT (2026-08-07)** : `ntdll_ntreg.c` est `include_str!` + écrit
+   + compilé/lié dans **tout build natif 32-bit** (boucle heavy-form `rtlstr`/`ntdll_floor`/`ntdll_ntreg`), cœurs
+   `aret_ntreg_*` résolus depuis `aret_win32.c` ; **aucun conflit** de symboles (imports PE → shims `aret_*` ; code Wine
+   compilé → `Nt*` nus). **Preuve NATIVE** (`proof_ntreg_native.sh`) : plancher registre real-ABI compilé par `cc` natif,
+   ELF autonome sans Wine, bit-identique aux valeurs Wine. **Reste** : un **vrai fichier ntdll de Wine** consommant le
+   registre en interne (`RtlOpenCurrentUser`/`RtlQueryRegistryValues`, choisi par la mesure) vendoré + adaptateur esp +
+   fixture PE = premier bout-en-bout non-chaîne. Puis d'autres fichiers, puis DLL.
 
 **Invariants** : registre/état vide ⇒ prouver en round-trip ; jamais une valeur système devinée ; hash inchangé (additif) ;
 `@N` Nt\* déjà dans `stdcall_pops` (audit) ; chaque tranche = fixture winediff + entrée 71 + maj ici.
