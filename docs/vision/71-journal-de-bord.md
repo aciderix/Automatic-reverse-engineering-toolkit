@@ -6843,5 +6843,14 @@ Détail : **70 §6** (roadmap). Résumé :
   comparées, comme `LastWriteTime` du registre) et le **short-name 8.3 généré** (`LONG~R5S.DAT`, hashé par Wine, non
   modélisé ⇒ `ShortNameLength=0` = état « 8.3 désactivé » valide/sound). Le fixture n'emploie que des noms 8.3 (short=0
   des deux côtés). Empaquetage multi-entrée identique (fixe 94 au lieu de 12). `win32_ntdir` étendu, bit-identique Wine.
-- **Reste tranche 3** : patterns glob génériques de `NtQueryDirectoryFile`, `NtDeviceIoControlFile` — au besoin mesuré.
-  Puis tranches 4 (divers `Nt*`), 5 (variante real-ABI dans `wine_heavy`), 6 (driver `version.c`).
+- **⭐ Patterns glob de `NtQueryDirectoryFile` — LIMITE DURE mesurée (§0/§8), pas un trou** : la sonde a révélé que
+  `*.txt` **matche `a.txtx`** sous Wine. Cause **mesurée** : `RtlIsNameInExpression` matche le pattern contre **le nom
+  long ET le short-name 8.3 généré** (`a.txtx` → `A~1.TXT` matche `*.txt`), et ce short-name est la **valeur
+  environnementale hashée par Wine** qu'on ne modélise pas (cf. `FileBothDir`). ⇒ un glob générique **ne peut PAS** être
+  bit-identique Wine. **Réponse sound** (déjà en place, message clarifié) : on modélise seulement les patterns
+  **match-ALL** — NULL, `"*"`, **et `"*.*"` ajouté** (mesuré ≡ `"*"`, tous les noms y compris sans point, indépendant des
+  short-names) — bit-identiques ; **tout autre pattern = `aret_partial`** (abort défini, jamais une liste qui diffère en
+  silence de Wine). `win32_ntdir` teste `"*.*"`. C'est un **résultat négatif utile** consigné, pas une lacune à combler
+  par un matcher long-name-only (qui manquerait les matches par short-name → sortie fausse).
+- **Reste tranche 3** : `NtDeviceIoControlFile` — au besoin mesuré. Puis tranches 4 (divers `Nt*`), 5 (variante real-ABI
+  dans `wine_heavy`), 6 (driver `version.c`).

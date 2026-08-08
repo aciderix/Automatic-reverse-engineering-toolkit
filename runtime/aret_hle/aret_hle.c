@@ -1386,11 +1386,19 @@ uint32_t aret_NtQueryDirectoryFile(uint32_t esp) {
     if (cls != 12 && cls != 3) { aret_partial("NtQueryDirectoryFile: only FileNames/FileBothDirectoryInformation modelled"); return NT_ST_INVALID_PARAMETER; }
     uint32_t fixed = (cls == 12) ? 12u : 94u;               /* fixed header before FileName */
     uint32_t ppat = arg(esp, 9);
-    if (ppat) {                                            /* accept NULL or "*" only */
+    if (ppat) {
+        /* Only the match-ALL patterns are modelled: NULL, "*", "*.*" (all measured == every entry,
+         * independent of short names). A GENERIC glob (e.g. "*.txt") CANNOT be reproduced bit-
+         * identically: Wine's RtlIsNameInExpression matches against BOTH the long name AND the
+         * generated 8.3 SHORT name (measured: "*.txt" matches "a.txtx" via its short name "A~1.TXT"),
+         * and that short name is the environmental Wine-hashed value we do not model. So a real
+         * pattern aborts soundly rather than return a listing that silently differs from Wine. */
         uint16_t pl = *(const uint16_t *)(uintptr_t)ppat;
         const uint16_t *pw = (const uint16_t *)(uintptr_t)*(const uint32_t *)(uintptr_t)(ppat + 4);
-        int match_all = (pl == 0) || (pw && pl == 2 && (pw[0] & 0xFF) == '*');
-        if (!match_all) { aret_partial("NtQueryDirectoryFile: only NULL/'*' search pattern modelled"); return NT_ST_INVALID_PARAMETER; }
+        int match_all = (pl == 0)
+            || (pw && pl == 2 && (pw[0] & 0xFF) == '*')                                      /* "*"   */
+            || (pw && pl == 6 && (pw[0] & 0xFF) == '*' && (pw[1] & 0xFF) == '.' && (pw[2] & 0xFF) == '*'); /* "*.*" */
+        if (!match_all) { aret_partial("NtQueryDirectoryFile: only NULL/'*'/'*.*' (match-all) modelled; a generic glob depends on Wine's environmental 8.3 short name"); return NT_ST_INVALID_PARAMETER; }
     }
     int s = u32_ntfile_slot(fd);
     if (s < 0) { u32_iosb_set(piosb, NT_ST_INVALID_HANDLE, 0); return NT_ST_INVALID_HANDLE; }

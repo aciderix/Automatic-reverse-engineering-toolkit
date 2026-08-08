@@ -88,6 +88,23 @@ int main(void){
     }
     NtClose(h);
 
+    /* "*.*" is the canonical DOS match-all pattern (measured == "*", every entry incl. dot-less
+     * names) -- modelled bit-identically; a generic glob (e.g. "*.txt") is not (it depends on the
+     * environmental 8.3 short name), so it is a sound abort, not tested here. */
+    h=opendir_nt(); restart=TRUE; i=0;
+    WCHAR dotw[]=L"*.*"; UNICODE_STRING dot; RtlInitUnicodeString(&dot,dotw);
+    for(;;){
+        memset(buf,0,sizeof buf);
+        NTSTATUS ds=NtQueryDirectoryFile(h,NULL,NULL,NULL,&io,buf,sizeof buf,12,TRUE,&dot,restart);
+        restart=FALSE;
+        if(ds){ printf("star[%d] s=0x%08lX\n",i,(unsigned long)ds); break; }
+        ULONG nlen=*(ULONG*)(buf+8);
+        printf("star[%d] name=",i);
+        for(ULONG j=0;j<nlen/2;j++) putchar((char)*(WCHAR*)(buf+12+2*j));
+        putchar('\n'); i++; if(i>20) break;
+    }
+    NtClose(h);
+
     DeleteFileA("C:\\aret_ntdir\\zeta.bin");
     DeleteFileA("C:\\aret_ntdir\\beta.bin");
     DeleteFileA("C:\\aret_ntdir\\mu.bin");

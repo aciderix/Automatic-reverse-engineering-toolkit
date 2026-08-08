@@ -171,8 +171,10 @@ Trois **couches** (branchement → comportement), et pour le comportement trois 
    `STATUS_NO_MORE_FILES`, pattern NULL/`"*"` (autre = `aret_partial`). **+ `FileBothDirectoryInformation`(3)** (classe de
    `FindFirstFile`) : attr/EOF/AllocationSize/EaSize/nom déterministes (EOF/Alloc = 0 pour un répertoire, quirk Wine
    mesuré) ; dates env. remplies depuis `stat` mais exclues du fixture ; short-name 8.3 non modélisé (`ShortNameLength=0`,
-   sound). Round-trip bit-identique Wine (`winecorpus/win32_ntfile`, `win32_ntdir`, `win32_ntreg` non régressé). **Reste** :
-   patterns glob génériques, `NtDeviceIoControlFile` — au besoin mesuré.
+   sound). Patterns : NULL/`"*"`/`"*.*"` (match-all) bit-identiques ; **glob générique = LIMITE DURE** (Wine matche contre
+   le short-name 8.3 environnemental — `*.txt` matche `a.txtx` via `A~1.TXT`) ⇒ `aret_partial` sound, consigné. Round-trip
+   bit-identique Wine (`winecorpus/win32_ntfile`, `win32_ntdir`, `win32_ntreg` non régressé). **Reste** :
+   `NtDeviceIoControlFile` — au besoin mesuré.
 4. **Divers à la demande** 🔜 : `NtQuerySystemInformation`, `NtQueryPerformanceCounter`, `NtDelayExecution` (≈Sleep, fibers),
    `NtQueryInformationProcess`/`Thread`, `NtAllocateVirtualMemory` (≈VirtualAlloc), `NtProtectVirtualMemory`… **piloté par la
    mesure** (`--mode walls`/besoin d'un driver), pas spéculatif.
