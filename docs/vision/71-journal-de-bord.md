@@ -7120,3 +7120,18 @@ Détail : **70 §6** (roadmap). Résumé :
   lift-correctness vers la surface API** — nouveau mur = **`wcspbrk` non implémenté** (import CRT manquant ⇒ **abort sound**
   §0, pas un bug de lift). ⇒ le fix a transformé un bug de justesse profond en un simple **shim manquant** (prochain
   incrément data-driven). C'est le résultat visé : **un correctif de lift GÉNÉRAL** débloque WinMerge et la classe.
+
+### 2026-08-08 — [I5][HLE-CRT] **Trio wide-string `wcspbrk`/`wcsspn`/`wcscspn` (16-bit) — comble le trou de la famille wide CRT (mur WinMerge post-fix), bit-identique Wine**
+
+- **Suite directe du fix de récupération** : WinMerge, une fois le null-deref `0x10` levé, avançait jusqu'à un **abort sound
+  sur `wcspbrk`** (import CRT non modélisé). On comble le **trio de balayage** manquant de la famille wide-string déjà en
+  place (`wcschr`/`wcsstr`/`wcslen`/…) : `wcspbrk` (1er char de `s` présent dans `accept`), `wcsspn`/`wcscspn` (longueur du
+  préfixe fait uniquement de chars **dans**/**hors** de l'ensemble). Sémantique C standard, **16-bit** (WCHAR Windows),
+  ordinal (locale C) — `aret_crt.c`, via `u32_wcs_in`. **Réponse à la question « industrialisation ? »** : la *tuyauterie*
+  (signature/`@N`) est auto-générable mais quasi nulle ici (CRT **cdecl**, `@N`=0) ; le *corps* n'est jamais deviné (§0) —
+  donc **shim à la main trivial**, mais fait **en FAMILLE** (méthode `Path*`/`Str*`) plutôt qu'un-par-mur : grille de mesure
+  vs Wine couvrant hit/miss, ensemble vide, appartenance à la frontière.
+- **Fixture** `winecorpus/crt_wcsscan.c` : 12 cas (pbrk `ol`/`wz`/none/empty, spn abc/all/none/empty, cspn XYZ/none/first/
+  empty) — **bit-identique Wine**. mingw importe les trois de **msvcrt par ordinal** (1149/1158/1161) ⇒ testable (pas inliné).
+- **Portes** : `crt_wcsscan` bit-identique ; hash **`19acad982194bf07` inchangé** (ajout runtime pur, additif) ; stdcall_audit
+  PASS. **Rebuild WinMerge** : mur `wcspbrk` franchi (mur suivant consigné en suivi).

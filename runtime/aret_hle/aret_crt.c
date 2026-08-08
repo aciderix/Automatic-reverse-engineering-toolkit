@@ -1142,6 +1142,34 @@ uint32_t aret_wcsstr(uint32_t esp) {
     }
     return 0;
 }
+/* Wide scanning trio (`<wchar.h>`, 16-bit code units, ordinal like msvcrt). Same
+ * standard semantics as their narrow twins: `wcspbrk` returns a pointer to the first
+ * char of `s` that occurs in `accept` (NULL if none); `wcsspn`/`wcscspn` return the
+ * length of the initial run of `s` made only of chars that are in / not in `set`. */
+static int u32_wcs_in(uint16_t c, const uint16_t *set) {
+    for (; *set; set++) if (*set == c) return 1;
+    return 0;
+}
+uint32_t aret_wcspbrk(uint32_t esp) {
+    const uint16_t *s = (const uint16_t *)(uintptr_t)a32(esp, 0);
+    const uint16_t *a = (const uint16_t *)(uintptr_t)a32(esp, 1);
+    for (; *s; s++) if (u32_wcs_in(*s, a)) return (uint32_t)(uintptr_t)s;
+    return 0;
+}
+uint32_t aret_wcsspn(uint32_t esp) {
+    const uint16_t *s = (const uint16_t *)(uintptr_t)a32(esp, 0);
+    const uint16_t *a = (const uint16_t *)(uintptr_t)a32(esp, 1);
+    uint32_t n = 0;
+    while (s[n] && u32_wcs_in(s[n], a)) n++;
+    return n;
+}
+uint32_t aret_wcscspn(uint32_t esp) {
+    const uint16_t *s = (const uint16_t *)(uintptr_t)a32(esp, 0);
+    const uint16_t *r = (const uint16_t *)(uintptr_t)a32(esp, 1);
+    uint32_t n = 0;
+    while (s[n] && !u32_wcs_in(s[n], r)) n++;
+    return n;
+}
 /* Wide numeric parse (wcstol/wcstoul): copy the low byte of each 16-bit unit into a
  * narrow buffer (numeric text is ASCII), parse with the host strtol/strtoul, then map
  * the end pointer back to the original wide string (1 code unit == 1 narrow char). */
