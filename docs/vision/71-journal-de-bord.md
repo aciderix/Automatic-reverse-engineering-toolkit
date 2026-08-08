@@ -7088,3 +7088,35 @@ Détail : **70 §6** (roadmap). Résumé :
   `Const` depuis un eax non-constant) et de **rebuild WinMerge** (boucle ~10 min/itération) — sous-investigation *interne
   au compilateur*, distincte de la mesure boîte-noire (épuisée ici). **Acquis livré** : la mesure demandée est complète et
   la cause **cernée** (opt/SSA global, une classe rare) ; les 6 pistes mortes sont documentées pour la session dédiée.
+
+### 2026-08-08 — [I5][LIFT][RECOV] **✅ WinMerge `0x10` RÉSOLU — cause GÉNÉRALE : une fonction dont l'épilogue `ret` est ADRESSE-PRISE se faisait tronquer son propre retour → `return 0`**
+
+- **Aboutissement de la mesure** (docs 71 des 2026-08-02/08). Le mur `0xC0000005 at 0x10` de WinMerge/MFC90 = un ctor C++ MSVC
+  lifté (`sub_470022`) qui retourne **0 au lieu de `this`** ⇒ `p->membre = new T()` stocke NULL ⇒ deref `[null+0x10]`.
+- **Root-cause à l'instruction (instrumentation de l'opt + de la récupération, puis reproducteur minimal)**. Le ctor finit
+  par `… ; mov eax,this ; call _EH_epilog3 ; ret`. Son **`ret` d'épilogue isolé a son adresse prise** (table EH/vtable), donc
+  la récupération l'a promu **fonction bare-`ret` autonome**. Cette adresse devient alors une **frontière tronquante** :
+  `collect_function` s'arrête **avant** le `ret` du ctor ⇒ le bloc `call _EH_epilog3` a une chute (fall-through) **absente de
+  la fonction** ⇒ `build_ir` ne produit **aucun terminateur `Return`** ⇒ `emit` synthétise un **`return 0` de repli** qui
+  **jette le `this` déjà en eax**. **Ce n'est PAS** un bug d'opt (le `Return`=`Read(eax)` de `build.rs` n'a jamais été créé),
+  ni un `_EH_epilog3` fautif (il préserve eax) — c'est une **troncature de récupération**. `_EH_epilog3` n'est pas noreturn.
+- **6 hypothèses éliminées d'abord** (store mal dirigé, re-zéro, `_EH_epilog3` générique, motif isolé, établissement inliné,
+  ecx indéfini) — cf. entrée précédente. La cause n'était visible **ni** dans le C par-fonction **ni** en boîte noire : il a
+  fallu instrumenter `opt::optimize` (le `Return` est `Const(0)` **avant** l'opt) puis `build_ir` (bloc `term=Call`,
+  `succ=[0x470042]` **absent** de `func.blocks`, `epilog noreturn=false`).
+- **Fix GÉNÉRAL** (`analysis/mod.rs`, `build_function`) : après `collect_function`, pour tout `call` dont la chute est une
+  **frontière** décodant en un **`ret`/`ret N` isolé** (`Flow::Return`), **réabsorber** cette unique instruction dans la
+  fonction. **Sound** — c'est exactement ce que le matériel exécute après le retour de l'appel ; le stub bare-`ret` garde sa
+  propre récupération (chevauchement d'un octet, inoffensif) pour son usage adresse-prise. **Additif** : ne se déclenche que
+  quand la chute d'un `call` est **absente** de la fonction (cas pathologique de troncature) ⇒ **hash inchangé**.
+- **Reproducteur → fixture** `winecorpus/recov_epilog_ret.{c,def}` : ctor thiscall en asm (mingw n'émet pas `_EH_prolog3`/
+  `_EH_epilog3`) qui **prend l'adresse de son propre `ret` d'épilogue** (déclenche le bare-ret-stub) + `.def` forçant
+  `_except_handler3` (SEH-establish actif). **Avant le fix : `probe=0x0` (BUG) ; après : `probe=0x1234`, bit-identique
+  Wine.** C'est la classe entière des **ctors/dtors C++ MSVC sous EH dont l'épilogue `ret` est référencé par une table**.
+- **Portes** : `recov_epilog_ret` bit-identique Wine ; **hash `19acad982194bf07` inchangé** ; difftest **272/272** ;
+  stdcall_audit PASS ; **funcdiff 0 divergence** (21 859 scorées) ; winediff complet.
+- **✅ WinMerge dépasse le `0x10`** (rebuild mfc90u/shell32/mlang) : le null-deref **ne se reproduit plus** (l'objet
+  `0x51efd0` est désormais **non-null**, le ctor rend `this`), MFC s'initialise plus loin, et le driver **bascule du
+  lift-correctness vers la surface API** — nouveau mur = **`wcspbrk` non implémenté** (import CRT manquant ⇒ **abort sound**
+  §0, pas un bug de lift). ⇒ le fix a transformé un bug de justesse profond en un simple **shim manquant** (prochain
+  incrément data-driven). C'est le résultat visé : **un correctif de lift GÉNÉRAL** débloque WinMerge et la classe.

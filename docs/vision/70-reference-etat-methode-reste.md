@@ -225,7 +225,7 @@ sert désormais de **détecteur** : un warm build qui ne réutilise pas ~tout si
 
 ### État régression (référence — doit rester vert)
 difftest **272/272** · transpile-diff **4/4** (H=`19acad982194bf07`) · winediff
-**227/229** (2 rouges connus, orthogonaux au code : `gdi_uifont` **environnemental** fontconfig i386 ; `ole_mlang`
+**228/230** (2 rouges connus, orthogonaux au code : `gdi_uifont` **environnemental** fontconfig i386 ; `ole_mlang`
 **flake** oracle Wine-COM sous Xvfb concurrent — passe seul) · **heavy-form 5 preuves** (`proof.sh`/`proof_native.sh` rtlstr,
 `proof_ntreg.sh`/`proof_ntreg_native.sh` registre real-ABI, **`proof_reg_native.sh` = `reg.c` de Wine ENTIER**) · **ehdiff 6/6** (SEH `seh_except`
 + C++ `throw_catch`/`throw_dtor`/`throw_across`/`throw_byval`/`throw_static` — throw/catch, destructeur d'unwind, multi-frames, catch-by-value, CRT statique — bit-identiques Wine) · cpudiff vert (per-instruction + séquences génératives) · funcdiff corpus **0 divergence** (lift **~20,6k** scorées /
@@ -431,6 +431,15 @@ recompilabilité **100 %** · WASM **7/7**.
   finissant à `addr` — cassait `0x405f22`). Ne peut pas tronquer (rien ne franchit un terminateur). Mur mesuré dominant
   sur le corpus MSVC 1997 (avance slidelib/DEMO32/itiem95) ; **+89 fonctions récupérées dans busybox/sqlite** (funcdiff
   20501→20590, 0 div ; l'extension `0xC3` : slidelib 103→111 fn, régression complète verte).
+- **Épilogue `ret` adresse-pris = ne PAS tronquer le retour de la fonction** (2026-08-08, bug **général**, driver WinMerge/MFC90) :
+  un `ret` isolé qui est l'**épilogue** d'une fonction (`… ; mov eax,this ; call _EH_epilog3 ; ret`) mais dont l'**adresse est prise**
+  (table EH/vtable) était récupéré comme **fonction bare-`ret` autonome** → son adresse devenait une **frontière tronquante** →
+  `collect_function` s'arrêtait **avant** le `ret` de la fonction → le bloc `call` avait une chute **absente** → `build_ir` sans
+  `Return` → `emit` mettait un **`return 0` de repli** qui **jetait la valeur en eax** (le `return this` d'un ctor MSVC ⇒ null-deref
+  aval). Fix (`analysis::build_function`) : réabsorber un `ret`/`ret N` **isolé** à la chute d'un `call` quand cette chute est une
+  frontière (`Flow::Return` en `global`). **Sound** (c'est l'instruction exécutée après le retour de l'appel), **additif** (ne se
+  déclenche que sur la chute d'un `call` **absente** de la fonction ⇒ **hash inchangé**, difftest 272/272, funcdiff 0 div). Débloque
+  la classe des ctors/dtors C++ MSVC sous EH à `ret` d'épilogue tabulé. Gardé `winecorpus/recov_epilog_ret.{c,def}` (bit-identique Wine).
 - **FLIRT** : opérandes **relocalisés wildcardés** (`.reloc`) ; **thunks jamais
   signaturés** (résolus structurellement) ; glue reconnue = `looks_like_func_start`.
   ⚠️ FLIRT est **cosmétique** pour nos cibles (reconnaît du code de biblio, pas le

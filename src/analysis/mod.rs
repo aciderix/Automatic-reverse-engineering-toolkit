@@ -1948,6 +1948,29 @@ fn build_function(
         }
     }
 
+    // A tail `call <helper>; ret` whose lone `ret` was independently recovered as a
+    // bare-`ret` stub (its address is taken elsewhere — e.g. an EH/vtable table)
+    // turns that `ret`'s address into a truncating boundary: `collect_function`
+    // stops *before* this function's own epilogue. The `call` block is then left
+    // with a fall-through that is absent from the function, `build_ir` finds no
+    // `Return` terminator, and `emit` synthesises a fallback `return 0` — silently
+    // dropping a value the function had already placed in eax (an MSVC constructor's
+    // `return this`, set right before `call _EH_epilog3`). Pull such a lone epilogue
+    // `ret`/`ret N` back in: for a `call` whose fall-through is a boundary that
+    // decodes to a single `Return`, absorb that one instruction. Sound — it is
+    // exactly what the hardware executes after the call returns; the bare-`ret` stub
+    // keeps its own (harmless, one-byte) recovery for its address-taken use.
+    let stolen_epilogues: Vec<u64> = insns
+        .values()
+        .filter(|i| i.flow == Flow::Call)
+        .map(|i| i.next_addr())
+        .filter(|ft| !insns.contains_key(ft) && boundary.contains(ft))
+        .filter(|ft| matches!(global.get(ft), Some(ri) if ri.flow == Flow::Return))
+        .collect();
+    for ft in stolen_epilogues {
+        insns.insert(ft, global[&ft].clone());
+    }
+
     let mut callees = BTreeSet::new();
     for insn in insns.values() {
         if insn.flow == Flow::Call {
