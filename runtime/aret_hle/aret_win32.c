@@ -1482,6 +1482,20 @@ uint32_t aret_SleepEx(uint32_t esp) {
     if (!aret_fiber_sleep(ms)) usleep((useconds_t)ms * 1000u);
     return 0;
 }
+/* NtDelayExecution(Alertable, DelayInterval) -- the ntdll syscall Sleep bottoms out on. The
+ * interval is a LARGE_INTEGER in 100 ns units; a NEGATIVE value is a relative delay, so
+ * |value|/10000 = ms, routed to the same fiber sleep as Sleep. No APC/alert modelled -> returns
+ * STATUS_SUCCESS like SleepEx (measured Wine). A positive (absolute) interval is a rare unmodelled
+ * sub-case -> aret_partial (defined, not guessed). */
+uint32_t aret_NtDelayExecution(uint32_t esp) {
+    uint32_t pdi = WU(1);
+    if (!pdi) return 0;                                  /* NULL interval: nothing to wait on */
+    int64_t iv = *(const int64_t *)(uintptr_t)pdi;
+    if (iv > 0) { aret_partial("NtDelayExecution: absolute (positive) interval not modelled"); return 0; }
+    uint32_t ms = (uint32_t)((-iv) / 10000);             /* 100 ns ticks -> ms */
+    if (!aret_fiber_sleep(ms)) usleep((useconds_t)ms * 1000u);
+    return 0;                                            /* STATUS_SUCCESS */
+}
 /* Wide (16-bit) directory helpers — widen the narrow results (consistent with the A
  * versions; paths are ASCII). */
 static uint32_t u32_fill_pathw(uint32_t esp, const char *path) {

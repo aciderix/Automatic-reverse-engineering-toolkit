@@ -6852,5 +6852,20 @@ Détail : **70 §6** (roadmap). Résumé :
   short-names) — bit-identiques ; **tout autre pattern = `aret_partial`** (abort défini, jamais une liste qui diffère en
   silence de Wine). `win32_ntdir` teste `"*.*"`. C'est un **résultat négatif utile** consigné, pas une lacune à combler
   par un matcher long-name-only (qui manquerait les matches par short-name → sortie fausse).
-- **Reste tranche 3** : `NtDeviceIoControlFile` — au besoin mesuré. Puis tranches 4 (divers `Nt*`), 5 (variante real-ABI
-  dans `wine_heavy`), 6 (driver `version.c`).
+- **Reste tranche 3** : `NtDeviceIoControlFile` = catch-all par code IOCTL (chaque code = mini-API) ⇒ **rien à
+  implémenter spéculativement** (violerait « piloté par la mesure ») ; un import non fourni **aborte déjà proprement**
+  (`aret_unimpl`) jusqu'à ce qu'un driver mesuré exige un IOCTL précis. Sound par défaut.
+
+### 2026-08-07 — [I13][HLE-WIN32][LOURD] **Plancher Nt\* tranche 4 (divers) — `NtDelayExecution` (≈ `Sleep`), bit-identique Wine**
+
+- **Le syscall sur lequel `Sleep` bute** : `NtDelayExecution(Alertable, DelayInterval*)`, intervalle en unités **100 ns**,
+  **négatif = délai relatif** ⇒ `|valeur|/10000` = ms, routé sur le **même `aret_fiber_sleep`** que `Sleep` (horloge
+  virtuelle déterministe des fibers). Pas d'APC/alerte ⇒ **`STATUS_SUCCESS`** (mesuré Wine, comme `SleepEx`). Intervalle
+  **positif (absolu)** = sous-cas rare **non modélisé** → `aret_partial` (défini, pas deviné). Fixture `win32_ntdelay`
+  (délai relatif + yield 0) bit-identique Wine — le **timing n'est pas comparé**, seuls le statut et la **continuation**
+  le sont (l'alternative était un abort `aret_unimpl`).
+- **Portes** : `win32_ntdelay` bit-identique ; hash **inchangé** ; audit PASS (`NtDelayExecution@8` déjà dans
+  `stdcall_pops`).
+- **Reste tranche 4** : `NtQuerySystemInformation`/`NtQueryPerformanceCounter` (largement environnementaux — contrat à
+  isoler du non-comparable), mémoire virtuelle (`NtAllocateVirtualMemory`/`NtFreeVirtualMemory` — adresse
+  non-déterministe, contrat alloc→write→read→free testable). Puis tranches 5 (real-ABI dans `wine_heavy`), 6 (`version.c`).
