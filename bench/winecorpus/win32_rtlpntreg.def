@@ -1,5 +1,7 @@
 LIBRARY ntdll.dll
 EXPORTS
 RtlpNtCreateKey@28
+RtlpNtOpenKey@12
 RtlpNtSetValueKey@16
 RtlpNtQueryValueKey@20
+RtlpNtEnumerateSubKey@12

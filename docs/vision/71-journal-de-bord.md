@@ -6965,8 +6965,10 @@ Détail : **70 §6** (roadmap). Résumé :
   `aret_ntreg_*` → g_reg`. Off-path (`RtlConvertSidToUnicodeString`/`RtlExpandEnvironmentStrings_U`/
   `GetCurrentThreadEffectiveToken`, seulement via `RtlOpenCurrentUser`/`RtlQueryRegistryValues`) = **stubs abort sound**
   (au plancher) pour clore le lien.
-- **Fixture PE `winecorpus/win32_rtlpntreg`** (+`.def`+**`.killat`**) : un vrai PE importe `RtlpNtCreateKey`/`SetValueKey`/
-  `QueryValueKey`, round-trip une clé, **bit-identique Wine**. **Deux pièges d'import résolus** : `RtlpNt*` sont des exports
+- **Fixture PE `winecorpus/win32_rtlpntreg`** (+`.def`+**`.killat`**) : un vrai PE importe `RtlpNtCreateKey`/`OpenKey`/
+  `SetValueKey`/`QueryValueKey`/**`EnumerateSubKey`** et exerce **create/set/query + sous-clés relatives + énumération triée +
+  réouverture** — donc les wrappers plancher `NtCreateKey`/`NtSetValueKey`/`NtQueryValueKey`/**`NtEnumerateKey`/`NtOpenKey`**
+  tous atteints via le `reg.c` **compilé**, **bit-identique Wine**. **Deux pièges d'import résolus** : `RtlpNt*` sont des exports
   **non documentés** absents de l'import-lib mingw ⇒ `.def` forcé ; et Wine les exporte **non décorés** alors que le PE
   appelle `@N` (stdcall) ⇒ nouvelle option harnais **`NAME.killat`** (dlltool `--kill-at`) pour importer le nom nu — sinon
   Wine résout un stub `@28` et aborte. Marqueur **par fixture** (global casserait `comctl32_ordinal` qui importe par

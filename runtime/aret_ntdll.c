@@ -54,6 +54,7 @@ long NTAPI RtlpNtCreateKey(void *, uint32_t, const void *, uint32_t, const void 
 long NTAPI RtlpNtOpenKey(void *, uint32_t, const void *);
 long NTAPI RtlpNtSetValueKey(void *, uint32_t, const void *, uint32_t);
 long NTAPI RtlpNtQueryValueKey(void *, void *, void *, void *, void *);
+long NTAPI RtlpNtEnumerateSubKey(void *, void *, uint32_t);
 /* NLS conversions (the floor, runtime/wine_heavy/ntdll_floor.c) — apps import these directly too. */
 long NTAPI RtlMultiByteToUnicodeN(void *, unsigned long, unsigned long *, const void *, unsigned long);
 long NTAPI RtlUnicodeToMultiByteN(void *, unsigned long, unsigned long *, const void *, unsigned long);
@@ -104,6 +105,7 @@ uint32_t aret_RtlpNtCreateKey(uint32_t esp) { return (uint32_t)RtlpNtCreateKey(N
 uint32_t aret_RtlpNtOpenKey(uint32_t esp) { return (uint32_t)RtlpNtOpenKey(NP(0), NA(1), NP(2)); }
 uint32_t aret_RtlpNtSetValueKey(uint32_t esp) { return (uint32_t)RtlpNtSetValueKey(NP(0), NA(1), NP(2), NA(3)); }
 uint32_t aret_RtlpNtQueryValueKey(uint32_t esp) { return (uint32_t)RtlpNtQueryValueKey(NP(0), NP(1), NP(2), NP(3), NP(4)); }
+uint32_t aret_RtlpNtEnumerateSubKey(uint32_t esp) { return (uint32_t)RtlpNtEnumerateSubKey(NP(0), NP(1), NA(2)); }
 
 #else /* not native i386: the compiled Wine bodies are not linked -> sound abort, never a guess */
 #define STUB(n) uint32_t aret_##n(uint32_t esp) { (void)esp; aret_unimpl(#n); return 0; }
@@ -116,7 +118,7 @@ STUB(RtlIntegerToChar) STUB(RtlIntegerToUnicodeString) STUB(RtlCharToInteger) ST
 STUB(RtlCreateUnicodeString) STUB(RtlCreateUnicodeStringFromAsciiz)
 STUB(RtlAppendUnicodeStringToString) STUB(RtlAppendUnicodeToString)
 STUB(RtlPrefixString)
-STUB(RtlpNtCreateKey) STUB(RtlpNtOpenKey) STUB(RtlpNtSetValueKey) STUB(RtlpNtQueryValueKey)
+STUB(RtlpNtCreateKey) STUB(RtlpNtOpenKey) STUB(RtlpNtSetValueKey) STUB(RtlpNtQueryValueKey) STUB(RtlpNtEnumerateSubKey)
 STUB(RtlMultiByteToUnicodeN) STUB(RtlUnicodeToMultiByteN) STUB(RtlUpcaseUnicodeToMultiByteN)
 STUB(RtlOemToUnicodeN) STUB(RtlUnicodeToOemN) STUB(RtlUpcaseUnicodeToOemN)
 STUB(RtlMultiByteToUnicodeSize) STUB(RtlUnicodeToMultiByteSize)
