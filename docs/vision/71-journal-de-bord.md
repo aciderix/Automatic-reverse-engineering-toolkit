@@ -7033,3 +7033,32 @@ Détail : **70 §6** (roadmap). Résumé :
   `19acad982194bf07` ; stdcall_audit PASS (783 stdcall prouvés) ; winediff complet non régressé. **Doc 70 §4.5/§5.0 + doc 82
   mises à jour.** **Reste** : cibles réelles-code à deps `ucrtbase` (router ucrtbase→msvcrt par nom) ; DLL de calcul plus
   grosses (`xmllite`, `mspatcha`) au besoin mesuré.
+
+### 2026-08-08 — [I5][LIFT][DIAG] **WinMerge re-mesuré : le mur `0x10` racine-causé à l'INSTRUCTION — un ctor C++ MSVC lifté retourne 0 au lieu de `this` (bug opt/SSA rare, PAS un manque d'API)**
+
+- **Contexte (demande utilisateur : « retenter WinMerge et mesurer »)**. Rebuild complet (`--with-dll mfc90u/shell32/mlang`,
+  `ARET_TRACE=1 ARET_TRACE_DUMP=0`, Xvfb) : **43 690 fonctions récupérées** (40 011 liftées), le mur **`0xC0000005 at 0x10`
+  est reproduit à l'identique** (post CRT + init MFC + shell32 + mlang). Le driver n'est **pas** bloqué par des APIs/DLL
+  manquantes — c'est **un bug de lift-correctness**, exactement comme prédit le 2026-08-02.
+- **Root-cause à l'instruction (watchpoint matériel gdb sur l'adresse hôte du champ)**. L'image est mappée **identité VA**
+  (`__aret_map_memory`, mmap MAP_FIXED), donc le champ `0x51efd0+0xc` est à l'adresse hôte `0x51efdc`. Chaîne :
+  1. Consommateur `sub_42e14e` lit `[0x51efdc]` → **0** → appelle `sub_42eca8(this=0)` → `mov …,[esi+0x10]`, `esi=0` → faute.
+  2. `awatch 0x51efdc` : **deux** accès seulement — le **ctor** `sub_42e884` (écrit) et le consommateur (lit), tous deux `0`.
+     Le store va à la **bonne** adresse (`edx=base+0xc=0x51efdc`) — donc **PAS** un store mal dirigé (hypothèse b éliminée),
+     et un seul write (pas de re-zéro, hypothèse c éliminée).
+  3. Le ctor stocke `[ebp-0x140]` = **le retour de `sub_470022`** (motif MSVC `p->m = new T()` : le ctor **retourne `this`**).
+     Mesuré : `sub_470022` appelé avec `this=0x13d66700` (**valide**, `operator new` OK) **retourne `eax=0`**. ⇒ membre = 0.
+- **Pourquoi le ctor retourne 0 — NARROWED**. `sub_470022` (code C++ MSVC de WinMerge, pas mfc90u) utilise
+  `_EH_prolog3`/`_EH_epilog3`. Original : `mov eax,this ; call _EH_epilog3 ; ret`, et le vrai `_EH_epilog3` **préserve eax**.
+  Le C lifté de `_EH_epilog3` (`sub_4ac2ba`) **retourne bien l'eax entrant** (`return (edx<<32)|(eax&0xffffffff)`), et le
+  lowering d'appel pose `eax=résultat`. **Pourtant `sub_470022` émet `return 0`** — son `Return` terminal est résolu en
+  `Const(0)` **avant l'opt**, puis l'opt DCE l'eax mort. **Ce n'est PAS un bug générique `_EH_epilog3`** : sur **1174** sites
+  d'appel `_EH_epilog3`, l'immense majorité **retourne correctement** (`return <résultat epilog> ; return 0` mort). `sub_470022`
+  est un cas **rare** où le `return <résultat>` réel **manque** et le flot tombe sur le `return 0` de repli. Différence
+  structurelle candidate (non tranchée) : SEH-establish (`aret_seh_setjmp`) **+** un appel intermédiaire (`sub_421bbd`) entre
+  l'établissement et l'épilogue, avec `eax=this` chargé de `[ebp-0x10]` juste avant l'épilogue.
+- **Statut §2 (borner puis pivoter)**. Mur **localisé à l'instruction** et **narrowed** à une interaction opt/SSA rare
+  (`Return`→`Const(0)`), pas un manque de couverture. Le trancher exige d'**isoler** l'interaction dans un **reproducteur
+  minimal** (fixture asm SEH-establish + helper préservant eax avant `ret`, car mingw n'émet pas `_EH_epilog3`) — sous-
+  investigation focalisée, testabilité délicate. **Acquis** : la mesure demandée est livrée — le mur WinMerge = **un** bug de
+  lift à fort levier (classe des ctors/dtors C++ MSVC sous EH retournant `this`), pas « tous les Nt / n'importe quelle DLL ».
