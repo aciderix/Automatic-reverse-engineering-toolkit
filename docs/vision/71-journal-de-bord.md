@@ -6827,5 +6827,15 @@ Détail : **70 §6** (roadmap). Résumé :
   (ouvert via kernel32) apprend le chemin par `readlink(/proc/self/fd/N)`. Fixture étendue (create→write→set-disp→close→
   reopen=NOT_FOUND). **Portes** : `win32_ntfile` **et** `win32_ntreg` (le chemin registre de `NtClose`, inchangé)
   bit-identiques ; hash inchangé ; audit PASS ; winediff complet vert.
-- **Reste tranche 3** : `NtQueryDirectoryFile` (énumération de répertoire), `NtDeviceIoControlFile` — au besoin mesuré.
+- **`NtQueryDirectoryFile` (`FileNamesInformation`) — même jour** : la classe `FileNamesInformation`(12) ne porte
+  **aucun champ environnemental** (ni date ni taille) — `{NextEntryOffset@0, FileIndex@4=0, FileNameLength@8, FileName@12}`
+  — donc l'énumération de répertoire est **bit-identique**. Backé par `opendir`/`readdir` + un **snapshot trié** stocké
+  par handle (`g_ntfile.dnames`, reconstruit sur `RestartScan`, libéré au close). **Mesuré vs Wine** : entrées `.` `..`
+  puis **tri case-insensible** (upcasé) ; mode **single-entry** = une entrée/appel (`Information`=12+namelen, next=0) ;
+  mode **multi-entry** = entrées **empaquetées 8-alignées** (`NextEntryOffset`=align8(12+namelen), 0 sur la dernière ;
+  `Information`=offset_dernière+12+namelen_dernière) ; épuisé → `STATUS_NO_MORE_FILES` (0x80000006). Pattern **NULL ou
+  `"*"`** = tout (autre pattern = `aret_partial`, sound). Fixture `winecorpus/win32_ntdir` (single + multi, NULL + `"*"`)
+  bit-identique Wine. **Reste** : `FileBothDirectoryInformation` (avec dates environnementales → à exclure comme
+  `LastWriteTime` du registre) + patterns glob génériques.
+- **Reste tranche 3** : `NtQueryDirectoryFile` autres classes + patterns, `NtDeviceIoControlFile` — au besoin mesuré.
   Puis tranches 4 (divers `Nt*`), 5 (variante real-ABI dans `wine_heavy`), 6 (driver `version.c`).

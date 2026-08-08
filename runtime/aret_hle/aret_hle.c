@@ -1196,15 +1196,23 @@ static int u32_nt_file_path(uint32_t poa, char *win, size_t cap) {
  * tagged HLE handle (registry/event/…) it does not own. Bounded; overflow leaves an fd untracked
  * (still valid, leaks on close — sound). */
 #define U32_MAX_NTFILE 64
-static struct { int used, fd, del; char path[1024]; } g_ntfile[U32_MAX_NTFILE];
+static struct { int used, fd, del; char path[1024];
+                char **dnames; int dn, dcur;           /* NtQueryDirectoryFile scan snapshot + cursor */
+              } g_ntfile[U32_MAX_NTFILE];
 static int u32_ntfile_slot(int fd) {
     for (int i = 0; i < U32_MAX_NTFILE; i++) if (g_ntfile[i].used && g_ntfile[i].fd == fd) return i;
     return -1;
+}
+static void u32_ntfile_free_scan(int s) {
+    if (g_ntfile[s].dnames) { for (int i = 0; i < g_ntfile[s].dn; i++) free(g_ntfile[s].dnames[i]);
+        free(g_ntfile[s].dnames); g_ntfile[s].dnames = NULL; }
+    g_ntfile[s].dn = g_ntfile[s].dcur = 0;
 }
 static void u32_ntfile_register(int fd, const char *path) {
     int s = u32_ntfile_slot(fd);                        /* fd reused after an untracked close: refresh */
     if (s < 0) for (int i = 0; i < U32_MAX_NTFILE; i++) if (!g_ntfile[i].used) { g_ntfile[i].used = 1; s = i; break; }
     if (s < 0) return;                                  /* table full: leave untracked */
+    u32_ntfile_free_scan(s);
     g_ntfile[s].fd = fd; g_ntfile[s].del = 0;
     snprintf(g_ntfile[s].path, sizeof g_ntfile[s].path, "%s", path);
 }
@@ -1213,11 +1221,19 @@ int aret_ntfile_close(uint32_t handle) {
     if (s < 0) return 0;
     int fd = g_ntfile[s].fd, del = g_ntfile[s].del;
     char path[1024]; snprintf(path, sizeof path, "%s", g_ntfile[s].path);
+    u32_ntfile_free_scan(s);
     g_ntfile[s].used = 0;
     close(fd);
     if (del) unlink(path);                              /* delete-on-close (measured vs Wine) */
     return 1;
 }
+/* Case-insensitive (upcased-ASCII) compare, Wine's directory-entry order. */
+static int u32_ci_cmp(const char *a, const char *b) {
+    for (;; a++, b++) { unsigned ca = (unsigned char)*a, cb = (unsigned char)*b;
+        if (ca >= 'a' && ca <= 'z') ca -= 32;
+        if (cb >= 'a' && cb <= 'z') cb -= 32;
+        if (ca != cb) return (int)ca - (int)cb;
+        if (!ca) return 0; } }
 /* Shared open core for NtCreateFile/NtOpenFile. Returns NTSTATUS; on success writes fd->*pfh and
  * the create Information (OPENED/CREATED/…). */
 static uint32_t u32_nt_open(uint32_t poa, uint32_t desired, uint32_t disp, uint32_t pfh, uint32_t *pinfo) {
@@ -1346,6 +1362,68 @@ uint32_t aret_NtSetInformationFile(uint32_t esp) {
     }
     aret_partial("NtSetInformationFile: only FileEndOfFile/Position/DispositionInformation modelled");
     return NT_ST_INVALID_PARAMETER;
+}
+#define NT_ST_BUFFER_OVERFLOW  0x80000005u
+#define NT_ST_NO_MORE_FILES    0x80000006u
+uint32_t aret_NtQueryDirectoryFile(uint32_t esp) {
+    /* (FileHandle@0, Event@1, ApcRoutine@2, ApcContext@3, IoStatusBlock@4, FileInformation@5,
+     *  Length@6, FileInformationClass@7, ReturnSingleEntry@8, FileName@9, RestartScan@10).
+     * Only FileNamesInformation(12) is modelled -- it has NO environmental fields, so it is
+     * bit-identical: {NextEntryOffset@0, FileIndex@4=0, FileNameLength@8, FileName@12}. Entries
+     * are "." ".." then case-insensitive sorted; NextEntryOffset = align8(12+namelen), 0 on the
+     * last; Information = last_offset + (12+namelen_last); exhausted -> STATUS_NO_MORE_FILES.
+     * Only a NULL or "*" search pattern is modelled (both = list all). Measured vs Wine. */
+    int fd = (int)arg(esp, 0);
+    uint32_t piosb = arg(esp, 4), info = arg(esp, 5), length = arg(esp, 6), cls = arg(esp, 7);
+    int single = arg(esp, 8) != 0, restart = arg(esp, 10) != 0;
+    if (cls != 12) { aret_partial("NtQueryDirectoryFile: only FileNamesInformation modelled"); return NT_ST_INVALID_PARAMETER; }
+    uint32_t ppat = arg(esp, 9);
+    if (ppat) {                                            /* accept NULL or "*" only */
+        uint16_t pl = *(const uint16_t *)(uintptr_t)ppat;
+        const uint16_t *pw = (const uint16_t *)(uintptr_t)*(const uint32_t *)(uintptr_t)(ppat + 4);
+        int match_all = (pl == 0) || (pw && pl == 2 && (pw[0] & 0xFF) == '*');
+        if (!match_all) { aret_partial("NtQueryDirectoryFile: only NULL/'*' search pattern modelled"); return NT_ST_INVALID_PARAMETER; }
+    }
+    int s = u32_ntfile_slot(fd);
+    if (s < 0) { u32_iosb_set(piosb, NT_ST_INVALID_HANDLE, 0); return NT_ST_INVALID_HANDLE; }
+    if (restart || !g_ntfile[s].dnames) {                  /* (re)build the sorted snapshot */
+        u32_ntfile_free_scan(s);
+        DIR *dir = opendir(g_ntfile[s].path);
+        if (!dir) { u32_iosb_set(piosb, NT_ST_INVALID_HANDLE, 0); return NT_ST_INVALID_HANDLE; }
+        int cap = 16, n = 0; char **arr = (char **)malloc(cap * sizeof(char *));
+        struct dirent *e;
+        while ((e = readdir(dir))) {
+            if (n == cap) { cap *= 2; arr = (char **)realloc(arr, cap * sizeof(char *)); }
+            arr[n] = (char *)malloc(strlen(e->d_name) + 1); strcpy(arr[n], e->d_name); n++;
+        }
+        closedir(dir);
+        for (int a = 1; a < n; a++) { char *t = arr[a]; int b = a - 1;
+            while (b >= 0 && u32_ci_cmp(arr[b], t) > 0) { arr[b + 1] = arr[b]; b--; } arr[b + 1] = t; }
+        g_ntfile[s].dnames = arr; g_ntfile[s].dn = n; g_ntfile[s].dcur = 0;
+    }
+    if (g_ntfile[s].dcur >= g_ntfile[s].dn) { u32_iosb_set(piosb, NT_ST_NO_MORE_FILES, 0); return NT_ST_NO_MORE_FILES; }
+    uint8_t *base = (uint8_t *)(uintptr_t)info;
+    uint32_t off = 0, prev_hdr = 0; int emitted = 0;
+    while (g_ntfile[s].dcur < g_ntfile[s].dn) {
+        const char *nm = g_ntfile[s].dnames[g_ntfile[s].dcur];
+        int wl = (int)strlen(nm); uint32_t namelen = 2u * (uint32_t)wl, entry = 12 + namelen;
+        if (off + entry > length) {
+            if (emitted == 0) { u32_iosb_set(piosb, NT_ST_BUFFER_OVERFLOW, 0); return NT_ST_BUFFER_OVERFLOW; }
+            break;
+        }
+        uint8_t *p = base + off;
+        memset(p, 0, 12);                                  /* NextEntryOffset=0, FileIndex=0 */
+        *(uint32_t *)(p + 8) = namelen;
+        for (int i = 0; i < wl; i++) *(uint16_t *)(p + 12 + 2 * i) = (uint16_t)(uint8_t)nm[i];
+        if (emitted > 0) *(uint32_t *)(base + prev_hdr) = off - prev_hdr;   /* link previous -> this */
+        prev_hdr = off;
+        g_ntfile[s].dcur++; emitted++;
+        if (single) break;
+        off = (off + entry + 7u) & ~7u;                    /* next entry 8-aligned */
+    }
+    const char *last = g_ntfile[s].dnames[g_ntfile[s].dcur - 1];
+    u32_iosb_set(piosb, NT_ST_SUCCESS, prev_hdr + 12 + 2u * (uint32_t)strlen(last));
+    return NT_ST_SUCCESS;
 }
 
 /* Win16-era file API (_lopen/_lcreat/_lclose/_lread/_lwrite/_llseek + _hread/
