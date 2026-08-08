@@ -10033,6 +10033,13 @@ uint32_t aret_GetLocaleInfoW(uint32_t esp) {
 }
 uint32_t aret_LoadMenuA(uint32_t esp)     { (void)esp; return 0; }    /* no menu resource loaded (sound) */
 uint32_t aret_LoadMenuW(uint32_t esp)     { (void)esp; return 0; }    /* idem (W): menu bar is cosmetic here (sound: NULL = no menu) */
+/* Accelerator table (keyboard shortcuts): cosmetic for a functional run. LoadAccelerators
+ * returns NULL (no table); TranslateAccelerator then returns 0 (this message is NOT an
+ * accelerator) so the caller dispatches it normally — a defined, sound outcome, not a guess. */
+uint32_t aret_LoadAcceleratorsA(uint32_t esp)   { (void)esp; return 0; }
+uint32_t aret_LoadAcceleratorsW(uint32_t esp)   { (void)esp; return 0; }
+uint32_t aret_TranslateAcceleratorA(uint32_t esp) { (void)esp; return 0; }
+uint32_t aret_TranslateAcceleratorW(uint32_t esp) { (void)esp; return 0; }
 uint32_t aret_PlayEnhMetaFile(uint32_t esp) { (void)esp; return 0; }  /* EMF playback unmodelled (sound fail) */
 uint32_t aret_LocalSize(uint32_t esp) { void *p = WP(0); return p ? (uint32_t)malloc_usable_size(p) : 0; }
 /* Polygon(hdc, POINT*, n): a FILLED polygon. Wine's interior rasterisation (its scanline
