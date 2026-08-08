@@ -951,6 +951,28 @@ uint32_t aret_VirtualAlloc(uint32_t esp) {
     return WRP(p);
 }
 uint32_t aret_VirtualFree(uint32_t esp) { free(WP(0)); return 1; }
+/* NtAllocateVirtualMemory(ProcessHandle, *BaseAddress, ZeroBits, *RegionSize, AllocationType,
+ * Protect) -- the ntdll syscall VirtualAlloc/RtlAllocateHeap bottom out on. Backed by the
+ * allocator like VirtualAlloc (requested base ignored; calloc = the zeroed MEM_COMMIT contract).
+ * *RegionSize rounds UP to a 4096 page and is written back; *BaseAddress receives the base
+ * (measured Wine: STATUS_SUCCESS, RegionSize 100->4096 / 5000->8192, memory zeroed + writable). */
+uint32_t aret_NtAllocateVirtualMemory(uint32_t esp) {
+    uint32_t pbase = WU(1), pregion = WU(3);
+    if (!pregion) return 0xC000000Du;                    /* STATUS_INVALID_PARAMETER */
+    uint32_t req = *(uint32_t *)(uintptr_t)pregion;
+    uint32_t rounded = (req + 0xFFFu) & ~0xFFFu; if (!rounded) rounded = 0x1000u;
+    void *p = calloc(1, rounded);
+    if (!p) return 0xC0000017u;                          /* STATUS_NO_MEMORY */
+    if (pbase) *(uint32_t *)(uintptr_t)pbase = WRP(p);
+    *(uint32_t *)(uintptr_t)pregion = rounded;
+    return 0;                                            /* STATUS_SUCCESS */
+}
+/* NtFreeVirtualMemory(ProcessHandle, *BaseAddress, *RegionSize, FreeType) -> STATUS_SUCCESS. */
+uint32_t aret_NtFreeVirtualMemory(uint32_t esp) {
+    uint32_t pbase = WU(1);
+    if (pbase) { uint32_t b = *(uint32_t *)(uintptr_t)pbase; if (b) free((void *)(uintptr_t)b); }
+    return 0;
+}
 uint32_t aret_GlobalAlloc(uint32_t esp) {
     /* (uFlags, dwBytes) — GMEM_ZEROINIT (0x40) -> calloc. */
     uint32_t flags = WU(0), bytes = WU(1);

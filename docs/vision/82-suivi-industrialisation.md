@@ -177,8 +177,10 @@ Trois **couches** (branchement → comportement), et pour le comportement trois 
    `NtDeviceIoControlFile` — au besoin mesuré.
 4. **Divers à la demande** 🚧 — **`NtDelayExecution` ✅ FAIT (2026-08-07)** : ≈`Sleep`, intervalle 100 ns négatif=relatif
    → `aret_fiber_sleep` (horloge virtuelle), `STATUS_SUCCESS`, absolu = `aret_partial` ; fixture `win32_ntdelay`
-   bit-identique. **Reste** : `NtQuerySystemInformation`, `NtQueryPerformanceCounter`, `NtQueryInformationProcess`/`Thread`,
-   `NtAllocateVirtualMemory` (≈VirtualAlloc)… **piloté par la mesure** (`--mode walls`/besoin d'un driver), pas spéculatif.
+   bit-identique. **`NtAllocateVirtualMemory`/`NtFreeVirtualMemory` ✅ FAIT (2026-08-07)** : ≈`VirtualAlloc` (calloc,
+   `MEM_COMMIT` zéro-init), `*RegionSize` arrondi page 4096, `STATUS_SUCCESS` ; adresse non-déterministe ⇒ contrat testé
+   (`win32_ntvm`), pas l'adresse. **Reste** : `NtQuerySystemInformation`, `NtQueryPerformanceCounter`,
+   `NtQueryInformationProcess`/`Thread`… **piloté par la mesure** (`--mode walls`/besoin d'un driver), pas spéculatif.
 5. **Variante real-ABI dans le plancher** 🔜 : exposer le cœur logique de chaque `Nt*` en fonction NTAPI liable, ajoutée à
    `wine_heavy` (comme les conversions `aret_cp1252_*`), pour que `rtlstr.c`+`version.c`+… **compilés** appellent ces `Nt*`.
 6. **Driver de bout en bout** 🔜 : **`version.c`** de ntdll (lit le registre → version OS) vendoré + adaptateurs + fixture,

@@ -6866,6 +6866,12 @@ Détail : **70 §6** (roadmap). Résumé :
   le sont (l'alternative était un abort `aret_unimpl`).
 - **Portes** : `win32_ntdelay` bit-identique ; hash **inchangé** ; audit PASS (`NtDelayExecution@8` déjà dans
   `stdcall_pops`).
+- **Mémoire virtuelle ajoutée (même jour)** : `NtAllocateVirtualMemory`/`NtFreeVirtualMemory` — les syscalls sous
+  `VirtualAlloc`/`RtlAllocateHeap`, backés par l'allocateur comme `VirtualAlloc` (`calloc` = contrat `MEM_COMMIT`
+  zéro-init ; base demandée ignorée). `*RegionSize` **arrondi à la page 4096** et réécrit, `*BaseAddress` reçoit la base ;
+  `STATUS_SUCCESS` (mesuré : 100→4096, 5000→8192, mémoire zéro+inscriptible). **Adresse non-déterministe ⇒ non comparée** :
+  le fixture `win32_ntvm` prouve le **contrat** (statut, RegionSize arrondi, zéro-init, relecture, free) sans imprimer la
+  base. Bit-identique Wine.
 - **Reste tranche 4** : `NtQuerySystemInformation`/`NtQueryPerformanceCounter` (largement environnementaux — contrat à
-  isoler du non-comparable), mémoire virtuelle (`NtAllocateVirtualMemory`/`NtFreeVirtualMemory` — adresse
-  non-déterministe, contrat alloc→write→read→free testable). Puis tranches 5 (real-ABI dans `wine_heavy`), 6 (`version.c`).
+  isoler du non-comparable), `NtQueryInformationProcess`/`Thread` — au besoin mesuré. Puis tranches 5 (real-ABI dans
+  `wine_heavy`), 6 (`version.c`).
