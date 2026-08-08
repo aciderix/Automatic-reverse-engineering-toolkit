@@ -6835,7 +6835,13 @@ Détail : **70 §6** (roadmap). Résumé :
   mode **multi-entry** = entrées **empaquetées 8-alignées** (`NextEntryOffset`=align8(12+namelen), 0 sur la dernière ;
   `Information`=offset_dernière+12+namelen_dernière) ; épuisé → `STATUS_NO_MORE_FILES` (0x80000006). Pattern **NULL ou
   `"*"`** = tout (autre pattern = `aret_partial`, sound). Fixture `winecorpus/win32_ntdir` (single + multi, NULL + `"*"`)
-  bit-identique Wine. **Reste** : `FileBothDirectoryInformation` (avec dates environnementales → à exclure comme
-  `LastWriteTime` du registre) + patterns glob génériques.
-- **Reste tranche 3** : `NtQueryDirectoryFile` autres classes + patterns, `NtDeviceIoControlFile` — au besoin mesuré.
+  bit-identique Wine.
+- **`FileBothDirectoryInformation`(3) ajouté (même jour)** : la classe de `FindFirstFile` (fixe 94 octets, `FileName@94`).
+  Champs **déterministes** remplis+prouvés : `FileAttributes` (0x10 dir / 0x20 fichier), `EndOfFile`/`AllocationSize`
+  (`st_size`/`st_blocks*512` — **mais 0/0 pour un répertoire**, quirk Wine attrapé par winediff), `EaSize`=0,
+  `FileNameLength`. **Environnementaux exclus du fixture** : les 4 dates (remplies depuis `stat` — vrai mtime — mais non
+  comparées, comme `LastWriteTime` du registre) et le **short-name 8.3 généré** (`LONG~R5S.DAT`, hashé par Wine, non
+  modélisé ⇒ `ShortNameLength=0` = état « 8.3 désactivé » valide/sound). Le fixture n'emploie que des noms 8.3 (short=0
+  des deux côtés). Empaquetage multi-entrée identique (fixe 94 au lieu de 12). `win32_ntdir` étendu, bit-identique Wine.
+- **Reste tranche 3** : patterns glob génériques de `NtQueryDirectoryFile`, `NtDeviceIoControlFile` — au besoin mesuré.
   Puis tranches 4 (divers `Nt*`), 5 (variante real-ABI dans `wine_heavy`), 6 (driver `version.c`).

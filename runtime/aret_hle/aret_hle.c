@@ -1234,6 +1234,9 @@ static int u32_ci_cmp(const char *a, const char *b) {
         if (cb >= 'a' && cb <= 'z') cb -= 32;
         if (ca != cb) return (int)ca - (int)cb;
         if (!ca) return 0; } }
+/* Unix time -> Windows FILETIME (100 ns ticks since 1601-01-01). Environmental (a real file's
+ * mtime), excluded by the fixture just like the registry LastWriteTime. */
+static int64_t u32_unix_to_filetime(time_t t) { return ((int64_t)t + 11644473600LL) * 10000000LL; }
 /* Shared open core for NtCreateFile/NtOpenFile. Returns NTSTATUS; on success writes fd->*pfh and
  * the create Information (OPENED/CREATED/…). */
 static uint32_t u32_nt_open(uint32_t poa, uint32_t desired, uint32_t disp, uint32_t pfh, uint32_t *pinfo) {
@@ -1368,15 +1371,20 @@ uint32_t aret_NtSetInformationFile(uint32_t esp) {
 uint32_t aret_NtQueryDirectoryFile(uint32_t esp) {
     /* (FileHandle@0, Event@1, ApcRoutine@2, ApcContext@3, IoStatusBlock@4, FileInformation@5,
      *  Length@6, FileInformationClass@7, ReturnSingleEntry@8, FileName@9, RestartScan@10).
-     * Only FileNamesInformation(12) is modelled -- it has NO environmental fields, so it is
-     * bit-identical: {NextEntryOffset@0, FileIndex@4=0, FileNameLength@8, FileName@12}. Entries
-     * are "." ".." then case-insensitive sorted; NextEntryOffset = align8(12+namelen), 0 on the
-     * last; Information = last_offset + (12+namelen_last); exhausted -> STATUS_NO_MORE_FILES.
-     * Only a NULL or "*" search pattern is modelled (both = list all). Measured vs Wine. */
+     * Two classes are modelled: FileNamesInformation(12) {NextEntryOffset@0, FileIndex@4=0,
+     * FileNameLength@8, FileName@12} (no environmental fields) and FileBothDirectoryInformation(3)
+     * {…times@8-39, EndOfFile@40, AllocationSize@48, FileAttributes@56, FileNameLength@60, EaSize@64,
+     * ShortNameLength@68, ShortName@70[12], FileName@94}. Entries are "." ".." then case-insensitive
+     * sorted; NextEntryOffset = align8(fixed+namelen), 0 on the last; Information = last_offset +
+     * (fixed+namelen_last); exhausted -> STATUS_NO_MORE_FILES. Times are environmental (real file
+     * mtime, excluded by the fixture); the generated 8.3 ShortName is not modelled (ShortNameLength=0
+     * -- a valid "8.3 disabled" state, sound), so the fixture uses only 8.3-fitting names. Only a
+     * NULL or "*" search pattern is modelled (both = list all). Measured vs Wine. */
     int fd = (int)arg(esp, 0);
     uint32_t piosb = arg(esp, 4), info = arg(esp, 5), length = arg(esp, 6), cls = arg(esp, 7);
     int single = arg(esp, 8) != 0, restart = arg(esp, 10) != 0;
-    if (cls != 12) { aret_partial("NtQueryDirectoryFile: only FileNamesInformation modelled"); return NT_ST_INVALID_PARAMETER; }
+    if (cls != 12 && cls != 3) { aret_partial("NtQueryDirectoryFile: only FileNames/FileBothDirectoryInformation modelled"); return NT_ST_INVALID_PARAMETER; }
+    uint32_t fixed = (cls == 12) ? 12u : 94u;               /* fixed header before FileName */
     uint32_t ppat = arg(esp, 9);
     if (ppat) {                                            /* accept NULL or "*" only */
         uint16_t pl = *(const uint16_t *)(uintptr_t)ppat;
@@ -1406,15 +1414,32 @@ uint32_t aret_NtQueryDirectoryFile(uint32_t esp) {
     uint32_t off = 0, prev_hdr = 0; int emitted = 0;
     while (g_ntfile[s].dcur < g_ntfile[s].dn) {
         const char *nm = g_ntfile[s].dnames[g_ntfile[s].dcur];
-        int wl = (int)strlen(nm); uint32_t namelen = 2u * (uint32_t)wl, entry = 12 + namelen;
+        int wl = (int)strlen(nm); uint32_t namelen = 2u * (uint32_t)wl, entry = fixed + namelen;
         if (off + entry > length) {
             if (emitted == 0) { u32_iosb_set(piosb, NT_ST_BUFFER_OVERFLOW, 0); return NT_ST_BUFFER_OVERFLOW; }
             break;
         }
         uint8_t *p = base + off;
-        memset(p, 0, 12);                                  /* NextEntryOffset=0, FileIndex=0 */
-        *(uint32_t *)(p + 8) = namelen;
-        for (int i = 0; i < wl; i++) *(uint16_t *)(p + 12 + 2 * i) = (uint16_t)(uint8_t)nm[i];
+        memset(p, 0, fixed);                               /* NextEntryOffset=0, FileIndex=0, rest 0 */
+        if (cls == 12) {
+            *(uint32_t *)(p + 8) = namelen;
+        } else {                                           /* FileBothDirectoryInformation */
+            char fp[2048]; snprintf(fp, sizeof fp, "%s/%s", g_ntfile[s].path, nm);
+            struct stat st;
+            if (stat(fp, &st) == 0) {
+                int isdir = S_ISDIR(st.st_mode);
+                int64_t mt = u32_unix_to_filetime(st.st_mtime), at = u32_unix_to_filetime(st.st_atime);
+                *(int64_t *)(p + 8) = mt; *(int64_t *)(p + 16) = at;      /* Creation ~ mtime, LastAccess */
+                *(int64_t *)(p + 24) = mt; *(int64_t *)(p + 32) = mt;     /* LastWrite, Change (environmental) */
+                /* Wine reports EndOfFile/AllocationSize 0 for a directory (measured); real size for a file. */
+                *(int64_t *)(p + 40) = isdir ? 0 : (int64_t)st.st_size;               /* EndOfFile */
+                *(int64_t *)(p + 48) = isdir ? 0 : (int64_t)st.st_blocks * 512;       /* AllocationSize */
+                *(uint32_t *)(p + 56) = isdir ? 0x10u : 0x20u;           /* DIRECTORY : ARCHIVE */
+            }
+            *(uint32_t *)(p + 60) = namelen;               /* EaSize@64=0, ShortNameLength@68=0, ShortName@70 zeroed */
+        }
+        uint32_t noff = fixed;
+        for (int i = 0; i < wl; i++) *(uint16_t *)(p + noff + 2 * i) = (uint16_t)(uint8_t)nm[i];
         if (emitted > 0) *(uint32_t *)(base + prev_hdr) = off - prev_hdr;   /* link previous -> this */
         prev_hdr = off;
         g_ntfile[s].dcur++; emitted++;
@@ -1422,7 +1447,7 @@ uint32_t aret_NtQueryDirectoryFile(uint32_t esp) {
         off = (off + entry + 7u) & ~7u;                    /* next entry 8-aligned */
     }
     const char *last = g_ntfile[s].dnames[g_ntfile[s].dcur - 1];
-    u32_iosb_set(piosb, NT_ST_SUCCESS, prev_hdr + 12 + 2u * (uint32_t)strlen(last));
+    u32_iosb_set(piosb, NT_ST_SUCCESS, prev_hdr + fixed + 2u * (uint32_t)strlen(last));
     return NT_ST_SUCCESS;
 }
 

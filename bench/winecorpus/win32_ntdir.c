@@ -27,8 +27,8 @@ static HANDLE opendir_nt(void){
 
 int main(void){
     CreateDirectoryA("C:\\aret_ntdir",NULL);
-    HANDLE f;
-    f=CreateFileA("C:\\aret_ntdir\\zeta.bin",GENERIC_WRITE,0,0,CREATE_ALWAYS,0,0); CloseHandle(f);
+    HANDLE f; DWORD wn;
+    f=CreateFileA("C:\\aret_ntdir\\zeta.bin",GENERIC_WRITE,0,0,CREATE_ALWAYS,0,0); WriteFile(f,"hello",5,&wn,0); CloseHandle(f);
     f=CreateFileA("C:\\aret_ntdir\\beta.bin",GENERIC_WRITE,0,0,CREATE_ALWAYS,0,0); CloseHandle(f);
     f=CreateFileA("C:\\aret_ntdir\\mu.bin",GENERIC_WRITE,0,0,CREATE_ALWAYS,0,0); CloseHandle(f);
     CreateDirectoryA("C:\\aret_ntdir\\sub",NULL);
@@ -67,6 +67,25 @@ int main(void){
     /* the next call exhausts -> STATUS_NO_MORE_FILES */
     s=NtQueryDirectoryFile(h,NULL,NULL,NULL,&io,buf,sizeof buf,12,FALSE,NULL,FALSE);
     printf("multi-after s=0x%08lX\n",(unsigned long)s);
+    NtClose(h);
+
+    /* FileBothDirectoryInformation, single-entry: attr/EOF/AllocationSize/name are deterministic;
+     * times and the generated 8.3 short name are environmental -> NOT printed. Names are 8.3-fitting
+     * so ShortNameLength is 0 both sides. */
+    h=opendir_nt(); restart=TRUE; i=0;
+    for(;;){
+        memset(buf,0,sizeof buf);
+        NTSTATUS bs=NtQueryDirectoryFile(h,NULL,NULL,NULL,&io,buf,sizeof buf,3,TRUE,NULL,restart);
+        restart=FALSE;
+        if(bs){ printf("both[%d] s=0x%08lX\n",i,(unsigned long)bs); break; }
+        ULONG attr=*(ULONG*)(buf+56), nlen=*(ULONG*)(buf+60), easz=*(ULONG*)(buf+64);
+        unsigned char shortlen=buf[68];
+        long long eof=*(long long*)(buf+40), alloc=*(long long*)(buf+48);
+        printf("both[%d] Info=%lu attr=0x%lX EOF=%lld Alloc=%lld Ea=%lu shortlen=%u nlen=%lu name=",i,
+            (unsigned long)io.Information,(unsigned long)attr,eof,alloc,(unsigned long)easz,shortlen,(unsigned long)nlen);
+        for(ULONG j=0;j<nlen/2;j++) putchar((char)*(WCHAR*)(buf+94+2*j));
+        putchar('\n'); i++; if(i>20) break;
+    }
     NtClose(h);
 
     DeleteFileA("C:\\aret_ntdir\\zeta.bin");
