@@ -209,6 +209,18 @@ Trois **couches** (branchement → comportement), et pour le comportement trois 
 **Invariants** : registre/état vide ⇒ prouver en round-trip ; jamais une valeur système devinée ; hash inchangé (additif) ;
 `@N` Nt\* déjà dans `stdcall_pops` (audit) ; chaque tranche = fixture winediff + entrée 71 + maj ici.
 
+### 🎯 Levier 1 sur une VRAIE DLL binaire tierce à ALGORITHME RÉEL ✅ **FAIT (2026-08-08)**
+
+> Au-delà des DLL-fixtures qu'on compile et des builtins « surface OS » (comctl32→gdi32, `Nt*`→`g_reg`) : **la `zlib1.dll`
+> de Wine LIFTÉE** (96 Ko de vrai DEFLATE/inflate/crc32) sort **byte-identique** à Wine sur `compress`/`uncompress`/`crc32`/
+> `adler32` (`winecorpus/lift_zlib`). **Aucun code nouveau** — l'intégration loader-multi-modules × vrai code tiers.
+> **Le travail = la SÉLECTION mesurée** de la cible (§0), balayage des ~430 DLL i386 sur 3 filtres, chacun a éliminé un
+> piège concret : (1) relais-stub (thunks `__wine_spec_imp_` **ET** forwarders — `version`/`lz32`/`msvcrt40`) ; (2) **stub
+> Wine** (`RaiseException` ⇒ pas d'oracle — `msvcp140_2` special-math) ; (3) imports non couverts (`ucrtbase`/`user32`).
+> `zlib1` = kernel32+**msvcrt** seuls, voie mémoire n'exerce que malloc/memcpy. **Point §0** : crc32 SIMD (pclmulqdq)
+> masqué par CPUID ⇒ chemin scalaire liftable, sortie identique par garantie zlib. Détail 71 (2026-08-08).
+> **Reste** : router `ucrtbase`→`msvcrt` par nom (débloque `cabinet`/`xmllite`/`mspatcha`…), au besoin mesuré.
+
 4. **Corps Wine — forme LOURDE** : compiler du `.c` Wine entier + **porter une fois le plancher `ntdll`/win32u**
    → couverture massive. *(Milestone.)* **🚧 OUVERTE ET MESURÉE (2026-08-02, `tools/gen_wine_heavy.py`)** : `rtlstr.c`
    de ntdll **compile INCHANGÉ** en objet i686 → **46 fonctions `Rtl*` réelles d'un coup**, sur un plancher **fini de 12

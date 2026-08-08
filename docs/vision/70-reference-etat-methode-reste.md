@@ -542,6 +542,17 @@ recompilabilité **100 %** · WASM **7/7**.
   real-ABI) et (2) **lifter** le binaire — une **DLL binaire liftée** (`--with-dll`, Levier 1) important les `Nt*` ntdll
   route ses imports via le **loader multi-modules** vers les shims `aret_Nt*` → même `g_reg`, bit-identique Wine
   (`winecorpus/liftntreg.{c,dll.c}`).
+- **⭐ Levier 1 sur une VRAIE DLL BINAIRE TIERCE À ALGORITHME RÉEL (2026-08-08)** — au-delà des DLL-fixtures qu'on compile et
+  des builtins Wine « surface OS » (comctl32→gdi32, `Nt*`→`g_reg`) : la **`zlib1.dll` de Wine** (96 Ko de vrai code DEFLATE/
+  inflate/crc32) est **liftée** par ARET, ses exports `compress`/`uncompress`/`crc32`/`adler32` sortent **byte-identique** à
+  Wine chargeant la même DLL. **La sélection de la cible est le travail** (§0) : balayage des ~430 DLL i386 sur 3 critères,
+  chacun a éliminé un piège — (1) **pas relais-stub** (thunks `__wine_spec_imp_` **ET** forwarders — écarte `version` 12+2/16,
+  `lz32`, `msvcrt40`, `psapi`) ; (2) **pas stub Wine** (`RaiseException`/`.text`-par-export — écarte `msvcp140_2`, les
+  special-math C++ que Wine **stubbe** ⇒ pas d'oracle) ; (3) **imports couverts** (`zlib1` = kernel32+**msvcrt** seuls, la
+  voie mémoire n'exerce que malloc/memcpy ; les `gz*` fichier non atteints). **Point §0** : zlib dispatche crc32 sur
+  pclmulqdq/SSE4.2 selon CPUID, qu'ARET **masque** ⇒ chemin scalaire liftable, tandis que Wine prend le SIMD — sortie
+  identique par garantie zlib (le lifting n'a pas eu à modéliser pclmulqdq). Gardé `winecorpus/lift_zlib.{c,def,withdll}`
+  (3 tampons round-trip, bit-identique Wine ; SKIP propre si `zlib1.dll` absent).
 - **TEB `StackBase`/`StackLimit` = vraies bornes de la pile machine** (`fs:[4]`/`fs:[8]`, 2026-07-17, bug **général**) :
   l'entrée émise (`aret_main.c`) publie `__aret_set_stack_bounds(top=aret_stack+taille, bottom=aret_stack)` avant de
   lancer le programme → un sas CRT MSVC qui lit `fs:[4]` (StackBase) et déréférence `[StackBase-8]` (idiome

@@ -6995,3 +6995,41 @@ Détail : **70 §6** (roadmap). Résumé :
 - **Portes** : `liftntreg` bit-identique ; `dll_lifting` (changement harnais) non régressé ; hash **inchangé** ; audit PASS ;
   winediff complet. **Deux voies « DLL entières » désormais prouvées** : (1) **compiler** la source Wine (`reg.c` → plancher
   real-ABI) et (2) **lifter** le binaire (imports `Nt*` → shims → `g_reg`).
+
+### 2026-08-08 — [I13][LIFT-DLL] **🎯 LEVIER 1 sur une VRAIE DLL BINAIRE TIERCE À ALGORITHME RÉEL — `zlib1.dll` de Wine liftée, aller-retour de compression bit-identique Wine**
+
+- **Le cran qui manquait.** Jusqu'ici le Levier 1 était prouvé sur des **DLL-fixtures qu'on compile nous-mêmes**
+  (`dll_lifting`, `liftntreg`) et sur des **builtins Wine à SURFACE OS** (comctl32 → HLE gdi32, `Nt*` → `g_reg`). Ici c'est
+  une **vraie DLL binaire tierce à ALGORITHME RÉEL** : `zlib1.dll` de Wine (96 Ko de vrai code DEFLATE/inflate/crc32),
+  **liftée** par ARET (`--with-dll`), dont les exports `compress`/`uncompress`/`crc32`/`adler32` produisent une sortie
+  **byte-identique** à Wine chargeant la même DLL. Premier vrai « BYO-DLL » de calcul pur.
+- **La sélection de la cible EST le travail d'ingénierie (§0 « mesurer avant de coder »).** Balayage des ~430 DLL i386 de
+  Wine sur **trois** critères, chacun ayant éliminé un piège concret :
+  1. **Pas un relais-stub** : `objdump -t | grep __wine_spec_imp_` **ET** `objdump -p | grep 'Forwarder RVA'` (règle 70 §5.0,
+     les deux mécanismes). A éliminé `version` (12+2/16), `lz32` (12 fwd), `msvcrt40` (1162 fwd), `psapi`/`imagehlp` (thunks).
+     ⚠️ Mon 1er repérage (avant compression) n'avait compté **que** les forwarders et classait `version.dll` « vrai code » —
+     la 2ᵉ moitié de la règle (thunks) l'a corrigé : version est un **relais**. La discipline a évité un lift inutile.
+  2. **Pas un STUB Wine** : un `.dll` Wine à 0 thunk/0 forwarder peut quand même être un **stub généré** (chaque export
+     `RaiseException(EXCEPTION_WINE_STUB)`) — donc **aucun oracle** (Wine se contente de lever). Détecté par densité de
+     `wine_spec_unimplemented_stub` + octets de `.text` par export. A éliminé `msvcp140_2.dll` (les special-math C++17,
+     pourtant tentantes : pures et déterministes — mais Wine les **stubbe**, `.text`=4332 o, 46 `RaiseException`).
+  3. **Surface d'imports couverte par le HLE** : idéalement `kernel32`/`ntdll`/**`msvcrt`** (pas `ucrtbase`/`user32`/`gdi32`).
+     `zlib1` importe **kernel32 + msvcrt** uniquement (17 + 34 fonctions, toutes standard), et l'aller-retour **en mémoire**
+     n'en exerce qu'une poignée (malloc/free/memcpy) ; les lourdes (`_open`/`setlocale`/`_initterm`) sont dans le code `gz*`
+     de fichier, **non atteint**. Restants réels-code mais deps lourdes, écartés : `cabinet` (zlib1+ucrtbase), `mpr`/`winspool`
+     (user32+gdi32), la famille `x3daudio`/`d3d*`/`vcomp` (ucrtbase).
+- **Fixture** `winecorpus/lift_zlib.{c,def,withdll}` : l'app importe `compress`/`uncompress`/`crc32`/`adler32`/`compressBound`/
+  `zlibVersion` (`.def` → import-lib dlltool ; noms cdecl **non décorés**, pas de `.killat`), `.withdll` = `zlib1.dll` (lifté
+  du `WINE_PE_DIR`). Trois tampons — pseudo-aléatoire (littéraux/Huffman dynamique), phrase répétée (longs matches), tout-zéro
+  — chacun **round-trip** (compress→uncompress→égalité) + checksums + 12 premiers octets compressés. **Sortie bit-identique
+  Wine** (`ver=1.3.1`, `crc/adler`, `clen`, préfixe `78 9c …`). Aucun code runtime/lifter nouveau : c'est l'**intégration**
+  loader-multi-modules × vrai code tiers qui est prouvée.
+- **⭐ Point §0 sur crc32 SIMD, mesuré non supposé.** zlib dispatche `crc32` sur `pclmulqdq`/SSE4.2 selon **CPUID** ; ARET
+  **masque** ces ISA (70 §4.1) ⇒ la DLL liftée prend le **chemin scalaire** (liftable), Wine prend le **SIMD** — mais zlib
+  garantit une **sortie identique** quel que soit le chemin, donc les checksums matchent des deux côtés. Le lifting n'a **pas**
+  eu à modéliser pclmulqdq : le masquage CPUID a choisi un chemin liftable, et le résultat reste juste. (Deux imports `gz*`
+  hors-chemin — `wcstombs`/`_wopen` — restent non implémentés ⇒ **abort sound** s'ils étaient atteints ; ils ne le sont pas.)
+- **Portes** : `lift_zlib` bit-identique (harnais winediff, SKIP propre si `zlib1.dll` absent) ; hash **inchangé**
+  `19acad982194bf07` ; stdcall_audit PASS (783 stdcall prouvés) ; winediff complet non régressé. **Doc 70 §4.5/§5.0 + doc 82
+  mises à jour.** **Reste** : cibles réelles-code à deps `ucrtbase` (router ucrtbase→msvcrt par nom) ; DLL de calcul plus
+  grosses (`xmllite`, `mspatcha`) au besoin mesuré.

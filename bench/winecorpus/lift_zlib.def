@@ -1,0 +1,8 @@
+LIBRARY zlib1.dll
+EXPORTS
+compress
+uncompress
+crc32
+adler32
+compressBound
+zlibVersion
