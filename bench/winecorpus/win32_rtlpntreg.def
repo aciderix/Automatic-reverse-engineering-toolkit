@@ -1,0 +1,5 @@
+LIBRARY ntdll.dll
+EXPORTS
+RtlpNtCreateKey@28
+RtlpNtSetValueKey@16
+RtlpNtQueryValueKey@20

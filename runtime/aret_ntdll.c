@@ -47,6 +47,13 @@ unsigned char NTAPI RtlCreateUnicodeStringFromAsciiz(void *, const char *);
 long     NTAPI RtlAppendUnicodeStringToString(void *, const void *);
 long     NTAPI RtlAppendUnicodeToString(void *, const void *);
 unsigned char NTAPI RtlPrefixString(const void *, const void *, unsigned char);
+/* Registry Rtlp* wrappers (the whole Wine reg.c, runtime/wine_heavy/reg.c): thin exported
+ * wrappers over the Nt* registry syscalls, which resolve to the real-ABI floor (ntdll_ntreg.c ->
+ * ARET's g_reg). They operate on a caller-provided key, so a PE round-trips through compiled Wine. */
+long NTAPI RtlpNtCreateKey(void *, uint32_t, const void *, uint32_t, const void *, uint32_t, void *);
+long NTAPI RtlpNtOpenKey(void *, uint32_t, const void *);
+long NTAPI RtlpNtSetValueKey(void *, uint32_t, const void *, uint32_t);
+long NTAPI RtlpNtQueryValueKey(void *, void *, void *, void *, void *);
 /* NLS conversions (the floor, runtime/wine_heavy/ntdll_floor.c) — apps import these directly too. */
 long NTAPI RtlMultiByteToUnicodeN(void *, unsigned long, unsigned long *, const void *, unsigned long);
 long NTAPI RtlUnicodeToMultiByteN(void *, unsigned long, unsigned long *, const void *, unsigned long);
@@ -93,6 +100,10 @@ uint32_t aret_RtlCreateUnicodeStringFromAsciiz(uint32_t esp) { return RtlCreateU
 uint32_t aret_RtlAppendUnicodeStringToString(uint32_t esp) { return (uint32_t)RtlAppendUnicodeStringToString(NP(0), NP(1)); }
 uint32_t aret_RtlAppendUnicodeToString(uint32_t esp) { return (uint32_t)RtlAppendUnicodeToString(NP(0), NP(1)); }
 uint32_t aret_RtlPrefixString(uint32_t esp) { return RtlPrefixString(NP(0), NP(1), (unsigned char)NA(2)); }
+uint32_t aret_RtlpNtCreateKey(uint32_t esp) { return (uint32_t)RtlpNtCreateKey(NP(0), NA(1), NP(2), NA(3), NP(4), NA(5), NP(6)); }
+uint32_t aret_RtlpNtOpenKey(uint32_t esp) { return (uint32_t)RtlpNtOpenKey(NP(0), NA(1), NP(2)); }
+uint32_t aret_RtlpNtSetValueKey(uint32_t esp) { return (uint32_t)RtlpNtSetValueKey(NP(0), NA(1), NP(2), NA(3)); }
+uint32_t aret_RtlpNtQueryValueKey(uint32_t esp) { return (uint32_t)RtlpNtQueryValueKey(NP(0), NP(1), NP(2), NP(3), NP(4)); }
 
 #else /* not native i386: the compiled Wine bodies are not linked -> sound abort, never a guess */
 #define STUB(n) uint32_t aret_##n(uint32_t esp) { (void)esp; aret_unimpl(#n); return 0; }
@@ -105,6 +116,7 @@ STUB(RtlIntegerToChar) STUB(RtlIntegerToUnicodeString) STUB(RtlCharToInteger) ST
 STUB(RtlCreateUnicodeString) STUB(RtlCreateUnicodeStringFromAsciiz)
 STUB(RtlAppendUnicodeStringToString) STUB(RtlAppendUnicodeToString)
 STUB(RtlPrefixString)
+STUB(RtlpNtCreateKey) STUB(RtlpNtOpenKey) STUB(RtlpNtSetValueKey) STUB(RtlpNtQueryValueKey)
 STUB(RtlMultiByteToUnicodeN) STUB(RtlUnicodeToMultiByteN) STUB(RtlUpcaseUnicodeToMultiByteN)
 STUB(RtlOemToUnicodeN) STUB(RtlUnicodeToOemN) STUB(RtlUpcaseUnicodeToOemN)
 STUB(RtlMultiByteToUnicodeSize) STUB(RtlUnicodeToMultiByteSize)

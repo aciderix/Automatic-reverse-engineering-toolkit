@@ -225,7 +225,9 @@ sert désormais de **détecteur** : un warm build qui ne réutilise pas ~tout si
 
 ### État régression (référence — doit rester vert)
 difftest **272/272** · transpile-diff **4/4** (H=`19acad982194bf07`) · winediff
-**207/208** (le seul rouge = `gdi_uifont`, **environnemental** : fontconfig i386, orthogonal au code) · **ehdiff 6/6** (SEH `seh_except`
+**~225/227** (2 rouges connus, orthogonaux au code : `gdi_uifont` **environnemental** fontconfig i386 ; `ole_mlang`
+**flake** oracle Wine-COM sous Xvfb concurrent — passe seul) · **heavy-form 5 preuves** (`proof.sh`/`proof_native.sh` rtlstr,
+`proof_ntreg.sh`/`proof_ntreg_native.sh` registre real-ABI, **`proof_reg_native.sh` = `reg.c` de Wine ENTIER**) · **ehdiff 6/6** (SEH `seh_except`
 + C++ `throw_catch`/`throw_dtor`/`throw_across`/`throw_byval`/`throw_static` — throw/catch, destructeur d'unwind, multi-frames, catch-by-value, CRT statique — bit-identiques Wine) · cpudiff vert (per-instruction + séquences génératives) · funcdiff corpus **0 divergence** (lift **~20,6k** scorées /
 **~20k appels** — **imports (stubs `@N` + `@0` scalaires) + appels indirects résolus + intrinsèques mémoire host-backés (memmove/memcpy)** ; scratch sous-esp exclu ; opt ~10k scorées) · SMT **11/11** · in-place **3/3** · magicdiv **2³²** ·
 recompilabilité **100 %** · WASM **7/7**.
@@ -515,6 +517,27 @@ recompilabilité **100 %** · WASM **7/7**.
   (size-query, MORE_DATA+taille)/`RegEnumValue`/`RegEnumKey(Ex)`/`RegDeleteKey`(récursif)/`RegDeleteValue`/`RegQueryInfoKey`/
   `RegCloseKey`, A complet + W (conversion de nom). Disposition CREATED(1)/OPENED(2). Gardé `winecorpus/win32_registry.c`
   (round-trip bit-identique Wine).
+- **⭐ Plancher ntdll `Nt*` (2026-08-07, doc 82 tranches 2-6) — les syscalls SOUS advapi32/kernel32, sur le MÊME `g_reg`/
+  modèle fd.** **Registre** : `NtCreateKey`/`NtOpenKey`/`NtSetValueKey`/`NtQueryValueKey`/`NtDeleteValueKey`/`NtQueryKey`/
+  `NtEnumerateKey`/`NtEnumerateValueKey`/`NtFlushKey`/`NtDeleteKey`/`NtClose` (structs `KEY_*`/`KEY_VALUE_*` mesurés :
+  `MaxNameLen` en octets, tri case-insensible, régimes petit-tampon distincts, `LastWriteTime` exclu). **Fichier** (dans ce
+  modèle **un HANDLE EST un fd**) : `NtCreateFile`/`NtOpenFile`/`NtReadFile`/`NtWriteFile`/`NtQueryInformationFile`
+  (`FileStandard`/`Position`)/`NtSetInformationFile` (`EndOfFile`=ftruncate/`Position`=lseek/`Disposition`=delete-on-close)/
+  `NtQueryDirectoryFile` (`FileNames`+`FileBothDir`, `.`/`..` triés, pattern NULL/`*`/`*.*` ; glob générique = **limite
+  dure** car dépend du short-name 8.3 environnemental) ; `NtClose` ferme vraiment le fd + honore le delete-on-close ;
+  `AllocationSize`=`st_blocks*512` (formule stat de Wine, portable). **Divers** : `NtDelayExecution`(≈Sleep, fibers),
+  `NtAllocateVirtualMemory`/`NtFreeVirtualMemory`(≈VirtualAlloc). Gardés `winecorpus/win32_nt{reg,enum,file,dir,delay,vm}`
+  + `win32_rtlpntreg` — tous bit-identiques Wine. Sous-cas non modélisés/non-reproductibles = `aret_partial`/abort sound.
+- **⭐ Forme LOURDE — un FICHIER ntdll de Wine ENTIER tourne sur le plancher (capstone, 2026-08-07).** `dlls/ntdll/reg.c`
+  de Wine (768 l., **inchangé** hormis splice des forward-decls) est **vendoré** (`runtime/wine_heavy/reg.c`), compilé par
+  `cc` **natif** contre le shim NT-types autonome (`native/nt_types.h`+`reg_types.h`), lié au **plancher `Nt*` real-ABI**
+  (`ntdll_ntreg.c` : wrappers NTAPI → cœurs `aret_ntreg_*` partagés avec les shims esp) + `rtlstr.c` + le plancher ASCII.
+  **Un vrai PE** important `RtlpNtCreateKey`/`RtlpNtSetValueKey`/`RtlpNtQueryValueKey` (adaptateurs esp `aret_RtlpNt*`,
+  `aret_ntdll.c`) atteint donc la logique Wine **compilée-en-ARET** → floor → `g_reg`, **bit-identique Wine**
+  (`winecorpus/win32_rtlpntreg` + `.def`/`.killat`). Preuves autonomes : `tools/wine_heavy/proof_reg_native.sh` (ELF sans
+  Wine au runtime) + `proof_ntreg*.sh`. **Premier fichier ntdll de Wine non-chaîne entier en production** — le milestone
+  « DLL user-mode entières » franchi. **Piège §0 attrapé** : une décl **implicite cdecl** d'une fonction plancher stdcall
+  déséquilibre la pile ⇒ **tout déclarer NTAPI** ; `RtlCreateUnicodeString` rend **BOOLEAN**.
 - **TEB `StackBase`/`StackLimit` = vraies bornes de la pile machine** (`fs:[4]`/`fs:[8]`, 2026-07-17, bug **général**) :
   l'entrée émise (`aret_main.c`) publie `__aret_set_stack_bounds(top=aret_stack+taille, bottom=aret_stack)` avant de
   lancer le programme → un sas CRT MSVC qui lit `fs:[4]` (StackBase) et déréférence `[StackBase-8]` (idiome
@@ -939,6 +962,11 @@ résidu qui abort restera l'**obfusqué/fait-main/VM-packé** (indécidable, §9
   ntdll** (131 `Nt*` syscalls + 212 `Rtl*` + 74 divers) ⇒ la chaîne user-mode est **finie**, elle bute sur 131 syscalls NT
   (jumeau du mur win32k). ⇒ Une famille **pure et déterministe** (`Path*`/`Str*`) se comble au **shim HLE** (I5), pas en
   liftant kernelbase. Détail 71 (2026-08-01 [LIFT-DLL][INFRA]).
+  **✅ LE PLANCHER `Nt*` EST POSÉ (2026-08-07, §4.5)** : le fond de chaîne (registre + fichier + divers) est **implémenté et
+  prouvé bit-identique Wine**, et sa **variante real-ABI** dans `wine_heavy` laisse un **fichier ntdll de Wine ENTIER
+  (`reg.c`) compilé** appeler ces `Nt*` — donc « lifter/compiler des DLL user-mode entières » **n'est plus bloqué par le
+  plancher**. Reste : étendre le plancher `Nt*` **fichier** real-ABI (comme le registre) au besoin, puis d'autres fichiers
+  ntdll, puis des DLL entières.
 - **Levier 2 — Finir les mécanismes bornés qui débloquent une CLASSE** : EH C++ (`__CxxFrameHandler`), bitmap-fonts,
   runtime VB. Chacun = une session, des milliers de binaires.
 - **Levier 3 — Mop-up data-driven** du résidu, trié par le Levier 0.

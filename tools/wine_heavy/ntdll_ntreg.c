@@ -64,3 +64,15 @@ NTSTATUS NTAPI NtQueryInformationToken(HANDLE Token, int Class, void *Info, ULON
     (void)Token; (void)Class; (void)Info; (void)Len; (void)RetLen;
     aret_unimpl("NtQueryInformationToken (RtlOpenCurrentUser)"); return -1;
 }
+/* Off-path symbols a whole compiled reg.c references (only RtlOpenCurrentUser / RtlQueryRegistry
+ * Values reach them, never the RtlpNt* round-trip we drive) -> sound abort if ever actually
+ * called, provided so the whole reg.c links. */
+NTSTATUS NTAPI RtlConvertSidToUnicodeString(void *s, void *sid, unsigned char alloc) {
+    (void)s; (void)sid; (void)alloc; aret_unimpl("RtlConvertSidToUnicodeString (reg.c off-path)"); return -1;
+}
+NTSTATUS NTAPI RtlExpandEnvironmentStrings_U(void *env, void *src, void *dst, void *len) {
+    (void)env; (void)src; (void)dst; (void)len; aret_unimpl("RtlExpandEnvironmentStrings_U (reg.c off-path)"); return -1;
+}
+void * NTAPI GetCurrentThreadEffectiveToken(void) {
+    aret_unimpl("GetCurrentThreadEffectiveToken (reg.c off-path)"); return 0;
+}

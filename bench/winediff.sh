@@ -78,8 +78,11 @@ run_one() {
   # system libs would otherwise provide by name — e.g. an import BY ORDINAL (comctl32
   # InitCommonControls @17). Placed right after $src so it wins the symbol.
   local imp_lib=""
+  # NAME.killat: pass dlltool --kill-at so the IAT imports the UNDECORATED name (e.g. an
+  # undocumented stdcall ntdll export like RtlpNtCreateKey, which Wine exports without the @N).
+  local killat=(); [ -f "$CORPUS/$name.killat" ] && killat=(--kill-at)
   if [ -f "$CORPUS/$name.def" ] && command -v "${MINGW%-gcc}-dlltool" >/dev/null 2>&1; then
-    if "${MINGW%-gcc}-dlltool" -d "$CORPUS/$name.def" -l "$WD/$name.imp.a" 2>"$WD/err"; then
+    if "${MINGW%-gcc}-dlltool" "${killat[@]}" -d "$CORPUS/$name.def" -l "$WD/$name.imp.a" 2>"$WD/err"; then
       imp_lib="$WD/$name.imp.a"
     else
       echo "FAIL  $name (dlltool: $(head -1 "$WD/err"))"; return 1

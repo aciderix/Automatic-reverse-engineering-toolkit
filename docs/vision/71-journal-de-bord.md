@@ -6953,3 +6953,26 @@ Détail : **70 §6** (roadmap). Résumé :
   étendu ; hash **inchangé** ; heavy-form fixtures (`ntdll_rtlstr`) + registre (`win32_ntreg`) verts ; winediff complet.
 - **Reste (pleine production)** : vendorer `reg.c` (`include_str!`) + adaptateur esp `aret_RtlpNt*` + fixture PE ⇒ un
   **PE réel** important `RtlpNtCreateKey` atteint la logique Wine **compilée-en-ARET**. Puis d'autres fichiers, puis DLL.
+
+### 2026-08-07 — [I13][INFRA][BUILDER][LOURD] **🎯 CAPSTONE PLEINE PRODUCTION — un vrai PE atteint la logique Wine COMPILÉE-EN-ARET (`reg.c` entier) → plancher `Nt*` → `g_reg`, bit-identique Wine**
+
+- **Bout-en-bout franchi.** `reg.c` de Wine (vendoré `runtime/wine_heavy/reg.c`, splice des forward-decls, **inchangé**) est
+  **câblé en production** : `WINE_REG_C` `include_str!` + écrit + ajouté à la boucle heavy-form (`rtlstr`/`ntdll_floor`/
+  `ntdll_ntreg`/**`reg`**) ⇒ compilé `-m32 -fshort-wchar -D__WINESRC__` et lié dans **tout build natif 32-bit**.
+- **Adaptateurs esp** (`aret_ntdll.c`, gaté i386) : `aret_RtlpNtCreateKey`/`aret_RtlpNtOpenKey`/`aret_RtlpNtSetValueKey`/
+  `aret_RtlpNtQueryValueKey` déballent l'esp et appellent les vraies fonctions **compilées** de `reg.c` (real-ABI). Un PE
+  important `RtlpNt*` route donc `import → aret_RtlpNt* → reg.c compilé → NtCreateKey (plancher `ntdll_ntreg.c`) →
+  `aret_ntreg_*` → g_reg`. Off-path (`RtlConvertSidToUnicodeString`/`RtlExpandEnvironmentStrings_U`/
+  `GetCurrentThreadEffectiveToken`, seulement via `RtlOpenCurrentUser`/`RtlQueryRegistryValues`) = **stubs abort sound**
+  (au plancher) pour clore le lien.
+- **Fixture PE `winecorpus/win32_rtlpntreg`** (+`.def`+**`.killat`**) : un vrai PE importe `RtlpNtCreateKey`/`SetValueKey`/
+  `QueryValueKey`, round-trip une clé, **bit-identique Wine**. **Deux pièges d'import résolus** : `RtlpNt*` sont des exports
+  **non documentés** absents de l'import-lib mingw ⇒ `.def` forcé ; et Wine les exporte **non décorés** alors que le PE
+  appelle `@N` (stdcall) ⇒ nouvelle option harnais **`NAME.killat`** (dlltool `--kill-at`) pour importer le nom nu — sinon
+  Wine résout un stub `@28` et aborte. Marqueur **par fixture** (global casserait `comctl32_ordinal` qui importe par
+  ordinal).
+- **Portes** : `win32_rtlpntreg` bit-identique ; `comctl32_ordinal` (changement `winediff.sh`) non régressé ; audit PASS
+  (`RtlpNt*` `@N`) ; hash **inchangé** ; les **5 preuves heavy-form** vertes ; winediff complet. **Doc 70 mise à jour**
+  (§3 régression, §4.5 plancher `Nt*` + capstone, §5 « plancher posé »).
+- **Reste** : étendre les cœurs real-ABI aux `Nt*` **fichier** (comme le registre) ; vendorer d'autres fichiers ntdll ; puis
+  des DLL user-mode entières via le loader multi-modules (Levier 1).

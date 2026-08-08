@@ -199,8 +199,12 @@ Trois **couches** (branchement → comportement), et pour le comportement trois 
    KEY_VALUE_*/RTL_QUERY_REGISTRY_TABLE/TOKEN_* + déclarations NTAPI des fonctions plancher/Nt\* appelées), se lie au
    plancher real-ABI + rtlstr + floor, et **round-trip une clé comme ELF autonome sans Wine**, bit-identique aux valeurs
    Wine (`proof_reg_native.sh`). **Premier fichier ntdll de Wine non-chaîne entier tournant sur le plancher.** Bug §0
-   attrapé : décl implicite cdecl d'une fonction plancher stdcall → crash → tout déclarer NTAPI. **Reste (pleine prod)** :
-   vendorer `reg.c` + adaptateur esp `aret_RtlpNt*` + fixture PE ⇒ un PE réel atteint la logique Wine compilée-en-ARET.
+   attrapé : décl implicite cdecl d'une fonction plancher stdcall → crash → tout déclarer NTAPI. **PLEINE PRODUCTION ✅ FAIT
+   (2026-08-07)** : `reg.c` vendoré + câblé builder (boucle heavy-form) + adaptateurs esp `aret_RtlpNt*` (`aret_ntdll.c`) +
+   stubs off-path ⇒ un **vrai PE** important `RtlpNtCreateKey` (fixture `win32_rtlpntreg`, `.def`+`.killat` pour l'export
+   ntdll non documenté/non décoré) atteint la logique Wine **compilée-en-ARET** → plancher → g_reg, **bit-identique Wine**.
+   Le milestone « DLL user-mode entières » est **franchi** sur un premier fichier. **Reste** : cœurs real-ABI `Nt*` fichier,
+   d'autres fichiers ntdll, puis des DLL entières (loader multi-modules, Levier 1).
 
 **Invariants** : registre/état vide ⇒ prouver en round-trip ; jamais une valeur système devinée ; hash inchangé (additif) ;
 `@N` Nt\* déjà dans `stdcall_pops` (audit) ; chaque tranche = fixture winediff + entrée 71 + maj ici.

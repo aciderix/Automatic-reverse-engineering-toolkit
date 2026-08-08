@@ -50,6 +50,10 @@ const WINE_FLOOR_C: &str = include_str!("../../runtime/wine_heavy/ntdll_floor.c"
 /// the heavy floor below; its bare Nt* symbols serve compiled Wine code (a PE's own imports still
 /// route to the aret_* esp shims, a different symbol set).
 const WINE_NTREG_C: &str = include_str!("../../runtime/wine_heavy/ntdll_ntreg.c");
+/// A whole Wine ntdll file (doc 82 tranche 6 capstone): dlls/ntdll/reg.c, UNCHANGED except the
+/// forward-decl splice, compiled on the real-ABI Nt* registry floor. Its exported Rtlp*Nt / Rtl*
+/// registry functions are reached from a PE via the aret_Rtlp* adapters (aret_ntdll.c).
+const WINE_REG_C: &str = include_str!("../../runtime/wine_heavy/reg.c");
 const WINE_NT_TYPES_H: &str = include_str!("../../runtime/wine_heavy/native/nt_types.h");
 const WINE_REG_TYPES_H: &str = include_str!("../../runtime/wine_heavy/native/reg_types.h");
 const WINE_FLOOR_H: &str = include_str!("../../runtime/wine_heavy/native/ntdll_floor.h");
@@ -1359,6 +1363,7 @@ pub fn transpile(
         std::fs::write(wh.join("rtlstr.c"), WINE_RTLSTR_C)?;
         std::fs::write(wh.join("ntdll_floor.c"), WINE_FLOOR_C)?;
         std::fs::write(wh.join("ntdll_ntreg.c"), WINE_NTREG_C)?;
+        std::fs::write(wh.join("reg.c"), WINE_REG_C)?;
         std::fs::write(wh.join("native/nt_types.h"), WINE_NT_TYPES_H)?;
         std::fs::write(wh.join("native/reg_types.h"), WINE_REG_TYPES_H)?;
         std::fs::write(wh.join("native/ntdll_floor.h"), WINE_FLOOR_H)?;
@@ -1704,7 +1709,7 @@ pub fn transpile(
     // tools/wine_heavy/proof_native.sh; the aret_Rtl* adapters (aret_ntdll.c) route imports here.
     if !wasm && bits == 32 {
         let shim = out_dir.join("wine_heavy/native");
-        for stem in ["rtlstr", "ntdll_floor", "ntdll_ntreg"] {
+        for stem in ["rtlstr", "ntdll_floor", "ntdll_ntreg", "reg"] {
             let src = out_dir.join(format!("wine_heavy/{stem}.c"));
             let obj = out_dir.join(format!("wine_{stem}.o"));
             let out = Command::new(&cc)
