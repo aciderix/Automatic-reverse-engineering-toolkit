@@ -7155,3 +7155,22 @@ Détail : **70 §6** (roadmap). Résumé :
   cœur GUI. « WinMerge au bout » = jalon **M7-GUI** (multi-sessions) ; ce crash lift dans pcre/libexpat est le prochain cran.
 - **Portes** (tout committé/poussé) : hash `19acad982194bf07` inchangé, difftest 272/272, stdcall_audit PASS, funcdiff 0 div,
   winediff 228/230, + fixtures `recov_epilog_ret`/`crt_wcsscan` bit-identiques Wine.
+
+### 2026-08-08 — [I5][LIFT][DIAG] **WinMerge mur #7 caractérisé : crash `memcpy_s` (~10 Mo) dans mfc90u — un pointeur de chaîne `L"Settings"` utilisé comme LONGUEUR de wmemcpy**
+
+- **Après les 6 murs franchis** (fix récup + wcspbrk + pcre/libexpat liftées + LoadMenu/Accel stubs), WinMerge atteint un
+  **crash** (`0xC0000005 at 0x14ae64cc`), pas un import manquant. gdb : faute dans **libc `memcpy`** (`movdqu`), appelé par
+  `aret_memcpy_s`, appelé par **mfc90u lifté** (`sub_6a36de`, base 0x6a). `count=0x989e98` (~10 Mo) ⇒ lecture hors-source.
+- **Décodé** : `sub_6a36de` = wrapper **wmemcpy** (`memcpy_s(dst, 2·destN, src, 2·srcN)`, octets = 2·WCHAR). `count = 2·eax`,
+  `eax = 0x4c4f4c`. **`0x4c4f4c` est un POINTEUR** vers la chaîne large `L"Settings"` (`.rdata` WinMerge) — **utilisé comme
+  une LONGUEUR**. Remonté : `sub_6a3649` fait `v100 = [v5+0xc]` (le champ « longueur » d'une structure CString modélisée sur
+  la pile, `v5 = esp-4`) qui contient `0x4c4f4c` au lieu d'un compte ⇒ 2× = ~10 Mo ⇒ overrun.
+- **Lien avec le fix `0x10`** : `ebx=0x51ef18` tout du long = **le même graphe d'objets** que le null-deref `0x10` réparé.
+  Le ctor rend désormais `this` (non-null), l'init **poursuit**, et ce copie-de-chaîne CString **en aval** révèle son propre
+  défaut : un champ longueur qui porte un pointeur de chaîne. **Nouvelle forensics dédiée** (3ᵉ crash de la session) : tracer
+  d'où vient la corruption du champ `+0xc` (construction CString mfc90u / setup pile de l'appelant) — soit un bug de lift
+  plus profond, soit une API HLE en amont qui rend un pointeur là où un compte est attendu.
+- **Statut §2 (borner)** : mur **caractérisé à l'instruction** (wmemcpy, champ `+0xc` = `&L"Settings"`), non tranché.
+  **Bilan WinMerge de la session** : le blocage racine **multi-sessions `0x10` est levé** (fix de lift **général**), et le
+  driver a franchi **6 murs** jusqu'au cœur de l'init GUI MFC. « Au bout » = jalon **M7-GUI** (multi-sessions). Prochain cran
+  = ce crash CString mfc90u.
