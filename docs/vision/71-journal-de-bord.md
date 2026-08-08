@@ -7062,3 +7062,29 @@ Détail : **70 §6** (roadmap). Résumé :
   minimal** (fixture asm SEH-establish + helper préservant eax avant `ret`, car mingw n'émet pas `_EH_epilog3`) — sous-
   investigation focalisée, testabilité délicate. **Acquis** : la mesure demandée est livrée — le mur WinMerge = **un** bug de
   lift à fort levier (classe des ctors/dtors C++ MSVC sous EH retournant `this`), pas « tous les Nt / n'importe quelle DLL ».
+
+### 2026-08-08 — [I5][LIFT][DIAG] **WinMerge `0x10` (suite) : 6 hypothèses ÉLIMINÉES par reproducteur minimal — c'est un bug d'opt/SSA à l'ÉCHELLE DU PROGRAMME, pas reproductible en isolé**
+
+- **Objectif (utilisateur : « résoudre WinMerge de manière générale »)**. Isoler la cause du `return 0` de `sub_470022`
+  (ctor C++ MSVC lifté qui devrait retourner `this`) dans un **reproducteur minimal** (boucle rapide), conformément au §2.
+- **Reproducteur** (`scratchpad/ehrepro/repro.c`, non committé) : copies fidèles de `_EH_prolog3` (0x4ac1e2) et
+  `_EH_epilog3` (0x4ac2ba) MSVC + un ctor `probe` calqué sur `sub_470022` (`push $4; mov handler,eax; call _EH_prolog3;
+  mov ecx,[ebp-0x10]; call intermediate; mov [ebp-0x10],eax; call _EH_epilog3; ret`), import forcé de `_except_handler3`
+  (`.def` → `seh_active` ON). Vérifié **OK sous Wine** à chaque étape.
+- **Le C généré de `probe` est rendu IDENTIQUE à celui de `sub_470022`** — même `_EH_prolog3` **inliné** (marqueur
+  `aret_seh_setjmp` **dans** le corps), même sauvegarde/rechargement de `this` via `[ebp-0x10]` **à travers** l'établissement
+  SEH + l'appel intermédiaire, même appel `_EH_epilog3` avec `eax=this` **et `ecx=0 /*undef*/`** (obtenu en faisant clobber
+  ecx par l'intermédiaire), même `_EH_epilog3` qui **préserve eax** (`return (edx<<32)|(eax&mask)`). **Et `probe` retourne
+  CORRECTEMENT `0x1234`** — le bug **ne se reproduit pas**.
+- **⇒ 6 hypothèses ÉLIMINÉES avec preuve** (pour ne pas les refaire) : (a) store mal dirigé — non (l'adresse du store est
+  `0x51efdc`, bonne) ; (b) re-zéro ultérieur — non (un seul write) ; (c) bug générique `_EH_epilog3` — non (sur **1174**
+  sites, la quasi-totalité retourne juste) ; (d) le motif prologue+établissement+rechargement mémoire — non (repro OK) ;
+  (e) l'établissement SEH **inliné** dans la fonction — non (repro l'a, OK) ; (f) `ecx` indéfini au call épilogue — non
+  (repro l'a, OK). **Conclusion forte** : le `return 0` **n'est causé par RIEN de visible dans le C par-fonction** ; c'est
+  une **décision d'opt/SSA à l'échelle du programme** (dépend des 43 690 fonctions) — un `Return` (normalement `Read(eax)`,
+  `build.rs`) replié en `Const(0)` alors que l'appel épilogue **et** son résultat sont conservés (donc **pas** un bloc mort
+  supprimé, **pas** un noreturn).
+- **BORNÉ → le trancher exige d'INSTRUMENTER l'opt d'ARET** (imprimer quand un `Return` d'une fonction est replié en
+  `Const` depuis un eax non-constant) et de **rebuild WinMerge** (boucle ~10 min/itération) — sous-investigation *interne
+  au compilateur*, distincte de la mesure boîte-noire (épuisée ici). **Acquis livré** : la mesure demandée est complète et
+  la cause **cernée** (opt/SSA global, une classe rare) ; les 6 pistes mortes sont documentées pour la session dédiée.
