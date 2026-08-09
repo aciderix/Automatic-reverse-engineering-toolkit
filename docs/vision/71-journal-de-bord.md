@@ -7396,3 +7396,28 @@ Détail : **70 §6** (roadmap). Résumé :
   le ctor `ios_base::Init` qui ne peuple pas cout. **Prochain** : diagnostiquer ce mur, puis **MESURER l'effet corpus** sur
   les 463 (sweep `--with-dll libstdc++ libgcc`) — la mesure exigée par l'utilisateur **avant** de considérer le chantier fini
   (elle sera parlante une fois iostream complet ; aujourd'hui elle montrerait « avance mais pas débloqué »).
+
+### 2026-08-08 — [I13][LIFT-DLL][DIAG] **étape 2, mur suivant DIAGNOSTIQUÉ : les CONSTRUCTEURS GLOBAUX C++ mingw ne tournent pas (`__do_global_ctors` no-op'é) ⇒ `std::cout` jamais construit**
+
+- **Après le fix pseudo-reloc (cout résolu à `0x561cc0`), crash plus profond** (`sub_4a7b00`, `chunk_12.c:8776`) : deref de
+  `*(vtable−12)` (offset de base virtuelle iostream). gdb : **l'objet cout à `0x561cc0` est ENTIÈREMENT ZÉRO** (vtable nulle)
+  ⇒ **cout n'a jamais été construit**.
+- **Cause racine.** `std::cout`/`cin`/`cerr` sont construits par `std::ios_base::Init::Init()`, invoqué par le static
+  `__ioinit` de l'exe, lancé par la chaîne mingw **`___main` → `__do_global_ctors`** (qui parcourt `__CTOR_LIST__` et appelle
+  chaque ctor global). **ARET no-op'e `__main` ET `do_global_ctors`** (`is_glue_name`, `src/loader/mod.rs:134-138`) ⇒ **les
+  ctors globaux C++ ne tournent JAMAIS**. Inoffensif pour un C mingw (aucun ctor), **fatal** pour du C++ (cout/locale non
+  construits). ⚠️ **Trou §0 sous-jacent** : no-op'er `__do_global_ctors` **saute silencieusement** les ctors au lieu d'aborter
+  — un faux-silencieux (masqué jusqu'ici car aucun binaire C++ mingw ne tournait bout-en-bout).
+- **Structure mingw confirmée** (io.exe) : `.CRT` = `_pre_c_init`(0x401010)/`_pre_cpp_init`(0x401110) (pré-init CRT,
+  `__getmainargs`…) ; les ctors **utilisateur/globaux** vivent dans **`__CTOR_LIST__`** (`[-1, ctor_n, …, ctor_1, 0]`,
+  appelés en ordre **inverse** par `___do_global_ctors` à VA `0x4007f0`). `_initterm` (MSVC) est déjà géré (`aret_initterm`) ;
+  l'équivalent mingw (`__CTOR_LIST__`) **ne l'est pas**.
+- **FIX identifié (contrôlé, additif — prochain incrément).** Comme `dll_inits`/`_initterm` : **récupérer `__CTOR_LIST__`**
+  (adresse extraite du `mov reg,[imm]` de `___do_global_ctors` FLIRT-reconnu, ou scan du tableau `-1`-en-tête de pointeurs de
+  code terminé par 0), **enregistrer ses ctors comme entry-points** (pour qu'ils soient liftés), et **émettre au démarrage**
+  des appels à chaque ctor **en ordre inverse** (après `dll_inits`, avant l'entrée app) — miroir de `dll_init_calls`
+  (`builder/mod.rs:1283`). Gaté : n'agit que si `__CTOR_LIST__` a des entrées ⇒ 0 effet sur les C/MSVC ⇒ hash inchangé.
+  ⚠️ **Régression à surveiller** : startup de TOUT binaire mingw — winediff complet obligatoire (busybox/lua/nasm mingw).
+- **Statut.** Mur **entièrement diagnostiqué**, fix **cadré**. C'est le 2ᵉ chantier loader du jour ; landé prochainement
+  (changement de startup correctness-critique ⇒ pas bâclé en fin de session). **Ensuite** : mesure corpus `--with-dll` sur les
+  463 (exigence utilisateur) une fois iostream bout-en-bout.
