@@ -277,15 +277,17 @@ pub fn build_ir(prog: &Program, func: &Function) -> IrFunction {
     // GNU/Itanium C++ EH: this function has an `.eh_frame` LSDA ⇒ inject the establish
     // (setjmp at entry) and per-call active-PC hooks the runtime dispatcher needs. Off for
     // every other function ⇒ no injection, byte-identical (see emit::set_gnu_eh_funcs).
-    let gnu_eh = crate::emit::is_gnu_eh_func(func.entry);
-    // An EH function's frame MUST be raw shared-stack memory (not named SSA scalars): the
-    // catch continuation runs as a SEPARATE lifted function against this function's frame
-    // (via the establisher ebp), so any local set in the try body and read after the catch
-    // (e.g. a value computed before the throw) has to live in real memory both sides can see.
-    let raw_frames = x87.is_some()
-        || uses_xmm128_mem(func)
-        || crate::ir::lift::frames_off()
-        || crate::emit::is_gnu_eh_frame(func.entry);
+    // GNU EH: the ESTABLISH (setjmp) is injected only at a real EH function's entry; the
+    // active-call-PC hook `setpc` (and the frame pop) go in EVERY frame that runs against an
+    // establisher — the EH functions AND their landing-pad continuations — so a rethrow from
+    // inside a catch records the rethrow site and the establisher frame stays live across it.
+    let gnu_eh_func = crate::emit::is_gnu_eh_func(func.entry);
+    let gnu_eh_frame = crate::emit::is_gnu_eh_frame(func.entry);
+    // An EH frame MUST be raw shared-stack memory (not named SSA scalars): a catch continuation
+    // runs as a SEPARATE lifted function against the establisher's frame (via its ebp/base), so
+    // any local set in the try body and read after the catch has to live in real memory.
+    let raw_frames =
+        x87.is_some() || uses_xmm128_mem(func) || crate::ir::lift::frames_off() || gnu_eh_frame;
     crate::ir::lift::set_frames_off(raw_frames);
 
     let gnu_eh_setpc = |ip: u64| {
@@ -306,7 +308,7 @@ pub fn build_ir(prog: &Program, func: &Function) -> IrFunction {
         let mut stmts: Vec<Stmt> = Vec::new();
         // Establish the EH frame at the function entry, before the prologue: push the frame
         // keyed by this esp and arm the setjmp (emit renders the marker as both).
-        if gnu_eh && addr == func.entry {
+        if gnu_eh_func && addr == func.entry {
             stmts.push(Stmt::CallStmt(Expr::Call {
                 target: CallTarget::Named("__aret_gnu_eh_establish".to_string()),
                 args: vec![
@@ -333,7 +335,7 @@ pub fn build_ir(prog: &Program, func: &Function) -> IrFunction {
             // GNU EH: record the active call site + frame ebp before every call, so a throw
             // out of the callee maps to this function's right landing pad (the LSDA region is
             // keyed by the call PC). The call instruction's own VA falls inside its region.
-            if gnu_eh && insn.flow == Flow::Call {
+            if gnu_eh_frame && insn.flow == Flow::Call {
                 stmts.push(gnu_eh_setpc(insn.address));
             }
             // stdcall over-pop compensation (fallback for imports of unknown arity).

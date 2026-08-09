@@ -7761,3 +7761,36 @@ Deux cas de plus, mesurés puis prouvés bit-identiques Wine (`bench/gnueh/eh_ca
   4/4**, winediff (à confirmer). **Reste 2d** : `__cxa_rethrow` (nécessite de garder la frame établisseuse vivante à travers le
   catch + `setpc`/pop injectés dans les continuations — refonte du cycle de vie des frames, brique dédiée), offsets `__vmi` non
   nuls, throw pendant l'unwind (std::terminate).
+
+### 2026-08-09 — [I13][EH][LIFT ✅] **Brique EH C++ Itanium — 2d (part 2) : `__cxa_rethrow` (`throw;`) + refonte du cycle de vie des frames**
+
+`throw;` dans un `catch`, re-attrapé par un `try` englobant de la MÊME fonction. Prouvé bit-identique Wine
+(`bench/gnueh/eh_rethrow.cpp`, **gnuehdiff 5/5** ; `start`/`inner`/`outer 7`/`done`).
+- **Refonte du cycle de vie des frames (la vraie brique, prérequise par le rethrow)** : jusqu'ici `aret_gnu_eh_run`
+  **poppait** la frame établisseuse avant de lancer le landing pad. Faux pour un rethrow : le `catch` interne tourne comme
+  **continuation** de la fonction établisseuse, et un `throw;` doit re-trouver **cette même frame** (pour son `try` englobant).
+  Nouveau modèle : `aret_gnu_eh_run` **ne pop plus** — la frame reste vivante à travers le handler. Qui pop alors ? (a) une
+  continuation **CATCH** exécute le handler + la fin de la fonction et pop sur son **propre `return` lifté** ; (b) une
+  continuation **CLEANUP** finit en `_Unwind_Resume`, qui pop **là**. ⇒ deux gates séparés (`build.rs`) : **establish**
+  (setjmp) seulement à l'entrée d'une **vraie fonction EH** (`is_gnu_eh_func`) ; **setpc** (PC de call actif) + **pop** dans
+  **toute frame** qui tourne contre un établisseur — fonctions EH **ET** landing pads (`is_gnu_eh_frame`), pour que le
+  `throw;` enregistre bien son site et que le pop-avant-`Return` (`structured.rs`, gaté `is_gnu_eh_frame`) couvre les
+  continuations.
+- **Le bug attrapé (§0, mesuré au désassemblage)** : le landing pad **partagé** que GCC émet pour `outer catch(int)` appelle
+  `__cxa_end_catch` (du `catch(...)` **interne** qu'on quitte) **AVANT** le `__cxa_begin_catch` externe (`0x40153f: mov
+  %eax,%ebx ; call end_catch ; cmp $1,%esi ; je … ; call begin_catch`). Mon `end_catch` **libérait inconditionnellement**
+  l'objet ⇒ le `begin_catch` externe lisait un pointeur **libéré** ⇒ « outer <garbage> », pas de `done`. **Cause générale**
+  (pas le fixture) : l'ABI Itanium veut qu'un `end_catch` qui suit un rethrow **ne détruise pas** l'exception (elle est de
+  nouveau **en vol** — `__cxa_rethrow` **négative le handlerCount**, et le `end_catch` de fermeture le ré-incrémente sans
+  détruire).
+- **Fix (modèle à exception unique)** : flag `g_gnu_rethrown` posé par `aret_cxa_rethrow`, **consommé** par le prochain
+  `aret_cxa_end_catch` — qui **saute** free+dtor et **préserve** `g_gnu_cur_exc`/`g_gnu_cur_dtor` (le vrai catcher externe les
+  détruira à son `end_catch`). `aret_cxa_rethrow` = `g_gnu_rethrown=1; aret_gnu_dispatch()` : l'état en vol (`g_gnu_exc_obj`/
+  `tinfo`/`cur_dtor`) est **intact** depuis le `__cxa_throw` d'origine (begin/end_catch ne le touchent pas) ⇒ c'est
+  exactement l'exception attrapée. La continuation du handler a enregistré le site du rethrow via `setpc`, donc le dispatch
+  ré-examine la frame établisseuse à ce PC (le `try` englobant) puis vers l'extérieur.
+- **Régression-propre** : la refonte ne change ni 2a/2b/2c/2d-part1 (tous toujours verts) ni les binaires non-EH (gates
+  `is_gnu_eh_func`/`is_gnu_eh_frame`, inertes ailleurs).
+- **Portes** : **hash `19acad982194bf07` inchangé**, **difftest 272/272**, **gnuehdiff 5/5**, **winediff 231/233** (2 rouges
+  connus : `gdi_uifont` env + `ole_mlang` flake), cargo test **79+** vert. **Reste 2d** : offsets `__vmi` (multi-héritage)
+  non nuls, throw pendant l'unwind (`std::terminate`). Axe DLL-tierces (doc 82) séparé.

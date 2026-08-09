@@ -269,9 +269,20 @@ Trois **couches** (branchement → comportement), et pour le comportement trois 
 > mesurés (lp_enc=omit, ttype=indirect|pcrel|sdata4, cs=uleb128) ; tout autre encodage ⇒ fonction **sautée** (sound).
 > **Décision modèle** : `catch_types` = adresses des **slots** `type_info*` (indirect, liés au load par pseudo-reloc) — le
 > dispatcher déréférence au throw pour matcher le typeinfo de `__cxa_throw`. Recovery-only ⇒ **hash inchangé**, difftest
-> 272/272 ; tests unitaires auto-contenus (uleb/sleb/read_encoded + LSDA synthétique). **Reste** : (1b) setjmp d'établissement,
-> (2) dispatcher `aret_cxa_throw` (parcours pile EH + match type + longjmp au landing pad), `_Unwind_Resume`/`__cxa_begin/end_catch`.
-> Détail 71 (2026-08-09).
+> 272/272 ; tests unitaires auto-contenus (uleb/sleb/read_encoded + LSDA synthétique). Détail 71 (2026-08-09).
+>
+> **✅ 1b + 2a→2d FAITS (2026-08-09) — throw/catch bout-en-bout via le dispatcher ARET, bit-identique Wine.** Sous-briques
+> livrées (chacune prouvée `bench/gnuehdiff.sh`, **5/5**) : **1b** setjmp d'établissement à l'entrée d'une fonction EH +
+> `setpc` (PC de call actif par frame) + pop ; **2a** premier throw/catch `int` (match par égalité de pointeur de typeinfo) ;
+> **2b** sous-typage (`catch(Base&)` attrape `throw Derived`) via la base-chain du type_info (vptrs ABI = slot IAT+8, connus
+> à l'analyse sans charger libstdc++) ; **2c** destructeurs pendant l'unwind (`_Unwind_Resume`) + frame de continuation
+> robuste (`setpc` capture `(pc, esp=frame base, ebp)`) ; **2d part 1** `catch(...)` + catch-by-value (copie via
+> `__cxa_get_exception_ptr`, destruction de l'objet lancé ET copié à `end_catch`, dtor THISCALL) ; **2d part 2**
+> `__cxa_rethrow` (`throw;`) + refonte du cycle de vie des frames (la frame établisseuse reste vivante à travers le catch ;
+> `end_catch` de fermeture ne détruit pas l'exception rethrown). Runtime `aret_cxa_*`/`aret_gnu_dispatch` (`aret_hle.c`),
+> table call-site/catch émise (`aret_dispatch.c`), gates `is_gnu_eh_func`/`is_gnu_eh_frame` (émission inerte ailleurs ⇒
+> **hash inchangé**). **Reste EH** : offsets `__vmi` (multi-héritage) non nuls, throw pendant l'unwind (`std::terminate`),
+> puis **mesure corpus** sur les 463 (doc 90). Détail 71 (2026-08-09).
 
 4. **Corps Wine — forme LOURDE** : compiler du `.c` Wine entier + **porter une fois le plancher `ntdll`/win32u**
    → couverture massive. *(Milestone.)* **🚧 OUVERTE ET MESURÉE (2026-08-02, `tools/gen_wine_heavy.py`)** : `rtlstr.c`

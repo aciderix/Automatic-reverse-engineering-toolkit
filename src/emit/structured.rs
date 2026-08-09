@@ -194,7 +194,7 @@ pub fn emit_function(func: &IrFunction, forward: &mut BTreeSet<u64>, with_params
         is_header: vec![false; n],
         indeg,
         entry,
-        eh: super::is_gnu_eh_func(func.entry),
+        eh: super::is_gnu_eh_frame(func.entry),
         emitted: vec![false; n],
         out: String::new(),
     };

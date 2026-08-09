@@ -4399,6 +4399,9 @@ static int g_gnu_eh_n = 0;
 static uint32_t g_gnu_run_lp, g_gnu_run_obj, g_gnu_run_sel, g_gnu_run_ebp, g_gnu_run_esp;
 static uint32_t g_gnu_cur_exc = 0;    /* the in-flight caught object (freed at end_catch) */
 static uint32_t g_gnu_cur_dtor = 0;   /* its destructor (the dtor arg of __cxa_throw), run at end_catch */
+static int g_gnu_rethrown = 0;        /* set by __cxa_rethrow: the NEXT __cxa_end_catch (the one that
+                                       * closes the handler we rethrew from) must NOT destroy the
+                                       * object — it is in flight again (Itanium: handlerCount negated). */
 
 void aret_gnu_eh_push(uint32_t key, uint32_t pc_start) {
     if (g_gnu_eh_n >= 256) aret_unmodelled("GNU EH: establish-frame stack overflow");
@@ -4426,10 +4429,13 @@ void aret_gnu_eh_pop(void) {
  * value as the establisher's return. The frame was already trimmed by the dispatcher. */
 uint64_t aret_gnu_eh_run(uint32_t esp) {
     (void)esp;
-    aret_gnu_eh_pop();   /* the establisher is returning through the landing pad now */
-    /* Run the landing pad with the establisher's frame: __esp = the frame base (outgoing
-     * args / the pad's own call pushes go below it), ebp = the frame pointer (regular
-     * locals at [ebp+K]). A pad may use either or both, so pass both. */
+    /* Do NOT pop here: the establisher frame stays live across the handler so a rethrow
+     * from inside a catch still finds it. A CATCH continuation runs the handler + the rest
+     * of the function and pops on its own (lifted) return (the pop hook is injected into
+     * continuations too); a CLEANUP continuation ends in _Unwind_Resume, which pops there.
+     * Run the pad with __esp = the frame base (outgoing args / the pad's own pushes go
+     * below it) and ebp = the frame pointer (regular locals at [ebp+K]); a pad may use
+     * either or both. */
     uint32_t base = g_gnu_run_esp ? g_gnu_run_esp : g_gnu_run_ebp;
     return aret_call(g_gnu_run_lp, base, g_gnu_run_obj, 0, g_gnu_run_sel, g_gnu_run_ebp, 0, 0, 0);
 }
@@ -4468,6 +4474,13 @@ uint32_t aret_cxa_begin_catch(uint32_t esp) {
  * place it as stack arg 0 (esp = S-4, callee reads [esp+4]) for a cdecl thunk. S is free
  * stack below the shim's esp. */
 uint32_t aret_cxa_end_catch(uint32_t esp) {
+    if (g_gnu_rethrown) {
+        /* This end_catch closes the handler we rethrew FROM (GCC's shared landing pad runs it
+         * before the enclosing catch's begin_catch). The exception is in flight again, so it
+         * must survive: keep g_gnu_cur_exc/g_gnu_cur_dtor for the eventual catcher's end_catch. */
+        g_gnu_rethrown = 0;
+        return 0;
+    }
     if (g_gnu_cur_exc) {
         if (g_gnu_cur_dtor) {
             uint32_t s = (esp - 0x40) & ~0xfu;   /* free scratch, aligned */
@@ -4519,10 +4532,11 @@ static void aret_gnu_dispatch(void) {
 }
 
 /* _Unwind_Resume(exc): a cleanup landing pad finished its destructors and re-raises the
- * exception. The unwound frames have already been popped, so simply continue the dispatch
- * outward with the same in-flight exception. */
+ * exception. The cleanup frame is now fully unwound past, so pop it, then continue the
+ * dispatch outward with the same in-flight exception. */
 uint32_t aret_Unwind_Resume(uint32_t esp) {
     (void)esp;
+    aret_gnu_eh_pop();
     aret_gnu_dispatch();
     return 0;   /* not reached */
 }
@@ -4533,6 +4547,18 @@ uint32_t aret_cxa_throw(uint32_t esp) {
     g_gnu_exc_obj = arg(esp, 0);
     g_gnu_exc_tinfo = arg(esp, 1);
     g_gnu_cur_dtor = arg(esp, 2);
+    aret_gnu_dispatch();
+    return 0;   /* not reached */
+}
+
+/* __cxa_rethrow: re-raise the exception currently being handled (`throw;` in a catch). The
+ * establisher frame is still live (aret_gnu_eh_run does not pop across a catch), and the
+ * handler's continuation recorded the rethrow site via setpc, so the dispatcher re-examines
+ * this frame there (an enclosing try in the same function) and then outward. The in-flight
+ * exception state is untouched by begin/end_catch, so it is exactly what was caught. */
+uint32_t aret_cxa_rethrow(uint32_t esp) {
+    (void)esp;
+    g_gnu_rethrown = 1;   /* the in-flight exception survives the closing end_catch (see above) */
     aret_gnu_dispatch();
     return 0;   /* not reached */
 }
