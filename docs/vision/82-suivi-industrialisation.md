@@ -245,9 +245,14 @@ Trois **couches** (branchement → comportement), et pour le comportement trois 
 > routine hand-rolled appelle une **chaîne de nom d'API comme cible**. Pas le trou `GetProcAddress→0` (fault = pointeur mal
 > calculé, pas appel-à-0). ⇒ **étape 2 (iostream) et étape 3 (throw/catch) = LE MÊME mur : le runtime EH/unwind GNU**, qui
 > marche la **vraie pile machine** (DWARF CFI) — incompatible *shared-stack*. Détail 71 (2026-08-08 [DIAG]).
-> **Reste = LA BRIQUE dédiée EH/unwind GNU** (multi-sessions, comme SEH/MSVC : router/émuler `__register_frame_info`/
-> `_Unwind_RaiseException`/`__cxa_throw`/`__gxx_personality_v0` de façon consciente de la pile liftée). Le chemin heureux STL
-> (étape 1) reste solide ; l'EH/unwind est **le mur unique** du runtime C++ GNU et se manifeste **dès iostream**.
+> **⚠️ NATURE DU 1er MUR iostream ROUVERTE (2026-08-08, gdb).** Le backtrace gdb (autorité) place le crash **dans libstdc++**
+> (`sub_531f20`, deref de la valeur `0x50746547`="GetP"), atteint par **un appel indirect depuis `main`** — **pas** dans l'EH
+> de libgcc (le ring de trace montrait des fn libgcc **déjà retournées**). Signature = **slot d'import non patché** (nom d'API
+> déréférencé comme pointeur) ⇒ piste **loader/import** (tractable, générale), à confirmer par un rebuild `-O0 -g` + gdb à la
+> ligne C. La **portée mesurée reste valable** (35,3 % du corpus, doc 90) ; seule la NATURE du 1er mur iostream est rouverte.
+> **La brique EH/unwind GNU** (`__register_frame_info`/`_Unwind_*`/`__cxa_throw`/`__gxx_personality_v0`, DWARF-vs-shared-stack)
+> reste **structurellement** requise pour l'étape 3 (`throw`/`catch`) — mais le crash iostream n'est **pas prouvé** en être.
+> Détail + correction : doc 71 (2026-08-08 [DIAG] CORRECTION).
 
 4. **Corps Wine — forme LOURDE** : compiler du `.c` Wine entier + **porter une fois le plancher `ntdll`/win32u**
    → couverture massive. *(Milestone.)* **🚧 OUVERTE ET MESURÉE (2026-08-02, `tools/gen_wine_heavy.py`)** : `rtlstr.c`

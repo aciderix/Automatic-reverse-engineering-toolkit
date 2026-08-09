@@ -7264,3 +7264,32 @@ Détail : **70 §6** (roadmap). Résumé :
   **Acquis mesuré** : le chemin heureux STL (étape 1) est solide ; l'EH/unwind est LE mur unique du runtime C++ GNU, et
   il se manifeste **dès iostream**, pas seulement au `throw`. Reprise rapide possible : `io.cpp` + le `-O0 -g`/gdb sur
   `out/chunk_*.c` pour l'instruction exacte, puis concevoir la brique.
+
+### 2026-08-08 — [I13][LIFT-DLL][DIAG] **⚠️ CORRECTION du diagnostic étape 2 : gdb (autorité) place le crash dans libstdc++, PAS dans l'EH de libgcc — piste « import/loader non résolu », à confirmer avant de conclure**
+
+- **Pourquoi cette correction.** L'entrée précédente concluait « le mur = EH/unwind de libgcc » à partir du **ring de trace
+  ARET** (dont la queue montrait des fonctions libgcc). Le **backtrace gdb** (autorité : pile vivante au fault) dit autre chose :
+  ```
+  #0 sub_531f20 (+15804)   <- FAULT, deref de 0x50746547
+  #1 sub_53e9c0
+  #2 aret_call             <- UN appel INDIRECT
+  #3 sub_401768
+  #4 sub_4014e0 (main)
+  #5 main
+  ```
+  Le crash est **dans libstdc++** (`sub_531f20`, région rebasée libstdc++), atteint par **un seul appel indirect** depuis
+  `main`, et c'est un **deref de `0x50746547`** ("GetP" = octets du nom "GetProcAddress") **comme pointeur** — pas un saut,
+  pas de l'unwind. Le ring montrait des fonctions libgcc **déjà retournées** (entrées, pas pile vivante) ⇒ m'avait égaré.
+- **Nouvelle hypothèse (plus tractable, à CONFIRMER) : un slot d'import non patché.** Une valeur = octets d'un nom d'API
+  déréférencée comme pointeur est la signature d'un **slot IAT laissé sur l'`IMAGE_IMPORT_BY_NAME`** (nom non résolu) —
+  potentiellement un **trou du loader multi-modules sur les imports PROPRES des DLL liftées** (libstdc++/libgcc importent
+  kernel32/msvcrt ; si un slot de LEUR IAT n'est pas patché, leur code lit la chaîne de nom). **Ce serait GÉNÉRAL et
+  corrigeable**, pas la fondamentale incompatibilité EH/pile.
+- **Ce qui reste incertain (honnêteté §0).** Non confirmé : (a) est-ce vraiment un slot d'import non résolu, ou une valeur
+  mal-liftée qui coïncide ; (b) quel import ; (c) le lien avec l'EH (le static-init C++ enchaîne locale + frame-reg). La
+  conclusion « EH/unwind est LE mur » de l'entrée précédente est donc **suspendue** : elle reste vraie pour l'étape 3
+  (`throw`/`catch`, structurellement DWARF-vs-shared-stack), mais **le crash iostream de l'étape 2 n'est PAS prouvé être ça**.
+- **Prochain pas décisif (une session focalisée) : rebuild `-O0 -g` du out-dir + gdb à la LIGNE C** de `sub_531f20+15804`
+  (le C est déjà `-O0`, il ne manque que `-g`) ⇒ voir l'instruction exacte et l'origine de `0x50746547` (slot IAT ? quelle
+  DLL ? quel import ?). **Puis** trancher : fix loader (tractable) vs brique EH (lourde). **La mesure de portée reste valable**
+  (35,3 % du corpus utilisent EH/iostream, doc 90) — seule la NATURE du 1er mur iostream est rouverte.
