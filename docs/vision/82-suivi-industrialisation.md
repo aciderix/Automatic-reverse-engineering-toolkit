@@ -239,9 +239,15 @@ Trois **couches** (branchement → comportement), et pour le comportement trois 
 > `std::map`(`_Rb_tree`) — tout **lifté**, **1er cas d'une DLL liftée important une AUTRE DLL liftée** (libstdc++→libgcc),
 > **bit-identique** (36 s transpile+run, 6008 fn). Outillage : **mingw g++ installé** (absent du conteneur de base) +
 > affordance harnais **`.cpp`** (compile g++, SKIP propre sinon). Aucun code Rust/runtime ⇒ hash inchangé. Détail 71.
-> **Reste** : étape 2 **iostream** (`std::cout`/`ios_base::Init`/`locale` — mur locale/ctype à mesurer) ; étape 3 **l'EH C++
-> Itanium** (`__cxa_*`/`_Unwind_*` à travers frames liftées = le vrai mur, incompatible *shared-stack*/DWARF, brique
-> dédiée) ; puis re-mesurer le corpus.
+> **🚧 étape 2 (iostream) MESURÉE (2026-08-08) — le mur UNIFIE 2 et 3 : c'est l'EH/UNWIND de libgcc.** `std::cout` crashe au
+> **static-init C++** (`0xc0000005 at 0x50746547` = "GetP") : `std::ios_base::Init` tire la machinerie **DWARF-2 EH frame
+> registration** de libgcc (`__register_frame_info`, tirée **même sans throw**) + la résolution dynamique de démarrage — une
+> routine hand-rolled appelle une **chaîne de nom d'API comme cible**. Pas le trou `GetProcAddress→0` (fault = pointeur mal
+> calculé, pas appel-à-0). ⇒ **étape 2 (iostream) et étape 3 (throw/catch) = LE MÊME mur : le runtime EH/unwind GNU**, qui
+> marche la **vraie pile machine** (DWARF CFI) — incompatible *shared-stack*. Détail 71 (2026-08-08 [DIAG]).
+> **Reste = LA BRIQUE dédiée EH/unwind GNU** (multi-sessions, comme SEH/MSVC : router/émuler `__register_frame_info`/
+> `_Unwind_RaiseException`/`__cxa_throw`/`__gxx_personality_v0` de façon consciente de la pile liftée). Le chemin heureux STL
+> (étape 1) reste solide ; l'EH/unwind est **le mur unique** du runtime C++ GNU et se manifeste **dès iostream**.
 
 4. **Corps Wine — forme LOURDE** : compiler du `.c` Wine entier + **porter une fois le plancher `ntdll`/win32u**
    → couverture massive. *(Milestone.)* **🚧 OUVERTE ET MESURÉE (2026-08-02, `tools/gen_wine_heavy.py`)** : `rtlstr.c`

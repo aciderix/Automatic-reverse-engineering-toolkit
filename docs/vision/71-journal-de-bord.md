@@ -7236,3 +7236,31 @@ Détail : **70 §6** (roadmap). Résumé :
   non régressé. Doc 70/82/90 màj.
 - **Reste (le chantier)** : étape 2 = **iostream** (`std::cout`/`ios_base::Init`/`locale` — l'init locale/ctype sera un mur à
   mesurer) ; étape 3 = **l'EH C++ Itanium** (le vrai mur, brique dédiée). Puis re-mesurer le corpus (le levier change).
+
+### 2026-08-08 — [I13][LIFT-DLL][DIAG] **libstdc++ étape 2 (iostream) : le mur est l'EH/UNWIND de libgcc au STATIC-INIT — il UNIFIE l'étape 2 et l'étape 3 (résultat négatif mesuré)**
+
+- **Suite « dans l'ordre » du chemin heureux (étape 1 ✅).** Fixture spike `std::cout << string/int/hex/float/bool/setw`
+  (scratchpad `io.cpp`). Oracle Wine OK (`str=hello world len=11` … `width=[    99]`). **ARET : sortie VIDE + crash
+  `0xc0000005 at 0x50746547`.** Crash **pendant le static-init C++**, avant le corps de `main`.
+- **Diagnostic (traceur I1 + disasm libgcc, borné §2).** `0x50746547` = ASCII **"GetP"** (début de "GetProcAddress") —
+  une **chaîne de nom d'API traitée comme cible d'appel**. La chaîne d'entrées de trace finit dans des fonctions **libgcc
+  liftées** (base `0x1970000`, `sub_198e820` = **RVA `0x1e820`**, juste après `___register_frame_info_bases` RVA `0x1c7c0`),
+  qui transportent `edx=0x50746547`("GetP") et `0x41656c64`("dleA" = fin de "GetModuleHandleA", string à RVA `0x2a280`).
+  ⇒ une routine de **résolution dynamique hand-rolled** au static-init calcule un mauvais pointeur (le pointeur de la
+  **chaîne de nom** au lieu de la fonction) et l'appelle.
+- **Ce que ça N'EST PAS.** Pas le trou `GetProcAddress→0` (§P1quater) : le fault est un **pointeur mal calculé** (adresse
+  d'une chaîne), pas un appel à 0 ; implémenter `GetProcAddress` ne le corrigerait pas. (⚠️ `ARET_RELAY=1` a rendu **0 ligne
+  même sur la fixture qui PASSE** ⇒ le relay ne prouve rien ici, inférence retirée.)
+- **Ce que ça EST — et le point stratégique.** `std::cout` tire `std::ios_base::Init` (locale/facettes) **et** la
+  **machinerie EH/unwind de libgcc au static-init** : l'**enregistrement des frames DWARF-2** (`__register_frame_info`,
+  tiré **même sans `throw`**) + la résolution dynamique de démarrage mingw. ⇒ **l'étape 2 (iostream) et l'étape 3
+  (throw/catch) sont LE MÊME mur : le runtime EH/unwind de libgcc.** Ce runtime fait du bas-niveau (enregistrer/marcher des
+  frames DWARF sur la **vraie pile machine**, résoudre des API à la main) **fondamentalement incompatible avec le modèle
+  *shared-stack*** (esp par valeur, code transpilé en C) — comme SEH/MSVC l'était, mais côté GNU/Itanium.
+- **Statut §2 (borner, pas thrash).** Mur **caractérisé à l'instruction/routine** (libgcc EH-frame region, chaîne-nom
+  appelée comme code), **non tranché**. Ce n'est **pas** un shim ni un fix général rapide : c'est la **brique dédiée
+  EH/unwind GNU** (multi-sessions), à concevoir comme les briques SEH/MSVC (routage/émulation de l'unwind conscient de la
+  pile liftée : `__register_frame_info`/`_Unwind_RaiseException`/`__cxa_throw`/personality `__gxx_personality_v0`).
+  **Acquis mesuré** : le chemin heureux STL (étape 1) est solide ; l'EH/unwind est LE mur unique du runtime C++ GNU, et
+  il se manifeste **dès iostream**, pas seulement au `throw`. Reprise rapide possible : `io.cpp` + le `-O0 -g`/gdb sur
+  `out/chunk_*.c` pour l'instruction exacte, puis concevoir la brique.
