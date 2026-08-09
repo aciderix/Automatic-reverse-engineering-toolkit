@@ -7445,3 +7445,25 @@ Détail : **70 §6** (roadmap). Résumé :
   avec la couverture DLL + rebasing + thunk.
 - **Acquis net** : le fix **pseudo-reloc reste landé et correct** (cout **résolu**, `d848e86`) ; le vrai mur restant =
   **exécuter les constructeurs globaux des DLL C++ liftées**. Diagnostic **complet**. **Mesure corpus** après ça.
+
+### 2026-08-08 — [I13][LIFT-DLL][DIAG] **cout : la construction est dans la chaîne d'init du `DllMainCRTStartup` de libstdc++ (lifté, exécuté par ARET) — `_initterm(.CRT$XC)` ET `__do_global_ctors`, mais elle ne s'achève pas**
+
+- **Vérifié (avant de re-coder — leçon du revert précédent).** ARET **exécute bien** le `DllMain`/`DllMainCRTStartup` des 2 DLL
+  liftées (`dll_inits`, 2 appels dans `aret_main.c`). Le `___DllMainCRTStartup` de libstdc++ (`0x…41200`) fait, comme tout
+  CRT mingw : **`call __initterm` ×2** (`.CRT$XI` C-init + `.CRT$XC` **C++-init**) **puis `call ___main`** (→ `__do_global_ctors`,
+  `__CTOR_LIST__`) **puis `_DllMain`**. `__initterm` ici est un **appel DIRECT à une fonction LOCALE liftée** (`0x…56200`),
+  **pas** le shim `aret_initterm` — le `_initterm` lifté parcourt `.CRT$XC` et appelle chaque init par **appel indirect**.
+- **Donc la cible du fix se précise.** La construction de `cout` (`std::ios_base::Init` — **34 réfs** dans libstdc++) est
+  dans **`.CRT$XC` (via `_initterm` lifté)** OU **`__CTOR_LIST__` (via `__do_global_ctors` no-op'é)**. La chaîne d'init
+  **tourne** (DllMainCRTStartup lifté) mais **ne construit pas cout** (mesuré : cout=zéro). Deux causes possibles, à
+  **départager par trace** avant de coder : (a) le `_initterm` lifté parcourt `.CRT$XC` mais ses **appels indirects vers
+  les static-init ne se résolvent pas** (fonctions non récupérées) ⇒ sautés/abort ; (b) la construction est dans
+  `__CTOR_LIST__` que `__do_global_ctors` **no-op'é** saute.
+- **Prochain pas (ciblé, fresh) : TRACER la chaîne d'init du DllMainCRTStartup de libstdc++** (`ARET_TRACE`, la DLL-init
+  tourne avant `main` ⇒ visible en tête de ring) → voir si `_initterm` lifté est entré, si ses appels indirects atteignent
+  le static-init d'ios_base::Init, ou si le chemin passe par `__do_global_ctors`. **Puis** coder le fix exact : soit
+  débloquer la résolution des appels indirects de `.CRT$XC` (recovery des static-init), soit lancer `__CTOR_LIST__` (fix
+  DLL-ctor du plan précédent, rebasé). **Pas de 3ᵉ implémentation à l'aveugle** — d'abord la trace tranche (a) vs (b).
+- **Acquis** : fix pseudo-reloc landé (`d848e86`, cout **résolu**) ; la construction de cout est **localisée à la chaîne
+  d'init DllMainCRTStartup de libstdc++** ; mécanisme exact (`.CRT$XC` vs `__CTOR_LIST__`) = **1 trace** à faire. **Mesure
+  corpus** après iostream bout-en-bout.
