@@ -7649,3 +7649,20 @@ machinerie établissement+PC+dispatcher **sans** le matching de sous-typage Itan
 - **Ordre d'implémentation révisé** : (2a) dispatcher `aret_cxa_throw` + établissement + PC de call + `__cxa_begin/end_catch`
   + `_Unwind_Resume`, matching **égalité de pointeur seule**, prouvé sur `ehmin.cpp` bit-identique Wine ; (2b) matching de
   sous-typage `__do_catch`, prouvé sur `eh.cpp`. Chacun = un incrément gate-vert.
+
+### 2026-08-09 — [I13][EH][LIFT ✅] **Brique EH C++ Itanium — 2a (part 1/2) : la TABLE call-site/catch émise (aret_dispatch.c), consommée par le futur dispatcher**
+
+Le dispatcher runtime a besoin de la métadonnée LSDA **au runtime** ; `emit_gnu_eh_tables` (builder) l'émet en tables C
+plates dans `aret_dispatch.c` depuis `gnu_eh_entries` (brique 1a) : `aret_gnu_eh_sites[]` (région `[start,end)`→landing pad +
+tranche de catches) + `aret_gnu_eh_catches[]` (`ar_filter` sélecteur + slot `type_info*`), plus deux accesseurs
+(`aret_gnu_eh_site(pc,…)`, `aret_gnu_eh_catch(i,…)`). **Vérifié correct sur `ehmin.exe`** (`throw 42;catch(int)`) : catch
+`{filter 1, slot 0x408004}` (= le slot `int` typeinfo), site throw `[…f40,…f45)`→lp `…f45` (1 catch int) + un site cleanup.
+- **Détail ABI mesuré** : l'ABI shim d'ARET passe les args à `[esp+0]` (`arg(esp,0)`=arg0) — **pas d'adresse de retour poussée**
+  ⇒ le dispatcher ne peut PAS lire le PC du throw depuis `[esp]`. Le **PC de call actif doit être injecté** (1b-γ) : avant chaque
+  call d'une fonction EH, poser `active_pc = VA du call` ; le dispatcher teste `start <= active_pc < end` (la région LSDA couvre
+  les octets de l'instruction call, pas l'adresse de retour). Confirme que 1b-γ est requis même pour le cas mono-frame.
+- **Gate (§0)** : table **vide** (terminateur seul) pour tout binaire sans LSDA ⇒ inerte, **hash `19acad982194bf07` inchangé**
+  (4/4). Accesseurs = fonctions globales inertes tant que le dispatcher ne les appelle pas.
+- **Reste 2a (part 2/2)** : dispatcher runtime `aret_cxa_throw` + `__cxa_begin/end_catch` + `_Unwind_Resume` (aret_hle.c,
+  match par égalité de pointeur) **et** le câblage lifter (établissement setjmp à l'entrée + `set_pc` avant chaque call + pop au
+  retour), prouvé bit-identique Wine sur `ehmin` — la partie qui active le comportement, faite d'un bloc pour être testée.
