@@ -67,11 +67,14 @@ fn body_line(s: &Stmt) -> Option<String> {
         // GNU EH: record the active call-site PC + the (post-prologue) frame ebp before a
         // call in an EH function, so a throw out of that call maps to the right landing pad.
         Stmt::CallStmt(Expr::Call { target: CallTarget::Named(n), args, .. })
-            if n == "__aret_gnu_eh_setpc" && args.len() == 2 =>
+            if n == "__aret_gnu_eh_setpc" && args.len() == 3 =>
         {
             let pc = expr_c(&args[0]);
-            let ebp = expr_c(&args[1]);
-            Some(format!("aret_gnu_eh_setpc((uint32_t)({pc}), (uint32_t)({ebp}));"))
+            let esp = expr_c(&args[1]);
+            let ebp = expr_c(&args[2]);
+            Some(format!(
+                "aret_gnu_eh_setpc((uint32_t)({pc}), (uint32_t)({esp}), (uint32_t)({ebp}));"
+            ))
         }
         // GNU EH: pop this frame on the normal (no-throw) return path.
         Stmt::CallStmt(Expr::Call { target: CallTarget::Named(n), args, .. })

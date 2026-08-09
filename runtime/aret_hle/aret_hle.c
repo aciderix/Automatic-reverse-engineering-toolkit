@@ -4390,8 +4390,8 @@ static int aret_gnu_type_matches(uint32_t thrown_ti, uint32_t catch_ti) {
 struct aret_gnu_frame {
     uint32_t key;      /* the establisher esp = setjmp key */
     uint32_t pc;       /* active call-site PC (set before each call) */
-    uint32_t ebp;      /* frame ebp captured post-prologue (for running the landing pad) */
-    uint32_t esp;      /* establisher esp (scratch base for the landing pad) */
+    uint32_t ebp;      /* the frame pointer (constant post-prologue): locals live at [ebp+K] */
+    uint32_t esp;      /* the frame base = max esp seen at a call: outgoing args at [esp+K] */
     uint32_t pc_start; /* the function's entry VA (diagnostic) */
 };
 static struct aret_gnu_frame g_gnu_eh[256];
@@ -4402,18 +4402,19 @@ static uint32_t g_gnu_cur_exc = 0;   /* the in-flight caught object (freed at en
 void aret_gnu_eh_push(uint32_t key, uint32_t pc_start) {
     if (g_gnu_eh_n >= 256) aret_unmodelled("GNU EH: establish-frame stack overflow");
     struct aret_gnu_frame *f = &g_gnu_eh[g_gnu_eh_n++];
-    f->key = key; f->pc = 0; f->ebp = 0; f->esp = key; f->pc_start = pc_start;
+    f->key = key; f->pc = 0; f->ebp = 0; f->esp = 0; f->pc_start = pc_start;
 }
-/* `sp` is the esp at a call in this function. The catch continuation is lifted to read
- * the function's locals relative to its FRAME BASE (the post-prologue esp, after any GCC
- * `and esp,-16` realignment), so that is what the landing pad must run with. esp only
- * falls across a function (pushes/args), so the max esp seen at any call is the frame
- * base (reached at a zero-arg call such as the CRT `___main`). */
-void aret_gnu_eh_setpc(uint32_t pc, uint32_t sp) {
+/* Called before each call in an EH function: `sp`/`bp` are its esp/ebp there. A landing pad
+ * (a lifted continuation) reads the function's locals via BOTH the frame pointer `ebp`
+ * ([ebp+K]) and the frame base ([esp+K], the post-prologue esp after any GCC `and esp,-16`),
+ * so it must run with the same two. `ebp` is constant post-prologue; esp only falls across a
+ * function (args), so the max esp at any call is the frame base. */
+void aret_gnu_eh_setpc(uint32_t pc, uint32_t sp, uint32_t bp) {
     if (g_gnu_eh_n > 0) {
         struct aret_gnu_frame *f = &g_gnu_eh[g_gnu_eh_n - 1];
         f->pc = pc;
-        if (sp > f->ebp) f->ebp = sp;   /* ebp field carries the frame base (max esp) */
+        f->ebp = bp;
+        if (sp > f->esp) f->esp = sp;
     }
 }
 void aret_gnu_eh_pop(void) {
@@ -4425,11 +4426,11 @@ void aret_gnu_eh_pop(void) {
 uint64_t aret_gnu_eh_run(uint32_t esp) {
     (void)esp;
     aret_gnu_eh_pop();   /* the establisher is returning through the landing pad now */
-    /* Run the landing pad AT the establisher's frame base: the continuation reads the
-     * function's locals relative to its own __esp, so __esp must be that frame base (its
-     * own outgoing-arg/call pushes go below it, not over the locals above). */
-    uint32_t base = g_gnu_run_ebp ? g_gnu_run_ebp : g_gnu_run_esp;
-    return aret_call(g_gnu_run_lp, base, g_gnu_run_obj, 0, g_gnu_run_sel, base, 0, 0, 0);
+    /* Run the landing pad with the establisher's frame: __esp = the frame base (outgoing
+     * args / the pad's own call pushes go below it), ebp = the frame pointer (regular
+     * locals at [ebp+K]). A pad may use either or both, so pass both. */
+    uint32_t base = g_gnu_run_esp ? g_gnu_run_esp : g_gnu_run_ebp;
+    return aret_call(g_gnu_run_lp, base, g_gnu_run_obj, 0, g_gnu_run_sel, g_gnu_run_ebp, 0, 0, 0);
 }
 
 /* __cxa_allocate_exception(size) -> object buffer. Closed model: we own allocate/throw/
@@ -4458,50 +4459,60 @@ uint32_t aret_cxa_end_catch(uint32_t esp) {
     if (g_gnu_cur_exc) { free((void *)(uintptr_t)g_gnu_cur_exc); g_gnu_cur_exc = 0; }
     return 0;
 }
-/* _Unwind_Resume: re-raise from a cleanup landing pad (destructor unwinding). Not reached
- * by brick 2a's fixtures (no destructors between throw and catch); a later brick models
- * cleanup propagation. Loud abort rather than a silently-skipped destructor (§0). */
-uint32_t aret_Unwind_Resume(uint32_t esp) {
-    (void)esp;
-    aret_unmodelled("GNU EH: _Unwind_Resume (cleanup/destructor unwinding) not yet modelled");
-    return 0;
-}
+static uint32_t g_gnu_exc_obj = 0, g_gnu_exc_tinfo = 0;   /* the in-flight exception */
 
-/* __cxa_throw(object, type_info*, dtor): walk the EH-frame stack innermost-first; the
- * first frame whose active call site catches the thrown type transfers control there. */
-uint32_t aret_cxa_throw(uint32_t esp) {
-    uint32_t obj = arg(esp, 0), tinfo = arg(esp, 1);
+/* Dispatch the in-flight exception across the current EH-frame stack, innermost-first.
+ * The first frame with a landing pad transfers control there: with a MATCHING catch, the
+ * selector is that catch's ar_filter and the catch body runs; with only a cleanup (no
+ * matching catch), the selector is 0, the frame's destructors run, and the landing pad
+ * ends in _Unwind_Resume — which re-enters here to continue unwinding outward (the frame
+ * was popped in aret_gnu_eh_run). A site with no landing pad just propagates. Never returns
+ * on a transfer; aborts loud only when the chain is exhausted with no handler (unhandled). */
+static void aret_gnu_dispatch(void) {
+    uint32_t obj = g_gnu_exc_obj, tinfo = g_gnu_exc_tinfo;
     for (int i = g_gnu_eh_n - 1; i >= 0; i--) {
         struct aret_gnu_frame *f = &g_gnu_eh[i];
         uint32_t lp; int coff, ccount;
         if (f->pc == 0 || !aret_gnu_eh_site(f->pc, &lp, &coff, &ccount)) continue;
+        if (lp == 0) continue;   /* site guarded but no landing pad: pure propagation */
         int sel = -1;
         for (int c = 0; c < ccount; c++) {
             int32_t filter; uint32_t slot;
             aret_gnu_eh_catch(coff + c, &filter, &slot);
             /* deref the indirect ttype slot -> the live std::type_info* (== the pointer
-             * __cxa_throw was handed, by construction). 0 slot = catch-all. Match is exact
-             * OR the Itanium subtype rule (a base catches a derived throw). */
+             * __cxa_throw was handed). 0 slot = catch-all. Match is exact OR the Itanium
+             * subtype rule (a base catches a derived throw). */
             uint32_t catch_tinfo = slot ? *(const uint32_t *)(uintptr_t)slot : 0;
             if (aret_gnu_type_matches(tinfo, catch_tinfo)) { sel = (int)filter; break; }
         }
-        if (sel >= 0) {
-            g_gnu_run_lp = lp; g_gnu_run_obj = obj; g_gnu_run_sel = (uint32_t)sel;
-            g_gnu_run_ebp = f->ebp; g_gnu_run_esp = f->esp;
-            g_gnu_eh_n = i + 1;   /* discard the inner frames being unwound past */
-            aret_longjmp_do(f->key, 1);   /* -> establisher setjmp -> aret_gnu_eh_run */
-            /* not reached */
-        }
-        /* A landing pad with no matching catch is a cleanup (destructors). Running past it
-         * without invoking those destructors would be a silent wrong (§0), so stop loud
-         * rather than skip them — brick 2a's fixtures have none between throw and catch. */
-        if (ccount == 0) {
-            aret_unmodelled("GNU EH: destructor cleanup during unwind not yet modelled");
-        }
+        /* No matching catch but a landing pad -> a cleanup: run destructors (selector 0),
+         * then the pad's _Unwind_Resume continues the unwind outward. */
+        if (sel < 0) sel = 0;
+        g_gnu_run_lp = lp; g_gnu_run_obj = obj; g_gnu_run_sel = (uint32_t)sel;
+        g_gnu_run_ebp = f->ebp; g_gnu_run_esp = f->esp;
+        g_gnu_eh_n = i + 1;   /* aret_gnu_eh_run pops this frame; inner ones are discarded */
+        aret_longjmp_do(f->key, 1);   /* -> establisher setjmp -> aret_gnu_eh_run */
+        /* not reached */
     }
     fprintf(stderr, "aret: unhandled C++ exception (GNU/Itanium, type_info 0x%08x)\n", (unsigned)tinfo);
     abort();
-    return 0;
+}
+
+/* _Unwind_Resume(exc): a cleanup landing pad finished its destructors and re-raises the
+ * exception. The unwound frames have already been popped, so simply continue the dispatch
+ * outward with the same in-flight exception. */
+uint32_t aret_Unwind_Resume(uint32_t esp) {
+    (void)esp;
+    aret_gnu_dispatch();
+    return 0;   /* not reached */
+}
+
+/* __cxa_throw(object, type_info*, dtor): start unwinding for a fresh exception. */
+uint32_t aret_cxa_throw(uint32_t esp) {
+    g_gnu_exc_obj = arg(esp, 0);
+    g_gnu_exc_tinfo = arg(esp, 1);
+    aret_gnu_dispatch();
+    return 0;   /* not reached */
 }
 
 /* _Unwind_RaiseException(exc): the raw libgcc entry a hand-rolled throw could use; route

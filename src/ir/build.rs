@@ -294,6 +294,7 @@ pub fn build_ir(prog: &Program, func: &Function) -> IrFunction {
             args: vec![
                 Expr::Const(ip as i128, Ty::int(32)),
                 Expr::Read(Location::Reg(RegId(4))), // esp — the runtime keeps its max = the frame base
+                Expr::Read(Location::Reg(RegId(5))), // ebp — the frame pointer (constant post-prologue)
             ],
             ret: Ty::int(32),
         })

@@ -7724,3 +7724,24 @@ lancé. Prouvé bit-identique Wine (`bench/gnueh/eh_throw_derived.cpp`, gnuehdif
 - **Portes** : **hash `19acad982194bf07` inchangé** (accesseur inerte `0,0,0` hors EH ; matcher additif) ; **difftest
   272/272** ; **gnuehdiff 2/2** ; winediff (à confirmer). **Reste EH** : cleanup/dtor durant l'unwind (`_Unwind_Resume`),
   rethrow, catch-by-value, catch(...), offsets de base non nuls (`__vmi` multi-héritage).
+
+### 2026-08-09 — [I13][EH][LIFT ✅] **Brique EH C++ Itanium — 2c : destructeurs pendant l'unwind (`_Unwind_Resume`) + fix ROBUSTE du frame de continuation**
+
+Un throw doit exécuter les destructeurs des objets locaux des portées traversées, en ordre inverse, avant le catch.
+- **Dispatch refactoré** (`aret_gnu_dispatch`) : parcourt la pile de frames EH ; une frame avec un catch qui matche →
+  transfert catch (sélecteur = `ar_filter`) ; une frame avec un landing pad **sans** catch → transfert **cleanup**
+  (sélecteur 0) qui exécute les destructeurs puis `_Unwind_Resume` → **re-entre** le dispatch sur les frames extérieures
+  (les frames déroulées ont été poppées). `aret_cxa_throw` amorce l'exception (globale `g_gnu_exc_*`) puis dispatch ;
+  `_Unwind_Resume` continue. Exhaustion sans handler = abort sound (unhandled).
+- **⭐ Fix ROBUSTE du frame (§0)** : l'heuristique max-esp de 2a était **fragile** — elle supposait un call 0-arg (`___main`
+  dans `main`) pour capturer le frame base. `f` n'en a pas ⇒ frame base sous-estimé ⇒ `this` du destructeur **corrompu**
+  (`Guard149914304 dtor`). Mesuré : `f` accède à son local `g1` via **ebp** (`[ebp-0xc]`) **et** ses args sortants via le
+  **frame base** (esp post-prologue). Le landing pad (continuation liftée) a besoin des **DEUX**. Fix : `setpc` capture
+  maintenant `(pc, esp, ebp)` — frame base = **max esp**, ebp = **le frame pointer** (constant post-prologue) — et
+  `aret_gnu_eh_run` lance le landing pad avec `__esp = frame base` **et** `ebp = vrai ebp`. Corrige `f` (dtor `this` juste)
+  **et** `main` (2a/2b inchangés — ils lisaient via `__esp`).
+- **Prouvé bit-identique Wine** : `bench/gnueh/eh_throw_dtor.cpp` (`f` non-inliné + `main`, dtors en ordre inverse avant le
+  catch), **-O0 et -O1**, **gnuehdiff 3/3**.
+- **Portes** : **hash `19acad982194bf07` inchangé** (setpc gaté EH ; dispatch additif), **difftest 272/272**, winediff (à
+  confirmer). **Reste EH** : rethrow (`__cxa_rethrow`), catch-by-value (copie de l'objet), catch(...), offsets `__vmi` non nuls,
+  throw pendant l'unwind (std::terminate). Axe DLL-tierces (doc 82) séparé.
