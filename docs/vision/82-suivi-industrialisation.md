@@ -279,10 +279,12 @@ Trois **couches** (branchement → comportement), et pour le comportement trois 
 > robuste (`setpc` capture `(pc, esp=frame base, ebp)`) ; **2d part 1** `catch(...)` + catch-by-value (copie via
 > `__cxa_get_exception_ptr`, destruction de l'objet lancé ET copié à `end_catch`, dtor THISCALL) ; **2d part 2**
 > `__cxa_rethrow` (`throw;`) + refonte du cycle de vie des frames (la frame établisseuse reste vivante à travers le catch ;
-> `end_catch` de fermeture ne détruit pas l'exception rethrown). Runtime `aret_cxa_*`/`aret_gnu_dispatch` (`aret_hle.c`),
-> table call-site/catch émise (`aret_dispatch.c`), gates `is_gnu_eh_func`/`is_gnu_eh_frame` (émission inerte ailleurs ⇒
-> **hash inchangé**). **Reste EH** : offsets `__vmi` (multi-héritage) non nuls, throw pendant l'unwind (`std::terminate`),
-> puis **mesure corpus** sur les 463 (doc 90). Détail 71 (2026-08-09).
+> `end_catch` de fermeture ne détruit pas l'exception rethrown) ; **2d part 3** héritage multiple à offset de base non nul
+> (`this`-adjustment vers le sous-objet base attrapé, non-virtuel + public ; `end_catch` détruit la base d'allocation, pas
+> le pointeur intérieur). Runtime `aret_cxa_*`/`aret_gnu_dispatch` (`aret_hle.c`), table call-site/catch émise
+> (`aret_dispatch.c`), gates `is_gnu_eh_func`/`is_gnu_eh_frame` (émission inerte ailleurs ⇒ **hash inchangé**). **Reste EH** :
+> bases **virtuelles** (offset en vtable), throw pendant l'unwind (`std::terminate`), exceptions imbriquées actives, puis
+> **mesure corpus** sur les 463 (doc 90). Détail 71 (2026-08-09).
 
 4. **Corps Wine — forme LOURDE** : compiler du `.c` Wine entier + **porter une fois le plancher `ntdll`/win32u**
    → couverture massive. *(Milestone.)* **🚧 OUVERTE ET MESURÉE (2026-08-02, `tools/gen_wine_heavy.py`)** : `rtlstr.c`

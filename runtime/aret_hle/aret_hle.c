@@ -4349,18 +4349,21 @@ extern void aret_gnu_eh_catch(int i, int32_t *filter, uint32_t *slot);
 extern void aret_gnu_eh_abi_vptrs(uint32_t *cls, uint32_t *si, uint32_t *vmi);
 
 /* Does a `catch (Catch&)` catch a thrown object of type `thrown_ti`? Itanium rule: the
- * types are equal, or `catch_ti` is a base of `thrown_ti`. We classify a `std::type_info`
- * by its vtable pointer (matched against the ABI vtable values, emitted from the imports)
- * and walk `thrown_ti`'s bases. Only bases at offset 0 (the whole `__si` single-inheritance
- * case, and offset-0 `__vmi` bases) bind the catch parameter without a `this`-adjustment,
- * which is all this brick models; a non-zero base offset is simply not matched (the throw
- * then reports unhandled = a sound abort, never a wrong bind), and an UNRECOGNISED type_info
- * vtable is a loud abort (never a guessed match). `catch_ti == 0` = catch-all. */
-static int aret_gnu_type_matches(uint32_t thrown_ti, uint32_t catch_ti) {
-    if (catch_ti == 0) return 1;   /* catch(...) */
+ * types are equal, or `catch_ti` is a public base of `thrown_ti`. We classify a
+ * `std::type_info` by its vtable pointer (matched against the ABI vtable values, emitted
+ * from the imports) and walk `thrown_ti`'s bases. On a match, `*adjust` gets the BYTE OFFSET
+ * from the thrown object pointer to the caught base sub-object (0 for equal / single
+ * inheritance; the accumulated base offsets under multiple inheritance) — the dispatcher adds
+ * it so the catch parameter binds the right sub-object. Only NON-VIRTUAL, PUBLIC bases are
+ * followed; a virtual base (needs the object's vtable at runtime) or a non-public base is not
+ * matched (the throw then reports unhandled = a sound abort, never a wrong bind), and an
+ * UNRECOGNISED type_info vtable is a loud abort (never a guessed match). `catch_ti == 0` =
+ * catch-all (no typed pointer to adjust). */
+static int aret_gnu_type_match_adj(uint32_t thrown_ti, uint32_t catch_ti, int32_t *adjust) {
+    if (catch_ti == 0) { *adjust = 0; return 1; }   /* catch(...) */
     uint32_t cls = 0, si = 0, vmi = 0;
     aret_gnu_eh_abi_vptrs(&cls, &si, &vmi);
-    if (thrown_ti == catch_ti) return 1;
+    if (thrown_ti == catch_ti) { *adjust = 0; return 1; }
     uint32_t vptr = *(const uint32_t *)(uintptr_t)thrown_ti;
     if (cls && vptr == cls) {
         return 0;   /* __class_type_info: no base */
@@ -4368,23 +4371,34 @@ static int aret_gnu_type_matches(uint32_t thrown_ti, uint32_t catch_ti) {
     if (si && vptr == si) {
         /* __si_class_type_info: one public base at offset 0. */
         uint32_t base = *(const uint32_t *)(uintptr_t)(thrown_ti + 8);
-        return aret_gnu_type_matches(base, catch_ti);
+        return aret_gnu_type_match_adj(base, catch_ti, adjust);
     }
     if (vmi && vptr == vmi) {
         /* __vmi_class_type_info: {vptr, name, flags, base_count, base_info[]} where each
-         * base_info is {base_type, offset_flags} and offset_flags = (offset<<8)|flags. */
+         * base_info is {base_type, offset_flags} and offset_flags = (offset<<8)|flags,
+         * flags bit0 = virtual, bit1 = public. */
         uint32_t nbase = *(const uint32_t *)(uintptr_t)(thrown_ti + 12);
         for (uint32_t b = 0; b < nbase && b < 64; b++) {
             uint32_t bi = thrown_ti + 16 + b * 8;
             uint32_t base = *(const uint32_t *)(uintptr_t)bi;
             uint32_t offflags = *(const uint32_t *)(uintptr_t)(bi + 4);
-            if ((offflags >> 8) != 0) continue;   /* non-zero base offset: not bound here */
-            if (aret_gnu_type_matches(base, catch_ti)) return 1;
+            if (offflags & 0x1) continue;   /* virtual base: offset lives in the vtable — not modelled */
+            if (!(offflags & 0x2)) continue; /* non-public base: not catchable */
+            int32_t sub;
+            if (aret_gnu_type_match_adj(base, catch_ti, &sub)) {
+                *adjust = ((int32_t)offflags >> 8) + sub;   /* accumulate this base's byte offset */
+                return 1;
+            }
         }
         return 0;
     }
     aret_unmodelled("GNU EH: unrecognised type_info vtable during subtype match");
     return 0;
+}
+/* Boolean form (no adjustment needed by the caller). */
+static int aret_gnu_type_matches(uint32_t thrown_ti, uint32_t catch_ti) {
+    int32_t adj;
+    return aret_gnu_type_match_adj(thrown_ti, catch_ti, &adj);
 }
 
 struct aret_gnu_frame {
@@ -4397,7 +4411,8 @@ struct aret_gnu_frame {
 static struct aret_gnu_frame g_gnu_eh[256];
 static int g_gnu_eh_n = 0;
 static uint32_t g_gnu_run_lp, g_gnu_run_obj, g_gnu_run_sel, g_gnu_run_ebp, g_gnu_run_esp;
-static uint32_t g_gnu_cur_exc = 0;    /* the in-flight caught object (freed at end_catch) */
+static uint32_t g_gnu_exc_obj = 0, g_gnu_exc_tinfo = 0;   /* the in-flight thrown object (the
+                                       * allocation base) + its type_info; destroyed at end_catch */
 static uint32_t g_gnu_cur_dtor = 0;   /* its destructor (the dtor arg of __cxa_throw), run at end_catch */
 static int g_gnu_rethrown = 0;        /* set by __cxa_rethrow: the NEXT __cxa_end_catch (the one that
                                        * closes the handler we rethrew from) must NOT destroy the
@@ -4461,15 +4476,18 @@ uint32_t aret_cxa_get_exception_ptr(uint32_t esp) {
     return arg(esp, 0);
 }
 /* __cxa_begin_catch(exc) -> caught object pointer. In the closed model the pointer we
- * handed the landing pad in eax IS the object, so return it unchanged. */
+ * handed the landing pad in eax IS the (already this-adjusted) caught sub-object, so return
+ * it unchanged. The object DESTROYED at end_catch is the thrown allocation base
+ * (g_gnu_exc_obj), which differs from this pointer under multiple inheritance. */
 uint32_t aret_cxa_begin_catch(uint32_t esp) {
-    uint32_t obj = arg(esp, 0);
-    g_gnu_cur_exc = obj;
-    return obj;
+    return arg(esp, 0);
 }
 /* __cxa_end_catch: the handler is done with the exception -> destroy the thrown object
  * (its destructor is the dtor arg __cxa_throw was given, and for a class type it has a
- * visible effect) and free it. GCC i386 calls a member destructor `E::~E(this)` THISCALL
+ * visible effect) and free it. Destroy the ALLOCATION BASE (g_gnu_exc_obj), NOT the caught
+ * pointer: for a base catch under multiple inheritance the caught pointer is an interior
+ * sub-object (base+offset) and freeing/destroying that would corrupt the heap / run the
+ * dtor on the wrong `this`. GCC i386 calls a member destructor `E::~E(this)` THISCALL
  * (`this` in ecx — measured: it opens `mov (%ecx),…`), so pass the object in ecx; also
  * place it as stack arg 0 (esp = S-4, callee reads [esp+4]) for a cdecl thunk. S is free
  * stack below the shim's esp. */
@@ -4477,22 +4495,21 @@ uint32_t aret_cxa_end_catch(uint32_t esp) {
     if (g_gnu_rethrown) {
         /* This end_catch closes the handler we rethrew FROM (GCC's shared landing pad runs it
          * before the enclosing catch's begin_catch). The exception is in flight again, so it
-         * must survive: keep g_gnu_cur_exc/g_gnu_cur_dtor for the eventual catcher's end_catch. */
+         * must survive: keep g_gnu_exc_obj/g_gnu_cur_dtor for the eventual catcher's end_catch. */
         g_gnu_rethrown = 0;
         return 0;
     }
-    if (g_gnu_cur_exc) {
+    if (g_gnu_exc_obj) {
         if (g_gnu_cur_dtor) {
             uint32_t s = (esp - 0x40) & ~0xfu;   /* free scratch, aligned */
-            *(uint32_t *)(uintptr_t)s = g_gnu_cur_exc;
-            (void)aret_call(g_gnu_cur_dtor, s - 4, 0, g_gnu_cur_exc /*ecx=this*/, 0, 0, 0, 0, 0);
+            *(uint32_t *)(uintptr_t)s = g_gnu_exc_obj;
+            (void)aret_call(g_gnu_cur_dtor, s - 4, 0, g_gnu_exc_obj /*ecx=this*/, 0, 0, 0, 0, 0);
         }
-        free((void *)(uintptr_t)g_gnu_cur_exc);
-        g_gnu_cur_exc = 0; g_gnu_cur_dtor = 0;
+        free((void *)(uintptr_t)g_gnu_exc_obj);
+        g_gnu_exc_obj = 0; g_gnu_exc_tinfo = 0; g_gnu_cur_dtor = 0;
     }
     return 0;
 }
-static uint32_t g_gnu_exc_obj = 0, g_gnu_exc_tinfo = 0;   /* the in-flight exception */
 
 /* Dispatch the in-flight exception across the current EH-frame stack, innermost-first.
  * The first frame with a landing pad transfers control there: with a MATCHING catch, the
@@ -4508,20 +4525,23 @@ static void aret_gnu_dispatch(void) {
         uint32_t lp; int coff, ccount;
         if (f->pc == 0 || !aret_gnu_eh_site(f->pc, &lp, &coff, &ccount)) continue;
         if (lp == 0) continue;   /* site guarded but no landing pad: pure propagation */
-        int sel = -1;
+        int sel = -1; int32_t adjust = 0;
         for (int c = 0; c < ccount; c++) {
             int32_t filter; uint32_t slot;
             aret_gnu_eh_catch(coff + c, &filter, &slot);
             /* deref the indirect ttype slot -> the live std::type_info* (== the pointer
              * __cxa_throw was handed). 0 slot = catch-all. Match is exact OR the Itanium
-             * subtype rule (a base catches a derived throw). */
+             * subtype rule (a base catches a derived throw); `adjust` is the this-offset to
+             * the caught base sub-object (non-zero under multiple inheritance). */
             uint32_t catch_tinfo = slot ? *(const uint32_t *)(uintptr_t)slot : 0;
-            if (aret_gnu_type_matches(tinfo, catch_tinfo)) { sel = (int)filter; break; }
+            if (aret_gnu_type_match_adj(tinfo, catch_tinfo, &adjust)) { sel = (int)filter; break; }
         }
         /* No matching catch but a landing pad -> a cleanup: run destructors (selector 0),
          * then the pad's _Unwind_Resume continues the unwind outward. */
-        if (sel < 0) sel = 0;
-        g_gnu_run_lp = lp; g_gnu_run_obj = obj; g_gnu_run_sel = (uint32_t)sel;
+        if (sel < 0) { sel = 0; adjust = 0; }
+        /* Hand the landing pad the this-adjusted sub-object (eax -> __cxa_begin_catch): the
+         * caught reference must point at the caught base within the thrown object. */
+        g_gnu_run_lp = lp; g_gnu_run_obj = (uint32_t)((int32_t)obj + adjust); g_gnu_run_sel = (uint32_t)sel;
         g_gnu_run_ebp = f->ebp; g_gnu_run_esp = f->esp;
         g_gnu_eh_n = i + 1;   /* aret_gnu_eh_run pops this frame; inner ones are discarded */
         aret_longjmp_do(f->key, 1);   /* -> establisher setjmp -> aret_gnu_eh_run */

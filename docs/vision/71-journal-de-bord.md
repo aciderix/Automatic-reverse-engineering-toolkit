@@ -7794,3 +7794,29 @@ Deux cas de plus, mesurés puis prouvés bit-identiques Wine (`bench/gnueh/eh_ca
 - **Portes** : **hash `19acad982194bf07` inchangé**, **difftest 272/272**, **gnuehdiff 5/5**, **winediff 231/233** (2 rouges
   connus : `gdi_uifont` env + `ole_mlang` flake), cargo test **79+** vert. **Reste 2d** : offsets `__vmi` (multi-héritage)
   non nuls, throw pendant l'unwind (`std::terminate`). Axe DLL-tierces (doc 82) séparé.
+
+### 2026-08-09 — [I13][EH][LIFT ✅] **Brique EH C++ Itanium — 2d (part 3) : héritage multiple à offset de base NON NUL (`this`-adjustment)**
+
+`catch(B&)` d'un `throw C` où `C : A, B` — la sous-objet `B` est à un **offset non nul** dans `C` (mesuré : +8, après
+`A={vptr,a}`). Prouvé bit-identique Wine (`bench/gnueh/eh_multi_inherit.cpp`, **gnuehdiff 6/6** ; `start`/`caught B b=2`/
+`~C`/`~B`/`~A`/`done`).
+- **Mesuré (§0)** : jusqu'ici `aret_gnu_type_matches` **sautait** toute base `__vmi` à offset ≠ 0 (`(offflags>>8)!=0 ⇒
+  continue`) ⇒ la levée sortait *unhandled* = abort sound. Wine, lui, attrape `B&` et lit `b.b=2` : il faut **ajuster le
+  pointeur `this`** de l'objet lancé vers le sous-objet base attrapé (le personality routine calcule `adjustedPtr`, que
+  `__cxa_begin_catch` rend).
+- **Fix** : `aret_gnu_type_match_adj(thrown, catch, &adjust)` accumule l'**offset d'octets** le long de la base-chain
+  (`__vmi` : `offset = (int32_t)offflags >> 8`, décalage **arithmétique** pour le signe ; `__si` : +0 ; égalité : +0). Ne
+  suit que les bases **NON VIRTUELLES** (`flags & 0x1` == virtuel ⇒ offset dans la vtable, non modélisé ⇒ skip) et
+  **PUBLIQUES** (`flags & 0x2` ⇒ une base non-publique n'est pas *catchable*) — sinon skip ⇒ *unhandled* = abort sound,
+  jamais un bind faux. Le dispatcher pose `g_gnu_run_obj = obj + adjust` (eax → `begin_catch` → la référence attrapée
+  pointe le bon sous-objet ; `get_exception_ptr` pour le catch-by-value idem).
+- **⭐ Correction du modèle de destruction (généralise, prouvée par la fixture)** : `__cxa_end_catch` détruisait
+  `g_gnu_cur_exc` = **l'argument de `begin_catch`** = le pointeur attrapé — désormais **ajusté** (intérieur) sous héritage
+  multiple ⇒ `free`/dtor sur un pointeur intérieur = **corruption du tas / mauvais `this`**. `end_catch` détruit maintenant
+  la **BASE D'ALLOCATION** `g_gnu_exc_obj` (ce que `__cxa_throw` a reçu, ce que `__cxa_allocate_exception` a rendu) avec
+  `g_gnu_cur_dtor` (le dtor complet de `C` ⇒ `~C`/`~B`/`~A`). `g_gnu_cur_exc` supprimé (begin_catch ne fait plus que rendre
+  son arg). Équivalent aux fixtures offset-0 (base = objet), correct pour l'offset non nul.
+- **Portes** : **hash `19acad982194bf07` inchangé** (runtime C pur, chemin EH), **difftest 272/272**, **gnuehdiff 6/6**,
+  **winediff 231/233** (2 rouges connus), cargo test **79+** vert. **Reste EH** : bases **virtuelles** (offset en vtable),
+  throw pendant l'unwind (`std::terminate`), exceptions **imbriquées actives** (throw d'un type dans le catch d'un autre —
+  le modèle à exception unique ne l'attrape pas encore). Axe DLL-tierces (doc 82) séparé.
