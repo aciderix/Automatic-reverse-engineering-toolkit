@@ -274,13 +274,47 @@ pub fn build_ir(prog: &Program, func: &Function) -> IrFunction {
     // OR in any caller-forced setting (the transpiler's shared-stack mode forces
     // frames off so `[ebp+d]` incoming arguments stay raw loads from the shared
     // stack instead of becoming undefined named locals).
-    let raw_frames = x87.is_some() || uses_xmm128_mem(func) || crate::ir::lift::frames_off();
+    // GNU/Itanium C++ EH: this function has an `.eh_frame` LSDA ⇒ inject the establish
+    // (setjmp at entry) and per-call active-PC hooks the runtime dispatcher needs. Off for
+    // every other function ⇒ no injection, byte-identical (see emit::set_gnu_eh_funcs).
+    let gnu_eh = crate::emit::is_gnu_eh_func(func.entry);
+    // An EH function's frame MUST be raw shared-stack memory (not named SSA scalars): the
+    // catch continuation runs as a SEPARATE lifted function against this function's frame
+    // (via the establisher ebp), so any local set in the try body and read after the catch
+    // (e.g. a value computed before the throw) has to live in real memory both sides can see.
+    let raw_frames = x87.is_some()
+        || uses_xmm128_mem(func)
+        || crate::ir::lift::frames_off()
+        || crate::emit::is_gnu_eh_frame(func.entry);
     crate::ir::lift::set_frames_off(raw_frames);
+
+    let gnu_eh_setpc = |ip: u64| {
+        Stmt::CallStmt(Expr::Call {
+            target: CallTarget::Named("__aret_gnu_eh_setpc".to_string()),
+            args: vec![
+                Expr::Const(ip as i128, Ty::int(32)),
+                Expr::Read(Location::Reg(RegId(4))), // esp — the runtime keeps its max = the frame base
+            ],
+            ret: Ty::int(32),
+        })
+    };
 
     let mut blocks: Vec<Block> = Vec::with_capacity(order.len());
     for (i, &addr) in order.iter().enumerate() {
         let blk = &func.blocks[&addr];
         let mut stmts: Vec<Stmt> = Vec::new();
+        // Establish the EH frame at the function entry, before the prologue: push the frame
+        // keyed by this esp and arm the setjmp (emit renders the marker as both).
+        if gnu_eh && addr == func.entry {
+            stmts.push(Stmt::CallStmt(Expr::Call {
+                target: CallTarget::Named("__aret_gnu_eh_establish".to_string()),
+                args: vec![
+                    Expr::Read(Location::Reg(RegId(4))), // esp (the setjmp key)
+                    Expr::Const(func.entry as i128, Ty::int(32)),
+                ],
+                ret: Ty::int(32),
+            }));
+        }
 
         let is_control = matches!(
             blk.terminator,
@@ -295,6 +329,12 @@ pub fn build_ir(prog: &Program, func: &Function) -> IrFunction {
         // pop count is *unknown* — used for the over-pop compensation fallback below.
         let mut prev_unknown_import = false;
         for insn in &blk.insns[..body_len] {
+            // GNU EH: record the active call site + frame ebp before every call, so a throw
+            // out of the callee maps to this function's right landing pad (the LSDA region is
+            // keyed by the call PC). The call instruction's own VA falls inside its region.
+            if gnu_eh && insn.flow == Flow::Call {
+                stmts.push(gnu_eh_setpc(insn.address));
+            }
             // stdcall over-pop compensation (fallback for imports of unknown arity).
             // A 32-bit __stdcall callee pops its own arguments with `ret N`; under
             // accumulate-outgoing-args the caller then emits `sub esp, N` to undo that

@@ -673,6 +673,18 @@ thread_local! {
     /// byte-identical (no injection, no marker). Off by default.
     static SEH_ACTIVE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 
+    /// Entry VAs of functions with GNU/Itanium C++ EH metadata (an `.eh_frame` LSDA).
+    /// ir::build injects the establish/setpc/pop hooks only in these; empty on any binary
+    /// without such metadata ⇒ no injection, byte-identical. Populated by the builder.
+    static GNU_EH_FUNCS: std::cell::RefCell<std::collections::HashSet<u64>> =
+        std::cell::RefCell::new(std::collections::HashSet::new());
+
+    /// VAs whose lifted frame must be raw shared-stack memory for GNU EH: the EH functions
+    /// AND their landing-pad continuations (which run as separate functions against the
+    /// establisher's frame and must read its locals through real memory, not named SSA).
+    static GNU_EH_FRAMES: std::cell::RefCell<std::collections::HashSet<u64>> =
+        std::cell::RefCell::new(std::collections::HashSet::new());
+
     /// Execution-trace mode (`--trace`, doc 81 §I1): when on, each function's body is
     /// prefixed with an `aret_trace_push(va, esp, regs…)` recording its entry into an
     /// in-memory ring buffer, dumped by the runtime only on `aret_unmodelled`/an
@@ -746,6 +758,29 @@ pub fn set_seh_active(on: bool) {
 
 pub(crate) fn seh_active() -> bool {
     SEH_ACTIVE.with(|c| c.get())
+}
+
+/// Set the entry VAs of GNU C++ EH functions (the builder computes them once from
+/// `gnu_eh_entries`). Empty clears it.
+pub fn set_gnu_eh_funcs(funcs: std::collections::HashSet<u64>) {
+    GNU_EH_FUNCS.with(|c| *c.borrow_mut() = funcs);
+}
+
+/// Whether `va` is the entry of a GNU C++ EH function (gates the establish/setpc/pop
+/// injection in ir::build).
+pub(crate) fn is_gnu_eh_func(va: u64) -> bool {
+    GNU_EH_FUNCS.with(|c| c.borrow().contains(&va))
+}
+
+/// Set the VAs whose frame must be raw shared-stack memory for GNU EH (EH functions +
+/// their landing-pad continuations). Empty clears it.
+pub fn set_gnu_eh_frames(frames: std::collections::HashSet<u64>) {
+    GNU_EH_FRAMES.with(|c| *c.borrow_mut() = frames);
+}
+
+/// Whether `va`'s lifted frame must be raw memory (an EH function or a landing pad).
+pub(crate) fn is_gnu_eh_frame(va: u64) -> bool {
+    GNU_EH_FRAMES.with(|c| c.borrow().contains(&va))
 }
 
 /// Render the function's value declarations. Frame-base values (entry rsp/rbp)

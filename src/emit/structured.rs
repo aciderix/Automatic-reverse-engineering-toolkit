@@ -50,6 +50,35 @@ fn body_line(s: &Stmt) -> Option<String> {
                  {{ uint32_t _sj = aret_seh_setjmp({f}); if (_sj) return aret_seh_run(g_seh_frame, _sj - 1); }}"
             ))
         }
+        // GNU/Itanium C++ EH establish (injected at every EH-function entry, ir::build):
+        // push the frame keyed by this esp and arm a setjmp. On a matching throw the
+        // dispatcher longjmps back here (setjmp returns non-zero) and the function returns
+        // the landing pad's result via aret_gnu_eh_run. args = [esp, pc_start].
+        Stmt::CallStmt(Expr::Call { target: CallTarget::Named(n), args, .. })
+            if n == "__aret_gnu_eh_establish" && args.len() == 2 =>
+        {
+            let esp = expr_c(&args[0]);
+            let pc = expr_c(&args[1]);
+            Some(format!(
+                "aret_gnu_eh_push((uint32_t)({esp}), (uint32_t)({pc})); \
+                 if (aret_gnu_eh_setjmp((uint32_t)({esp}))) return aret_gnu_eh_run((uint32_t)({esp}));"
+            ))
+        }
+        // GNU EH: record the active call-site PC + the (post-prologue) frame ebp before a
+        // call in an EH function, so a throw out of that call maps to the right landing pad.
+        Stmt::CallStmt(Expr::Call { target: CallTarget::Named(n), args, .. })
+            if n == "__aret_gnu_eh_setpc" && args.len() == 2 =>
+        {
+            let pc = expr_c(&args[0]);
+            let ebp = expr_c(&args[1]);
+            Some(format!("aret_gnu_eh_setpc((uint32_t)({pc}), (uint32_t)({ebp}));"))
+        }
+        // GNU EH: pop this frame on the normal (no-throw) return path.
+        Stmt::CallStmt(Expr::Call { target: CallTarget::Named(n), args, .. })
+            if n == "__aret_gnu_eh_pop" && args.is_empty() =>
+        {
+            Some("aret_gnu_eh_pop();".to_string())
+        }
         Stmt::CallStmt(e) => Some(format!("(void)({});", expr_c(e))),
         // An instruction the lifter could not model. In the read-only decompile
         // it is a comment; in the *transpile* (shared-stack) path it is live code
@@ -86,6 +115,9 @@ struct Structurer {
     is_header: Vec<bool>,
     indeg: Vec<usize>,
     entry: usize,
+    /// This function has GNU C++ EH metadata: its normal (no-throw) returns must pop the
+    /// EH frame the entry establish pushed (the throw path pops in aret_gnu_eh_run).
+    eh: bool,
     emitted: Vec<bool>,
     out: String,
 }
@@ -159,6 +191,7 @@ pub fn emit_function(func: &IrFunction, forward: &mut BTreeSet<u64>, with_params
         is_header: vec![false; n],
         indeg,
         entry,
+        eh: super::is_gnu_eh_func(func.entry),
         emitted: vec![false; n],
         out: String::new(),
     };
@@ -363,6 +396,11 @@ impl Structurer {
         match self.terminator(i).clone() {
             Stmt::Return(e) => {
                 let v = e.map(|x| expr_c(&x)).unwrap_or_else(|| "0".into());
+                // GNU EH: a normal return leaves the try scope — pop the frame the entry
+                // establish pushed (the catch path pops inside aret_gnu_eh_run instead).
+                if self.eh {
+                    self.line(depth, "aret_gnu_eh_pop();");
+                }
                 self.line(depth, &format!("return {};", v));
                 None
             }

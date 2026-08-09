@@ -7666,3 +7666,37 @@ tranche de catches) + `aret_gnu_eh_catches[]` (`ar_filter` sélecteur + slot `ty
 - **Reste 2a (part 2/2)** : dispatcher runtime `aret_cxa_throw` + `__cxa_begin/end_catch` + `_Unwind_Resume` (aret_hle.c,
   match par égalité de pointeur) **et** le câblage lifter (établissement setjmp à l'entrée + `set_pc` avant chaque call + pop au
   retour), prouvé bit-identique Wine sur `ehmin` — la partie qui active le comportement, faite d'un bloc pour être testée.
+
+### 2026-08-09 — [I13][EH][LIFT ✅] **🎯 Brique EH C++ Itanium — 2a COMPLÈTE : le 1er throw/catch GNU/Itanium tourne bout-en-bout via le dispatcher ARET, bit-identique Wine**
+
+**Milestone** : `throw 42; catch(int)` (mingw g++) — le tout premier `throw`/`catch` C++ **GNU/Itanium** à faire l'aller-retour à
+travers ARET. Sortie transpilée = `start / f(7)=21 / caught 42 / done caught=42 normal=21` = **oracle Wine exact**, déterministe
+(150+ runs : direct, piped, capturé, cold builds, gros env aléatoire). Le dérouleur DWARF de libgcc (qui marche la vraie pile
+machine, incompatible *shared-stack*) est **remplacé** par le dispatcher ARET.
+- **Runtime `aret_cxa_throw` (aret_hle.c)** : pile de frames EH `g_gnu_eh` (push à l'entrée d'une fonction EH, pop au retour) ;
+  au throw, parcourt les frames innermost-first, mappe le PC de call actif → call-site LSDA (`aret_gnu_eh_site`, table émise) →
+  landing pad + catches ; **match par égalité de pointeur** (deref du slot ttype indirect → `type_info*` vivant == celui de
+  `__cxa_throw`) ; **longjmp** au setjmp de l'établisseur → `aret_gnu_eh_run` exécute le landing pad avec l'objet en **eax** et le
+  sélecteur `ar_filter` en **edx** (le pad fait `cmp edx,filter; je`). + `__cxa_allocate_exception`/`begin_catch`/`end_catch`/
+  `free_exception` (modèle clos : l'objet alloué EST l'objet, aucun header). `_Unwind_Resume`/`_Unwind_RaiseException`/cleanup dtor
+  = **abort sound** (briques ultérieures). Sous-typage (`__do_catch` bases) = brique 2b.
+- **Câblage lifter (gaté sur fonction ayant une LSDA ⇒ hash `19acad982194bf07` INCHANGÉ)** : établissement `setjmp` à l'entrée
+  (marqueur `__aret_gnu_eh_establish` rendu par emit) ; **`setpc` avant chaque call** (marqueur, injecté dans `ir::build` où
+  `insn.address` existe) ; **pop avant chaque `Return`** (emit, sur les fonctions EH). Décls/macro `aret_gnu_eh_setjmp` gatées
+  (`uses_gnu_eh`). Ensembles `emit::gnu_eh_funcs` (injection) et `gnu_eh_frames` (raw-frames).
+- **⭐ Deux découvertes clés (mesurées, §0)** : (a) **l'ABI shim d'ARET passe les args à `[esp+0]` sans adresse de retour** ⇒ le
+  PC du throw doit être injecté (`setpc`), il ne peut PAS venir de `[esp]`. (b) **Le frame réaligné GCC** (`and esp,-16`) : les
+  locaux de la fonction sont à `[frame_base+K]` où `frame_base` = l'esp **post-prologue**, PAS ebp ; la continuation (landing pad,
+  fonction séparée) lit ces locaux via son propre `__esp`, donc `aret_gnu_eh_run` doit la lancer avec `__esp = frame_base`. On le
+  capture en enregistrant le **max esp** vu aux `setpc` (= le frame base, atteint au 1er call 0-arg tel que `___main`). Sans ce fix,
+  un local posé avant le throw et lu après le catch (`normal`) sortait faux (0) — attrapé par la fixture, corrigé. Les fonctions EH
+  **et leurs landing pads** forcent `raw_frames` (mémoire partagée réelle) pour que la continuation voie le frame de l'établisseur.
+- **Portes** : **hash inchangé** (injection gatée, 0 fonction EH dans le corpus difftest) ; **difftest 272/272** ; **winediff
+  231/233** (aucune régression — les 2 rouges connus). Nouveau harness dédié **`bench/gnuehdiff.sh`** (mingw g++, oracle Wine avec
+  les DLL runtime copiées à côté, capture ARET **dans un fichier**) → `bench/gnueh/eh_throw_int.cpp` **1/1, stable**.
+- **⚠️ Note harnais** : la fixture `.cpp` sous **winecorpus/winediff** sort un DIFF **flaky** alors que le binaire est prouvé correct
+  (capturé **dans un fichier** sous le harnais exact = 4 lignes justes). La cause est la **capture `| extract | norm` dans un
+  `$(...)`** de winediff (pas le binaire, pas le cache — testé), reproductible seulement dans ce chemin. D'où le harnais dédié
+  `gnuehdiff` (capture fichier, comme ehdiff). **À investiguer séparément** : la capture pipe-dans-`$()` de winediff pour la classe
+  EH/sortie-longue. **Reste EH** : 2b (sous-typage `__do_catch` sur `eh.cpp` : `runtime_error`→`exception`), puis cleanup/dtor
+  (`_Unwind_Resume`), rethrow, catch-by-value, catch(...). Axe DLL-tierces (doc 82) toujours séparé.

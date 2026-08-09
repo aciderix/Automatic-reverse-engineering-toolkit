@@ -432,6 +432,27 @@ fn seh_decls() -> &'static str {
      #define aret_seh_setjmp(frame) ((uint32_t)setjmp(*aret_jmpbuf_for((uint32_t)(frame))))\n\n"
 }
 
+/// True when the program has GNU/Itanium C++ EH metadata (an `.eh_frame` LSDA), so the
+/// establish/dispatch machinery is wired. Empty for everything else ⇒ no injection, no decls.
+fn uses_gnu_eh(prog: &Program) -> bool {
+    !crate::analysis::gnu_eh::gnu_eh_entries(prog).is_empty()
+}
+
+/// Declarations for the GNU C++ EH establish injection (see structured.rs / ir::build):
+/// the establish push, the setjmp macro keyed by the establisher esp, and the landing-pad
+/// runner. Emitted only when uses_gnu_eh.
+fn gnu_eh_decls() -> &'static str {
+    "\n/* GNU/Itanium C++ EH: setjmp injected at each EH-function entry, keyed by the\n\
+     establisher esp so aret_cxa_throw's aret_longjmp_do(esp,…) lands here (aret_hle.c). */\n\
+     #include <setjmp.h>\n\
+     jmp_buf *aret_jmpbuf_for(uint32_t key);\n\
+     void aret_gnu_eh_push(uint32_t key, uint32_t pc_start);\n\
+     void aret_gnu_eh_setpc(uint32_t pc, uint32_t ebp);\n\
+     void aret_gnu_eh_pop(void);\n\
+     uint64_t aret_gnu_eh_run(uint32_t esp);\n\
+     #define aret_gnu_eh_setjmp(key) ((uint32_t)setjmp(*aret_jmpbuf_for((uint32_t)(key))))\n\n"
+}
+
 /// Imports whose return value occupies the full `edx:eax` pair — a `long long`,
 /// or an 8-byte struct (`div_t`/`ldiv_t`) the 32-bit ABI returns in edx:eax.
 /// Their shim must be declared returning `uint64_t` so the call site reads both
@@ -1213,6 +1234,24 @@ pub fn transpile(
     // Inject the SEH setjmp only when the program uses _except_handler3 (__try/__except),
     // so every other program's lifted code stays byte-identical.
     emit::set_seh_active(uses_seh(prog));
+    // GNU/Itanium C++ EH: inject the establish/setpc/pop hooks only in functions that have
+    // an `.eh_frame` LSDA, so every other program's lifted code stays byte-identical.
+    {
+        let gnu_funcs = crate::analysis::gnu_eh::gnu_eh_entries(prog);
+        emit::set_gnu_eh_funcs(gnu_funcs.iter().map(|f| f.pc_start).collect());
+        // The EH functions AND their landing-pad continuations both need raw memory frames:
+        // a continuation runs as a separate function against the establisher's frame.
+        let mut frames: std::collections::HashSet<u64> =
+            gnu_funcs.iter().map(|f| f.pc_start).collect();
+        for f in &gnu_funcs {
+            for cs in &f.call_sites {
+                if cs.landing_pad != 0 {
+                    frames.insert(cs.landing_pad);
+                }
+            }
+        }
+        emit::set_gnu_eh_frames(frames);
+    }
     // Execution trace (doc 81 §I1): `ARET_TRACE=1` prefixes each function with an entry
     // record (VA + esp + regs) dumped by the runtime on a crash, to reconstruct the call
     // chain leading to a late corruption. Off by default → default build byte-identical.
@@ -1273,6 +1312,8 @@ pub fn transpile(
     };
     emit::set_shared_stack(false);
     emit::set_seh_active(false);
+    emit::set_gnu_eh_funcs(std::collections::HashSet::new());
+    emit::set_gnu_eh_frames(std::collections::HashSet::new());
     // Soundness: which called shims have no real implementation (they would hit
     // the weak "unimplemented" stub — warn + return 0, a silent wrong result).
     let unimplemented_imports: Vec<String> = {
@@ -1535,6 +1576,9 @@ pub fn transpile(
             }
             if uses_seh(prog) {
                 decls_h.push_str(seh_decls());
+            }
+            if uses_gnu_eh(prog) {
+                decls_h.push_str(gnu_eh_decls());
             }
         }
         write("aret_decls.h", &decls_h)?;
