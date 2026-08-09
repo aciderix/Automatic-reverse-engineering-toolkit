@@ -1289,6 +1289,22 @@ pub fn transpile(
              sub_{entry:x}((uint64_t)(uintptr_t)top, 0x{base:x}u, 1u, 0, 0); }}\n"
         ));
     }
+    // C++ global constructors (doc 71 2026-08-08): mingw defers these to
+    // `___main`→`__do_global_ctors`, which ARET no-ops — so lifted libstdc++'s
+    // `_GLOBAL__sub_I` (which builds std::cout/cin/cerr) would never run. Run them
+    // here in call order (recover_ctor_list already reversed __CTOR_LIST__), on the
+    // shared stack, as a cdecl `void ctor(void)`. Only non-empty for a multi-module
+    // lift, so C/MSVC single-binary transpiles are unaffected (hash unchanged).
+    let mut ctor_decls = String::new();
+    let mut ctor_calls = String::new();
+    for &va in &prog.ctor_list {
+        ctor_decls.push_str(&format!(
+            "         uint64_t sub_{va:x}(uint64_t,uint64_t,uint64_t,uint64_t,uint64_t);\n"
+        ));
+        ctor_calls.push_str(&format!(
+            "    {{ uint32_t *csp=(uint32_t*)top; csp[0]=0; sub_{va:x}((uint64_t)(uintptr_t)top, 0, 0, 0, 0); }}\n"
+        ));
+    }
     let main_c = format!(
         "#include <stdint.h>\n\n\
          /* One shared machine stack for all transpiled functions (UBT M3). */\n\
@@ -1303,6 +1319,7 @@ pub fn transpile(
          void __aret_set_stack_bounds(uint32_t base, uint32_t limit);\n\
          uint64_t sub_{entry:x}(uint64_t __esp, uint64_t a, uint64_t c, uint64_t d, uint64_t b);\n\
          {dll_init_decls}\
+         {ctor_decls}\
          int main(int argc, char **argv) {{\n\
          \x20   aret_real_argc = argc; aret_real_argv = argv;\n\
          {map_call}    uint8_t *top = aret_stack + sizeof(aret_stack) - 64;\n\
@@ -1312,6 +1329,7 @@ pub fn transpile(
          \x20   __aret_set_stack_bounds((uint32_t)(uintptr_t)(aret_stack + sizeof(aret_stack)),\n\
          \x20                           (uint32_t)(uintptr_t)aret_stack);\n\
          {dll_init_calls}\
+         {ctor_calls}\
          {argv_prep}\
          \x20   /* Lay a cdecl frame so an entry at `main` reads argc/argv from the\n\
          \x20      shared machine stack at [esp+4]/[esp+8]; harmless for a no-arg\n\
@@ -1338,6 +1356,17 @@ pub fn transpile(
     for &addr in &undef_subs {
         stubs.push_str(&format!(
             "__attribute__((weak)) uint64_t sub_{addr:x}(uint64_t e,uint64_t a,uint64_t c,uint64_t d,uint64_t b){{ (void)e;(void)a;(void)c;(void)d;(void)b; aret_unmodelled(\"sub_{addr:x} (unrecovered function)\"); return 0; }}\n"
+        ));
+    }
+    // A global ctor that ARET recovered gets a strong `sub_<va>` in a chunk (it runs and
+    // e.g. constructs std::cout); one it deliberately no-ops as startup glue — chiefly
+    // `__gcc_register_frame` (matched by is_glue_name) — has none, so give every ctor a
+    // WEAK no-op fallback. The strong definition wins when present; the glue ctor links as
+    // the harmless no-op ARET already intends. (undef_subs' abort-stub can't be used here:
+    // a no-op'd glue ctor is not an "unrecovered function", it is meant to do nothing.)
+    for &va in &prog.ctor_list {
+        stubs.push_str(&format!(
+            "__attribute__((weak)) uint64_t sub_{va:x}(uint64_t e,uint64_t a,uint64_t c,uint64_t d,uint64_t b){{ (void)e;(void)a;(void)c;(void)d;(void)b; return 0; }}\n"
         ));
     }
     // Indirect-call dispatch table: internal entries (translated) + host-backed

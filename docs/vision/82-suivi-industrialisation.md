@@ -253,6 +253,14 @@ Trois **couches** (branchement → comportement), et pour le comportement trois 
 > **La brique EH/unwind GNU** (`__register_frame_info`/`_Unwind_*`/`__cxa_throw`/`__gxx_personality_v0`, DWARF-vs-shared-stack)
 > reste **structurellement** requise pour l'étape 3 (`throw`/`catch`) — mais le crash iostream n'est **pas prouvé** en être.
 > Détail + correction : doc 71 (2026-08-08 [DIAG] CORRECTION).
+>
+> **✅ RÉSOLU (2026-08-08) — iostream tourne bout-en-bout bit-identique Wine.** La NATURE du 1er mur, tranchée : (1) un slot
+> auto-import (`&std::cout`) non propagé ⇒ **fix loader pseudo-reloc** (`d848e86`, cout **résolu**) ; (2) `std::cout`/`cin`/`cerr`
+> **jamais construits** car les **ctors globaux de libstdc++** (`__CTOR_LIST__` via `__do_global_ctors`) sont no-op'és ⇒ **fix
+> loader ctors** : `recover_ctor_list` par module (signature `8B 1D <imm32> 83 FB FF`, thunks résolus) + rebasing +
+> `seed_functions` + émission au démarrage + stub faible no-op pour la glue `register_frame`. **18 ctors** exécutés, cout
+> **construit**, `std::cout << …` **bit-identique Wine**. Gate multi-module ⇒ hash inchangé. Ce n'était donc **PAS** la brique
+> EH (l'EH reste pour l'étape 3, `throw`/`catch`). **Reste** : EH C++ Itanium, puis **mesure corpus** sur les 463. Détail 71.
 
 4. **Corps Wine — forme LOURDE** : compiler du `.c` Wine entier + **porter une fois le plancher `ntdll`/win32u**
    → couverture massive. *(Milestone.)* **🚧 OUVERTE ET MESURÉE (2026-08-02, `tools/gen_wine_heavy.py`)** : `rtlstr.c`

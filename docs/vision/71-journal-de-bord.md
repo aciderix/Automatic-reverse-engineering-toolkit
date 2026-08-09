@@ -7467,3 +7467,31 @@ Détail : **70 §6** (roadmap). Résumé :
 - **Acquis** : fix pseudo-reloc landé (`d848e86`, cout **résolu**) ; la construction de cout est **localisée à la chaîne
   d'init DllMainCRTStartup de libstdc++** ; mécanisme exact (`.CRT$XC` vs `__CTOR_LIST__`) = **1 trace** à faire. **Mesure
   corpus** après iostream bout-en-bout.
+
+### 2026-08-08 — [I13][LIFT-DLL][LOADER ✅] **🎯 iostream C++ BOUT-EN-BOUT bit-identique Wine — ARET exécute les CONSTRUCTEURS GLOBAUX des DLL liftées (libstdc++ construit `std::cout`/`cin`/`cerr`)**
+
+- **Milestone.** `std::cout << string << int << hex << float << bool << std::endl` **lifté, bit-identique Wine**
+  (`io: s=hello world v0=… hex=ff f=1.50 b=true`). L'iostream complet (locale, facettes, formatage, manipulateurs) tourne
+  via **libstdc++ liftée**. C'est le mur qui bloquait 361/1313 binaires du corpus.
+- **Le fix : lancer les ctors globaux des DLL liftées au démarrage.** Cause (vérifiée avant de coder, doc 71 supra) :
+  `std::cout` est un global de libstdc++ construit par le **`_GLOBAL__sub_I` de libstdc++** (son `__CTOR_LIST__`, via
+  `__do_global_ctors` que ARET no-op'e) — pas par l'exe (qui n'a pas d'`ios_base::Init`). Implémentation :
+  - **`recover_ctor_list`** (`src/loader/mod.rs`) localise `__CTOR_LIST__` par la **signature invariante**
+    `8B 1D <imm32> 83 FB FF` (= `mov ebx,[__CTOR_LIST__]; cmp ebx,-1` ; lue depuis le *ctor* routine ⇒ jamais `__DTOR_LIST__`).
+    Le prologue **varie** selon la version mingw (frame-pointer ou non) — d'où la signature sur le **cœur** invariant, pas le
+    prologue (1ère version trop étroite, ratait libstdc++). Parcourt `[head, ctor…, 0]`, **résout les thunks `jmp`**, rend
+    l'ordre d'appel (inverse du tableau). Robuste aux binaires strippés (donnée `.rdata` conservée).
+  - **`merge_modules`** récupère les ctors de **chaque DLL avant rebasing** puis **rebase** par le delta ⇒ VAs corrects dans
+    l'image fusionnée (`LoadedModule.ctors`). `load_with_modules` compose `primary.ctor_list = [ctors DLL (ordre de chargement)] + [ctors exe]`.
+  - **`seed_functions`** ajoute `ctor_list` (les `_GLOBAL__sub_I` ne sont atteints que par la donnée `__CTOR_LIST__`).
+  - **Builder** émet les appels au démarrage (après `dll_inits`, avant l'entrée app), + un **stub faible no-op par ctor** :
+    un ctor récupéré (réel) a un `sub_<va>` fort (il tourne, construit cout) ; un ctor **glue** no-op'é (surtout
+    `__gcc_register_frame`, matché par `is_glue_name`) lie le no-op faible **voulu**. **18 ctors** exécutés pour io.cpp.
+- **Gate / soundness (§0).** `ctor_list` n'est peuplé que dans le **chemin multi-module** (`load_with_modules`) ⇒ transpile
+  standalone = **no-op total**, hash **`19acad982194bf07` inchangé** (vérifié 4/4). Le glue `register_frame` reste no-op'é
+  (ARET le veut), les vrais ctors tournent. **Leçon** : 2 tentatives revertées (exe-only, mauvaise cible ; SIG trop étroite)
+  **avant** la bonne — mesurer la cible AVANT de coder (la 3e fois a vérifié statiquement `.CRT$XC` vide vs `__CTOR_LIST__`
+  peuplé) a évité une 3e implémentation à l'aveugle.
+- **Portes** : `lift_libstdcxx` étendu à iostream **ok** ; hash inchangé (4/4) ; `lift_libgcc` ok ; winediff complet [en cours].
+- **⇒ Le runtime C++ GNU tourne bout-en-bout lifté** : arith (libgcc) + STL happy-path + **iostream/locale/ctors**. Reste :
+  l'**EH C++** (`throw`/`catch`) ; puis **MESURE CORPUS** sur les 463 (exigence utilisateur).

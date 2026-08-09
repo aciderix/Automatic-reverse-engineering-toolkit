@@ -574,9 +574,16 @@ recompilabilité **100 %** · WASM **7/7**.
   (`--mode walls` : 24 Mo liftés en **12 s**, 6252 fn ; murs résiduels = bruit data-en-code + 30 imports fs/wide-char
   hors-chemin) puis fixture `winecorpus/lift_libstdcxx.cpp` — `std::string`/`std::vector`+`std::sort`/`std::map`(`_Rb_tree`)
   **liftés**, **1er cas d'une DLL liftée important une AUTRE DLL liftée** (libstdc++→libgcc), bit-identique (36 s, 6008 fn).
-  Affordance harnais **`.cpp`** (compile g++, SKIP propre sinon). **Reste** : étape 2 **iostream** (`std::cout`/`ios_base::Init`/
-  `locale` — mur locale/ctype à mesurer) ; étape 3 **l'EH C++ Itanium** (`__cxa_*`/`_Unwind_*` à travers frames liftées = le
-  vrai mur, incompatible *shared-stack*/DWARF, brique dédiée) ; puis re-mesurer le corpus.
+  Affordance harnais **`.cpp`** (compile g++, SKIP propre sinon).
+  **`libstdc++-6.dll` étape 2 ✅ (2026-08-08) — iostream BOUT-EN-BOUT bit-identique Wine.** `std::cout << string/int/hex/float/
+  bool << std::endl` **lifté** (`lift_libstdcxx.cpp` étendu). Deux fixes loader **généraux** : (a) **pseudo-relocations
+  d'auto-import mingw** appliquées au load (`apply_runtime_pseudo_relocs` — `&std::cout` référence l'adresse du slot `__imp_`,
+  réécrite vers son contenu **avant lifting** ; sinon `&cout`=garbage) ; (b) **constructeurs globaux des DLL liftées exécutés
+  au démarrage** (`recover_ctor_list` : `__CTOR_LIST__` localisé par `8B 1D <imm32> 83 FB FF`, thunks résolus, **par module
+  rebasé** ; `seed_functions`+builder ; stub faible no-op pour la glue `__gcc_register_frame`) — `std::cout`/`cin`/`cerr` sont
+  construits par les ctors de **libstdc++** (que mingw défère à `__do_global_ctors`, no-op'é par ARET). **18 ctors** exécutés.
+  Gate multi-module ⇒ hash inchangé. **Reste** : étape 3 **EH C++ Itanium** (`throw`/`catch`, `__cxa_*`/`_Unwind_*` — DWARF
+  vs *shared-stack*, brique dédiée) ; puis **mesure corpus** sur les 463.
 - **TEB `StackBase`/`StackLimit` = vraies bornes de la pile machine** (`fs:[4]`/`fs:[8]`, 2026-07-17, bug **général**) :
   l'entrée émise (`aret_main.c`) publie `__aret_set_stack_bounds(top=aret_stack+taille, bottom=aret_stack)` avant de
   lancer le programme → un sas CRT MSVC qui lit `fs:[4]` (StackBase) et déréférence `[StackBase-8]` (idiome

@@ -16,6 +16,8 @@
 #include <map>
 #include <algorithm>
 #include <numeric>
+#include <iostream>
+#include <iomanip>
 #include <cstdio>
 
 int main() {
@@ -44,5 +46,14 @@ int main() {
     for (auto& kv : m) acc = acc * 31 + kv.second;   // ordered traversal (sorted keys)
     printf("msz=%zu first=%s find_fig=%d acc=%ld\n",
            m.size(), m.begin()->first.c_str(), m["fig"], acc);
+
+    // iostream: proves the lifted libstdc++ GLOBAL ctors ran (std::cout/cin/cerr are
+    // constructed by libstdc++'s own __CTOR_LIST__ static init, which ARET runs at
+    // startup — mingw defers them to __do_global_ctors, which ARET otherwise no-ops).
+    // Exercises ostream operator<< for string/int/hex/float/bool + manipulators + endl.
+    std::cout << "io: s=" << s << " v0=" << v.front() << " m=" << m["fig"]
+              << " hex=" << std::hex << 255 << std::dec
+              << " f=" << std::fixed << std::setprecision(2) << 1.5
+              << " b=" << std::boolalpha << true << std::endl;
     return 0;
 }

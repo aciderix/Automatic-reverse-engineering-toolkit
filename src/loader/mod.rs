@@ -161,6 +161,15 @@ pub struct Program {
     /// name only the COM activator ever asks for. Forwarded exports are excluded
     /// (they are not code in this image). Empty unless DLLs were merged in.
     pub dll_exports: Vec<(String, String, u64)>,
+    /// C++ **global constructors** to run before the app entry, in call order (rebased).
+    /// mingw defers global ctors to `___main` → `__do_global_ctors`, which walks
+    /// `__CTOR_LIST__` (`[-1, ctor_n, …, ctor_1, 0]`) and calls each in **reverse** array
+    /// order; ARET no-ops that glue, so without this the ctors never run. The one that
+    /// matters for lifted libstdc++ is its own `__CTOR_LIST__` static init (the
+    /// `_GLOBAL__sub_I` that constructs `std::cout`/`cin`/`cerr`). Populated **only** in the
+    /// multi-module path (`load_with_modules`) — from the exe and each lifted DLL — so a
+    /// standalone transpile is a no-op (hash unchanged). Run at startup by the builder.
+    pub ctor_list: Vec<u64>,
     pub sections: Vec<Section>,
     /// address -> symbol, sorted, used to name functions and resolve call targets.
     pub symbols: BTreeMap<u64, KnownSymbol>,
@@ -307,6 +316,7 @@ impl Program {
             exports,
             dll_inits: Vec::new(),
             dll_exports: Vec::new(),
+            ctor_list: Vec::new(),
             sections,
             symbols,
             imports,
@@ -498,6 +508,11 @@ impl Program {
         if self.is_executable(self.entry) {
             seeds.push(self.entry);
         }
+        // C++ global constructors (run at startup by the builder) must be recovered so
+        // the emitted `sub_<ctor>` calls resolve — they are reached only through
+        // `__CTOR_LIST__` data, which linear recovery would miss. Only ever non-empty in
+        // the multi-module path, so a standalone transpile is unaffected.
+        seeds.extend(self.ctor_list.iter().copied().filter(|&a| self.is_executable(a)));
         for sym in self.symbols.values() {
             if sym.is_function && self.is_executable(sym.address) {
                 seeds.push(sym.address);
@@ -690,6 +705,9 @@ pub struct LoadedModule {
     pub init_entry: u64,
     /// The module's rebased image base — passed as `hinstDLL` to its DllMain.
     pub hinstance: u64,
+    /// The module's C++ global constructors, rebased to the merged image (call order).
+    /// libstdc++'s here are what construct `std::cout`/`cin`/`cerr`.
+    pub ctors: Vec<u64>,
 }
 
 /// Normalize a DLL name for matching: lowercase, drop a trailing `.dll`. So
@@ -814,6 +832,12 @@ pub fn merge_modules(
         let delta = new_base as i64 - dll.image_base as i64;
         // Rebased entry point (_DllMainCRTStartup) — 0 if the DLL has none.
         let init_entry = if dll.entry != 0 { (dll.entry as i64 + delta) as u64 } else { 0 };
+        // Recover the DLL's global ctors BEFORE rebasing its sections (the scan/reads work
+        // at the DLL's own addresses), then shift the recovered VAs to the merged image.
+        // libstdc++'s ctors here construct std::cout/cin/cerr (mingw defers them to
+        // __do_global_ctors, which ARET no-ops — so they must be run explicitly).
+        let ctors: Vec<u64> =
+            recover_ctor_list(&dll).into_iter().map(|va| (va as i64 + delta) as u64).collect();
 
         apply_base_relocations(&mut dll.sections, &dll.base_relocs, delta)?;
         for s in &mut dll.sections {
@@ -871,7 +895,7 @@ pub fn merge_modules(
             primary.pe_imports.entry(s).or_insert(imp);
         }
         primary.sections.append(&mut dll.sections);
-        loaded.push(LoadedModule { name, exports, init_entry, hinstance: new_base });
+        loaded.push(LoadedModule { name, exports, init_entry, hinstance: new_base, ctors });
     }
     Ok(loaded)
 }
@@ -889,6 +913,9 @@ pub fn merge_modules(
 /// loaded section (can't patch it → would leave a stale IAT pointer).
 pub fn load_with_modules(primary_data: &[u8], dlls: &[(String, Vec<u8>)]) -> Result<Program> {
     let mut primary = Program::load(primary_data)?;
+    // Recover the exe's own global ctors from its own sections, before the merge folds
+    // the DLLs' code in (which would make the `__do_global_ctors` scan ambiguous).
+    let exe_ctors = recover_ctor_list(&primary);
     let mut dll_progs = Vec::with_capacity(dlls.len());
     for (name, data) in dlls {
         dll_progs.push((name.clone(), Program::load(data)?));
@@ -899,6 +926,16 @@ pub fn load_with_modules(primary_data: &[u8], dlls: &[(String, Vec<u8>)]) -> Res
         .iter()
         .filter(|m| m.init_entry != 0)
         .map(|m| (m.init_entry, m.hinstance))
+        .collect();
+    // C++ global constructors to run at startup (the builder emits calls): each lifted
+    // DLL's ctors first, in load order (libstdc++'s build std::cout/cin/cerr), then the
+    // exe's — mirroring Windows, where a DLL's static objects are constructed before the
+    // exe runs. Only populated here (the multi-module path), so a standalone transpile
+    // has an empty ctor_list and is unaffected (hash unchanged).
+    primary.ctor_list = modules
+        .iter()
+        .flat_map(|m| m.ctors.iter().copied())
+        .chain(exe_ctors)
         .collect();
     // Publish every merged DLL's named local exports for the runtime (see the
     // `dll_exports` field): what the app imports statically is routed below, but
@@ -1029,6 +1066,75 @@ fn apply_runtime_pseudo_relocs(primary: &mut Program, resolved: &BTreeMap<u64, u
             s.data[off..off + bytes].copy_from_slice(&le[..bytes]);
         }
     }
+}
+
+/// Recover a module's C++ **global-constructor** list (see the `ctor_list` field). mingw
+/// defers global ctors to `___main` → `__do_global_ctors`, which walks `__CTOR_LIST__` and
+/// calls its entries in reverse; ARET no-ops that glue, so the ctors (e.g. libstdc++'s
+/// `_GLOBAL__sub_I` that builds `std::cout`/`cin`/`cerr`) would silently never run. We find
+/// `__CTOR_LIST__` by locating `___do_global_ctors` via its byte signature (robust to
+/// stripped binaries): its prologue `push ebp; mov ebp,esp; push ebx; sub esp,0x14;
+/// mov ebx,[imm32]` names the list address in the imm32 — reading it from the *ctor* routine
+/// disambiguates it from `__DTOR_LIST__`. `__CTOR_LIST__` = `[head, ctor_1, …, ctor_n, 0]`;
+/// `__do_global_ctors` calls `ctor_n..ctor_1`, so we return that (reversed) call order. A
+/// `jmp`-thunk ctor (e.g. `jmp ___gcc_register_frame`) is followed to its real body so it is
+/// recoverable. Every entry must point into an executable section or we bail (never guess).
+/// Returns VAs in this module's own address space (the caller rebases for a merged DLL).
+fn recover_ctor_list(prog: &Program) -> Vec<u64> {
+    if prog.bitness.bits() != 32 {
+        return Vec::new();
+    }
+    // `__do_global_ctors` reads `mov ebx, [__CTOR_LIST__]` then `cmp ebx, -1` (checks the
+    // list's `-1` head). The prologue around it varies by mingw version (frame pointer or
+    // not, stack size), but this core is invariant and specific: `8B 1D <imm32> 83 FB FF`.
+    // Reading it from THIS routine (ebx / cmp -1) disambiguates it from `__do_global_dtors`
+    // (which loads `__DTOR_LIST__` into eax and does not `cmp -1`).
+    let mut list_addr: Option<u64> = None;
+    'scan: for s in &prog.sections {
+        if !s.executable {
+            continue;
+        }
+        let d = &s.data;
+        let mut i = 0usize;
+        while i + 9 <= d.len() {
+            if d[i] == 0x8b && d[i + 1] == 0x1d && d[i + 6] == 0x83 && d[i + 7] == 0xfb && d[i + 8] == 0xff {
+                let a = u32::from_le_bytes(d[i + 2..i + 6].try_into().unwrap());
+                list_addr = Some(a as u64);
+                break 'scan;
+            }
+            i += 1;
+        }
+    }
+    let Some(list_addr) = list_addr else {
+        return Vec::new();
+    };
+    let follow_thunk = |va: u64| -> u64 {
+        // `jmp rel32` (E9): the ctor is a thunk to the real body.
+        if let Some(b) = prog.read_from(va) {
+            if b.len() >= 5 && b[0] == 0xE9 {
+                let rel = i32::from_le_bytes([b[1], b[2], b[3], b[4]]);
+                return (va as i64 + 5 + rel as i64) as u64;
+            }
+        }
+        va
+    };
+    let mut ctors = Vec::new();
+    let mut a = list_addr + 4; // skip the head (−1 or a count)
+    for _ in 0..65536 {
+        match prog.read_u32(a) {
+            Some(0) | None => break,
+            Some(v) => {
+                let va = follow_thunk(v as u64);
+                if !prog.is_executable(va) {
+                    return Vec::new(); // not a real ctor array — bail rather than guess
+                }
+                ctors.push(va);
+                a += 4;
+            }
+        }
+    }
+    ctors.reverse(); // __do_global_ctors calls the last array entry first
+    ctors
 }
 
 /// Parse a PE's import table keeping the **source DLL** of each import: IAT slot
