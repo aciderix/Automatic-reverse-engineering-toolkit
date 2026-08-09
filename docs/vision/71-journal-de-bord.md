@@ -7586,3 +7586,35 @@ Détail : **70 §6** (roadmap). Résumé :
   **matche le type** (deref du slot `catch_types` vs typeinfo throwé), **longjmp** au setjmp + switch au landing pad ;
   `_Unwind_Resume`/cleanup = re-throw ; `__cxa_begin/end_catch`. Gaté sur les imports EH ⇒ hash inchangé hors EH ; abort sound
   sur tout sous-cas non modélisé. **Chantier DLL-tierces (doc 82) reste séparé — on ne mélange pas.**
+
+### 2026-08-09 — [I13][EH][DESIGN] **Brique EH C++ Itanium — plan d'implémentation 1b+2 arrêté (miroir MSVC, avec la seule pièce nouvelle : le PC de call actif par frame)**
+
+Après lecture de toute la machinerie EH MSVC d'ARET (SEH `_except_handler3`/v4 + C++ `_CxxThrowException`/`__CxxFrameHandler3`),
+la correspondance GNU/Itanium est arrêtée. Table de correspondance :
+
+| MSVC (existant, prouvé) | GNU/Itanium (à construire) |
+|---|---|
+| Instruction d'établissement `mov fs:[0],esp` (le lifter la voit) | **AUCUNE instruction** → **synthétiser** l'établissement à l'**ENTRÉE de chaque fonction ayant une LSDA** (`gnu_eh_entries`) |
+| Chaîne de frames `fs:[0]` (TEB) | Pile EH GNU d'ARET (`g_gnu_eh`), push à l'entrée / pop au retour de chaque fonction EH |
+| ScopeTable `{filter,handler}` indexée par `trylevel` | Call-site table de la LSDA `[start,end)→landing_pad+action(types)` (brique 1a `gnu_eh_entries`) |
+| `trylevel` = **variable liftée** (`mov [ebp-4],state`) | **⭐ pièce nouvelle** : le call-site actif = le **PC de retour** ; GNU n'a pas de variable → **injecter, avant chaque `call` d'une fonction EH, un store du PC de ce call** dans la frame `g_gnu_eh` courante (analogue *synthétisé* du trylevel) |
+| `_CxxThrowException`→`aret_CxxFrameHandler3` : walk `fs:[0]`, matche les catchable types | `__cxa_throw`/`_Unwind_RaiseException`→**`aret_cxa_throw`** : walk `g_gnu_eh`, pour chaque frame lit `cur_pc`→ region call-site→ landing_pad+types |
+| Match type = `aret_cxx_catchable_match` (ThrowInfo) | Match type = **deref du slot `catch_types`** (indirect, brique 1a) → `type_info*` vs le typeinfo de `__cxa_throw` ; règle de sous-typage (`__do_catch`/héritage) à porter |
+| longjmp→setjmp établisseur ; `aret_seh_run` (is_cxx=1) `aret_call` le catch funclet (rend une **continuation VA**) puis `aret_call` la continuation | longjmp→setjmp établisseur ; puis **`aret_call` le LANDING PAD** avec l'ebp/esp de l'établisseur ; le landing pad fait `__cxa_begin_catch`+cleanup+corps catch puis reprend le flot normal |
+
+**Sous-étapes ordonnées (chacune gatée sur présence d'une LSDA ⇒ hash inchangé hors EH ; abort sound sur tout sous-cas non modélisé) :**
+- **1b-α — seeding** : ajouter les landing pads de `gnu_eh_entries` aux entrées de fonction **comme continuations** (miroir exact
+  de `cxx_conts` : construites en fonctions mais **exclues de la frontière de troncature** — un landing pad est un point de reprise
+  *dans le corps de l'établisseur*, sinon il tronque `main` et orpheline ses `jcc` intérieurs). Petit, additif, vérifiable (les
+  landing pads de `eh.exe` récupérés, hash inchangé).
+- **1b-β — établissement** : le lifter injecte à l'entrée d'une fonction EH un `__aret_gnu_eh_establish(key)` rendu en `setjmp`
+  (clé = VA d'entrée + esp courant pour distinguer les activations), gaté `gnu_eh_active()` (comme `seh_active()`).
+- **1b-γ — PC de call actif** : le lifter injecte avant chaque `call` d'une fonction EH un store du PC du call dans `g_gnu_eh` courant.
+- **2 — dispatcher runtime** `aret_cxa_throw`/`aret_Unwind_RaiseException`/`aret_cxa_begin/end_catch`/`aret_Unwind_Resume` :
+  walk `g_gnu_eh`, mappe `cur_pc`→landing pad via `gnu_eh_entries`, matche le type (deref slot), `longjmp` ; `_Unwind_Resume`=re-throw
+  vers la frame suivante ; cleanup-only landing pad = exécute puis re-throw. Personality `__gxx_personality_v0` = **no-op** (le
+  dispatcher ARET *remplace* le déroulement DWARF, comme il remplace `RtlUnwind`).
+- **Oracle** : fixture `winecorpus/eh.cpp` (throw runtime_error catché par `const std::exception&` + throw int nested) **bit-identique
+  Wine chargeant la même libstdc++** ; puis d'autres formes (by-value, catch-all, rethrow, dtor d'unwind) comme la suite ehdiff MSVC.
+
+Le chantier **DLL-tierces** (doc 82) reste **séparé** — on ne mélange pas.
