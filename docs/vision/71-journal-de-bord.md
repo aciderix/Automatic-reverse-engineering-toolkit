@@ -7545,3 +7545,44 @@ Détail : **70 §6** (roadmap). Résumé :
   pas en transpilé ⇒ abort. Le dispatcher ARET **remplace** le dérouleur DWARF par la chaîne EH liftée + LSDA.
 - **Statut** : **fondation posée** (modèle LSDA cerné, plan par bricks). Implémentation = chantier dédié frais (parser LSDA
   d'abord). Comportement actuel **sound** (abort bruyant au throw). Ensuite : **mesure corpus** sur les 463.
+
+### 2026-08-09 — [I13][EH][LIFT ✅] **Brique EH C++ Itanium — sous-brique 1a : le PARSER `.eh_frame`/LSDA (`analysis::gnu_eh_entries`) récupère la métadonnée EH, prouvé sur `eh.exe`**
+
+- **Livré.** `src/analysis/gnu_eh.rs` (`pub mod gnu_eh`, câblé dans `analysis/mod.rs`) — l'analogue GNU de `cxx_eh_entries`
+  (MSVC `FuncInfo`) : **prouvé depuis la métadonnée du binaire, rien de deviné** (§0). Parcourt `.eh_frame` (CIE→FDE, cache
+  d'encodages par CIE), et pour chaque FDE portant une LSDA (augmentation CIE `zPLR`) parse la `.gcc_except_table` (LSDA) →
+  `GnuEhFunc { pc_start, pc_end, call_sites: [GnuCallSite { start, end, landing_pad, catch_types }] }`. N'accepte QUE les
+  encodages `DW_EH_PE` que GCC/i386 émet (`pcrel|sdata4`, `absptr`, `uleb128/sleb128`, `udata2/4`) ; **tout autre encodage ⇒
+  fonction sautée** (sound — le dispatcher abortera bruyamment sur un throw là, jamais de landing pad deviné).
+- **Prouvé sur la fixture réelle `eh.cpp`/`eh.exe`** (mingw g++, DWARF-2 pur, pas de `.pdata`). Encodages **mesurés** (objdump
+  `--dwarf=frames` + probe) : CIE EH = `zPLR`, personality `0x9b` (indirect|pcrel|sdata4), **LSDA `0x1b`** (pcrel|sdata4),
+  FDE ptr `0x1b` ; LSDA header : `lp_enc=0xff` (**omit** ⇒ landing pads relatifs au **début de fonction**), `ttype_enc=0x9b`
+  (**indirect**|pcrel|sdata4), `cs_enc=0x01` (**uleb128**, régions relatives au début de fonction). Le parser récupère
+  **exactement** la FDE de `main` (`0x4014e0..0x401653`) et ses **11 call-sites**, dont les 3 handlers typés :
+  - `catch (const std::exception&)` → slot `0x409008` = `_ZTISt9exception` (`.data[0x409008]=0x40a6c8`, typeinfo local) ;
+  - `catch (const char*)` → slot `0x409004` = `__imp___ZTIPKc` ; `catch (int)` → slot `0x40900c` = `__imp___ZTIi`.
+  Les régions `[start,end)` couvrent bien les `call` qui peuvent throw (printf/`f`/`__cxa_throw`), les cleanup-only
+  (`__cxa_free_exception`+`_Unwind_Resume`) ont `landing_pad` non nul et `catch_types` vide.
+- **⭐ Décision de modèle (sound) : `catch_types` = les ADRESSES des SLOTS `type_info*`, pas les objets typeinfo.** mingw émet
+  la ttype table en **`DW_EH_PE_indirect`**, et les typeinfo **importés** (`const char*`/`int` depuis libstdc++) ne sont liés
+  qu'au **load** (mécanisme d'auto-import pseudo-reloc mingw qu'ARET applique déjà, `apply_runtime_pseudo_relocs`). Donc
+  `read_type` résout la valeur+base pcrel de l'entrée ttype mais **n'applique PAS le deref indirect** : il garde l'adresse du
+  slot. Le **dispatcher** (brique suivante) déréférence le slot **au moment du throw** pour obtenir le `std::type_info*` vivant
+  — exactement le pointeur que `__cxa_throw` reçoit ⇒ comparables **par construction**. Récupérer statiquement le typeinfo
+  serait faux pour les imports (le slot n'est valide qu'après relocation).
+- **Testabilité.** `parse_lsda` refactorée pour prendre `(bytes, read_u32_closure, …)` au lieu de `&Program` ⇒ **testable
+  auto-contenu**. Gardes permanentes (survivent au conteneur éphémère, aucune dépendance à un binaire du scratchpad) :
+  `uleb`/`sleb` (exemples DWARF), `read_encoded` (pcrel|sdata4, absptr, offset-0=pas-de-pointeur, omit), et **`parse_lsda`
+  sur un LSDA synthétique** reproduisant la forme mingw (lp_enc=omit, ttype indirect|pcrel|sdata4, cs uleb128 : 1 cleanup +
+  1 catch typé) → assertions sur régions/landing pad/slot de type. La validation **bout-en-bout** sur le vrai `eh.exe`
+  (11 call-sites, 3 typeinfo) a été faite via un probe temporaire, retiré après mesure (consigné ici).
+- **Soundness / gate (§0).** **Recovery-only, non câblé à l'émission** ⇒ **hash transpile `19acad982194bf07` INCHANGÉ** (4/4),
+  **difftest 272/272**. Module `#![allow(dead_code)]` jusqu'à ce que le dispatcher le consomme (exercé par les tests). Fix au
+  passage : deux constructeurs `LoadedModule` en `#[cfg(test)]` du loader n'avaient pas le champ `ctors` (ajouté par `db4bb19`)
+  ⇒ `cargo test` était cassé ; corrigés (`ctors: Vec::new()`).
+- **Reste de la brique EH** (miroir MSVC P3.5→P3.10, doc 71 2026-08-08 [EH][DESIGN]) : (1b) chaîne EH ARET = injection setjmp
+  à l'entrée des fonctions à landing pad (marqueur d'établissement, comme le SEH) ; (2) **dispatcher** `aret_cxa_throw` routant
+  `__cxa_throw`/`_Unwind_RaiseException` → parcourt la pile EH ARET, mappe PC-de-l'appel → landing pad via `gnu_eh_entries`,
+  **matche le type** (deref du slot `catch_types` vs typeinfo throwé), **longjmp** au setjmp + switch au landing pad ;
+  `_Unwind_Resume`/cleanup = re-throw ; `__cxa_begin/end_catch`. Gaté sur les imports EH ⇒ hash inchangé hors EH ; abort sound
+  sur tout sous-cas non modélisé. **Chantier DLL-tierces (doc 82) reste séparé — on ne mélange pas.**

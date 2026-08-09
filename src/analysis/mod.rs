@@ -8,6 +8,8 @@
 
 use crate::disasm::{Disassembler, Flow, Insn};
 use crate::loader::Program;
+
+pub mod gnu_eh;
 use indexmap::IndexMap;
 use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 

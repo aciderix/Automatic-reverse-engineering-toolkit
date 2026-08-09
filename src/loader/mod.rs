@@ -1653,6 +1653,7 @@ mod tests {
                     target: PeExportTarget::ForwardByName("OTHER".into(), "Delta".into()),
                 },
             ],
+            ctors: Vec::new(),
         };
         let imp = |dll: &str, name: Option<&str>, ord: Option<u32>| PeImport {
             dll: dll.into(),
@@ -1686,6 +1687,7 @@ mod tests {
             init_entry: 0,
             hinstance: 0,
             exports: parse_pe_exports(&gdi),
+            ctors: Vec::new(),
         };
         let resolved = resolve_module_imports(&app_imports, std::slice::from_ref(&gdi_mod));
         assert!(!resolved.is_empty(), "comctl32 imports from gdi32 should resolve");

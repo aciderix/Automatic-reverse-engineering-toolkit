@@ -261,6 +261,17 @@ Trois **couches** (branchement → comportement), et pour le comportement trois 
 > `seed_functions` + émission au démarrage + stub faible no-op pour la glue `register_frame`. **18 ctors** exécutés, cout
 > **construit**, `std::cout << …` **bit-identique Wine**. Gate multi-module ⇒ hash inchangé. Ce n'était donc **PAS** la brique
 > EH (l'EH reste pour l'étape 3, `throw`/`catch`). **Reste** : EH C++ Itanium, puis **mesure corpus** sur les 463. Détail 71.
+>
+> **🚧 étape 3 (EH C++ Itanium) ENGAGÉE — sous-brique 1a ✅ (2026-08-09) : le PARSER `.eh_frame`/LSDA.**
+> `src/analysis/gnu_eh.rs` (`gnu_eh_entries`, analogue GNU de `cxx_eh_entries`) récupère la métadonnée EH **depuis le binaire**
+> (§0, rien de deviné) : CIE→FDE→LSDA (`.gcc_except_table`), call-site table + action table + type table. **Prouvé sur
+> `eh.exe`** : FDE de `main` + 11 call-sites + les 3 typeinfo (`std::exception`/`const char*`/`int`). Encodages mingw/i386
+> mesurés (lp_enc=omit, ttype=indirect|pcrel|sdata4, cs=uleb128) ; tout autre encodage ⇒ fonction **sautée** (sound).
+> **Décision modèle** : `catch_types` = adresses des **slots** `type_info*` (indirect, liés au load par pseudo-reloc) — le
+> dispatcher déréférence au throw pour matcher le typeinfo de `__cxa_throw`. Recovery-only ⇒ **hash inchangé**, difftest
+> 272/272 ; tests unitaires auto-contenus (uleb/sleb/read_encoded + LSDA synthétique). **Reste** : (1b) setjmp d'établissement,
+> (2) dispatcher `aret_cxa_throw` (parcours pile EH + match type + longjmp au landing pad), `_Unwind_Resume`/`__cxa_begin/end_catch`.
+> Détail 71 (2026-08-09).
 
 4. **Corps Wine — forme LOURDE** : compiler du `.c` Wine entier + **porter une fois le plancher `ntdll`/win32u**
    → couverture massive. *(Milestone.)* **🚧 OUVERTE ET MESURÉE (2026-08-02, `tools/gen_wine_heavy.py`)** : `rtlstr.c`
@@ -303,3 +314,12 @@ Trois **couches** (branchement → comportement), et pour le comportement trois 
   **arrêt bruyant**. Automatiser retire l'écriture, **pas la preuve**.
 - **Portes** : hash transpile inchangé (additif), stdcall_audit PASS, winediff vert — à chaque cran.
 - **Licence** : Wine LGPL/GPL — obligations de distribution (décision produit, pas blocage technique).
+
+### 🗂️ Chantier SÉPARÉ à mesurer plus tard — « largeur de DLL tierces » (noté 2026-08-08, NE PAS mélanger avec l'EH)
+
+Constat de l'échantillon non-throw (doc 90) : les binaires C++ **sans** throw/catch du corpus sont bloqués non par l'EH
+mais par la **largeur de DLL tierces** (`libLLVM-21`, `libclang-cpp`, `libxapian`, Qt, tesseract…) + des **trous de
+récupération d'appels indirects** (vtables/pointeurs non récupérés dans le code propre du binaire). C'est un **axe Levier 1
+distinct** (lifter davantage de DLL tierces, ou router/mesurer leurs surfaces) **à ouvrir séparément et à mesurer** — **pas
+maintenant**, on ne le mélange pas avec la brique EH (populations disjointes : EH = les 102 throw-users ; DLL-breadth = les
+77 non-throw). À reprendre après l'EH, avec sa propre mesure de portée.
