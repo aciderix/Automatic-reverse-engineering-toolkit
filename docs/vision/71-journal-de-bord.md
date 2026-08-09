@@ -7319,3 +7319,28 @@ Détail : **70 §6** (roadmap). Résumé :
   au `cc` + garder les symboles, off par défaut, hash inchangé) pour lire la ligne C, **puis** corriger la résolution
   d'import loader. Alternative : mapper `sub_531f20` → symbole libstdc++ (base de merge). **Refute l'alarme « EH = mur
   iostream » ; recadre en fix loader/import.**
+
+### 2026-08-08 — [I13][LIFT-DLL][INFRA][DIAG] **build `-g` d'ARET (`ARET_DEBUG`) + root-cause étape 2 précisée : APPEL VIRTUEL sur un `this` corrompu (champ objet +0x78 = octets de nom d'API) — définitivement PAS l'EH**
+
+- **Outil (1er changement de code du chantier libstdc++).** `ARET_DEBUG=1` ajoute `-g` aux compilations C d'ARET
+  (`src/builder/mod.rs`, gaté env, off par défaut) ⇒ gdb/addr2line remontent au **statement C émis exact**. `-g` ne change
+  pas le codegen `-O0` ⇒ **hash `19acad982194bf07` inchangé** (vérifié 4/4) ; le cache d'objets clé sur `c_flags` ⇒ le build
+  debug a ses propres entrées. Réutilisable pour toute forensics future.
+- **Root-cause étape 2, à la ligne C (via `-g`).** Fault = `chunk_27.c:26667` :
+  ```c
+  v110 = *(uint32_t*)(v73 + 0x78);   // 26661 : this = champ objet [v73+0x78]
+  ...
+  v116 = *(uint32_t*)v110;           // 26667 : charge la vtable  <- FAULT (v110=0x50746547)
+  v118 = aret_call(*(uint32_t*)(v116+0x18), esp, v116, v110, ...);  // this->vtable[6](...)
+  ```
+  C'est un **APPEL VIRTUEL** (`this->vtable[6]()`) où **`this` (`v110`) = les octets "GetP"** — lu depuis le **champ +0x78
+  d'un objet `v73`** qui est **corrompu** (il porte la valeur d'une chaîne de nom d'API au lieu d'un pointeur d'objet).
+  ⇒ **Définitivement PAS la brique EH/unwind** : c'est une **corruption de champ objet** (facet/locale) au static-init
+  libstdc++ où une valeur de la **région des noms d'import** atterrit dans un slot de pointeur d'objet.
+- **Où ça pointe (fix, à confirmer au prochain incrément).** Le lien constant avec les octets de nom d'import (+ `aret_data_import`
+  rendant 0 pour les fonctions ⇒ slots auto-adressés, + `aret_GetProcAddress`→0) fait converger vers la **résolution d'imports
+  du loader multi-modules** : un initialiseur statique de libstdc++/libgcc (table de facettes/vtable) est peuplé avec une
+  valeur issue de la zone d'import mal résolue. **Prochain pas** : tracer l'écriture de `[v73+0x78]` (watchpoint `-g` sur le
+  champ) → l'initialiseur exact → corriger la résolution loader (tractable, général), **pas** une brique EH.
+- **Statut §2.** Forensics **bornée** (assez pour écarter l'EH et cibler le loader). Le fix = incrément focalisé suivant :
+  watchpoint `-g` sur `[v73+0x78]`, identifier l'initialiseur, corriger. Acquis : outil `-g` permanent + cause cernée.

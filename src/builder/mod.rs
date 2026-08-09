@@ -1627,6 +1627,13 @@ pub fn transpile(
         .iter()
         .map(|s| s.to_string())
         .collect();
+    // ARET_DEBUG=1 adds `-g` so the emitted C carries DWARF line info (gdb/addr2line
+    // map a fault back to the exact generated-C statement). Off by default; `-g` does
+    // not change `-O0` codegen, so the produced program is byte-identical (the object
+    // cache keys on c_flags, so a debug build simply gets its own cache entries).
+    if std::env::var_os("ARET_DEBUG").is_some() {
+        c_flags.push("-g".to_string());
+    }
     c_flags.extend(feat_cflags.iter().cloned());
     // Content-addressed object cache (doc 81 §I9). On a run that only changed an HLE
     // shim, every lifted-app object is bit-identical to the previous build — measured
