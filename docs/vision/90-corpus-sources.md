@@ -138,3 +138,25 @@ I/O privilégié → abort correct ; seules `pinsrd` 64 / `cvtdq2pd` 40 / `psllq
 **libgcc** — le lift `libgcc_s_dw2-1.dll` (2026-08-08, bit-identique Wine) frappe pile dans le top mesuré. Le reste de
 la tête (`operator new/delete`, `std::string`, iostream, `_Rb_tree`, `std::locale`, `__cxa_*`) vit dans
 **`libstdc++-6.dll`** ⇒ le multiplicateur suivant, lifté PAR-DESSUS libgcc.
+
+## Mesure de PORTÉE de la brique EH/unwind GNU (2026-08-08) — scan d'imports, 1313 binaires
+
+Question : la brique EH/unwind (le mur unique du runtime C++ GNU, cf. doc 71/82) toucherait **combien** de binaires ?
+Mesure directe (scan `objdump -p` des imports de chaque binaire du corpus, `scratchpad/ehscan/flags.txt`), **pas** une
+extrapolation. Flags par binaire = [importe libstdc++][importe libgcc][EH throw/catch][iostream].
+
+| catégorie | bins | % |
+|---|---:|---:|
+| total | 1313 | 100 |
+| pur C (aucun runtime C++) | 660 | 50,3 |
+| **couvert** : libgcc arith-only (`__divdi3`…) | 146 | 11,1 |
+| **couvert** : C++ happy-path (string/conteneurs, étape 1) | 45 | 3,4 |
+| EH C++ throw/catch (`_Unwind_`/`__cxa_throw`) → unwind complet | 401 | 30,5 |
+| iostream (frame-reg au static-init, cf. étape 2) | 361 | 27,5 |
+| **⟹ a besoin de la brique EH/unwind (union)** | **463** | **35,3** |
+
+**Le « 37-47 % » était une vraie mesure de « importe le runtime C++ » (38,4 % libstdc++, 48,1 % libgcc) ; la brique EH,
+mesurée finement, en touche 35,3 %** (on retranche les 191 déjà couverts : arith-only + happy-path). Deux couches :
+**401** (throw/catch réel = unwind complet) + **62** de plus (iostream sans throw = au moins le static-init).
+**Caveats** : nécessaire mais pas forcément suffisant par binaire (borne haute sur cette dimension) ; corpus MSYS2 =
+GNU-biaisé (un corpus MSVC montrerait l'EH MSVC, **déjà fait**). ⇒ **priorité confirmée par la donnée : on engage la brique.**
