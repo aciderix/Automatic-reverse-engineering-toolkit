@@ -7344,3 +7344,30 @@ Détail : **70 §6** (roadmap). Résumé :
   champ) → l'initialiseur exact → corriger la résolution loader (tractable, général), **pas** une brique EH.
 - **Statut §2.** Forensics **bornée** (assez pour écarter l'EH et cibler le loader). Le fix = incrément focalisé suivant :
   watchpoint `-g` sur `[v73+0x78]`, identifier l'initialiseur, corriger. Acquis : outil `-g` permanent + cause cernée.
+
+### 2026-08-08 — [I13][LIFT-DLL][DIAG ✅ ROOT-CAUSE] **étape 2 RÉSOLUE en diagnostic : les PSEUDO-RELOCATIONS d'auto-import mingw ne sont pas appliquées (auto-main saute `_pei386_runtime_relocator`) — fix loader général identifié**
+
+- **Chaîne complète (via `-g` + gdb + disasm exe).** `main` fait `movl $0x407208, (%esp)` (arg0 = `&std::cout`) puis
+  `call __ostream_insert`. **`0x407208` est l'adresse du SLOT `__imp__ZSt4cout`, pas l'objet cout.** libstdc++ lit
+  `this->vtable` à `[0x407208+0x78]` = `0x407280` = les octets de la chaîne "GetProcAddress" (le hint-name-table est juste
+  après l'IAT) ⇒ `mov (%eax),%eax` sur `0x50746547` ⇒ **fault**. `_ZSt4cout`/`_ZSt4cerr` sont des **imports de DONNÉE** de
+  libstdc++ (globaux exportés).
+- **Cause racine (générale).** mingw **auto-import** : une référence directe à une donnée de DLL (`&cout`) est compilée en
+  **immédiat = adresse du slot `__imp_`** + une entrée `_RUNTIME_PSEUDO_RELOC`. Au démarrage, **`_pei386_runtime_relocator`**
+  (CRT mingw) réécrit l'immédiat vers le **CONTENU du slot** (l'objet réel). **ARET démarre en auto-main (`0x4014e0`), qui
+  SAUTE le sas CRT** exécutant le relocator ⇒ les pseudo-relocs ne sont **jamais** appliquées ⇒ `&cout` reste l'adresse du
+  slot ⇒ deref = crash. io.exe **contient** la liste (`__RUNTIME_PSEUDO_RELOC_LIST__`, RVA 0x548-0x59c ; `__pei386_runtime_relocator`).
+  ⇒ **définitivement PAS la brique EH** ; c'est un **trou loader** (auto-import mingw non traité), **général** à tout binaire
+  mingw qui référence une donnée de DLL par adresse.
+- **Note importante (déjà présent hors DLL-lift ?).** Le loader ARET **écrit déjà** la VA d'export réelle dans les slots
+  IAT résolus (`load_with_modules`), donc **le CONTENU du slot 0x407208 est correct** (`0x561cc0`) ; ce qui manque, c'est de
+  **propager ce contenu aux références de code** via les pseudo-relocs. (Pour un exe mingw autonome sans `--with-dll`, le même
+  mécanisme s'appliquerait à ses propres auto-imports — à vérifier à la mesure.)
+- **FIX loader identifié (général, tractable — prochain incrément).** Appliquer `__RUNTIME_PSEUDO_RELOC_LIST__` **au load**
+  (après binding IAT) : parser la liste (`.rdata`, format v2 : en-tête `{0,0,1}` puis entrées `{sym_rva, target_rva, bits}`),
+  et pour chaque entrée patcher le code : `*(base+target) = *(base+target) - (base+sym) + *(base+sym)` (à la taille `bits`
+  8/16/32) — i.e. remplacer l'adresse du slot par son contenu. Statique (ARET binde l'IAT au load) ⇒ pas de relocator
+  runtime. Garde : n'appliquer que là où le slot est bindé (lifté), pas casser les slots HLE. **Puis MESURER l'effet corpus
+  (wallsweep sur les 463)**, pas seulement la fixture (exigence utilisateur).
+- **Outil acquis** : `ARET_DEBUG=1` (build `-g`) a été décisif ; conservé.
+- **Statut** : root-cause **complète et prouvée** ; implémentation du fix + mesure corpus = incrément focalisé suivant.
