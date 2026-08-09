@@ -7745,3 +7745,19 @@ Un throw doit exécuter les destructeurs des objets locaux des portées travers�
 - **Portes** : **hash `19acad982194bf07` inchangé** (setpc gaté EH ; dispatch additif), **difftest 272/272**, winediff (à
   confirmer). **Reste EH** : rethrow (`__cxa_rethrow`), catch-by-value (copie de l'objet), catch(...), offsets `__vmi` non nuls,
   throw pendant l'unwind (std::terminate). Axe DLL-tierces (doc 82) séparé.
+
+### 2026-08-09 — [I13][EH][LIFT ✅] **Brique EH C++ Itanium — 2d (part 1) : `catch(...)` et catch-BY-VALUE (copie + destruction de l'objet exception)**
+
+Deux cas de plus, mesurés puis prouvés bit-identiques Wine (`bench/gnueh/eh_catch_byval.cpp`, gnuehdiff **4/4**) :
+- **`catch(...)`** (catch-all) : **marchait déjà** — un slot ttype nul est un catch-all, `aret_gnu_type_matches` rend vrai. Confirmé.
+- **catch-by-value** `catch(E e)` (l'objet est **copié** dans le paramètre puis les DEUX exemplaires sont détruits) : deux
+  briques. (1) **`__cxa_get_exception_ptr`** : le landing pad l'appelle pour copy-construire `e` **avant** `begin_catch` — dans
+  le modèle clos = rend l'objet (comme `begin_catch`). (2) **`__cxa_end_catch` détruit l'objet exception** : mesuré §0, Wine
+  détruit `e` **ET** l'objet lancé (2 dtors) ; ARET n'en faisait qu'un. Fix : `__cxa_throw` mémorise son **dtor** (arg 2, 0 pour
+  un POD comme `int`), `end_catch` l'appelle sur l'objet avant `free`. **Convention mesurée** : `E::~E(this)` est **THISCALL**
+  (`this` en **ecx** — le corps ouvre `mov (%ecx),…`) ⇒ `aret_call(dtor, scratch, eax=0, ecx=obj, …)` (+ arg0 pile pour un thunk
+  cdecl éventuel). Résultat : `E dtor 9` **×2** puis `done` = Wine.
+- **Portes** : **hash `19acad982194bf07` inchangé** (shims HLE purement additifs, chemin EH), **difftest 272/272**, **gnuehdiff
+  4/4**, winediff (à confirmer). **Reste 2d** : `__cxa_rethrow` (nécessite de garder la frame établisseuse vivante à travers le
+  catch + `setpc`/pop injectés dans les continuations — refonte du cycle de vie des frames, brique dédiée), offsets `__vmi` non
+  nuls, throw pendant l'unwind (std::terminate).

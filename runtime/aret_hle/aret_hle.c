@@ -4397,7 +4397,8 @@ struct aret_gnu_frame {
 static struct aret_gnu_frame g_gnu_eh[256];
 static int g_gnu_eh_n = 0;
 static uint32_t g_gnu_run_lp, g_gnu_run_obj, g_gnu_run_sel, g_gnu_run_ebp, g_gnu_run_esp;
-static uint32_t g_gnu_cur_exc = 0;   /* the in-flight caught object (freed at end_catch) */
+static uint32_t g_gnu_cur_exc = 0;    /* the in-flight caught object (freed at end_catch) */
+static uint32_t g_gnu_cur_dtor = 0;   /* its destructor (the dtor arg of __cxa_throw), run at end_catch */
 
 void aret_gnu_eh_push(uint32_t key, uint32_t pc_start) {
     if (g_gnu_eh_n >= 256) aret_unmodelled("GNU EH: establish-frame stack overflow");
@@ -4447,6 +4448,12 @@ uint32_t aret_cxa_free_exception(uint32_t esp) {
     free((void *)(uintptr_t)arg(esp, 0));
     return 0;
 }
+/* __cxa_get_exception_ptr(exc) -> the thrown object pointer, WITHOUT marking the catch as
+ * begun (a catch-by-value landing pad calls this to copy-construct its parameter before
+ * __cxa_begin_catch). In the closed model the handed pointer IS the object, so return it. */
+uint32_t aret_cxa_get_exception_ptr(uint32_t esp) {
+    return arg(esp, 0);
+}
 /* __cxa_begin_catch(exc) -> caught object pointer. In the closed model the pointer we
  * handed the landing pad in eax IS the object, so return it unchanged. */
 uint32_t aret_cxa_begin_catch(uint32_t esp) {
@@ -4454,9 +4461,22 @@ uint32_t aret_cxa_begin_catch(uint32_t esp) {
     g_gnu_cur_exc = obj;
     return obj;
 }
+/* __cxa_end_catch: the handler is done with the exception -> destroy the thrown object
+ * (its destructor is the dtor arg __cxa_throw was given, and for a class type it has a
+ * visible effect) and free it. GCC i386 calls a member destructor `E::~E(this)` THISCALL
+ * (`this` in ecx — measured: it opens `mov (%ecx),…`), so pass the object in ecx; also
+ * place it as stack arg 0 (esp = S-4, callee reads [esp+4]) for a cdecl thunk. S is free
+ * stack below the shim's esp. */
 uint32_t aret_cxa_end_catch(uint32_t esp) {
-    (void)esp;
-    if (g_gnu_cur_exc) { free((void *)(uintptr_t)g_gnu_cur_exc); g_gnu_cur_exc = 0; }
+    if (g_gnu_cur_exc) {
+        if (g_gnu_cur_dtor) {
+            uint32_t s = (esp - 0x40) & ~0xfu;   /* free scratch, aligned */
+            *(uint32_t *)(uintptr_t)s = g_gnu_cur_exc;
+            (void)aret_call(g_gnu_cur_dtor, s - 4, 0, g_gnu_cur_exc /*ecx=this*/, 0, 0, 0, 0, 0);
+        }
+        free((void *)(uintptr_t)g_gnu_cur_exc);
+        g_gnu_cur_exc = 0; g_gnu_cur_dtor = 0;
+    }
     return 0;
 }
 static uint32_t g_gnu_exc_obj = 0, g_gnu_exc_tinfo = 0;   /* the in-flight exception */
@@ -4507,10 +4527,12 @@ uint32_t aret_Unwind_Resume(uint32_t esp) {
     return 0;   /* not reached */
 }
 
-/* __cxa_throw(object, type_info*, dtor): start unwinding for a fresh exception. */
+/* __cxa_throw(object, type_info*, dtor): start unwinding for a fresh exception. The dtor
+ * (arg 2, 0 for a POD like `int`) destroys the thrown object at __cxa_end_catch. */
 uint32_t aret_cxa_throw(uint32_t esp) {
     g_gnu_exc_obj = arg(esp, 0);
     g_gnu_exc_tinfo = arg(esp, 1);
+    g_gnu_cur_dtor = arg(esp, 2);
     aret_gnu_dispatch();
     return 0;   /* not reached */
 }
