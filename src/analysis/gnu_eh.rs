@@ -24,16 +24,26 @@ pub struct GnuCallSite {
     pub end: u64,
     /// Landing-pad VA (0 = no handler here, the exception just propagates through).
     pub landing_pad: u64,
-    /// The type-info SLOT VAs this landing pad catches, in order. Empty = a
-    /// cleanup-only landing pad (runs dtors then `_Unwind_Resume`); a `0` entry =
-    /// catch-all (`...`). **These are the addresses of `std::type_info*` slots, not
-    /// the type_info objects themselves** — mingw emits the ttype table with
-    /// `DW_EH_PE_indirect`, and imported type_infos (e.g. `const char*`, `int` from
-    /// libstdc++) are only bound at load (via the mingw auto-import pseudo-relocs
-    /// ARET already applies). The dispatcher dereferences the slot at throw time to
-    /// get the live `std::type_info*`, which is exactly the pointer `__cxa_throw`
-    /// receives — so the two are comparable by construction.
-    pub catch_types: Vec<u64>,
+    /// The catches this landing pad handles, in action-chain order. Empty with a
+    /// non-zero `landing_pad` = a cleanup-only pad (runs dtors then `_Unwind_Resume`,
+    /// selector 0). See `GnuCatch`.
+    pub catches: Vec<GnuCatch>,
+}
+
+/// One catch clause at a call site: the `ar_filter` selector the personality hands
+/// the landing pad (in `edx`/`__builtin_eh_return_data_regno(1)` — the landing pad
+/// does `cmp edx, filter; je <handler>`), and the caught type's `std::type_info*`
+/// SLOT VA. **The slot holds the type_info pointer, it is not the type_info object**
+/// — mingw emits the ttype table with `DW_EH_PE_indirect`, and imported type_infos
+/// (e.g. `int`/`const char*` from libstdc++) are only bound at load (via the mingw
+/// auto-import pseudo-relocs ARET already applies). The dispatcher dereferences the
+/// slot at throw time to get the live `std::type_info*`, which is exactly the pointer
+/// `__cxa_throw` receives — comparable by construction. `type_slot == 0` = catch-all
+/// (`catch(...)`, matches any and binds no object).
+#[derive(Clone, Copy, Debug)]
+pub struct GnuCatch {
+    pub filter: i64,
+    pub type_slot: u64,
 }
 
 /// One EH function's recovered metadata.
@@ -329,8 +339,8 @@ fn parse_lsda(
         let cs_lp = read_encoded(d, &mut p, cs_enc & 0x0f, va2)?;
         let action = uleb(d, &mut p)?; // 0 = cleanup none / propagate; else 1-based index into action table
         let landing_pad = if cs_lp == 0 { 0 } else { lp_start.wrapping_add(cs_lp) };
-        // Walk the action chain to collect the caught type-info indices.
-        let mut catch_types = Vec::new();
+        // Walk the action chain to collect the catches (filter selector + type slot).
+        let mut catches = Vec::new();
         if action != 0 {
             let mut ap = action_table_start + (action as usize - 1);
             for _ in 0..64 {
@@ -339,7 +349,10 @@ fn parse_lsda(
                 let disp_pos = ap;
                 let next = sleb(d, &mut ap)?;
                 if filter > 0 {
-                    catch_types.push(read_type(filter as u64)); // catch of a type (0 => catch-all sentinel handled by read_type)
+                    // A catch of a type: `filter` is the ar_filter selector the personality
+                    // hands the landing pad in edx; read_type(filter) resolves the ttype slot
+                    // (0 => catch-all sentinel handled by read_type).
+                    catches.push(GnuCatch { filter, type_slot: read_type(filter as u64) });
                 } else if filter == 0 {
                     // cleanup action (no type) — keep walking
                 }
@@ -357,7 +370,7 @@ fn parse_lsda(
             start: cs_start.wrapping_add(lp_start), // call-site regions are also lpstart-relative
             end: cs_start.wrapping_add(lp_start).wrapping_add(cs_len),
             landing_pad,
-            catch_types,
+            catches,
         });
     }
 
@@ -477,10 +490,12 @@ mod tests {
         assert_eq!(f.call_sites[0].start, pc_start + 0x10);
         assert_eq!(f.call_sites[0].end, pc_start + 0x15);
         assert_eq!(f.call_sites[0].landing_pad, 0);
-        assert!(f.call_sites[0].catch_types.is_empty());
-        // B: catch region, landing pad = pc_start + 0x40, one caught type = the SLOT VA.
+        assert!(f.call_sites[0].catches.is_empty());
+        // B: catch region, landing pad = pc_start + 0x40, one caught type (filter 1) = the SLOT VA.
         assert_eq!(f.call_sites[1].start, pc_start + 0x20);
         assert_eq!(f.call_sites[1].landing_pad, pc_start + 0x40);
-        assert_eq!(f.call_sites[1].catch_types, vec![ttype_slot]);
+        assert_eq!(f.call_sites[1].catches.len(), 1);
+        assert_eq!(f.call_sites[1].catches[0].filter, 1);
+        assert_eq!(f.call_sites[1].catches[0].type_slot, ttype_slot);
     }
 }
