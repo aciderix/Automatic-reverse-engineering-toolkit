@@ -7633,3 +7633,19 @@ la frontière de troncature**, sinon un landing pad au milieu de `main` tronquer
 - **Gate (§0)** : vide sur tout binaire sans LSDA `.eh_frame` (pas de try/catch) ⇒ **aucun effet**. **hash transpile
   `19acad982194bf07` inchangé** (4/4), **difftest 272/272**, **winediff 231/233** (les 2 rouges connus, `lift_libstdcxx` **ok**).
 - **Reste** : 1b-β (établissement setjmp à l'entrée), 1b-γ (store du PC de call actif), 2 (dispatcher `aret_cxa_throw`).
+
+### 2026-08-09 — [I13][EH][DESIGN] **Raffinement d'ordre : commencer le dispatcher par `throw int` (match par ÉGALITÉ DE POINTEUR, sans héritage)**
+
+Avant d'implémenter 1b-β/γ+2, la **fixture minimale testable** (§2) doit être **plus simple que `eh.cpp`** pour isoler la
+machinerie établissement+PC+dispatcher **sans** le matching de sous-typage Itanium (le morceau dur). Insight mesuré :
+- **`throw 42; catch(int)`** — le type lancé (`__cxa_throw(obj, &typeid(int), 0)`) et le type catché (slot ttype
+  `__imp___ZTIi`) sont **le même import** ⇒ après load, **le même `type_info*`** ⇒ le match = **égalité de pointeur** (aucune
+  lecture de vtable `__si_class_type_info`/`__vmi_class_type_info`, aucune marche de bases). Fixture créée : `ehmin.cpp`
+  (`start`/`throw 42`/`caught 42`/`done`), main = FDE `zPLR` (même forme que `eh.exe` : lp omit, ttype indirect|pcrel|sdata4,
+  cs uleb128).
+- Le **matching de sous-typage** (`runtime_error`→`exception` de `eh.cpp` : lire le `type_info` GNU, distinguer
+  `__class_type_info`/`__si_class_type_info`/`__vmi_class_type_info` par vtable, suivre `__base_type`) = **sous-brique
+  SÉPARÉE** (brique 2b), livrée après que `throw int` prouve l'ossature.
+- **Ordre d'implémentation révisé** : (2a) dispatcher `aret_cxa_throw` + établissement + PC de call + `__cxa_begin/end_catch`
+  + `_Unwind_Resume`, matching **égalité de pointeur seule**, prouvé sur `ehmin.cpp` bit-identique Wine ; (2b) matching de
+  sous-typage `__do_catch`, prouvé sur `eh.cpp`. Chacun = un incrément gate-vert.
