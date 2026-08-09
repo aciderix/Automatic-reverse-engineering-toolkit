@@ -7421,3 +7421,27 @@ Détail : **70 §6** (roadmap). Résumé :
 - **Statut.** Mur **entièrement diagnostiqué**, fix **cadré**. C'est le 2ᵉ chantier loader du jour ; landé prochainement
   (changement de startup correctness-critique ⇒ pas bâclé en fin de session). **Ensuite** : mesure corpus `--with-dll` sur les
   463 (exigence utilisateur) une fois iostream bout-en-bout.
+
+### 2026-08-08 — [I13][LIFT-DLL][DIAG] **CORRECTION du mur ctor : `std::cout` est construit par les ctors de libstdc++ (la DLL), PAS par l'exe — le fix doit lancer les ctors des DLL LIFTÉES (tentative exe-only revertée)**
+
+- **Tentative exe-only implémentée puis REVERTÉE.** J'ai ajouté `recover_ctor_list` (localise `__CTOR_LIST__` via la
+  signature de `___do_global_ctors`) + seed + émission au démarrage (miroir `dll_inits`). **Mais** la mesure a montré que
+  c'était la mauvaise cible : (a) l'unique entrée de `__CTOR_LIST__` de l'exe = **`0x402880 = _register_frame_ctor`
+  (`jmp ___gcc_register_frame`)** — l'enregistrement de **frames EH**, pas la construction C++ ; (b) l'exe importe `_ZSt4cout`
+  en **donnée** mais **AUCUN `ios_base::Init`** ⇒ l'exe **ne construit pas cout** ; (c) le thunk `jmp` n'était pas récupéré
+  (link error `undefined sub_402880`) ; (d) lancer `__gcc_register_frame` sur TOUT binaire mingw = risque de régression
+  (runtime EH). ⇒ **reverté** (build cassé + mauvaise cible + risqué). État propre restauré.
+- **Cause racine CORRIGÉE.** `std::cout`/`cin`/`cerr` sont des **globaux de libstdc++** construits par les **ctors globaux de
+  libstdc++ elle-même** (la DLL), lancés par son `DllMainCRTStartup` → `__do_global_ctors` **à elle**. ARET exécute le
+  `init_entry` (DllMain) de la DLL liftée via `dll_inits`, mais ce `DllMainCRTStartup` lifté appelle le `__do_global_ctors`
+  **no-op'é** ⇒ les ctors de la DLL ne tournent pas ⇒ cout=zéro.
+- **FIX correct (plus large, prochain incrément) : lancer les ctors des DLL LIFTÉES.** (1) `recover_ctor_list` **par module**
+  (exe **et** chaque DLL) ; (2) **rebaser** les VAs de ctor des DLL par le delta de `merge_modules` (elles sont récupérées
+  pré-rebase) ; (3) **résoudre les thunks `jmp`** (E9 rel32 → cible réelle) pour récupérer le vrai corps ; (4) émettre les
+  appels au démarrage : ctors DLL (dans l'ordre de chargement, après leur DllMain) **puis** ctors exe, avant l'entrée app ;
+  (5) gate + **winediff complet** (le `__gcc_register_frame` s'exécutera sur les binaires mingw C existants — vérifier
+  busybox/lua/nasm ne régressent pas, sinon filtrer les ctors EH-frame ou implémenter `__register_frame_info`). L'infra
+  (champ `ctor_list`, `recover_ctor_list`, seed, émission) est **conçue et validée en principe** — à re-poser proprement
+  avec la couverture DLL + rebasing + thunk.
+- **Acquis net** : le fix **pseudo-reloc reste landé et correct** (cout **résolu**, `d848e86`) ; le vrai mur restant =
+  **exécuter les constructeurs globaux des DLL C++ liftées**. Diagnostic **complet**. **Mesure corpus** après ça.
