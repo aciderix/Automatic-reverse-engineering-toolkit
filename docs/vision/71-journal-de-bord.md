@@ -7495,3 +7495,27 @@ Détail : **70 §6** (roadmap). Résumé :
 - **Portes** : `lift_libstdcxx` étendu à iostream **ok** ; hash inchangé (4/4) ; `lift_libgcc` ok ; winediff complet [en cours].
 - **⇒ Le runtime C++ GNU tourne bout-en-bout lifté** : arith (libgcc) + STL happy-path + **iostream/locale/ctors**. Reste :
   l'**EH C++** (`throw`/`catch`) ; puis **MESURE CORPUS** sur les 463 (exigence utilisateur).
+
+### 2026-08-08 — [I13][LIFT-DLL][EH][DIAG] **étape 3 (EH C++ Itanium) MESURÉE à l'instruction : le dérouleur libgck capture le VRAI contexte machine (asm) — incompatible *shared-stack* ⇒ abort SOUND ; brique dédiée cadrée**
+
+- **Mesure (fixture `eh.cpp` : `throw std::runtime_error` + `throw int`, catch typés).** Oracle Wine : `start / f(5)=10 /
+  caught: negative / caught int: 42 / done`. **ARET : `start / f(5)=10` puis ABORT** (SIGABRT via `aret_abort`, **pas** un
+  faux-silencieux — §0 respecté). Le chemin (gdb) : `throw` → `__cxa_throw` (sub_566320, libstdc++) → `_Unwind_RaiseException`
+  (sub_19abcd0, libgcc) → **`_uw_init_context_1`** (sub_19ab5c0, libgcc RVA 0x1b5c0) → **`aret_abort`**.
+- **Cause racine (structurelle, confirmée).** `_uw_init_context_1` capture l'**état machine RÉEL** (registres + pile) par
+  **inline asm** (`__builtin_unwind_init`) pour que le dérouleur DWARF puisse marcher la pile. Ces instructions sont
+  **non modélisables** en ARET (le modèle transpile en C, la pile machine est **émulée** `aret_stack`, il n'y a **pas** de
+  contexte machine réel à capturer) ⇒ `Asm`→`aret_abort` (§0.2). ⇒ **lifter le dérouleur libgcc NE PEUT PAS marcher** : il
+  aborte sound à la capture de contexte. Même nature que le mur x64-unwind noté depuis longtemps, mais côté GNU/Itanium.
+- **⇒ Brique dédiée requise (magnitude de la brique EH MSVC P3.10 = une session focalisée).** Approche (miroir du SEH/MSVC-EH
+  déjà fait) : **router `__cxa_throw`/`_Unwind_RaiseException`/`__cxa_begin_catch`/`_Unwind_Resume`/`__gxx_personality_v0`
+  vers un DISPATCHER HLE ARET** (pas le dérouleur libgcc lifté) qui (1) construit l'objet exception (`__cxa_allocate_exception`
+  déjà appelé), (2) marche la **pile LIFTÉE** (mécanisme setjmp-marker existant du SEH), (3) pour chaque frame consulte la
+  **LSDA** (`.gcc_except_table`, tables call-site + action + type-info du personality `__gxx_personality_v0`) pour trouver un
+  `catch` compatible, (4) transfère au **landing pad** (longjmp injecté à l'établissement, comme brick C SEH) avec l'objet +
+  le type. **Récupération SOUND des landing pads/LSDA** depuis la métadonnée (rien de deviné, comme `cxx_eh_entries` MSVC).
+  Imports EH mesurés : `_Unwind_Resume` (15), `__cxa_allocate/begin/end/free_exception`, `__cxa_throw`, `__gxx_personality_v0`.
+- **Statut.** Mur **entièrement caractérisé** (à l'instruction, cause structurelle prouvée). Comportement actuel **sound**
+  (abort bruyant). La brique = chantier dédié (parsing LSDA DWARF + dispatcher + landing-pad transfer), à mener frais comme
+  la brique MSVC-C++-EH. **Acquis session** : le runtime C++ GNU tourne bout-en-bout **hors EH** (libgcc arith + STL +
+  iostream/locale/ctors) ; l'EH est le **dernier** morceau. Ensuite : **mesure corpus** sur les 463.
