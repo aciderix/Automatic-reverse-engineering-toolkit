@@ -7618,3 +7618,18 @@ la correspondance GNU/Itanium est arrêtée. Table de correspondance :
   Wine chargeant la même libstdc++** ; puis d'autres formes (by-value, catch-all, rethrow, dtor d'unwind) comme la suite ehdiff MSVC.
 
 Le chantier **DLL-tierces** (doc 82) reste **séparé** — on ne mélange pas.
+
+### 2026-08-09 — [I13][EH][LIFT ✅] **Brique EH C++ Itanium — sous-brique 1b-α : les landing pads GNU seedés comme continuations non-tronquantes**
+
+Premier câblage de `gnu_eh_entries` (brique 1a) dans la récupération de fonctions (`analysis::analyze`). Chaque landing pad
+de la LSDA est un **point de reprise dans le corps de son établisseur**, atteint uniquement par le dispatcher EH ARET (brique
+suivante) — par aucun call direct ni pointeur de données. Il est donc seedé **exactement comme les continuations de catch MSVC**
+(`cxx_conts`, doc 70 §4.4) : ajouté aux entrées (construit en fonction, pour l'`aret_call` de reprise à venir) **mais exclu de
+la frontière de troncature**, sinon un landing pad au milieu de `main` tronquerait `main` et orphelinerait ses `jcc` intérieurs.
+- **Prouvé sur `eh.exe`** : `_main @ 0x4014e0` **couvre tout son étendue** (blocs 0x4014e0→0x401644, `Return` à 0x401609),
+  **pas de troncature** ; les 6 landing pads (0x401550/0x401552/0x4015bd/0x4015d8/0x401609/0x401644) récupérés comme blocs
+  intérieurs **et** fonctions-continuations autonomes (duplication assumée, comme MSVC). Transpile OK (seul manque = l'import
+  `cxa_throw`, attendu — le dispatcher n'existe pas encore).
+- **Gate (§0)** : vide sur tout binaire sans LSDA `.eh_frame` (pas de try/catch) ⇒ **aucun effet**. **hash transpile
+  `19acad982194bf07` inchangé** (4/4), **difftest 272/272**, **winediff 231/233** (les 2 rouges connus, `lift_libstdcxx` **ok**).
+- **Reste** : 1b-β (établissement setjmp à l'entrée), 1b-γ (store du PC de call actif), 2 (dispatcher `aret_cxa_throw`).

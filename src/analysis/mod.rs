@@ -844,7 +844,22 @@ fn global_decode(
     for va in cxx_funclets.iter().chain(cxx_conts_vec.iter()) {
         entries.insert(*va);
     }
-    let cxx_conts: BTreeSet<u64> = cxx_conts_vec.into_iter().collect();
+    let mut cxx_conts: BTreeSet<u64> = cxx_conts_vec.into_iter().collect();
+    // GNU/Itanium C++ EH (mingw): the LSDA landing pads recovered by `gnu_eh_entries`
+    // (brick 1a) are resume points *inside their establisher's body* — reached only when
+    // the ARET EH dispatcher (a later brick) transfers there on a throw, by no direct
+    // call or data pointer. Seed them exactly like the MSVC catch continuations: build
+    // them as functions but keep them OUT of the truncation boundary, so a landing pad
+    // mid-`main` does not orphan `main`'s interior branch targets. Empty on any binary
+    // without an `.eh_frame` LSDA (no try/catch) -> no effect, hash unchanged.
+    for f in gnu_eh::gnu_eh_entries(prog) {
+        for cs in &f.call_sites {
+            if cs.landing_pad != 0 && prog.is_executable(cs.landing_pad) {
+                entries.insert(cs.landing_pad);
+                cxx_conts.insert(cs.landing_pad);
+            }
+        }
+    }
     let mut jump_tables: HashMap<u64, Vec<u64>> = HashMap::new();
     if entries.is_empty() && prog.is_executable(prog.entry) {
         entries.insert(prog.entry);
