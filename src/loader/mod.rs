@@ -931,7 +931,104 @@ pub fn load_with_modules(primary_data: &[u8], dlls: &[(String, Vec<u8>)]) -> Res
         sec.data[off..off + 4].copy_from_slice(&bytes);
         primary.imports.remove(&slot);
     }
+    apply_runtime_pseudo_relocs(&mut primary, &resolved);
     Ok(primary)
+}
+
+/// Apply mingw's runtime auto-import pseudo-relocations (`__RUNTIME_PSEUDO_RELOC_LIST__`,
+/// v2 format) at LOAD time, so the lifter sees corrected immediates.
+///
+/// mingw references DLL **data** (e.g. `std::cout`, exported by libstdc++) by baking the
+/// `__imp_` IAT-slot ADDRESS as an immediate in code, plus a pseudo-reloc entry;
+/// `_pei386_runtime_relocator` normally rewrites that immediate to the slot's CONTENT (the
+/// real object) at CRT startup. ARET starts at auto-main and **transpiles `.text` to C**
+/// (immediates are baked into the C), so neither running the relocator nor patching bytes
+/// at runtime helps — the fix must patch `.text` **before** lifting. Cf. doc 71 (2026-08-08).
+///
+/// Only entries whose `__imp_` slot ARET actually **resolved** to a lifted export
+/// (`resolved`) are touched: there the real value is known and correct. Slots left to the
+/// HLE (patched at runtime by `aret_data_import`) are untouched — so a build with no lifted
+/// DLLs (`resolved` empty) is a complete **no-op** (transpile hash unchanged).
+fn apply_runtime_pseudo_relocs(primary: &mut Program, resolved: &BTreeMap<u64, u64>) {
+    if resolved.is_empty() {
+        return;
+    }
+    let base = primary.image_base;
+    let rva_in_image = |rva: u32| primary.section_at(base + rva as u64).is_some();
+    // Locate the v2 list by its 12-byte header {magic1=0, magic2=0, version=1} in a
+    // read-only (non-executable) section — mingw emits it in `.rdata`. Stripped binaries
+    // drop the delimiting symbols but keep the data, so we scan by structure and validate
+    // the first entry (sym/target are in-image RVAs, size flag ∈ {8,16,32}).
+    let mut list: Option<(u64, u64)> = None; // (first item VA, section end VA)
+    'find: for s in &primary.sections {
+        if s.executable {
+            continue;
+        }
+        let d = &s.data;
+        let mut i = 0usize;
+        while i + 24 <= d.len() {
+            let is_hdr = d[i..i + 8].iter().all(|&b| b == 0)
+                && u32::from_le_bytes(d[i + 8..i + 12].try_into().unwrap()) == 1;
+            if is_hdr {
+                let e = i + 12;
+                let sym = u32::from_le_bytes(d[e..e + 4].try_into().unwrap());
+                let target = u32::from_le_bytes(d[e + 4..e + 8].try_into().unwrap());
+                let flags = u32::from_le_bytes(d[e + 8..e + 12].try_into().unwrap());
+                if matches!(flags, 8 | 16 | 32) && rva_in_image(sym) && rva_in_image(target) {
+                    list = Some((s.address + e as u64, s.address + d.len() as u64));
+                    break 'find;
+                }
+            }
+            i += 4; // the list is 4-byte aligned
+        }
+    }
+    let Some((mut item_va, end_va)) = list else {
+        return;
+    };
+    // Read phase: collect (code VA, new value, size in bytes) for resolved-slot entries.
+    let mut patches: Vec<(u64, u64, usize)> = Vec::new();
+    while item_va + 12 <= end_va {
+        let (Some(sym), Some(target), Some(flags)) = (
+            primary.read_u32(item_va),
+            primary.read_u32(item_va + 4),
+            primary.read_u32(item_va + 8),
+        ) else {
+            break;
+        };
+        if !matches!(flags, 8 | 16 | 32) {
+            break; // end of a well-formed list (zero entry / list terminator)
+        }
+        item_va += 12;
+        let slot_va = base + sym as u64;
+        let code_va = base + target as u64;
+        let Some(&export_va) = resolved.get(&slot_va) else {
+            continue; // not a lifted-DLL data import — leave it to the HLE path
+        };
+        let bits = flags as usize;
+        let bytes = bits / 8;
+        let old = primary.read_from(code_va).filter(|b| b.len() >= bytes).map(|b| {
+            let mut v = 0u64;
+            for k in 0..bytes {
+                v |= (b[k] as u64) << (8 * k);
+            }
+            v
+        });
+        let Some(old) = old else { continue };
+        // v2 fix: new = old + (real import value − imp-slot address), truncated to size.
+        let mask = if bits >= 64 { u64::MAX } else { (1u64 << bits) - 1 };
+        let new = old.wrapping_add(export_va.wrapping_sub(slot_va)) & mask;
+        patches.push((code_va, new, bytes));
+    }
+    // Write phase: patch the section bytes so the lifter bakes the corrected immediate.
+    for (code_va, new, bytes) in patches {
+        if let Some(s) = primary.sections.iter_mut().find(|s| {
+            code_va >= s.address && code_va + bytes as u64 <= s.address + s.data.len() as u64
+        }) {
+            let off = (code_va - s.address) as usize;
+            let le = new.to_le_bytes();
+            s.data[off..off + bytes].copy_from_slice(&le[..bytes]);
+        }
+    }
 }
 
 /// Parse a PE's import table keeping the **source DLL** of each import: IAT slot

@@ -7371,3 +7371,28 @@ Détail : **70 §6** (roadmap). Résumé :
   (wallsweep sur les 463)**, pas seulement la fixture (exigence utilisateur).
 - **Outil acquis** : `ARET_DEBUG=1` (build `-g`) a été décisif ; conservé.
 - **Statut** : root-cause **complète et prouvée** ; implémentation du fix + mesure corpus = incrément focalisé suivant.
+
+### 2026-08-08 — [I13][LIFT-DLL][LOADER ✅] **FIX loader : pseudo-relocations d'auto-import mingw appliquées AU LOAD — le mur cout de l'étape 2 tombe (crash avance en profondeur), général**
+
+- **Implémenté** (`src/loader/mod.rs`, `apply_runtime_pseudo_relocs`, appelé dans `load_with_modules` après le binding IAT).
+  Localise la liste v2 `__RUNTIME_PSEUDO_RELOC_LIST__` par sa **structure** (en-tête `{0,0,1}` + 1ʳᵉ entrée valide : sym/target
+  RVAs in-image, taille ∈ {8,16,32}) — **robuste aux binaires strippés** (les symboles délimiteurs sautent, la donnée `.rdata`
+  reste). Pour chaque entrée dont le slot `__imp_` est **résolu vers un export lifté** (`resolved`), patche l'immédiat du code :
+  `new = old + (export_va − slot_va)` (taille bits) — **AVANT le lifting** (ARET transpile le `.text` en C, donc patcher les
+  octets au runtime serait sans effet ; il faut corriger avant que le lifter ne lise le code). Cf. entrée ROOT-CAUSE supra.
+- **Sûreté / bornes (§0).** N'agit **que** sur les slots que le loader a bindés (imports de DLL liftées) ⇒ laisse intacts les
+  slots HLE (patchés au runtime par `aret_data_import`). **`resolved` vide (build sans `--with-dll`) ⇒ no-op total** ⇒ hash
+  transpile **`19acad982194bf07` inchangé** (vérifié 4/4). Scan limité aux sections **non exécutables**, patch limité aux
+  sections chargées. Le fix ne peut toucher qu'un binaire qui **lifte** une DLL exportant la donnée auto-importée.
+- **Effet mesuré (fixture io.cpp).** Avant : crash `0xc0000005 at 0x50746547` ("GetP", `&cout` = adresse du slot `__imp_`).
+  Après : **`&cout` = `0x561cc0` (l'objet réel)** ✅ — le mur auto-import **tombe**. Le crash **avance en profondeur** dans
+  l'operator<< (`sub_4a7b00`, `chunk_12.c:8776` : `*(vtable−12)` = accès offset de base virtuelle du graphe d'objets iostream),
+  atteignable **seulement parce que cout est maintenant résolu**. ⇒ **vrai progrès**, pas une régression.
+- **Non-régression prouvée.** hash inchangé (4/4) ; **`lift_libgcc` ok**, **`lift_libstdcxx` ok** (le chemin heureux
+  string/vector/map passe **toujours** ⇒ le patch n'a rien corrompu) ; winediff complet [en cours].
+- **Statut.** Le **fix loader est correct, général et landé**. iostream **n'est pas encore 100 %** : mur suivant = la
+  **construction de l'objet cout / le graphe de vtables iostream** (virtual-base, facettes) au static-init — soit d'autres
+  données auto-importées non couvertes (slot pas dans `resolved` car réf **interne** à libstdc++, pas import de l'exe), soit
+  le ctor `ios_base::Init` qui ne peuple pas cout. **Prochain** : diagnostiquer ce mur, puis **MESURER l'effet corpus** sur
+  les 463 (sweep `--with-dll libstdc++ libgcc`) — la mesure exigée par l'utilisateur **avant** de considérer le chantier fini
+  (elle sera parlante une fois iostream complet ; aujourd'hui elle montrerait « avance mais pas débloqué »).
