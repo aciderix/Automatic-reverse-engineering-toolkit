@@ -377,6 +377,28 @@ fn parse_lsda(
     Some(GnuEhFunc { pc_start, pc_end, call_sites })
 }
 
+/// The three Itanium ABI type_info **vtable pointer values** (`__class_type_info`,
+/// `__si_class_type_info`, `__vmi_class_type_info`), by which the runtime dispatcher
+/// classifies a `std::type_info` to walk its base chain for a subtype catch (brick 2b).
+/// A GCC type_info stores, as its first field, `&<that abi vtable> + 8`; the abi vtable
+/// is imported from libstdc++, so its IAT slot VA is fixed and known at analysis time
+/// **without loading libstdc++** — the vptr value is `slot + 8`. 0 for a kind the binary
+/// never uses. Returned as `(class, si, vmi)`.
+pub fn gnu_eh_abi_vptrs(prog: &Program) -> (u64, u64, u64) {
+    let find = |needle: &str| -> u64 {
+        prog.imports
+            .iter()
+            .find(|(_, n)| n.contains(needle))
+            .map(|(&slot, _)| slot + 8)
+            .unwrap_or(0)
+    };
+    (
+        find("cxxabiv117__class_type_info"),
+        find("cxxabiv120__si_class_type_info"),
+        find("cxxabiv121__vmi_class_type_info"),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

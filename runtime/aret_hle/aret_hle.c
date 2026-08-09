@@ -4342,9 +4342,50 @@ uint32_t aret_CxxFrameHandler3(uint32_t esp) {
  * DW_EH_PE_indirect, bound at load), then longjmps to the establisher's setjmp, which runs
  * the landing pad with the exception object in eax and the ar_filter selector in edx (the
  * pad does `cmp edx, filter; je <handler>`), exactly as the real personality would.
- * Pointer-equality type match only (brick 2a); subtype (__do_catch) is a later brick. */
+ * Pointer-equality OR the Itanium subtype rule (a catch of a base catches a derived
+ * throw — brick 2b), walking the thrown type_info's base chain. */
 extern int aret_gnu_eh_site(uint32_t pc, uint32_t *lp, int *catch_off, int *catch_count);
 extern void aret_gnu_eh_catch(int i, int32_t *filter, uint32_t *slot);
+extern void aret_gnu_eh_abi_vptrs(uint32_t *cls, uint32_t *si, uint32_t *vmi);
+
+/* Does a `catch (Catch&)` catch a thrown object of type `thrown_ti`? Itanium rule: the
+ * types are equal, or `catch_ti` is a base of `thrown_ti`. We classify a `std::type_info`
+ * by its vtable pointer (matched against the ABI vtable values, emitted from the imports)
+ * and walk `thrown_ti`'s bases. Only bases at offset 0 (the whole `__si` single-inheritance
+ * case, and offset-0 `__vmi` bases) bind the catch parameter without a `this`-adjustment,
+ * which is all this brick models; a non-zero base offset is simply not matched (the throw
+ * then reports unhandled = a sound abort, never a wrong bind), and an UNRECOGNISED type_info
+ * vtable is a loud abort (never a guessed match). `catch_ti == 0` = catch-all. */
+static int aret_gnu_type_matches(uint32_t thrown_ti, uint32_t catch_ti) {
+    if (catch_ti == 0) return 1;   /* catch(...) */
+    uint32_t cls = 0, si = 0, vmi = 0;
+    aret_gnu_eh_abi_vptrs(&cls, &si, &vmi);
+    if (thrown_ti == catch_ti) return 1;
+    uint32_t vptr = *(const uint32_t *)(uintptr_t)thrown_ti;
+    if (cls && vptr == cls) {
+        return 0;   /* __class_type_info: no base */
+    }
+    if (si && vptr == si) {
+        /* __si_class_type_info: one public base at offset 0. */
+        uint32_t base = *(const uint32_t *)(uintptr_t)(thrown_ti + 8);
+        return aret_gnu_type_matches(base, catch_ti);
+    }
+    if (vmi && vptr == vmi) {
+        /* __vmi_class_type_info: {vptr, name, flags, base_count, base_info[]} where each
+         * base_info is {base_type, offset_flags} and offset_flags = (offset<<8)|flags. */
+        uint32_t nbase = *(const uint32_t *)(uintptr_t)(thrown_ti + 12);
+        for (uint32_t b = 0; b < nbase && b < 64; b++) {
+            uint32_t bi = thrown_ti + 16 + b * 8;
+            uint32_t base = *(const uint32_t *)(uintptr_t)bi;
+            uint32_t offflags = *(const uint32_t *)(uintptr_t)(bi + 4);
+            if ((offflags >> 8) != 0) continue;   /* non-zero base offset: not bound here */
+            if (aret_gnu_type_matches(base, catch_ti)) return 1;
+        }
+        return 0;
+    }
+    aret_unmodelled("GNU EH: unrecognised type_info vtable during subtype match");
+    return 0;
+}
 
 struct aret_gnu_frame {
     uint32_t key;      /* the establisher esp = setjmp key */
@@ -4439,9 +4480,10 @@ uint32_t aret_cxa_throw(uint32_t esp) {
             int32_t filter; uint32_t slot;
             aret_gnu_eh_catch(coff + c, &filter, &slot);
             /* deref the indirect ttype slot -> the live std::type_info* (== the pointer
-             * __cxa_throw was handed, by construction). 0 slot = catch-all. */
+             * __cxa_throw was handed, by construction). 0 slot = catch-all. Match is exact
+             * OR the Itanium subtype rule (a base catches a derived throw). */
             uint32_t catch_tinfo = slot ? *(const uint32_t *)(uintptr_t)slot : 0;
-            if (catch_tinfo == 0 || catch_tinfo == tinfo) { sel = (int)filter; break; }
+            if (aret_gnu_type_matches(tinfo, catch_tinfo)) { sel = (int)filter; break; }
         }
         if (sel >= 0) {
             g_gnu_run_lp = lp; g_gnu_run_obj = obj; g_gnu_run_sel = (uint32_t)sel;

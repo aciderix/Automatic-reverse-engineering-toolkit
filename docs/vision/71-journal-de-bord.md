@@ -7700,3 +7700,27 @@ machine, incompatible *shared-stack*) est **remplacé** par le dispatcher ARET.
   `gnuehdiff` (capture fichier, comme ehdiff). **À investiguer séparément** : la capture pipe-dans-`$()` de winediff pour la classe
   EH/sortie-longue. **Reste EH** : 2b (sous-typage `__do_catch` sur `eh.cpp` : `runtime_error`→`exception`), puis cleanup/dtor
   (`_Unwind_Resume`), rethrow, catch-by-value, catch(...). Axe DLL-tierces (doc 82) toujours séparé.
+
+### 2026-08-09 — [I13][EH][LIFT ✅] **Brique EH C++ Itanium — 2b : le SOUS-TYPAGE de catch (une base attrape un dérivé) via la base-chain du type_info**
+
+Suite de 2a : `throw Derived; catch(Base&)` — le type_info lancé ≠ le type_info catché, donc l'égalité de pointeur (2a) ne
+suffit pas. `aret_cxa_throw` applique désormais la **règle Itanium de sous-typage** en marchant la **base-chain** du type_info
+lancé. Prouvé bit-identique Wine (`bench/gnueh/eh_throw_derived.cpp`, gnuehdiff **2/2**) + multi-niveaux `C:B:A` vérifié.
+- **Mesuré (§0), pas deviné** : un type_info GCC stocke en 1er champ `&<vtable ABI> + 8` où la vtable ABI (`__class_type_info`/
+  `__si_class_type_info`/`__vmi_class_type_info`) est **importée de libstdc++**. Donc son slot IAT a une VA **fixe, connue à
+  l'analyse SANS charger libstdc++** ⇒ la valeur du vptr = `slot + 8` classe le kind. Mesuré sur `ehsub.exe` : Base ti =
+  `{vptr=class_slot+8, name}` (`__class`, 2 champs) ; Derived ti = `{vptr=si_slot+8, name, base=&Base}` (`__si`, 3 champs).
+- **Analysis** `gnu_eh_abi_vptrs(prog)` : trouve les 3 slots par nom d'import (`cxxabiv117__class`/`120__si`/`121__vmi`),
+  rend `(slot+8)` chacun (0 = kind inutilisé). **Émis** en accesseur `aret_gnu_eh_abi_vptrs` (aret_dispatch.c).
+- **Runtime** `aret_gnu_type_matches(thrown, catch)` : égalité, sinon classe `thrown` par vptr et marche : `__class` = pas de
+  base ; `__si` = **base à +8** (récursion) ; `__vmi` = tableau `base_info[]` (bases à **offset 0** seulement — un offset non
+  nul n'est pas bindé ici, la levée devient *unhandled* = abort sound, jamais un bind faux) ; **vptr inconnu = abort sound**
+  (jamais un match deviné). Le bind du paramètre catch : pour une base à offset 0 (tout `__si`), le sous-objet base == l'objet
+  ⇒ pas d'ajustement `this` — la fixture lit `x.b`/`x.a` (offset 0) correct.
+- **Portée** : couvre les hiérarchies **définies par l'utilisateur** (type_infos LOCAUX à l'exe) — le cas `runtime_error`→
+  `exception` de `eh.cpp` a les mêmes type_infos mais dans **libstdc++** (non mappé sans lifting), **et** la *construction* de
+  `runtime_error` (std::string/operator new) exige libstdc++ lifté ⇒ relève de l'**axe DLL-tierces** (doc 82, séparé). La
+  LOGIQUE de sous-typage, elle, est complète et prouvée.
+- **Portes** : **hash `19acad982194bf07` inchangé** (accesseur inerte `0,0,0` hors EH ; matcher additif) ; **difftest
+  272/272** ; **gnuehdiff 2/2** ; winediff (à confirmer). **Reste EH** : cleanup/dtor durant l'unwind (`_Unwind_Resume`),
+  rethrow, catch-by-value, catch(...), offsets de base non nuls (`__vmi` multi-héritage).

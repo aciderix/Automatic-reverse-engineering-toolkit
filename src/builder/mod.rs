@@ -695,6 +695,16 @@ fn emit_gnu_eh_tables(prog: &Program) -> String {
         \x20   *slot = aret_gnu_eh_catches[i].slot;\n\
         }\n",
     );
+    // The three Itanium ABI type_info vtable-pointer values, so the dispatcher can
+    // classify a type_info and walk its base chain for a subtype catch (brick 2b).
+    let (vt_class, vt_si, vt_vmi) = crate::analysis::gnu_eh::gnu_eh_abi_vptrs(prog);
+    let _ = writeln!(
+        s,
+        "/* Itanium ABI type_info vtable-pointer values (0 = kind unused). */\n\
+        void aret_gnu_eh_abi_vptrs(uint32_t *cls, uint32_t *si, uint32_t *vmi) {{\n\
+        \x20   *cls = 0x{vt_class:x}u; *si = 0x{vt_si:x}u; *vmi = 0x{vt_vmi:x}u;\n\
+        }}"
+    );
     s
 }
 
