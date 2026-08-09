@@ -160,3 +160,28 @@ mesurée finement, en touche 35,3 %** (on retranche les 191 déjà couverts : ar
 **401** (throw/catch réel = unwind complet) + **62** de plus (iostream sans throw = au moins le static-init).
 **Caveats** : nécessaire mais pas forcément suffisant par binaire (borne haute sur cette dimension) ; corpus MSYS2 =
 GNU-biaisé (un corpus MSVC montrerait l'EH MSVC, **déjà fait**). ⇒ **priorité confirmée par la donnée : on engage la brique.**
+
+## Échantillon « non-throw C++ » (2026-08-08) — l'effet des 2 fixes loader, isolé de l'EH
+
+Question utilisateur : sur les binaires C++ **sans** throw/catch, combien tournent **déjà** grâce aux 2 fixes loader du jour
+(pseudo-reloc + ctors de DLL), séparément de l'EH ? Mesure sur le corpus (qui **contient** la libstdc++/libgcc MSYS2 exacte).
+
+**Composition (179 exes C++ importent libstdc++)** : **102 utilisent throw/catch** (attendent l'EH), **77 non**. Mais des 77
+non-throw, **quasi tous** tirent 1+ DLL tierce **lourde** (`libLLVM-21` ×21, `libclang-cpp` ×14, `libxapian` ×13, Qt, `libraw`,
+tesseract…) : 42 en tirent 1, 25 en tirent 2, etc. **Seuls ~2 sont autonomes** (libstdc++/libgcc + DLL système). ⇒ ce corpus
+est **du gros logiciel C++**, pas des CLI autonomes.
+
+**Runs des 2 autonomes** (`mlir-tblgen`, `qtcreator_ctrlc_stub`, `--with-dll` libstdc++/libgcc du corpus) : **les deux
+passent l'init du runtime C++** (imports libstdc++ résolus — mlir-tblgen : 78 symboles, **0 skew** de version — ctors
+exécutés, `main` atteint) **puis abortent PLUS LOIN, dans LEUR PROPRE code**, sur un **appel indirect vers une fonction non
+récupérée** (`0x6fddf0` / `0x42ddf0`) — un **trou de récupération** (cible de vtable/pointeur ratée), **orthogonal** aux fixes
+loader **et** à l'EH. Wine ne donne pas de baseline `--version` (outils lourds à invocation spécifique) ⇒ pas de « works »
+bit-comparable.
+
+**Verdict honnête.** Un compte « N tournent bout-en-bout » **n'est pas extractible** de ce corpus : les 77 non-throw sont
+bloqués par la **largeur de DLL tierces** (+ des trous de récupération d'appels indirects), **PAS par l'EH**. Les 2 fixes
+loader sont une **suppression de mur GÉNÉRALE et PROUVÉE** — bout-en-bout bit-identique Wine sur la fixture `lift_libstdcxx`
+(iostream), **et** vérifiés sur 2 vrais binaires du corpus (l'init runtime C++ passe, l'abort est ailleurs). ⇒ **EH et fixes
+loader adressent des populations DISJOINTES** : l'EH débloque les 102 throw-users ; les 77 non-throw attendent surtout
+**plus de DLL liftées** (axe Levier 1 distinct) + de la récupération d'appels indirects. La preuve la plus propre des fixes
+reste la **fixture** (iostream), le corpus étant trop lourd pour un compte end-to-end net.
