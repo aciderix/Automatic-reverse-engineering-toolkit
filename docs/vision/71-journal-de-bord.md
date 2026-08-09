@@ -7293,3 +7293,29 @@ Détail : **70 §6** (roadmap). Résumé :
   (le C est déjà `-O0`, il ne manque que `-g`) ⇒ voir l'instruction exacte et l'origine de `0x50746547` (slot IAT ? quelle
   DLL ? quel import ?). **Puis** trancher : fix loader (tractable) vs brique EH (lourde). **La mesure de portée reste valable**
   (35,3 % du corpus utilisent EH/iostream, doc 90) — seule la NATURE du 1er mur iostream est rouverte.
+
+### 2026-08-08 — [I13][LIFT-DLL][DIAG] **étape 2 (iostream) forensics gdb : ce n'est PAS la brique EH — c'est un deref dans le static-init libstdc++ (piste loader/import), root-cause non finie faute de `-g`**
+
+- **Suite de la correction précédente, forensics gdb (sans rebuild, le C est déjà `-O0`).** Instruction fautive :
+  `mov (%eax),%eax` avec `eax=0x50746547` — un **deref** de la valeur "GetP". La valeur vient d'un local `-0x5e8(%ebp)`,
+  **null-checké comme un pointeur** puis déréférencé. Fonction = **`sub_531f20`** (libstdc++, corps dans `chunk_27.c`,
+  16 Ko), atteinte par **un seul `aret_call` indirect depuis `main`** (`main→sub_401768→aret_call→sub_53e9c0→sub_531f20`).
+- **Faits mesurés (décisifs pour écarter des hypothèses) :**
+  1. **La région data-import est remplie d'AUTO-POINTEURS** : `*0x665390=0x665390`, `*0x407154=0x407154`,
+     `*0x199a124=0x199a124`… C'est le fallback ARET pour un **import de DONNÉE non résolu** :
+     `aret_data_import(name)` (aret_hle.c) ne gère que `_iob`/`__mb_cur_max`/`__argv`/… et **rend 0 sinon** ⇒ le slot est
+     mis à **sa propre adresse** (`p ? p : slot_addr`). `aret_GetProcAddress` **rend 0** (§P1quater) ; la voie APPEL passe
+     par `aret_iatdisp_665390` (dispatch OK), mais la voie **DONNÉE** (`&GetProcAddress` lu comme valeur) rend l'auto-adresse.
+  2. **`0x50746547` n'est PAS un immédiat** du C émis (grep chunks = 0) ⇒ **calculé au runtime**.
+  3. **Aucun slot ne contient un pointeur vers la chaîne** "GetProcAddress" (0x6658e0) — `find` mémoire = rien. ⇒ la valeur
+     "GetP" est lue **transitoirement** depuis les octets de la chaîne (pointeur calculé base+offset), pas depuis un slot IAT.
+- **Conclusion (honnête, bornée §2).** Le crash iostream est **dans le static-init de libstdc++** (résolution dynamique /
+  locale), un **deref d'un pointeur qui porte des octets de nom d'API** — signature d'un **problème loader/import
+  (résolution des imports PROPRES des DLL liftées, `&fonction` en DONNÉE, `GetProcAddress`→0)**, **PAS** la brique EH/unwind
+  structurelle. ⇒ **bonne nouvelle** : probablement **tractable** (couche loader/HLE), pas un chantier EH multi-sessions.
+- **Ce qui BLOQUE la root-cause finale.** Il faut la **ligne C** de `sub_531f20+15804` : le C est déjà `-O0` mais **sans
+  `-g`**, et le relink à la main est empêché par le **script de layout à adresses fixes** d'ARET (`aret_layout.S`, base
+  0x400000, sections.bin). ⇒ **prochain pas = petite capacité outil : un mode build `-g` d'ARET** (`ARET_DEBUG` → passer `-g`
+  au `cc` + garder les symboles, off par défaut, hash inchangé) pour lire la ligne C, **puis** corriger la résolution
+  d'import loader. Alternative : mapper `sub_531f20` → symbole libstdc++ (base de merge). **Refute l'alarme « EH = mur
+  iostream » ; recadre en fix loader/import.**
