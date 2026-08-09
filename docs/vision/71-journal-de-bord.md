@@ -7519,3 +7519,29 @@ Détail : **70 §6** (roadmap). Résumé :
   (abort bruyant). La brique = chantier dédié (parsing LSDA DWARF + dispatcher + landing-pad transfer), à mener frais comme
   la brique MSVC-C++-EH. **Acquis session** : le runtime C++ GNU tourne bout-en-bout **hors EH** (libgcc arith + STL +
   iostream/locale/ctors) ; l'EH est le **dernier** morceau. Ensuite : **mesure corpus** sur les 463.
+
+### 2026-08-08 — [I13][EH][DESIGN] **Brique EH C++ Itanium — modèle de données LSDA cerné (fondation du dispatcher, 1er sous-pas)**
+
+- **Structure mesurée (fixture `eh.exe`).** `.eh_frame` (DWARF CFI) présent ; **pas** de `.pdata/.xdata` (pur Itanium/DWARF, pas
+  SEH). Les **landing pads** de `main` (try/catch) sont des adresses au **milieu** de la fonction liftée : `0x401559`
+  (cleanup : `__cxa_free_exception`+`_Unwind_Resume`), `0x401572` (catch : `__cxa_begin_catch`+`what()`+`__cxa_end_catch`).
+- **Le modèle de données à récupérer (analogue de `cxx_eh_entries` MSVC).** Chaque fonction à EH a une **FDE** dans `.eh_frame`
+  (ex. `main` : FDE `pc=0x4014e0..0x401653`) dont l'**augmentation** (CIE `zPLR`/`zLR`) porte un **pointeur LSDA** pcrel
+  (mesuré : aug data `77 ce ff ff` = LSDA à `FDE_aug + 0xffffce77`). La **LSDA** (`.gcc_except_table`, ici dans `.rdata`)
+  contient : (1) **call-site table** `[début région, longueur, landing_pad, action]` (LEB128) — mappe le **PC de l'appel
+  qui throw** → landing pad + action ; (2) **action table** → indices de types ; (3) **type table** → pointeurs `typeinfo`.
+- **Plan de la brique (bricks incrémentaux, miroir MSVC P3.5→P3.10).**
+  1. **Récupérer la métadonnée** : parser `.eh_frame` (FDE→LSDA) + LSDA (call-site/action/type) → `analysis::gnu_eh_entries`
+     `{func, [call_site_pc_range → landing_pad, catch_types[]]}`. **Prouvé par la métadonnée, rien de deviné** (comme MSVC).
+  2. **Chaîne EH ARET (≠ dérouleur machine).** Le lifter injecte, à l'entrée de chaque fonction à landing pad, un **setjmp**
+     qui empile la frame sur une pile EH ARET (comme le marqueur SEH-establish), dépilée au retour normal.
+  3. **Dispatcher** : router `__cxa_throw`/`_Unwind_RaiseException` vers `aret_cxa_throw` HLE → parcourt la pile EH ARET ;
+     pour chaque frame, la call-site table (PC de l'appel) → landing pad + action ; **matche le type** (`typeinfo` vs
+     `catch_types`, réutilise la logique de match MSVC) ; **longjmp** vers le setjmp de la frame + dispatch au landing pad
+     (switch injecté), avec l'objet exception (`__cxa_begin_catch` rend l'objet). `_Unwind_Resume`/cleanup = re-throw le long
+     de la chaîne. `__cxa_end_catch` libère.
+  4. Gaté sur les imports EH (`__cxa_throw`…) ⇒ hash inchangé hors EH ; abort sound sur tout sous-cas non modélisé.
+- **Pourquoi pas le dérouleur lifté** (rappel) : `_uw_init_context_1` capture le **contexte machine réel** (asm) qui n'existe
+  pas en transpilé ⇒ abort. Le dispatcher ARET **remplace** le dérouleur DWARF par la chaîne EH liftée + LSDA.
+- **Statut** : **fondation posée** (modèle LSDA cerné, plan par bricks). Implémentation = chantier dédié frais (parser LSDA
+  d'abord). Comportement actuel **sound** (abort bruyant au throw). Ensuite : **mesure corpus** sur les 463.
