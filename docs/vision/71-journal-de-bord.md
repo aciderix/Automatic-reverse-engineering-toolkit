@@ -7861,3 +7861,27 @@ conteneur (éphémère) mais **`repo.msys2.org` est joignable** (200 ; `sourcefo
   libgcc + libstdc++ étapes 1-2 déjà ✅ doc 82). Les `std::__throw_*` liftés → `__cxa_throw` (shim) → mon dispatcher =
   **convergence EH × DLL-tierces, désormais justifiée par la donnée**. Détail + chiffres : doc 82 (section « largeur de DLL
   tierces »). Aucun code changé (mesure) ; corpus non committé (éphémère + licence, fetcher reconstructible depuis doc 90).
+
+### 2026-08-14 — [HLE][LIFT ✅] **`DuplicateHandle` du pseudo-handle courant-thread : le 1ᵉʳ mur de la convergence EH×libstdc++, trouvé au relay**
+
+En poussant la fixture `throw std::runtime_error / catch(std::exception&)` avec les **3 runtimes liftés** (`--with-dll`
+libstdc++/libgcc/libwinpthread), abort au démarrage. **Diagnostiqué au relay ARET↔Wine** (I11 — `ARET_RELAY=1` + `WINEDEBUG=
++relay`) : le dernier appel avant l'abort = `DuplicateHandle(-1, -2, -1, &out)` **rend 0 (FALSE)**. Cause : `aret_DuplicateHandle`
+traitait le handle **source comme un fd hôte** et faisait `dup(src)` ; or `-2` = le **pseudo-handle `GetCurrentThread()`**, pas
+un fd ⇒ `dup(-2)` échoue ⇒ FALSE ⇒ le libwinpthread lifté (init pthread) **abort** (il duplique `GetCurrentThread()` en un vrai
+handle attendable/fermable).
+- **Fix (général, sound)** : `DuplicateHandle` résout maintenant le pseudo courant-thread (**et** un vrai handle de thread) via
+  `u32_thread_resolve` → rend un **VRAI handle de fibre** `U32_THREAD_BASE|idx` (**pas** le pseudo tel quel : deux threads
+  dupliquant `GetCurrentThread()` doivent obtenir des handles **distincts**, sinon un join aliaserait) ; pseudo courant-process
+  `-1` → lui-même ; nos objets kernel (event/mutex/sem) → le même objet (process-global) ; sinon fd hôte → `dup()` (ancien
+  comportement). Déplacé dans la section `#ifndef __wasm__` (helpers de fibre) + repli WASM `dup()`.
+- **Prouvé** : `winecorpus/win32_duphandle.c` (dup de `GetCurrentThread()` → handle réel non-nul ≠ pseudo, `WaitForSingleObject`
+  0 = `WAIT_TIMEOUT`, `CloseHandle` OK) **bit-identique Wine**. Portes : **hash `19acad982194bf07` inchangé**, **difftest
+  272/272**, **winediff 232/234** (2 rouges connus).
+- **Effet** : la fixture C++ **franchit l'init** (affiche `start`) puis bute sur le **VRAI mur d'étape 3** — au `throw`, le
+  `__cxa_throw` route vers le **libstdc++ lifté** (`sub_55ead0`) qui appelle le **`_Unwind_*` de libgcc lifté** (`sub_193b640`,
+  gros switch d'abort = le **dérouleur DWARF**) ⇒ abort, car le DWARF **marche la vraie pile machine**, incompatible
+  *shared-stack*. **C'est exactement la raison d'être de la brique EH** : il faut que la famille EH (`__cxa_throw`/
+  `__cxa_begin/end_catch`/`__cxa_rethrow`/`_Unwind_*`/`__gxx_personality_v0`) **route vers les shims HLE d'ARET**, PAS vers le
+  code lifté de libstdc++/libgcc — même quand ces DLL sont liftées. **Prochain cran = fix de routage loader** (override HLE de
+  la famille EH sur un module lifté), tâche dédiée. Détail routage : doc 82.

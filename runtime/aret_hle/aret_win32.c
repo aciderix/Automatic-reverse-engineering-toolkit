@@ -1617,20 +1617,9 @@ uint32_t aret_GetHandleInformation(uint32_t esp) {
  * / PROTECT_FROM_CLOSE) have no effect in this single-process model; accept and succeed. */
 uint32_t aret_SetHandleInformation(uint32_t esp) { (void)esp; return 1; }
 
-/* DuplicateHandle(srcProc, srcHandle, tgtProc, LPHANDLE tgtHandle, access, inherit,
- * options) -> BOOL. Handles are host fds, so dup() the source. The process arguments
- * are pseudo-handles here (one process) and ignored. DUPLICATE_CLOSE_SOURCE closes the
- * source; DUPLICATE_SAME_ACCESS is implicit (a dup shares the description). */
-uint32_t aret_DuplicateHandle(uint32_t esp) {
-    int src = (int)WU(1);
-    uint32_t *tgt = (uint32_t *)WP(3);
-    uint32_t options = WU(6);
-    int nfd = dup(src);
-    if (nfd < 0) { if (tgt) *tgt = 0; return 0; }
-    if (options & 0x1u /* DUPLICATE_CLOSE_SOURCE */) close(src);
-    if (tgt) *tgt = (uint32_t)nfd;
-    return 1;
-}
+/* DuplicateHandle is defined with the fiber machinery below (it must resolve the
+ * current-thread pseudo-handle to a real per-fiber thread handle), with a WASM
+ * fallback — see the `#ifndef __wasm__` thread section. */
 
 /* SetConsoleTextAttribute(handle, WORD attr) -> BOOL. Handles are host fds. The colour
  * is out-of-band and has no effect on the program's byte output, so the effect is a
@@ -2013,6 +2002,33 @@ static uint32_t u32_spawn(uint32_t start, uint32_t param, uint32_t flags, uint32
     if (pTid) *(uint32_t *)(uintptr_t)pTid = 0x1000u + (uint32_t)i;
     return U32_THREAD_BASE | (uint32_t)i;
 }
+/* DuplicateHandle(srcProc, srcHandle, tgtProc, LPHANDLE tgtHandle, access, inherit,
+ * options) -> BOOL. The source is one of: (a) the current-thread pseudo-handle (-2)
+ * or a real thread handle -> resolve to that fiber and return a REAL thread handle
+ * `U32_THREAD_BASE|idx` (NOT the pseudo unchanged: libwinpthread's pthread init
+ * duplicates GetCurrentThread() and each thread must get a DISTINCT, waitable/closeable
+ * handle, else two threads' handles would alias); (b) the current-process pseudo-handle
+ * (-1) -> itself (opaque, one process); (c) one of our event/mutex/semaphore handles ->
+ * the same object (process-global in this single-process model, so a duplicate is the
+ * same reference); (d) otherwise a host fd -> dup(). DUPLICATE_CLOSE_SOURCE closes a
+ * real fd source only (pseudo/kernel-object handles are not fds). */
+uint32_t aret_DuplicateHandle(uint32_t esp) {
+    uint32_t src = WU(1);
+    uint32_t *tgt = (uint32_t *)WP(3);
+    uint32_t options = WU(6);
+    int ti = u32_thread_resolve(src);
+    if (ti >= 0) { if (tgt) *tgt = U32_THREAD_BASE | (uint32_t)ti; return 1; }
+    if (src == 0xFFFFFFFFu /* GetCurrentProcess() pseudo */) { if (tgt) *tgt = 0xFFFFFFFFu; return 1; }
+    if (u32_event_idx(src) >= 0 || u32_mutex_idx(src) >= 0 || u32_sem_idx(src) >= 0) {
+        if (tgt) *tgt = src;   /* same process-global kernel object */
+        return 1;
+    }
+    int nfd = dup((int)src);
+    if (nfd < 0) { if (tgt) *tgt = 0; return 0; }
+    if (options & 0x1u /* DUPLICATE_CLOSE_SOURCE */) close((int)src);
+    if (tgt) *tgt = (uint32_t)nfd;
+    return 1;
+}
 uint32_t aret_CreateThread(uint32_t esp) {
     return u32_spawn(WU(2), WU(3), WU(4), WU(5));
 }
@@ -2344,6 +2360,20 @@ uint32_t aret_ExitThread(uint32_t esp) { return aret_ExitProcess(esp); }
 uint32_t aret_GetExitCodeThread(uint32_t esp) { uint32_t *o = (uint32_t *)WP(1); if (o) *o = 0; return 0; }
 uint32_t aret_WaitForSingleObject(uint32_t esp) { (void)esp; return 0; }
 uint32_t aret_WaitForMultipleObjects(uint32_t esp) { (void)esp; return 0; }
+/* WASM has no fibers, so there are no thread/kernel-object handles to resolve: only
+ * host fds exist. DuplicateHandle degrades to dup() (the process pseudo-handle -1 has
+ * no fd; hand it back unchanged). */
+uint32_t aret_DuplicateHandle(uint32_t esp) {
+    uint32_t src = WU(1);
+    uint32_t *tgt = (uint32_t *)WP(3);
+    uint32_t options = WU(6);
+    if (src == 0xFFFFFFFFu || src == 0xFFFFFFFEu) { if (tgt) *tgt = src; return 1; }
+    int nfd = dup((int)src);
+    if (nfd < 0) { if (tgt) *tgt = 0; return 0; }
+    if (options & 0x1u /* DUPLICATE_CLOSE_SOURCE */) close((int)src);
+    if (tgt) *tgt = (uint32_t)nfd;
+    return 1;
+}
 #endif /* __wasm__ */
 
 /* ------------------------------------------------------------------ */

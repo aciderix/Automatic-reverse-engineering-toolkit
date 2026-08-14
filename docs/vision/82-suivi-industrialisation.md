@@ -380,3 +380,18 @@ que **Wine ne prend pas**. ⇒ **divergence COMPORTEMENTALE dans le libwinpthrea
 un bug de lift), atteinte parce que **libstdc++ prend un lock au 1ᵉʳ throw**. **La brique EH n'est pas en cause** ; c'est de la
 lift-correctness du runtime de threads. **Prochaine étape = forensics dédiée** (relay ARET↔Wine sur `sub_19f41f0`/ses callees),
 tâche séparée. *(La convergence EH côté dispatcher reste prête ; il faut d'abord que le runtime de threads lifté ne diverge pas.)*
+
+**✅ Mur 1 RÉSOLU (2026-08-14) — `DuplicateHandle` du pseudo-handle `GetCurrentThread()`.** Le relay (I11) a pointé
+`DuplicateHandle(-1,-2,-1,&out)=FALSE` : `aret_DuplicateHandle` faisait `dup(src)` en supposant un fd, mais `-2` = pseudo
+courant-thread ⇒ échec ⇒ le libwinpthread lifté abort à l'init pthread. Fix général : résoudre le pseudo (et un vrai handle
+thread) en un **vrai handle de fibre distinct** ; pseudo process → lui-même ; event/mutex/sem → même objet ; sinon fd → `dup()`.
+Gardé `winecorpus/win32_duphandle` bit-identique Wine (hash inchangé, difftest 272/272, winediff 232/234). La fixture C++
+**franchit l'init** (`start`).
+**🚧 Mur 2 = LE VRAI cœur d'étape 3 — le routage de la famille EH.** Au `throw`, `__cxa_throw` route vers le **libstdc++
+lifté**, qui appelle le **`_Unwind_*` de libgcc lifté** (le **dérouleur DWARF**) ⇒ abort (le DWARF marche la vraie pile machine,
+incompatible *shared-stack*). **C'est la raison d'être de la brique EH** : la famille `__cxa_throw`/`__cxa_begin/end_catch`/
+`__cxa_rethrow`/`__cxa_get_exception_ptr`/`_Unwind_Resume`/`_Unwind_RaiseException`/`__gxx_personality_v0` doit **router vers les
+shims HLE d'ARET** (le dispatcher de la brique), **PAS** vers le code lifté de libstdc++/libgcc — **même quand ces DLL sont
+liftées**. Le fix = **override loader** : une denylist de symboles EH-runtime qui gagnent toujours sur l'export d'un module
+lifté. Chantier loader dédié (attention aux fixtures lifting-DLL existantes — régression). **C'est le prochain cran de la
+convergence.**
