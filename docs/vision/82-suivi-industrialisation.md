@@ -409,3 +409,12 @@ cold-path loud-abort, sinon link error — attrapé sur `lift_libgcc`) et **éga
 `__GXX_MERGED_TYPEINFO_NAMES=0` : l'exe et libstdc++ ont chacun une copie COMDAT faible, adresses distinctes car ARET ne
 fusionne pas les symboles faibles). winediff **234/236**, 0 régression lifting-DLL. **Reste** : bases virtuelles,
 `std::terminate`, puis mesure corpus.
+**🚧 1er VRAI binaire tiers testé (2026-08-14) — jsoncpp : la brique EH n'est PLUS le mur, c'est la lift-correctness.**
+Driver minimal `Json::Value(objectValue).asInt()` → jsoncpp lance sa **propre** `Json::LogicError` (: `Json::Exception` :
+`std::exception`) **depuis libjsoncpp**, attrapée en `std::exception&` dans l'exe (Wine : `start`/`caught: Value is not
+convertible to Int.`/`done`). ARET lifte **4 DLL** (libjsoncpp + libstdc++ + libgcc + libwinpthread), démarre (`start`), puis
+**segfault** (`0xc0000005`, `mov %eax,(%edx)` à `sub_454890+15062`, `edx=0xc80e010` = pointeur invalide) sur le chemin
+`asInt` (main → jsoncpp/libstdc++) **avant** le throw. ⇒ **la convergence EH tient** (le chemin d'exception n'est pas
+atteint), le nouveau mur est un **bug de lift-correctness dans du vrai code C++ dense** (jsoncpp/templates libstdc++ inlinés)
+— **axe distinct** (largeur DLL tierces / lift-correctness), forensics dédiée (`-O0 -g`+gdb à la ligne C, ou relay/funcdiff).
+Task séparée. C'est la 1ʳᵉ **mesure corpus** réelle : elle confirme que l'EH est fait et pointe le prochain axe par la donnée.
