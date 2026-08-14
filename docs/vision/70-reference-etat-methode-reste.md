@@ -602,7 +602,15 @@ recompilabilité **100 %** · WASM **7/7**.
   manglé, pas le pointeur) — sur mingw `__GXX_MERGED_TYPEINFO_NAMES=0`, l'exe et libstdc++ portent chacun une copie COMDAT
   faible du type_info (adresses distinctes car ARET ne fusionne pas les symboles faibles comme le loader natif). Gardé
   `winecorpus/lift_stdthrow.cpp`, hash inchangé, difftest 272/272, gnuehdiff 7/7, winediff **234/236**.
-  **Reste** : bases virtuelles, `std::terminate` ; puis **mesure corpus** sur les 463.
+  **`std::terminate` — MESURÉ puis DIFFÉRÉ (2026-08-14, décision utilisateur).** Une exception **non attrapée** : Wine imprime
+  sur **stderr** `terminate called after throwing an instance of '<type démanglé>'` + `  what():  <message>` et sort **code 3**.
+  Le reproduire bit-à-bit exige (a) **démangler** le nom (`St13runtime_error`→`std::runtime_error`, via le `__cxa_demangle`
+  lifté), (b) appeler le `.what()` **virtuel** de l'objet (vtable, thiscall), (c) `exit(3)`. **Bloquant de gate** : ni winediff
+  ni gnuehdiff ne comparent **stderr** (stdout seulement) ⇒ non gatable sans d'abord étendre un harnais (capture stderr+exit).
+  **Valeur faible** (une exception non attrapée = un programme qui plante, rare dans du logiciel fonctionnel) et **comportement
+  actuel déjà SOUND** (`aret: unhandled C++ exception …` + abort). ⇒ **à faire seulement si un vrai binaire l'exige**, avec le
+  harnais stderr d'abord.
+  **Reste** : bases virtuelles, `std::terminate` (mesuré/différé ci-dessus) ; puis **mesure corpus** sur les 463.
 - **TEB `StackBase`/`StackLimit` = vraies bornes de la pile machine** (`fs:[4]`/`fs:[8]`, 2026-07-17, bug **général**) :
   l'entrée émise (`aret_main.c`) publie `__aret_set_stack_bounds(top=aret_stack+taille, bottom=aret_stack)` avant de
   lancer le programme → un sas CRT MSVC qui lit `fs:[4]` (StackBase) et déréférence `[StackBase-8]` (idiome
