@@ -338,3 +338,31 @@ récupération d'appels indirects** (vtables/pointeurs non récupérés dans le 
 distinct** (lifter davantage de DLL tierces, ou router/mesurer leurs surfaces) **à ouvrir séparément et à mesurer** — **pas
 maintenant**, on ne le mélange pas avec la brique EH (populations disjointes : EH = les 102 throw-users ; DLL-breadth = les
 77 non-throw). À reprendre après l'EH, avec sa propre mesure de portée.
+
+### 📊 MESURE Levier 0 — la brique EH sur de VRAIS throw-users (2026-08-14) : le mur n'est PAS l'EH, c'est libstdc++
+
+**Échantillon** (téléchargé de `repo.msys2.org/mingw/mingw32`, mingw32 = repo gelé de 248 paquets ; 15 paquets variés → **62 PE**
+exe+dll). Filtre `import __cxa_throw` ⇒ **10 throw-users GNU/Itanium** : apps (`ninja`, `fluidsynth`, `pzstd`) + libs
+(`libxapian-45`, `libspdlog`, `libjsoncpp`, `libfmt`, `libcppdap`, `libgraphite2`, `libfluidsynth`). *(harfbuzz absent = compilé
+`-fno-exceptions` — donnée réelle, pas tous les C++ font de l'EH.)* `--mode walls` sur chacun (statique, pas d'exécution).
+
+**Résultat décisif (2 constats)** :
+1. **La brique EH est COMPLÈTE et confirmée sur du vrai code.** Les imports du **mécanisme** EH — `__cxa_throw`,
+   `__cxa_begin/end_catch`, `__cxa_rethrow`, `__cxa_get_exception_ptr`, `_Unwind_Resume`, `_Unwind_RaiseException`,
+   `__gxx_personality_v0` — sont **0 non-implémentés** sur les 10 binaires (les shims du brick les couvrent). Les
+   **lift-gaps d'instructions = bruit** (SSE `pminub`/`prefetcht0`, `ud2`, `int 0x29`) comme sur tout le corpus.
+2. **Le mur = la largeur libstdc++/libgcc/libwinpthread**, pas l'EH. Sur **547** lignes d'import-wall (10 binaires),
+   **195 (36 %) sont du C++ manglé `_Z…`** = libstdc++/libgcc. Tête par #binaires bloqués : `operator new`/`delete`
+   (`_Znwj`/`_ZdlPvj`/`_Znaj`), les **helpers `std::__throw_*`** (`__throw_length_error`/`__throw_logic_error`/
+   `__throw_bad_alloc`/`__throw_out_of_range_fmt`/`__throw_bad_array_new_length` — ceux qui **construisent puis lancent**
+   une exception `std::`), `std::string` (`basic_string::_M_*`), `std::map/set` (`_Rb_tree_increment`/`_insert_and_rebalance`),
+   `__cxa_guard_acquire/release/abort` (statiques locaux), `__dynamic_cast` (RTTI), `udivdi3`/`divdi3` (**libgcc, déjà
+   lifté**), `pthread_mutex_*` (libwinpthread).
+
+**⇒ Conclusion data-driven** : la brique EH (2a→2d) a fait ce qu'elle devait ; **le prochain mur mesuré pour faire tourner un
+vrai throw-user bout-en-bout est l'axe DLL-tierces** — lifter **libstdc++** (+ **libgcc** déjà ✅, + **libwinpthread**) à côté
+du binaire (`--with-localdll`, doc 82 « libgcc/libstdc++ étapes 1-2 » déjà prouvées). Les `std::__throw_*` liftés
+construiront l'exception `std::` puis appelleront `__cxa_throw` (mon shim) → mon dispatcher : c'est **la convergence EH ×
+DLL-tierces**, désormais **justifiée par la mesure**, pas supposée. Petits shims EH-adjacents (`__cxa_guard_*`,
+`__dynamic_cast`, `__cxa_call_terminate`) = gains bornés, mais **utiles seulement une fois libstdc++ lifté** (la masse est là).
+*(Corpus non committé : éphémère + licence GPL/LGPL ; fetcher reconstructible depuis les liens doc 90.)*

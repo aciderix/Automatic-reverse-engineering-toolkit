@@ -7843,3 +7843,21 @@ Wine rend `~E(1)` / `caught2 2` / `~E(2)`.
   231/233** (2 rouges connus ; `gdi_drawtext_amp` = 3ᵉ flake du même type oracle-sous-concurrence, **vert seul**), cargo test
   **79+** vert. **Reste EH** : bases virtuelles, throw pendant l'unwind (`std::terminate`), exceptions imbriquées **encore
   actives** (deux en vol simultanément — nécessiterait une pile d'exceptions ; le throw-new séquentiel ci-dessus, lui, marche).
+
+### 2026-08-14 — [I13][EH][MESURE ✅] **Levier 0 : la brique EH sur de VRAIS throw-users — le mur mesuré n'est PAS l'EH, c'est libstdc++**
+
+Mesure demandée par l'utilisateur (« on mesure sur le méga corpus ? »). Le corpus de 1240 PE (doc 90) n'est pas dans le
+conteneur (éphémère) mais **`repo.msys2.org` est joignable** (200 ; `sourceforge` 403). Échantillon **borné et varié**
+(15 paquets mingw32 → **62 PE**) ; filtre `import __cxa_throw` ⇒ **10 throw-users GNU/Itanium** (`ninja`/`fluidsynth`/`pzstd`
++ `libxapian`/`libspdlog`/`libjsoncpp`/`libfmt`/`libcppdap`/`libgraphite2`/`libfluidsynth`). `--mode walls` sur chacun.
+- **Constat 1 — la brique EH est complète, confirmée sur du vrai code** : `__cxa_throw`/`begin_catch`/`end_catch`/`rethrow`/
+  `get_exception_ptr`/`_Unwind_Resume`/`_Unwind_RaiseException`/`__gxx_personality_v0` = **0 non-implémenté** sur les 10
+  (les shims du brick les couvrent). Lift-gaps d'instructions = **bruit** (SSE/`ud2`).
+- **Constat 2 — le mur = largeur libstdc++/libgcc/libwinpthread** : sur **547** lignes d'import-wall, **195 (36 %)** sont du
+  C++ manglé `_Z…`. Tête par #binaires : `operator new`/`delete`, les **`std::__throw_*`** (construisent+lancent l'exception
+  `std::`), `std::string`, `std::map`/`_Rb_tree`, `__cxa_guard_*`, `__dynamic_cast`, `udivdi3`/`divdi3` (**libgcc déjà lifté**),
+  `pthread_mutex_*` (libwinpthread). *(harfbuzz `-fno-exceptions` ⇒ pas d'EH : tous les C++ n'en font pas.)*
+- **⇒ Prochain mur mesuré = axe DLL-tierces** (lifter libstdc++ + libwinpthread à côté du binaire, `--with-localdll` ;
+  libgcc + libstdc++ étapes 1-2 déjà ✅ doc 82). Les `std::__throw_*` liftés → `__cxa_throw` (shim) → mon dispatcher =
+  **convergence EH × DLL-tierces, désormais justifiée par la donnée**. Détail + chiffres : doc 82 (section « largeur de DLL
+  tierces »). Aucun code changé (mesure) ; corpus non committé (éphémère + licence, fetcher reconstructible depuis doc 90).
