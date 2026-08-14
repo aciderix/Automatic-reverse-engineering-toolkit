@@ -418,3 +418,13 @@ convertible to Int.`/`done`). ARET lifte **4 DLL** (libjsoncpp + libstdc++ + lib
 atteint), le nouveau mur est un **bug de lift-correctness dans du vrai code C++ dense** (jsoncpp/templates libstdc++ inlinés)
 — **axe distinct** (largeur DLL tierces / lift-correctness), forensics dédiée (`-O0 -g`+gdb à la ligne C, ou relay/funcdiff).
 Task séparée. C'est la 1ʳᵉ **mesure corpus** réelle : elle confirme que l'EH est fait et pointe le prochain axe par la donnée.
+> **LOCALISATION PRÉCISE (2026-08-14, `ARET_DEBUG=1`+gdb)** : crash `chunk_1.c:22234` `*(uint32_t*)v156 = v149`
+> (pose d'un **vptr de sous-objet** pendant une construction à **héritage VIRTUEL / VTT**). `sub_454890` = fonction de
+> **libstdc++ lifté** (std:: iostream, via `throwLogicError`→`std::ostringstream`). Valeurs : `v147=0x6258c8` = une vtable
+> **structurellement valide** (offset-to-top=0, typeinfo=`0x620a9c`, fns=`0x4b7440`/`0x4b7410`), mais `v148 = *(v147-12)`
+> (l'entrée **vbase-offset**) = **`0x51dea0`** = valeur ÉNORME (5 Mo) là où un offset de sous-objet doit être minuscule ⇒
+> `v156 = v148 + v129(objet) = 0xc80e010` non mappé ⇒ fault. Dump vtable `0x6258b8` : `51dea0 51dea0 51de50 51de90`
+> (les slots vbase-offset **corrompus**, ressemblent à des adresses module non/mal relocalisées). **Hypothèse** : bug de
+> **relocalisation** sur les entrées vbase-offset des vtables libstdc++ (ne devraient pas être rebasées) **ou** pointeur de
+> **construction-vtable/VTT** (`*(0x49038c)`) faux. Session focalisée : mapper `0x454890`→RVA libstdc++ original, comparer
+> les vbase-offsets, isoler reloc-vs-lift. **La brique EH n'est pas en cause** (chemin d'exception jamais atteint).
