@@ -7935,3 +7935,8 @@ dans `main`. Sortie `start`/`oor: vector::_M_range_check: __n (which is 5) >= th
 - **Portes** : **hash `19acad982194bf07` inchangé**, **difftest 272/272**, **gnuehdiff 7/7**, **winediff 234/236** (2 rouges
   connus ; `lift_libgcc`/`lift_zlib`/`lift_libstdcxx`/`lift_stdexcept`/`lift_stdthrow` verts — **0 régression lifting-DLL**),
   cargo test **79+**. **Reste EH** : bases virtuelles, `std::terminate`, puis **mesure corpus** (doc 90).
+- **Étape 3c ✅ (2026-08-14, AUCUN code — validation) — destructeur RAII pendant l'unwind d'un throw origiNÉ dans libstdc++**.
+  `f()` tient un `Guard` local et appelle `v.at(9)` (throw `out_of_range` depuis libstdc++) : l'unwind exécute **`~Guard(1)`**
+  (landing pad de cleanup en `f`, sélecteur 0) **avant** le catch de `main`. Marche **out of the box** (machinerie 2c + 3b
+  combinée) ⇒ pas une ligne de code, juste la fixture-garde `winecorpus/lift_stddtor.cpp` (bit-identique Wine, winediff
+  235/237). Confirme que multi-frame unwind + dtor intermédiaire + throw-depuis-libstdc++ se composent correctement.
