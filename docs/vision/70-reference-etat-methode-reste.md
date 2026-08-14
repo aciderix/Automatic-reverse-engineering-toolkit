@@ -225,7 +225,7 @@ sert désormais de **détecteur** : un warm build qui ne réutilise pas ~tout si
 
 ### État régression (référence — doit rester vert)
 difftest **272/272** · transpile-diff **4/4** (H=`19acad982194bf07`) · winediff
-**231/233** (2 rouges connus, orthogonaux au code : `gdi_uifont` **environnemental** fontconfig i386 ; `ole_mlang`
+**233/235** (2 rouges connus, orthogonaux au code : `gdi_uifont` **environnemental** fontconfig i386 ; `ole_mlang`
 **flake** oracle Wine-COM sous Xvfb concurrent — passe seul) · **heavy-form 5 preuves** (`proof.sh`/`proof_native.sh` rtlstr,
 `proof_ntreg.sh`/`proof_ntreg_native.sh` registre real-ABI, **`proof_reg_native.sh` = `reg.c` de Wine ENTIER**) · **ehdiff 6/6** (SEH `seh_except`
 + C++ `throw_catch`/`throw_dtor`/`throw_across`/`throw_byval`/`throw_static` — throw/catch, destructeur d'unwind, multi-frames, catch-by-value, CRT statique — bit-identiques Wine) · **gnuehdiff 7/7** (GNU/Itanium C++ `eh_throw_int`/`eh_throw_derived`/`eh_throw_dtor`/`eh_catch_byval`/`eh_rethrow`/`eh_multi_inherit`/`eh_throw_in_catch` — throw/catch, sous-typage, destructeurs d'unwind, catch-by-value, `__cxa_rethrow`, héritage multiple à offset non nul, throw d'une NOUVELLE exception depuis un catch — bit-identiques Wine, `bench/gnuehdiff.sh`) · cpudiff vert (per-instruction + séquences génératives) · funcdiff corpus **0 divergence** (lift **~20,6k** scorées /
@@ -582,8 +582,19 @@ recompilabilité **100 %** · WASM **7/7**.
   au démarrage** (`recover_ctor_list` : `__CTOR_LIST__` localisé par `8B 1D <imm32> 83 FB FF`, thunks résolus, **par module
   rebasé** ; `seed_functions`+builder ; stub faible no-op pour la glue `__gcc_register_frame`) — `std::cout`/`cin`/`cerr` sont
   construits par les ctors de **libstdc++** (que mingw défère à `__do_global_ctors`, no-op'é par ARET). **18 ctors** exécutés.
-  Gate multi-module ⇒ hash inchangé. **Reste** : étape 3 **EH C++ Itanium** (`throw`/`catch`, `__cxa_*`/`_Unwind_*` — DWARF
-  vs *shared-stack*, brique dédiée) ; puis **mesure corpus** sur les 463.
+  Gate multi-module ⇒ hash inchangé.
+  **`libstdc++-6.dll` étape 3 ✅ (2026-08-14) — EH C++ Itanium À TRAVERS libstdc++ LIFTÉ, bit-identique Wine.** Un vrai
+  `throw std::runtime_error(std::string)` / `catch(const std::exception&)` / `.what()` **construit par libstdc++ lifté**
+  tourne bout-en-bout : le `__cxa_throw` route vers le **dispatcher HLE d'ARET** (la brique EH), **pas** le dérouleur DWARF
+  de libgcc lifté (shared-stack incompatible). Trois briques : (a) **`DuplicateHandle`** du pseudo-handle courant-thread
+  (init pthread de libwinpthread lifté, pris au 1er throw) ; (b) **override loader** — la famille EH (`__cxa_throw`/
+  `begin/end_catch`/`rethrow`/`get_exception_ptr`/`_Unwind_*`/`__gxx_personality_v0`) route **toujours** vers les shims HLE,
+  même quand la DLL est liftée (`resolve_module_imports` denylist) ; (c) **vptrs ABI depuis les EXPORTS liftés** — les
+  vtables `__cxxabiv1::__*_class_type_info` sont trouvées dans les exports du module lifté (plus seulement les imports), le
+  matcher de sous-typage classe donc `std::runtime_error`→`std::exception`. Gardé `winecorpus/lift_stdexcept.cpp`
+  (`.withlocaldll` = libstdc++/libgcc/libwinpthread), hash inchangé, difftest 272/272, gnuehdiff 7/7, winediff 233/235.
+  **Reste** : throw ORIGINÉ dans une frame libstdc++ liftée (unwind à travers ses frames — enregistrer son `.eh_frame`),
+  bases virtuelles, `std::terminate` ; puis **mesure corpus** sur les 463.
 - **TEB `StackBase`/`StackLimit` = vraies bornes de la pile machine** (`fs:[4]`/`fs:[8]`, 2026-07-17, bug **général**) :
   l'entrée émise (`aret_main.c`) publie `__aret_set_stack_bounds(top=aret_stack+taille, bottom=aret_stack)` avant de
   lancer le programme → un sas CRT MSVC qui lit `fs:[4]` (StackBase) et déréférence `[StackBase-8]` (idiome

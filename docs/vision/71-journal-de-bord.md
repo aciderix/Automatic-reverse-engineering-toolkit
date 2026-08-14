@@ -7885,3 +7885,30 @@ handle attendable/fermable).
   `__cxa_begin/end_catch`/`__cxa_rethrow`/`_Unwind_*`/`__gxx_personality_v0`) **route vers les shims HLE d'ARET**, PAS vers le
   code lifté de libstdc++/libgcc — même quand ces DLL sont liftées. **Prochain cran = fix de routage loader** (override HLE de
   la famille EH sur un module lifté), tâche dédiée. Détail routage : doc 82.
+
+### 2026-08-14 — [I13][EH][LIFT ✅] **🎯 MILESTONE — un vrai `throw std::runtime_error` À TRAVERS libstdc++ LIFTÉ tourne bout-en-bout, bit-identique Wine**
+
+L'aboutissement de la convergence EH × DLL-tierces : `throw std::runtime_error(std::string)` / `catch(const std::exception&)`
+/ `.what()` **construit par du code libstdc++ lifté** sort `start`/`caught: boom-42`/`done` = **Wine** (rc 0). Deux fixes,
+après le `DuplicateHandle` de l'entrée précédente :
+- **(b) Override loader de la famille EH** (`resolve_module_imports`, `src/loader/mod.rs`) : la famille
+  `__cxa_throw`/`__cxa_begin/end_catch`/`__cxa_rethrow`/`__cxa_get_exception_ptr`/`__cxa_allocate/free_exception`/
+  `_Unwind_Resume`/`_Unwind_RaiseException`/`__gxx_personality_v0` (nom sans underscores de tête) est **exclue** de la
+  résolution vers un export de module lifté ⇒ reste un import ⇒ route vers les **shims HLE** (le dispatcher de la brique).
+  Sans ça, `__cxa_throw` allait vers le **libstdc++ lifté** → `_Unwind_*` de **libgcc lifté** = le **dérouleur DWARF**, qui
+  marche la vraie pile machine (incompatible *shared-stack*) → abort. C'est **la raison d'être de la brique** rendue
+  effective en multi-module. Additif (denylist ⇒ n'affecte que les slots qui pointaient vers du code lifté EH) ⇒ **hash
+  inchangé**, et **0 régression sur les fixtures lifting-DLL** (comctl32, lift_zlib, lift_libgcc, **lift_libstdcxx**).
+- **(c) vptrs ABI depuis les EXPORTS liftés** (`gnu_eh_abi_vptrs`, `src/analysis/gnu_eh.rs`) : hors lifting, un
+  `std::type_info` a son vptr = slot IAT + 8 (import) ; **libstdc++ lifté**, les vtables ABI
+  (`_ZTVN10__cxxabivNNN__*_class_type_infoE`) sont de **vrais EXPORTS** ⇒ vptr = VA de l'export + 8 (on exige le préfixe
+  `_ZTV` pour prendre la VTABLE, pas le `_ZTI`/`_ZTS`). Sans ça, le matcher de sous-typage ne classait pas le vptr de
+  `std::runtime_error` → abort « unrecognised type_info vtable ». Additif (branche export ajoutée après l'import) ⇒ hash
+  inchangé, gnuehdiff 7/7.
+- **Prouvé** : `winecorpus/lift_stdexcept.cpp` (+ `.withlocaldll` libstdc++/libgcc/libwinpthread ; harnais élargi à
+  `/usr/i686-w64-mingw32/lib` pour trouver libwinpthread) — runtime_error attrapé en base + `.what()` **et** logic_error
+  attrapé exact, **bit-identique Wine**. Portes : **hash `19acad982194bf07` inchangé**, **difftest 272/272**, **gnuehdiff
+  7/7**, **winediff 233/235** (2 rouges connus), cargo test vert.
+- **Reste** : throw **origiNÉ** dans une frame libstdc++ liftée (unwind à travers ses frames — il faut enregistrer le
+  `.eh_frame` des modules liftés dans `g_gnu_eh`), bases virtuelles, `std::terminate`. Puis **mesure corpus** (doc 90). C'est
+  le 1er vrai binaire C++ dont le throw/catch tourne bout-en-bout via le dispatcher ARET **sur libstdc++ lifté**.

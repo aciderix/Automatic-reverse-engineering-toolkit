@@ -746,12 +746,48 @@ impl LoadedModule {
 /// **forwarded** exports are left unresolved — the multi-module loader falls
 /// back to the HLE shim, or aborts soundly, never guesses. Brick 2.2 of DLL
 /// lifting (doc 80 §1.2).
+/// The GNU/Itanium C++ EH runtime family. ARET's EH brick (aret_cxa_*/aret_Unwind_*,
+/// doc 82) deliberately REPLACES libgcc's DWARF unwinder — it walks ARET's shared
+/// stack via its own frame stack + longjmp, incompatible with the real machine-stack
+/// DWARF CFI the lifted libstdc++/libgcc code uses. So these symbols must always bind
+/// to ARET's HLE shims, even when the providing DLL (libstdc++/libgcc) is lifted:
+/// routing them to the lifted code would run the DWARF unwinder and abort. Names are
+/// matched with leading underscores stripped (`__cxa_throw`→`cxa_throw`,
+/// `_Unwind_Resume`→`Unwind_Resume`) so the whole allocate/throw/catch/rethrow/unwind
+/// closed model stays consistent (the buffer IS the object, no _Unwind header).
+fn is_eh_runtime_symbol(name: &str) -> bool {
+    matches!(
+        name.trim_start_matches('_'),
+        "cxa_throw"
+            | "cxa_rethrow"
+            | "cxa_begin_catch"
+            | "cxa_end_catch"
+            | "cxa_get_exception_ptr"
+            | "cxa_allocate_exception"
+            | "cxa_free_exception"
+            | "cxa_call_terminate"
+            | "cxa_call_unexpected"
+            | "Unwind_Resume"
+            | "Unwind_RaiseException"
+            | "Unwind_Resume_or_Rethrow"
+            | "Unwind_ForcedUnwind"
+            | "Unwind_DeleteException"
+            | "gxx_personality_v0"
+            | "gxx_personality_sj0"
+    )
+}
+
 pub fn resolve_module_imports(
     app_imports: &BTreeMap<u64, PeImport>,
     modules: &[LoadedModule],
 ) -> BTreeMap<u64, u64> {
     let mut out = BTreeMap::new();
     for (&slot, imp) in app_imports {
+        // The C++ EH runtime family is served by ARET's HLE brick, never the lifted
+        // DWARF unwinder — leave it unresolved so it falls through to the shim.
+        if imp.name.as_deref().is_some_and(is_eh_runtime_symbol) {
+            continue;
+        }
         let Some(module) = modules.iter().find(|m| m.matches(&imp.dll)) else {
             continue; // DLL not loaded here → keep the shim / sound abort
         };

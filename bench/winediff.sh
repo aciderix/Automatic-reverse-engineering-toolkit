@@ -49,7 +49,7 @@ done
 # beside the exe and Wine loads that exact file ARET lifts). The measured #1 corpus gap.
 MINGW_DLL_DIRS=()
 for d in /usr/lib/gcc/i686-w64-mingw32/*-win32 /usr/lib/gcc/i686-w64-mingw32/*-posix \
-         /usr/lib/gcc/i686-w64-mingw32/* /usr/i686-w64-mingw32/bin; do
+         /usr/lib/gcc/i686-w64-mingw32/* /usr/i686-w64-mingw32/bin /usr/i686-w64-mingw32/lib; do
   [ -d "$d" ] && MINGW_DLL_DIRS+=("$d")
 done
 

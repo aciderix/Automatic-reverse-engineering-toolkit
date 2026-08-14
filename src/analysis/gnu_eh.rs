@@ -386,11 +386,23 @@ fn parse_lsda(
 /// never uses. Returned as `(class, si, vmi)`.
 pub fn gnu_eh_abi_vptrs(prog: &Program) -> (u64, u64, u64) {
     let find = |needle: &str| -> u64 {
-        prog.imports
+        // Non-lifted libstdc++: the ABI vtable is IMPORTED, and a std::type_info's vptr
+        // field equals the IAT slot address + 8 (measured, brick 2b).
+        if let Some((&slot, _)) = prog.imports.iter().find(|(_, n)| n.contains(needle)) {
+            return slot + 8;
+        }
+        // Lifted libstdc++ (`--with-dll`): the ABI vtable is a real EXPORT of the lifted
+        // module, so the vptr points at the vtable's VA + 8 (past offset_to_top + the
+        // typeinfo pointer). Require the `_ZTV` vtable mangling so we bind the VTABLE, not
+        // the type_info (`_ZTI`) or type string (`_ZTS`) that share the class name.
+        if let Some((_, _, va)) = prog
+            .dll_exports
             .iter()
-            .find(|(_, n)| n.contains(needle))
-            .map(|(&slot, _)| slot + 8)
-            .unwrap_or(0)
+            .find(|(_, n, _)| n.starts_with("_ZTV") && n.contains(needle))
+        {
+            return va + 8;
+        }
+        0
     };
     (
         find("cxxabiv117__class_type_info"),

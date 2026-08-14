@@ -395,3 +395,11 @@ shims HLE d'ARET** (le dispatcher de la brique), **PAS** vers le code lifté de 
 liftées**. Le fix = **override loader** : une denylist de symboles EH-runtime qui gagnent toujours sur l'export d'un module
 lifté. Chantier loader dédié (attention aux fixtures lifting-DLL existantes — régression). **C'est le prochain cran de la
 convergence.**
+**✅ Mur 2 RÉSOLU (2026-08-14) — 🎯 la convergence tourne bout-en-bout.** Deux fixes : (b) **denylist EH dans
+`resolve_module_imports`** — la famille EH reste un import ⇒ shims HLE, même DLL liftée (additif, hash inchangé, **0
+régression lifting-DLL** : comctl32/zlib/libgcc/libstdcxx verts) ; (c) **`gnu_eh_abi_vptrs` cherche aussi les EXPORTS
+liftés** (vtables ABI `_ZTVN10__cxxabiv…` ⇒ VA+8) pour classer `std::runtime_error`. Résultat : `winecorpus/lift_stdexcept.cpp`
+(`throw std::runtime_error`/`catch(std::exception&)`/`.what()` + logic_error, sur libstdc++/libgcc/libwinpthread liftés)
+**bit-identique Wine**. **1er vrai C++ dont throw/catch tourne end-to-end via le dispatcher ARET sur libstdc++ lifté.**
+Portes : hash inchangé, difftest 272/272, gnuehdiff 7/7, winediff 233/235. **Reste** : throw origiNÉ dans une frame
+libstdc++ liftée (enregistrer son `.eh_frame` dans `g_gnu_eh`), bases virtuelles, `std::terminate`, puis mesure corpus.
