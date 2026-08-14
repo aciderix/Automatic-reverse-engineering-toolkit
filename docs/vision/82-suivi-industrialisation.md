@@ -428,3 +428,14 @@ Task séparée. C'est la 1ʳᵉ **mesure corpus** réelle : elle confirme que l'
 > **relocalisation** sur les entrées vbase-offset des vtables libstdc++ (ne devraient pas être rebasées) **ou** pointeur de
 > **construction-vtable/VTT** (`*(0x49038c)`) faux. Session focalisée : mapper `0x454890`→RVA libstdc++ original, comparer
 > les vbase-offsets, isoler reloc-vs-lift. **La brique EH n'est pas en cause** (chemin d'exception jamais atteint).
+> **DISSECTION APPROFONDIE (2026-08-14) — ARET est FIDÈLE au guest ; la divergence est runtime.** Mappé : `sub_454890` =
+> **libjsoncpp** (base merged **0x440000**, RVA 0x14890 = orig `0x65254890`) — un gros ctor global qui bâtit les type_infos.
+> `0x49038c`/`0x490390` = `__imp___ZTVN10__cxxabiv117__class_type_infoE`/`__si_...` (auto-imports vtable, résolus au symbole
+> vtable, corrects). Guest exact (0x65254930+) : `lea -0xe8(%ebp),%ebx (objet) ; mov 0x6529038c,%eax (vtable) ; mov
+> -0xc(%eax),%ecx (=*(vtable-12)) ; add %ebx,%ecx (=*(vtable-12)+objet) ; mov %eax,(%ecx)` — **ARET lifte ça À
+> L'IDENTIQUE** (`v156=v148+v129 ; *v156=v149`). Et `*(vtable-12)=0x51dea0` = **exactement** le `0x6febdea0` original
+> **rebasé** (`0x4a0000+0x7dea0`) ⇒ **relocalisation correcte, lift correct**. Le motif = pose d'un **2ᵉ vptr** à
+> `objet + *(vtable-12)`, où `*(vtable-12)` DEVRAIT être un **petit offset de sous-objet** mais vaut un **pointeur**. ⇒ soit
+> l'`__imp` doit résoudre vers un **autre point** de la vtable (adresse-point vs symbole), soit l'adresse de pile de l'objet
+> sous Wine fait « marcher » l'addition. **Trancher = winedbg sur l'original** (valeurs runtime de `*(0x6529038c)`,
+> `*(vtable-12)`, `ebx`, `ecx`) — analyse statique épuisée. Localisation maximale atteinte ; suite = session winedbg dédiée.
