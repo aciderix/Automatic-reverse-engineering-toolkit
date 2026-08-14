@@ -4411,9 +4411,15 @@ struct aret_gnu_frame {
 static struct aret_gnu_frame g_gnu_eh[256];
 static int g_gnu_eh_n = 0;
 static uint32_t g_gnu_run_lp, g_gnu_run_obj, g_gnu_run_sel, g_gnu_run_ebp, g_gnu_run_esp;
-static uint32_t g_gnu_exc_obj = 0, g_gnu_exc_tinfo = 0;   /* the in-flight thrown object (the
-                                       * allocation base) + its type_info; destroyed at end_catch */
-static uint32_t g_gnu_cur_dtor = 0;   /* its destructor (the dtor arg of __cxa_throw), run at end_catch */
+static uint32_t g_gnu_exc_obj = 0, g_gnu_exc_tinfo = 0;   /* the in-flight thrown object being
+                                       * dispatched (allocation base) + its type_info */
+static uint32_t g_gnu_cur_dtor = 0;   /* the in-flight exception's dtor (the dtor arg of __cxa_throw) */
+/* The exception the CURRENT handler caught, snapshotted at __cxa_begin_catch and destroyed at
+ * the matching __cxa_end_catch. Snapshotting is essential: a handler may THROW A NEW exception,
+ * whose __cxa_throw overwrites g_gnu_exc_obj/g_gnu_cur_dtor before the shared landing pad runs
+ * this handler's closing end_catch — which must still destroy the OLD (caught) object. */
+static uint32_t g_gnu_caught_base = 0;   /* allocation base of the caught object (NOT the this-adjusted pointer) */
+static uint32_t g_gnu_caught_dtor = 0;   /* its complete-object destructor */
 static int g_gnu_rethrown = 0;        /* set by __cxa_rethrow: the NEXT __cxa_end_catch (the one that
                                        * closes the handler we rethrew from) must NOT destroy the
                                        * object — it is in flight again (Itanium: handlerCount negated). */
@@ -4475,11 +4481,14 @@ uint32_t aret_cxa_free_exception(uint32_t esp) {
 uint32_t aret_cxa_get_exception_ptr(uint32_t esp) {
     return arg(esp, 0);
 }
-/* __cxa_begin_catch(exc) -> caught object pointer. In the closed model the pointer we
- * handed the landing pad in eax IS the (already this-adjusted) caught sub-object, so return
- * it unchanged. The object DESTROYED at end_catch is the thrown allocation base
- * (g_gnu_exc_obj), which differs from this pointer under multiple inheritance. */
+/* __cxa_begin_catch(exc) -> caught object pointer. In the closed model the pointer we handed
+ * the landing pad in eax IS the (already this-adjusted) caught sub-object, so return it
+ * unchanged. Snapshot the in-flight exception's ALLOCATION BASE + dtor as the current caught
+ * exception, so the matching end_catch destroys the right (whole) object even if this handler
+ * throws a new one in the meantime (which would overwrite g_gnu_exc_obj). */
 uint32_t aret_cxa_begin_catch(uint32_t esp) {
+    g_gnu_caught_base = g_gnu_exc_obj;
+    g_gnu_caught_dtor = g_gnu_cur_dtor;
     return arg(esp, 0);
 }
 /* __cxa_end_catch: the handler is done with the exception -> destroy the thrown object
@@ -4495,18 +4504,18 @@ uint32_t aret_cxa_end_catch(uint32_t esp) {
     if (g_gnu_rethrown) {
         /* This end_catch closes the handler we rethrew FROM (GCC's shared landing pad runs it
          * before the enclosing catch's begin_catch). The exception is in flight again, so it
-         * must survive: keep g_gnu_exc_obj/g_gnu_cur_dtor for the eventual catcher's end_catch. */
+         * must survive: keep the caught snapshot for the eventual catcher's end_catch. */
         g_gnu_rethrown = 0;
         return 0;
     }
-    if (g_gnu_exc_obj) {
-        if (g_gnu_cur_dtor) {
+    if (g_gnu_caught_base) {
+        if (g_gnu_caught_dtor) {
             uint32_t s = (esp - 0x40) & ~0xfu;   /* free scratch, aligned */
-            *(uint32_t *)(uintptr_t)s = g_gnu_exc_obj;
-            (void)aret_call(g_gnu_cur_dtor, s - 4, 0, g_gnu_exc_obj /*ecx=this*/, 0, 0, 0, 0, 0);
+            *(uint32_t *)(uintptr_t)s = g_gnu_caught_base;
+            (void)aret_call(g_gnu_caught_dtor, s - 4, 0, g_gnu_caught_base /*ecx=this*/, 0, 0, 0, 0, 0);
         }
-        free((void *)(uintptr_t)g_gnu_exc_obj);
-        g_gnu_exc_obj = 0; g_gnu_exc_tinfo = 0; g_gnu_cur_dtor = 0;
+        free((void *)(uintptr_t)g_gnu_caught_base);
+        g_gnu_caught_base = 0; g_gnu_caught_dtor = 0;
     }
     return 0;
 }

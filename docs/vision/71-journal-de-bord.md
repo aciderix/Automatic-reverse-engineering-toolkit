@@ -7820,3 +7820,26 @@ Deux cas de plus, mesurés puis prouvés bit-identiques Wine (`bench/gnueh/eh_ca
   **winediff 231/233** (2 rouges connus), cargo test **79+** vert. **Reste EH** : bases **virtuelles** (offset en vtable),
   throw pendant l'unwind (`std::terminate`), exceptions **imbriquées actives** (throw d'un type dans le catch d'un autre —
   le modèle à exception unique ne l'attrape pas encore). Axe DLL-tierces (doc 82) séparé.
+
+### 2026-08-09 — [I13][EH][LIFT ✅] **Brique EH C++ Itanium — 2d (part 4) : `end_catch` détruit l'exception SNAPSHOTÉE au begin_catch (fix d'une régression latente de part 3)**
+
+Le part 3 avait fait détruire par `end_catch` la variable globale `g_gnu_exc_obj` (l'exception **en cours de dispatch**).
+**Régression latente** trouvée en **mesurant** (§0) le cas « **throw d'une NOUVELLE exception depuis un catch** » (pas un
+rethrow) : `try{ try{throw E(1);} catch(E&){ throw E(2); } } catch(E&){…}`. Le `throw E(2)` **écrase** `g_gnu_exc_obj` avant
+que le landing pad **partagé** n'exécute le `end_catch` de fermeture du catch(1) — qui doit détruire **E(1)**, pas E(2).
+Mesuré : ARET rendait `~E(2)` / `caught2 43027` (use-after-free : la NOUVELLE exception libérée tôt, l'ANCIENNE fuit) là où
+Wine rend `~E(1)` / `caught2 2` / `~E(2)`.
+- **Fix (modèle correct, aligné Itanium `caughtExceptions`)** : `__cxa_begin_catch` **snapshot** `(g_gnu_exc_obj,
+  g_gnu_cur_dtor)` dans `(g_gnu_caught_base, g_gnu_caught_dtor)` = l'exception **que CE handler a attrapée** ; `__cxa_end_catch`
+  détruit **ce snapshot**. Le snapshot est essentiel : le pad partagé fait `end_catch(ancien)` **avant** `begin_catch(nouveau)`,
+  donc au `end_catch` l'ancien snapshot tient encore (le nouveau `begin_catch` n'a pas encore couru). `g_gnu_caught_base` =
+  la **base d'allocation** (pas le pointeur `this`-ajusté MI). Rejoue correct sur **tous** les cas : throw-new-from-catch,
+  rethrow (snapshot préservé par le flag), MI (base ≠ pointeur attrapé), catch-by-value, offset-0.
+- **Fixture-garde** ajoutée : `bench/gnueh/eh_throw_in_catch.cpp` (`start`/`E(1)`/`caught1 1`/`E(2)`/`~E(1)`/`caught2 2`/`~E(2)`/
+  `done`), bit-identique Wine.
+- **Leçon (§0)** : part 3 était vert (gnuehdiff 6/6) mais portait un use-after-free qu'**aucune fixture existante
+  n'exerçait** — c'est en **mesurant un cas nouveau** (throw-new ≠ rethrow) qu'il est sorti. La fixture le verrouille.
+- **Portes** : **hash `19acad982194bf07` inchangé** (runtime C pur), **difftest 272/272**, **gnuehdiff 7/7**, **winediff
+  231/233** (2 rouges connus ; `gdi_drawtext_amp` = 3ᵉ flake du même type oracle-sous-concurrence, **vert seul**), cargo test
+  **79+** vert. **Reste EH** : bases virtuelles, throw pendant l'unwind (`std::terminate`), exceptions imbriquées **encore
+  actives** (deux en vol simultanément — nécessiterait une pile d'exceptions ; le throw-new séquentiel ci-dessus, lui, marche).
