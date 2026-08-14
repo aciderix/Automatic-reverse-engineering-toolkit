@@ -366,3 +366,17 @@ construiront l'exception `std::` puis appelleront `__cxa_throw` (mon shim) → m
 DLL-tierces**, désormais **justifiée par la mesure**, pas supposée. Petits shims EH-adjacents (`__cxa_guard_*`,
 `__dynamic_cast`, `__cxa_call_terminate`) = gains bornés, mais **utiles seulement une fois libstdc++ lifté** (la masse est là).
 *(Corpus non committé : éphémère + licence GPL/LGPL ; fetcher reconstructible depuis les liens doc 90.)*
+
+**🚧 Sonde de CONVERGENCE EH × libstdc++ (2026-08-14) — le lifting effondre le mur C++, un mur comportemental reste dans libwinpthread.**
+Lift multi-module `--with-dll` des **3 runtimes** (libstdc++-6 + libgcc + libwinpthread) à côté du binaire : **ça marche
+mécaniquement**. Sur `ninja.exe` le mur d'imports tombe **73 → 58**, **tous les `_ZNSt…` disparaissent** (servis par le
+libstdc++ lifté), **0 appel indirect non résolu** ; il ne reste que de la surface **OS** (IOCP/named-pipes/`AddVectoredExceptionHandler`/
+volumes) — donc ninja end-to-end = axe **largeur OS**, pas l'EH. Sur une fixture minimale `throw std::runtime_error(std::string)` /
+`catch(const std::exception&)` / `.what()` (Wine = `start`/`caught: boom-42`/`done`) : ARET transpile+compile+lie **6531 fn**,
+mais **abort au 1ᵉʳ throw**. Diagnostic (gdb) : la pile `main → … → aret_call → sub_19f4a70 → aret_abort` ; `aret_abort` = le
+**shim de `abort()`** ⇒ c'est le **code lifté lui-même** qui appelle `abort()`. `sub_19f4a70` = routine **thread/once-init de
+libwinpthread** (`GetCurrentThreadId`+`CreateEventA`) ; un helper `sub_19f41f0` **rend 1** sous ARET ⇒ branche `abort()`+`ud2`
+que **Wine ne prend pas**. ⇒ **divergence COMPORTEMENTALE dans le libwinpthread lifté** (en amont : un retour de shim Win32 ou
+un bug de lift), atteinte parce que **libstdc++ prend un lock au 1ᵉʳ throw**. **La brique EH n'est pas en cause** ; c'est de la
+lift-correctness du runtime de threads. **Prochaine étape = forensics dédiée** (relay ARET↔Wine sur `sub_19f41f0`/ses callees),
+tâche séparée. *(La convergence EH côté dispatcher reste prête ; il faut d'abord que le runtime de threads lifté ne diverge pas.)*
