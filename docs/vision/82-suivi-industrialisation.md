@@ -281,8 +281,10 @@ Trois **couches** (branchement → comportement), et pour le comportement trois 
 > `__cxa_rethrow` (`throw;`) + refonte du cycle de vie des frames (la frame établisseuse reste vivante à travers le catch ;
 > `end_catch` de fermeture ne détruit pas l'exception rethrown) ; **2d part 3** héritage multiple à offset de base non nul
 > (`this`-adjustment vers le sous-objet base attrapé, non-virtuel + public ; `end_catch` détruit la base d'allocation, pas
-> le pointeur intérieur). Runtime `aret_cxa_*`/`aret_gnu_dispatch` (`aret_hle.c`), table call-site/catch émise
-> (`aret_dispatch.c`), gates `is_gnu_eh_func`/`is_gnu_eh_frame` (émission inerte ailleurs ⇒ **hash inchangé**). **Reste EH** :
+> le pointeur intérieur) ; **2d part 4** `end_catch` détruit l'exception **snapshotée** au `begin_catch` (fix use-after-free
+> latent : throw d'une NOUVELLE exception depuis un catch, qui écrase l'exception en vol avant le `end_catch` de fermeture).
+> Runtime `aret_cxa_*`/`aret_gnu_dispatch` (`aret_hle.c`), table call-site/catch émise
+> (`aret_dispatch.c`), gates `is_gnu_eh_func`/`is_gnu_eh_frame` (émission inerte ailleurs ⇒ **hash inchangé**). **gnuehdiff 7/7**. **Reste EH** :
 > bases **virtuelles** (offset en vtable), throw pendant l'unwind (`std::terminate`), exceptions imbriquées actives, puis
 > **mesure corpus** sur les 463 (doc 90). Détail 71 (2026-08-09).
 
