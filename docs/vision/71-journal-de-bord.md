@@ -7912,3 +7912,26 @@ après le `DuplicateHandle` de l'entrée précédente :
 - **Reste** : throw **origiNÉ** dans une frame libstdc++ liftée (unwind à travers ses frames — il faut enregistrer le
   `.eh_frame` des modules liftés dans `g_gnu_eh`), bases virtuelles, `std::terminate`. Puis **mesure corpus** (doc 90). C'est
   le 1er vrai binaire C++ dont le throw/catch tourne bout-en-bout via le dispatcher ARET **sur libstdc++ lifté**.
+
+### 2026-08-14 — [I13][EH][LIFT ✅] **Étape 3b — un throw ORIGINÉ DANS libstdc++ lifté remonte au catch de l'exe, bit-identique Wine**
+
+`std::vector::at(5)` sur un vecteur de 2 → `std::out_of_range` lancé **depuis** libstdc++ (`__throw_out_of_range_fmt`), attrapé
+dans `main`. Sortie `start`/`oor: vector::_M_range_check: __n (which is 5) >= this->size() (which is 2)`/`done` = Wine
+(`winecorpus/lift_stdthrow.cpp`). Diagnostiqué au **relay** puis à un diagnostic EH temporaire (retiré). Deux causes, deux fixes :
+- **La denylist d'imports ne suffit pas** : dans libstdc++, `__throw_out_of_range_fmt`→`__cxa_throw` est un appel **DIRECT
+  intra-module** (pas via l'IAT). Fix = **host-back de la famille EH exportée** par une DLL liftée : `crt_symbol`
+  (`src/loader/mod.rs`) reconnaît désormais `is_eh_runtime_symbol` en plus de `is_crt_name` ⇒ le corps lifté de `__cxa_throw`/
+  `_Unwind_*` n'est **pas émis**, et **tout** appel (direct **ou** IAT) est routé au shim HLE via `resolve_call`. Additif
+  (host-back = moins de fonctions liftées) ⇒ **hash inchangé**. **Shims cold-path** ajoutés (loud-abort, §0, hors chemin
+  heureux) : `aret_cxa_call_terminate`/`_unexpected`, `aret_Unwind_ForcedUnwind`/`_DeleteException`/`_Resume_or_Rethrow`,
+  `aret_gxx_personality_v0`/`_sj0` — sinon **link error** sur les exports EH de la DLL liftée (attrapé sur `lift_libgcc` qui
+  exporte `_Unwind_Resume_or_Rethrow` : **toujours relancer les fixtures lifting-DLL** après un changement de host-back).
+- **Le type_info n'est PAS unique cross-module** (bug mesuré au diagnostic : thrown ti `0x5c188c` en libstdc++ vs catch ti
+  `0x40a708`/`0x40a714` dans l'exe — adresses DISTINCTES). Sur mingw/Windows, l'ABI Itanium compile avec
+  `__GXX_MERGED_TYPEINFO_NAMES=0` : l'exe et libstdc++ portent chacun une **copie COMDAT faible** du même type_info, et GCC
+  compare par **NOM manglé** (strcmp), pas par pointeur — ARET lifte les modules **sans** la fusion de symboles faibles du
+  loader natif. Fix = `aret_gnu_ti_equal(a,b)` : fast-path pointeur, sinon `strcmp` du nom (`type_info = {vptr, name@+4}`).
+  Additif (pointeur d'abord) ⇒ gnuehdiff 7/7 inchangé.
+- **Portes** : **hash `19acad982194bf07` inchangé**, **difftest 272/272**, **gnuehdiff 7/7**, **winediff 234/236** (2 rouges
+  connus ; `lift_libgcc`/`lift_zlib`/`lift_libstdcxx`/`lift_stdexcept`/`lift_stdthrow` verts — **0 régression lifting-DLL**),
+  cargo test **79+**. **Reste EH** : bases virtuelles, `std::terminate`, puis **mesure corpus** (doc 90).

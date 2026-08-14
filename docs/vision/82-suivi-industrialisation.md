@@ -401,5 +401,11 @@ régression lifting-DLL** : comctl32/zlib/libgcc/libstdcxx verts) ; (c) **`gnu_e
 liftés** (vtables ABI `_ZTVN10__cxxabiv…` ⇒ VA+8) pour classer `std::runtime_error`. Résultat : `winecorpus/lift_stdexcept.cpp`
 (`throw std::runtime_error`/`catch(std::exception&)`/`.what()` + logic_error, sur libstdc++/libgcc/libwinpthread liftés)
 **bit-identique Wine**. **1er vrai C++ dont throw/catch tourne end-to-end via le dispatcher ARET sur libstdc++ lifté.**
-Portes : hash inchangé, difftest 272/272, gnuehdiff 7/7, winediff 233/235. **Reste** : throw origiNÉ dans une frame
-libstdc++ liftée (enregistrer son `.eh_frame` dans `g_gnu_eh`), bases virtuelles, `std::terminate`, puis mesure corpus.
+Portes : hash inchangé, difftest 272/272, gnuehdiff 7/7, winediff 233/235.
+**✅ Étape 3b (2026-08-14) — throw ORIGINÉ DANS libstdc++ lifté remonte au catch de l'exe** (`vector::at` → `out_of_range`,
+`lift_stdthrow.cpp`, bit-identique Wine). Deux fixes : **host-back de la famille EH exportée** (`crt_symbol` reconnaît
+`__cxa_*`/`_Unwind_*` ⇒ les appels DIRECTS intra-libstdc++, invisibles à la denylist d'imports, vont au shim ; + shims
+cold-path loud-abort, sinon link error — attrapé sur `lift_libgcc`) et **égalité type_info par NOM** (mingw
+`__GXX_MERGED_TYPEINFO_NAMES=0` : l'exe et libstdc++ ont chacun une copie COMDAT faible, adresses distinctes car ARET ne
+fusionne pas les symboles faibles). winediff **234/236**, 0 régression lifting-DLL. **Reste** : bases virtuelles,
+`std::terminate`, puis mesure corpus.

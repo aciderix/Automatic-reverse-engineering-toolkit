@@ -225,7 +225,7 @@ sert désormais de **détecteur** : un warm build qui ne réutilise pas ~tout si
 
 ### État régression (référence — doit rester vert)
 difftest **272/272** · transpile-diff **4/4** (H=`19acad982194bf07`) · winediff
-**233/235** (2 rouges connus, orthogonaux au code : `gdi_uifont` **environnemental** fontconfig i386 ; `ole_mlang`
+**234/236** (2 rouges connus, orthogonaux au code : `gdi_uifont` **environnemental** fontconfig i386 ; `ole_mlang`
 **flake** oracle Wine-COM sous Xvfb concurrent — passe seul) · **heavy-form 5 preuves** (`proof.sh`/`proof_native.sh` rtlstr,
 `proof_ntreg.sh`/`proof_ntreg_native.sh` registre real-ABI, **`proof_reg_native.sh` = `reg.c` de Wine ENTIER**) · **ehdiff 6/6** (SEH `seh_except`
 + C++ `throw_catch`/`throw_dtor`/`throw_across`/`throw_byval`/`throw_static` — throw/catch, destructeur d'unwind, multi-frames, catch-by-value, CRT statique — bit-identiques Wine) · **gnuehdiff 7/7** (GNU/Itanium C++ `eh_throw_int`/`eh_throw_derived`/`eh_throw_dtor`/`eh_catch_byval`/`eh_rethrow`/`eh_multi_inherit`/`eh_throw_in_catch` — throw/catch, sous-typage, destructeurs d'unwind, catch-by-value, `__cxa_rethrow`, héritage multiple à offset non nul, throw d'une NOUVELLE exception depuis un catch — bit-identiques Wine, `bench/gnuehdiff.sh`) · cpudiff vert (per-instruction + séquences génératives) · funcdiff corpus **0 divergence** (lift **~20,6k** scorées /
@@ -593,8 +593,16 @@ recompilabilité **100 %** · WASM **7/7**.
   vtables `__cxxabiv1::__*_class_type_info` sont trouvées dans les exports du module lifté (plus seulement les imports), le
   matcher de sous-typage classe donc `std::runtime_error`→`std::exception`. Gardé `winecorpus/lift_stdexcept.cpp`
   (`.withlocaldll` = libstdc++/libgcc/libwinpthread), hash inchangé, difftest 272/272, gnuehdiff 7/7, winediff 233/235.
-  **Reste** : throw ORIGINÉ dans une frame libstdc++ liftée (unwind à travers ses frames — enregistrer son `.eh_frame`),
-  bases virtuelles, `std::terminate` ; puis **mesure corpus** sur les 463.
+  **`libstdc++-6.dll` étape 3b ✅ (2026-08-14) — throw ORIGINÉ DANS libstdc++ lifté, attrapé dans l'exe, bit-identique Wine.**
+  `std::vector::at(5)` hors bornes lance `std::out_of_range` **depuis** libstdc++ (`__throw_out_of_range_fmt`→`__cxa_throw`,
+  un appel **DIRECT intra-module** que la denylist d'imports ne voit pas). Deux pièces : (a) **host-back** de la famille EH
+  **exportée** par une DLL liftée (`crt_symbol` reconnaît `__cxa_*`/`_Unwind_*` ⇒ corps lifté NON émis, tout appel — direct
+  ou IAT — va au shim ; + shims cold-path loud-abort `__cxa_call_terminate/unexpected`, `_Unwind_ForcedUnwind/DeleteException/
+  Resume_or_Rethrow`, `__gxx_personality_v0/sj0`) ; (b) **égalité type_info par NOM** (`aret_gnu_ti_equal` : strcmp du nom
+  manglé, pas le pointeur) — sur mingw `__GXX_MERGED_TYPEINFO_NAMES=0`, l'exe et libstdc++ portent chacun une copie COMDAT
+  faible du type_info (adresses distinctes car ARET ne fusionne pas les symboles faibles comme le loader natif). Gardé
+  `winecorpus/lift_stdthrow.cpp`, hash inchangé, difftest 272/272, gnuehdiff 7/7, winediff **234/236**.
+  **Reste** : bases virtuelles, `std::terminate` ; puis **mesure corpus** sur les 463.
 - **TEB `StackBase`/`StackLimit` = vraies bornes de la pile machine** (`fs:[4]`/`fs:[8]`, 2026-07-17, bug **général**) :
   l'entrée émise (`aret_main.c`) publie `__aret_set_stack_bounds(top=aret_stack+taille, bottom=aret_stack)` avant de
   lancer le programme → un sas CRT MSVC qui lit `fs:[4]` (StackBase) et déréférence `[StackBase-8]` (idiome

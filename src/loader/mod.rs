@@ -401,7 +401,16 @@ impl Program {
         // Symbol table is authoritative when present.
         if let Some(s) = self.symbols.get(&addr) {
             if s.is_function {
-                return if is_crt_name(&s.name) { Some(s.name.as_str()) } else { None };
+                // A lifted GNU C++ runtime (libstdc++/libgcc via --with-dll) EXPORTS the
+                // EH family (__cxa_throw/_Unwind_*/…). Host-back those to ARET's HLE shims
+                // so a throw ORIGINATING inside libstdc++ (e.g. vector::at → __throw_* →
+                // __cxa_throw, a DIRECT intra-module call the import denylist can't catch)
+                // still reaches the brick's dispatcher, not the lifted DWARF unwinder.
+                return if is_crt_name(&s.name) || is_eh_runtime_symbol(&s.name) {
+                    Some(s.name.as_str())
+                } else {
+                    None
+                };
             }
         }
         // Stripped binary: recognize by FLIRT-lite signature instead.

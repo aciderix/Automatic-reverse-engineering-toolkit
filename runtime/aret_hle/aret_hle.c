@@ -4348,6 +4348,24 @@ extern int aret_gnu_eh_site(uint32_t pc, uint32_t *lp, int *catch_off, int *catc
 extern void aret_gnu_eh_catch(int i, int32_t *filter, uint32_t *slot);
 extern void aret_gnu_eh_abi_vptrs(uint32_t *cls, uint32_t *si, uint32_t *vmi);
 
+/* Are two std::type_info the SAME type? On mingw/Windows the Itanium ABI compiles with
+ * __GXX_MERGED_TYPEINFO_NAMES=0 — type_info objects are NOT unique across module
+ * boundaries (the exe and libstdc++ each carry a weak COMDAT copy of, say,
+ * `_ZTISt12out_of_range`), so GCC compares them by their MANGLED-NAME STRING, not by
+ * pointer. ARET lifts each module separately (no weak-symbol merge like the native
+ * loader does), so two copies of the same std:: type get distinct addresses — pointer
+ * equality alone would miss a throw from libstdc++ caught in the exe. Layout: a
+ * type_info is {vptr, const char* __type_name}, so the name is at +4. Fast path on
+ * pointer equality (same copy), else strcmp the names. */
+static int aret_gnu_ti_equal(uint32_t a, uint32_t b) {
+    if (a == b) return a != 0;
+    if (!a || !b) return 0;
+    const char *na = (const char *)(uintptr_t)*(const uint32_t *)(uintptr_t)(a + 4);
+    const char *nb = (const char *)(uintptr_t)*(const uint32_t *)(uintptr_t)(b + 4);
+    if (!na || !nb) return 0;
+    return strcmp(na, nb) == 0;
+}
+
 /* Does a `catch (Catch&)` catch a thrown object of type `thrown_ti`? Itanium rule: the
  * types are equal, or `catch_ti` is a public base of `thrown_ti`. We classify a
  * `std::type_info` by its vtable pointer (matched against the ABI vtable values, emitted
@@ -4363,7 +4381,7 @@ static int aret_gnu_type_match_adj(uint32_t thrown_ti, uint32_t catch_ti, int32_
     if (catch_ti == 0) { *adjust = 0; return 1; }   /* catch(...) */
     uint32_t cls = 0, si = 0, vmi = 0;
     aret_gnu_eh_abi_vptrs(&cls, &si, &vmi);
-    if (thrown_ti == catch_ti) { *adjust = 0; return 1; }
+    if (aret_gnu_ti_equal(thrown_ti, catch_ti)) { *adjust = 0; return 1; }
     uint32_t vptr = *(const uint32_t *)(uintptr_t)thrown_ti;
     if (cls && vptr == cls) {
         return 0;   /* __class_type_info: no base */
@@ -4599,6 +4617,47 @@ uint32_t aret_cxa_rethrow(uint32_t esp) {
 uint32_t aret_Unwind_RaiseException(uint32_t esp) {
     (void)esp;
     aret_unmodelled("GNU EH: _Unwind_RaiseException (non-__cxa_throw path) not yet modelled");
+    return 0;
+}
+
+/* Cold-path EH-runtime entries host-backed from a lifted libstdc++/libgcc (so their
+ * lifted bodies — which would drive the shared-stack-incompatible DWARF unwinder — are
+ * NOT emitted). They are unreachable on any handled-exception path (the brick's
+ * dispatcher owns throw/catch/unwind); if a program actually reaches one, that is a
+ * genuinely unmodelled case ⇒ loud abort (§0), never a silent wrong result. */
+uint32_t aret_cxa_call_terminate(uint32_t esp) {
+    (void)esp;
+    aret_unmodelled("GNU EH: __cxa_call_terminate (an exception escaped to terminate) not modelled");
+    return 0;
+}
+uint32_t aret_cxa_call_unexpected(uint32_t esp) {
+    (void)esp;
+    aret_unmodelled("GNU EH: __cxa_call_unexpected (violated dynamic exception-spec) not modelled");
+    return 0;
+}
+uint32_t aret_Unwind_ForcedUnwind(uint32_t esp) {
+    (void)esp;
+    aret_unmodelled("GNU EH: _Unwind_ForcedUnwind (forced unwind, e.g. longjmp/thread-cancel) not modelled");
+    return 0;
+}
+uint32_t aret_Unwind_Resume_or_Rethrow(uint32_t esp) {
+    (void)esp;
+    aret_unmodelled("GNU EH: _Unwind_Resume_or_Rethrow (foreign/rethrow-during-unwind path) not modelled");
+    return 0;
+}
+uint32_t aret_Unwind_DeleteException(uint32_t esp) {
+    (void)esp;
+    aret_unmodelled("GNU EH: _Unwind_DeleteException (foreign-exception cleanup) not modelled");
+    return 0;
+}
+uint32_t aret_gxx_personality_v0(uint32_t esp) {
+    (void)esp;
+    aret_unmodelled("GNU EH: __gxx_personality_v0 called (ARET's dispatcher replaces the personality)");
+    return 0;
+}
+uint32_t aret_gxx_personality_sj0(uint32_t esp) {
+    (void)esp;
+    aret_unmodelled("GNU EH: __gxx_personality_sj0 called (SJLJ personality not modelled)");
     return 0;
 }
 
