@@ -50,10 +50,13 @@ done
 export ARET tmp TIMEOUT MEMKB
 _wallsweep_one() {
   f="$1"; name="$(basename "$f")"; out="$tmp/$name.walls"
-  # Reuse a valid map already present (WALLSWEEP_KEEP re-runs) instead of re-analyzing.
+  # Reuse a cached result (WALLSWEEP_KEEP re-runs): a valid map -> skip; a recorded
+  # failure (.failed marker) -> skip too, so the ~dozens of giant blobs that OOM/time
+  # out don't re-pay their full timeout on every re-aggregation. Delete the marker to retry.
   if [ -s "$out" ] && grep -q "ARET wall map" "$out"; then return; fi
+  if [ -e "$out.failed" ]; then return; fi
   ( ulimit -v "$MEMKB" 2>/dev/null; timeout "$TIMEOUT" "$ARET" "$f" --mode walls ) >"$out" 2>/dev/null
-  if ! grep -q "ARET wall map" "$out"; then echo "  (analysis failed: $name)" >&2; rm -f "$out"; fi
+  if ! grep -q "ARET wall map" "$out"; then echo "  (analysis failed: $name)" >&2; rm -f "$out"; : >"$out.failed"; fi
 }
 export -f _wallsweep_one
 xargs -0 -a "$list" -P "$JOBS" -I{} bash -c '_wallsweep_one "$1"' _ {}

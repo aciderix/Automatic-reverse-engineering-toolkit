@@ -216,3 +216,32 @@ n'est **pas** « 40 shims à écrire » : c'est « le lift du runtime C++ est la
 mur mesuré est POST-LIFT** (ce qui bloque APRÈS avoir lifté le runtime = surface OS + lift-correctness C++ dense), qu'un
 raw-sweep ne montre pas ⇒ il faut un sweep **`--with-dll`** ciblé (comme la mesure 3-apps de 2026-08-15) pour le
 cartographier. Cibles data-désignées immédiates, indépendantes du lift : le **trio SSE** (général, vérifiable Unicorn).
+
+## Mur POST-LIFT (2026-08-15) — une fois le runtime C++ lifté, la surface OS restante
+
+Le raw-sweep compte les imports statiques ⇒ il ne voit pas le lift du runtime C++. Pour cartographier le **vrai mur
+post-lift** sans re-lifter 24 Mo de libstdc++ ×505 (~1-2 h), on filtre le sweep raw : les symboles fournis par le runtime
+lifté (`^Z`/`cxa_`/`Unwind`/`gxx_personality`/`pthread_`/`dynamic_cast`/`guard_`/libgcc-arith) sont marqués **lift-covered**
+et retirés du classement (`WALLSWEEP_COVERED`, harnais). Retirer un symbole ne change pas le compte d'un autre ⇒ **exact**,
+sur les **1279 binaires**. Résultat : **427/1279 (33 %) n'ont AUCUN import restant** une fois le runtime lifté (vs 119
+propres en raw) — **c'est la valeur mesurée du Levier 1** (lifter libstdc++/libgcc/libwinpthread débloque l'import-wall de
+33 % du corpus). Les **15236 symboles C++ filtrés couvrent 567 binaires**.
+
+**Mur POST-LIFT restant (par #binaires) — 3 familles nettes :**
+1. **Winsock2 / sockets BSD (`ws2_32.dll`) = LA surface OS dominante** : `WSAGetLastError` 67, `closesocket` 66,
+   `WSAStartup` 62, `setsockopt` 59, `ioctlsocket` 58, `connect` 55, `htons` 55, `recv` 54, `socket` 54, `htonl` 53,
+   `send` 53, `freeaddrinfo` 51, `getaddrinfo` 50, `select` 46, `ntohs` 44, `bind` 40… (~16 fns, 40-67 bins chacune).
+   **Famille HLE-OS classique** (comme fichier/registre/wide-char déjà faites) : mappable sur les **sockets POSIX de
+   l'hôte** (socket/connect/bind/send/recv/select = vrais syscalls), vérifiable vs Wine (fixture client/serveur
+   localhost). **C'est le prochain axe OS que la donnée désigne.**
+2. **GLib/GTK (`g_*`) + gettext (`libintl_*`) = largeur DLL tierces** : `libintl_gettext` 78, `g_free` 73,
+   `libintl_bindtextdomain` 70, `g_log` 66, `libintl_textdomain` 63, `g_object_unref` 62, `g_strdup` 60, `g_malloc` 51,
+   `g_type_*`/`g_hash_table_*`/`g_list_*`, `libintl_setlocale` 47… = **glib-2.0-0.dll + libintl-8.dll** (DLL tierces).
+   **Axe Levier 1 distinct** (lifter la DLL) — plus gros, séparé de la surface OS. `dllrunscript` 76 = à identifier
+   (probablement une DLL vendeur partagée du corpus MSYS2, pas une fonction OS générale).
+3. **Reliquats CRT msvcrt (petits, généraux)** : `_fpreset` 58, `_fpecode` 44, `__pxcptinfoptrs` 44, `ctime` 48 —
+   environnement FP + divers, shims minces.
+
+**⇒ Verdict post-lift** : le mur n°1 réel après le runtime C++ est le **réseau (Winsock)** — famille OS bornée (~16 fns),
+générale, sound, POSIX-backée, Wine-vérifiable. Puis la **largeur DLL tierces** (GLib/gettext, Levier 1). Puis le mop-up
+CRT (`_fpreset`/`_fpecode`/`ctime`). Le raw-sweep ne pouvait pas montrer ça (tête noyée sous le runtime C++ lift-covered).
