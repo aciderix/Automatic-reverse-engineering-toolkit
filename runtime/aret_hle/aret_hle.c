@@ -2175,6 +2175,7 @@ uint32_t aret_FindClose(uint32_t esp) {
  * on no match; _findnext -> 0 on success, -1 at end; _findclose -> 0. Times are the
  * real host stat times (correct values; not oracle-verified as they are env-dependent,
  * exactly like the FindFirstFile sibling). */
+static size_t aret_n2w(const char *s, uint16_t *out, size_t cap); /* fwd: defined below */
 static int aret_fill_finddata(aret_find_t *st, uint8_t *fd) {
     struct dirent *e;
     while ((e = readdir(st->d))) {
@@ -2193,13 +2194,16 @@ static int aret_fill_finddata(aret_find_t *st, uint8_t *fd) {
             }
             tc = (uint32_t)sb.st_ctime; ta = (uint32_t)sb.st_atime; tw = (uint32_t)sb.st_mtime;
         }
-        memset(fd, 0, 280);
+        /* `_wfinddata32_t` (wide) shares the head but its name field is WCHAR[260]
+         * at offset 20 (struct = 540 bytes) vs char[260] (280 bytes) for narrow. */
+        memset(fd, 0, st->wide ? 540 : 280);
         *(uint32_t *)(fd + 0)  = attrib;
         *(uint32_t *)(fd + 4)  = tc;
         *(uint32_t *)(fd + 8)  = ta;
         *(uint32_t *)(fd + 12) = tw;
         *(uint32_t *)(fd + 16) = (uint32_t)size;        /* _fsize_t is 32-bit */
-        snprintf((char *)(fd + 20), 260, "%s", e->d_name);
+        if (st->wide) aret_n2w(e->d_name, (uint16_t *)(fd + 20), 260);
+        else snprintf((char *)(fd + 20), 260, "%s", e->d_name);
         return 1;
     }
     return 0;
@@ -2784,6 +2788,119 @@ uint32_t aret_wremove(uint32_t esp) {
     translate_path(path, host, sizeof host);
     return (uint32_t)(remove(host) == 0 ? 0 : (uint32_t)-1);
 }
+
+/* ---- msvcrt WIDE-CHAR file/dir CRT (`_w*`) --------------------------------
+ * Measured on the corpus (doc 82, 2026-08-15): once the C++ runtime lifts, the
+ * next wall for real mingw C++ apps is the Unicode file API family. Each `_w*`
+ * function is its narrow twin with the path argument converted UTF-16 -> UTF-8
+ * (aret_w2n) then run through the SAME translate_path + POSIX call as the ANSI
+ * shim, so the behaviour is identical (proven bit-for-bit vs Wine, which loads
+ * the same msvcrt beside the exe). Nothing is guessed: an unmapped path or a
+ * failed syscall returns the msvcrt-defined error, never a fake success. */
+uint32_t aret_wopen(uint32_t esp) {
+    char name[1024], path[1024];
+    aret_w2n((const uint16_t *)(uintptr_t)arg(esp, 0), name, sizeof name);
+    translate_path(name, path, sizeof path);
+    uint32_t mo = arg(esp, 1);
+    int fl;
+    switch (mo & 0x3u) { case 1: fl = O_WRONLY; break; case 2: fl = O_RDWR; break; default: fl = O_RDONLY; break; }
+    if (mo & 0x008u) fl |= O_APPEND;
+    if (mo & 0x100u) fl |= O_CREAT;
+    if (mo & 0x200u) fl |= O_TRUNC;
+    if (mo & 0x400u) fl |= O_EXCL;
+    if (fl & O_CREAT) make_parents(path);
+    int fd = open(path, fl, 0666);
+    return (uint32_t)(fd < 0 ? (uint32_t)-1 : (uint32_t)fd);
+}
+/* Shared prologue for the pure path-wrapper `_w*` shims: arg0 UTF-16 -> host path. */
+static void aret_wpath(uint32_t esp, char *host, size_t cap) {
+    char name[1024];
+    aret_w2n((const uint16_t *)(uintptr_t)arg(esp, 0), name, sizeof name);
+    translate_path(name, host, cap);
+}
+uint32_t aret_wmkdir(uint32_t esp) {
+    char p[1024]; aret_wpath(esp, p, sizeof p);
+    return (uint32_t)(mkdir(p, 0777) == 0 ? 0 : (uint32_t)-1);
+}
+uint32_t aret_wrmdir(uint32_t esp) {
+    char p[1024]; aret_wpath(esp, p, sizeof p);
+    return (uint32_t)(rmdir(p) == 0 ? 0 : (uint32_t)-1);
+}
+uint32_t aret_wchdir(uint32_t esp) {
+    char p[1024]; aret_wpath(esp, p, sizeof p);
+    return (uint32_t)chdir(p);
+}
+uint32_t aret_wchmod(uint32_t esp) {
+    char p[1024]; aret_wpath(esp, p, sizeof p);
+    return (uint32_t)chmod(p, (int)arg(esp, 1));
+}
+uint32_t aret_wstat64(uint32_t esp) {
+    char p[1024]; aret_wpath(esp, p, sizeof p);
+    uint8_t *buf = (uint8_t *)(uintptr_t)arg(esp, 1);
+    struct stat st;
+    if (!buf || stat(p, &st) != 0) return (uint32_t)-1;
+    aret_fill_stat64(buf, &st);
+    return 0;
+}
+uint32_t aret_wstat32(uint32_t esp) {
+    char p[1024]; aret_wpath(esp, p, sizeof p);
+    uint8_t *buf = (uint8_t *)(uintptr_t)arg(esp, 1);
+    struct stat st;
+    if (!buf || stat(p, &st) != 0) return (uint32_t)-1;
+    aret_fill_stat32(buf, &st);
+    return 0;
+}
+/* _wgetcwd(WCHAR* buf, int size): host getcwd (narrow) then UTF-8 -> UTF-16. A
+ * NULL buf means "malloc it" in msvcrt, but callers overwhelmingly pass a buffer;
+ * a NULL buf returns 0 (sound: no silent wrong pointer). */
+uint32_t aret_wgetcwd(uint32_t esp) {
+    uint16_t *buf = (uint16_t *)(uintptr_t)arg(esp, 0);
+    int size = (int)arg(esp, 1);
+    if (!buf || size <= 0) return 0;
+    char cwd[4096];
+    if (!getcwd(cwd, sizeof cwd)) return 0;
+    aret_n2w(cwd, buf, (size_t)size);
+    return arg(esp, 0);                                 /* returns the buffer pointer */
+}
+/* _wfullpath(WCHAR* abs, const WCHAR* rel, size_t len): resolve rel to an absolute
+ * path. Mirrors aret_fullpath (realpath, then a best-effort join if rel is missing). */
+uint32_t aret_wfullpath(uint32_t esp) {
+    uint16_t *wabs = (uint16_t *)(uintptr_t)arg(esp, 0);
+    char rel[1024], out[4096];
+    aret_w2n((const uint16_t *)(uintptr_t)arg(esp, 1), rel, sizeof rel);
+    size_t len = (size_t)arg(esp, 2);
+    if (!wabs || !rel[0]) return 0;
+    if (!realpath(rel, out)) {
+        if (rel[0] == '/' || rel[0] == '\\') snprintf(out, sizeof out, "%s", rel);
+        else { char cwd[4096]; if (!getcwd(cwd, sizeof cwd)) return 0; snprintf(out, sizeof out, "%s/%s", cwd, rel); }
+    }
+    aret_n2w(out, wabs, len ? len : 260);
+    return arg(esp, 0);
+}
+/* _wfindfirst32 / _wfindnext32: the CRT wide directory iterator over
+ * `_wfinddata32_t` (WCHAR name at +20). Same opendir/fnmatch machinery as the
+ * narrow _findfirst; the fill routine writes the wide struct when st->wide. */
+uint32_t aret_wfindfirst(uint32_t esp) {
+    char spec[1024], path[1024];
+    aret_w2n((const uint16_t *)(uintptr_t)arg(esp, 0), spec, sizeof spec);
+    translate_path(spec, path, sizeof path);
+    uint8_t *fd = (uint8_t *)(uintptr_t)arg(esp, 1);
+    aret_find_t *st = (aret_find_t *)malloc(sizeof *st);
+    if (!st) { errno = ENOENT; return 0xFFFFFFFFu; }
+    st->wide = 1;
+    char *slash = strrchr(path, '/');
+    if (slash) { *slash = 0; snprintf(st->dir, sizeof st->dir, "%s", path); snprintf(st->pat, sizeof st->pat, "%s", slash + 1); }
+    else { snprintf(st->dir, sizeof st->dir, "."); snprintf(st->pat, sizeof st->pat, "%s", path); }
+    st->d = opendir(st->dir[0] ? st->dir : "/");
+    if (!st->d) { free(st); errno = ENOENT; return 0xFFFFFFFFu; }
+    if (!aret_fill_finddata(st, fd)) { closedir(st->d); free(st); errno = ENOENT; return 0xFFFFFFFFu; }
+    return (uint32_t)(uintptr_t)st;
+}
+uint32_t aret_wfindnext(uint32_t esp) { return aret_findnext(esp); } /* honors st->wide */
+/* Toolchain spelling variants: `_wfindfirst32`/`_wfindnext32` (32-bit time_t) and
+ * the default `_wfindfirst`/`_wfindnext` share the same `_wfinddata32_t` layout here. */
+uint32_t aret_wfindfirst32(uint32_t esp) { return aret_wfindfirst(esp); }
+uint32_t aret_wfindnext32(uint32_t esp) { return aret_wfindnext(esp); }
 
 /* ---- file end / file times (FILETIME <-> POSIX) ---------------------------
  * FILETIME = 100-ns ticks since 1601-01-01 UTC. */

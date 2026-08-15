@@ -8040,3 +8040,22 @@ stdexcept/stdthrow/stddtor/libgcc/zlib + comctl32_imagelist/progress verts). **G
 (+ `.withlocaldll`) — une `std::string` >15 chars (chemin heap `_M_create` thiscall) construite/copiée/jetée à travers
 libstdc++ lifté, longueur + texte imprimés, **bit-identique Wine** ; sans le fix, crash/hang (esp-drift). **Bilan session :
 3 bugs de lift-correctness GÉNÉRAUX** (pseudo-relocs multi-module, double static/runtime, callee-pop thiscall via thunk).
+
+### 2026-08-15 — [HLE][LIFT ✅] **Famille CRT wide-char `_w*` (fichier Unicode) — prochain axe mesuré post-milestone**
+
+La mesure du corpus post-jsoncpp (doc 82) a désigné le prochain mur : une fois le runtime C++ lifté (0 import C++ restant),
+les vraies apps C++ mingw butent sur la **surface OS/CRT**, dominée par la **famille fichier Unicode `_w*`**. Décision archi
+(cf. réponse doc) : **ni lift** (msvcrt/kernel32 descendent aux syscalls → ne terminent pas), **ni extraction Wine** (lourd +
+oracle circulaire) → **shims HLE minces**, car chaque `_wFoo` = son jumeau *narrow* + conversion chemin UTF-16→UTF-8
+(`aret_w2n`), machinerie que le HLE **a déjà** (narrow file shims + `aret_w2n`/`aret_n2w` + `aret_find_t.wide`).
+
+**Ajouté** (`runtime/aret_hle/aret_hle.c`) : `aret_wopen`, `aret_wstat64`/`aret_wstat32`, `aret_wmkdir`, `aret_wrmdir`,
+`aret_wchdir`, `aret_wchmod`, `aret_wgetcwd`, `aret_wfullpath`, `aret_wfindfirst`/`aret_wfindnext` (+ alias `*32`). Le filler
+CRT `aret_fill_finddata` devient **wide-aware** (`st->wide` ⇒ struct `_wfinddata32_t` de 540 o, nom WCHAR à +20 via `aret_n2w`).
+`_waccess`/`_wunlink`/`_wfopen`/`_wremove` préexistaient. Chaque shim = le corps POSIX du narrow, **rien de deviné** (chemin
+non mappé/échec → erreur msvcrt définie, jamais un faux 0). **Garde** : `winecorpus/crt_wpath.c` — crée un sous-dossier temp,
+`_wmkdir`/`_wopen`(écrit 5 o)/`_wstat64`(size=5)/`_waccess`/`_wfindfirst`+`_wfindnext`(énumère `hello.txt`)/`_wchdir`/`_wchmod`/
+`_wunlink`/`_wrmdir`, n'imprime que du **déterministe** (rc, taille, nom) — **bit-identique Wine** (même msvcrt). **Portes** :
+hash `19acad982194bf07` inchangé (HLE hors empreinte transpile), `crt_findfirst` (narrow, garde le filler modifié) + fileio +
+str_direction verts. **Reste de l'axe OS** (lots suivants) : Win32 FS/volumes `*W` (`CreateHardLinkW`/`RemoveDirectoryW`/
+`GetVolumeInformationW`/`Find*VolumeW`), locale (`_wcsxfrm`/`_wcsftime`), `getwc`/`putwc`, introspection process/thread.
