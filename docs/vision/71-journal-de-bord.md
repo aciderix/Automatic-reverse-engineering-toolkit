@@ -8222,3 +8222,26 @@ bug de FIXTURE, pas ARET (strace l'a montré : listen avant bind) → séparé e
 (additif, inoffensif). **Portes** : hash `19acad982194bf07` inchangé (HLE-only), difftest 272/272, win32_file/crt_sopen
 verts. **Reste** (increments suivants) : getaddrinfo/gethostbyname/inet_ntoa (retour de pointeur → alloc guest à valider),
 UDP sendto/recvfrom, WSA* async (WSAAsyncSelect/overlapped).
+
+### 2026-08-15 — [HLE][WIN32 ✅] **Winsock2 increment 2 : résolution de noms (getaddrinfo/freeaddrinfo/inet_ntoa/gethostname), bit-identique Wine**
+
+Suite du chantier Winsock (mur OS n°1 post-lift, doc 90). Increment 2 = la surface **résolution de noms + retour de
+pointeur**. Point de méthode validé d'abord : le runtime est compilé **-m32** ⇒ un pointeur hôte tient dans eax
+(`return (uint32_t)(uintptr_t)ptr`) et `malloc` rend une adresse 32-bit ⇒ les fonctions qui **retournent un pointeur**
+vers de la mémoire guest marchent directement (pas de mécanisme d'alloc guest spécial à inventer).
+- **`getaddrinfo`/`freeaddrinfo`** : le vrai travail = **reconstruire** la liste résultat hôte au **layout ADDRINFOA de
+  Windows** en mémoire guest (malloc 32-bit). Le layout **DIFFÈRE** : Windows met `ai_canonname` **avant** `ai_addr`,
+  Linux l'inverse ; et la famille d'adresse est numérotée autrement (AF_INET6 23 vs 10) — les deux traduits (struct 32 o :
+  0 flags 4 family 8 socktype 12 protocol 16 addrlen 20 canonname* 24 addr* 28 next*). Le sockaddr de chaque nœud est
+  copié avec `sa_family` traduit. `freeaddrinfo` libère mes allocations (nœud + canonname + addr). Échec du résolveur →
+  **erreur WSA** correspondante (`wsa_gai` : EAI_NONAME→WSAHOST_NOT_FOUND 11001…). Flags AI_PASSIVE/CANONNAME/NUMERICHOST
+  identiques Win/Linux (bas 3 bits).
+- **`inet_ntoa(in_addr par valeur)`** : retour pointeur vers un buffer statique (comme le static per-thread de Windows).
+- **`gethostname`** : POSIX direct (Wine et ARET sur le même conteneur ⇒ même nom).
+
+**Garde** : `winecorpus/win32_winsock_dns.c` — entrées **déterministes** uniquement (adresse numérique `AI_NUMERICHOST`
+sans DNS + wildcard `AI_PASSIVE` + littéral `inet_ntoa`), `gethostname` comparé en booléen (nom = environnemental).
+`getaddrinfo("127.0.0.1","80")` → fam=2 type=1 addr=7f000001 port=80 next=0, `inet_ntoa(0x7f000001)`→`127.0.0.1` —
+**bit-identique Wine**. **Portes** : hash `19acad982194bf07` inchangé (HLE-only), difftest 272/272, win32_winsock (inc.1)
+non régressé. **Reste** (increment 3) : `gethostbyname`/`getnameinfo` (autre layout hostent), UDP `sendto`/`recvfrom`,
+et l'async (`WSAAsyncSelect`/overlapped/IOCP — recoupe la surface subprocess de ninja).

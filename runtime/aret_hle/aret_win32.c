@@ -1456,6 +1456,102 @@ uint32_t aret_inet_addr(uint32_t esp) {
     const char *cp = WCS(0);
     return cp ? (uint32_t)inet_addr(cp) : INVALID_SOCKET_U;
 }
+/* inet_ntoa(in_addr) — in_addr passed BY VALUE (4 bytes). Returns a pointer to a
+ * static string (Windows uses a per-thread static; our fiber model is single-run). */
+uint32_t aret_inet_ntoa(uint32_t esp) {
+    struct in_addr a; a.s_addr = WU(0);
+    static char buf[16];
+    const char *s = inet_ntoa(a);
+    buf[0] = 0; if (s) { strncpy(buf, s, sizeof buf - 1); buf[sizeof buf - 1] = 0; }
+    return (uint32_t)(uintptr_t)buf;
+}
+uint32_t aret_gethostname(uint32_t esp) {
+    char *buf = WS(0);
+    return gethostname(buf, (size_t)WI(1)) < 0 ? wsa_fail() : 0;
+}
+
+/* Name resolution: getaddrinfo rebuilds the host result list into the WINDOWS
+ * ADDRINFOA layout in guest (32-bit) memory — the struct field order DIFFERS
+ * (Windows: ai_canonname before ai_addr; Linux the reverse) and the address family
+ * is numbered differently (AF_INET6 23 vs 10). A resolver failure maps to the
+ * matching WSA error. Windows ADDRINFOA (32-bit, 32 bytes):
+ *   0 ai_flags 4 ai_family 8 ai_socktype 12 ai_protocol 16 ai_addrlen(size_t)
+ *   20 ai_canonname* 24 ai_addr* 28 ai_next*. */
+static uint32_t wsa_gai(int rc) {
+    switch (rc) {
+        case EAI_NONAME:   return 11001;   /* WSAHOST_NOT_FOUND */
+        case EAI_AGAIN:    return 11002;   /* WSATRY_AGAIN */
+        case EAI_FAIL:     return 11003;   /* WSANO_RECOVERY */
+        case EAI_FAMILY:   return 10047;   /* WSAEAFNOSUPPORT */
+        case EAI_SOCKTYPE: return 10044;   /* WSAESOCKTNOSUPPORT */
+        case EAI_SERVICE:  return 10109;   /* WSATYPE_NOT_FOUND */
+        case EAI_MEMORY:   return 8;       /* WSA_NOT_ENOUGH_MEMORY */
+#ifdef EAI_NODATA
+        case EAI_NODATA:   return 11001;
+#endif
+        default:           return 11001;
+    }
+}
+uint32_t aret_getaddrinfo(uint32_t esp) {
+    const char *node = WCS(0), *service = WCS(1);
+    const uint8_t *wh = (const uint8_t *)WP(2);
+    uint32_t *out = (uint32_t *)WP(3);
+    if (out) *out = 0;
+    struct addrinfo hints, *lh = NULL, *lres = NULL;
+    if (wh) {
+        memset(&hints, 0, sizeof hints);
+        hints.ai_flags = *(const int *)(wh + 0) & 0x7;   /* PASSIVE/CANONNAME/NUMERICHOST identical */
+        int fam = *(const int *)(wh + 4);
+        if (fam != 0) { int hf = wsa_af_to_host((uint32_t)fam); if (hf < 0) { g_last_error = 10047; return 10047; } hints.ai_family = hf; }
+        hints.ai_socktype = *(const int *)(wh + 8);
+        hints.ai_protocol = *(const int *)(wh + 12);
+        lh = &hints;
+    }
+    int rc = getaddrinfo(node, service, lh, &lres);
+    if (rc != 0) { uint32_t w = wsa_gai(rc); g_last_error = w; return w; }
+    uint32_t head = 0; uint8_t *prev = NULL;
+    for (struct addrinfo *p = lres; p; p = p->ai_next) {
+        uint8_t *w = (uint8_t *)malloc(32);
+        if (!w) break;
+        memset(w, 0, 32);
+        *(int *)(w + 4)  = p->ai_family == AF_INET6 ? 23 : p->ai_family;
+        *(int *)(w + 8)  = p->ai_socktype;
+        *(int *)(w + 12) = p->ai_protocol;
+        *(uint32_t *)(w + 16) = (uint32_t)p->ai_addrlen;
+        if (p->ai_canonname) {
+            size_t n = strlen(p->ai_canonname) + 1;
+            char *cn = (char *)malloc(n);
+            if (cn) { memcpy(cn, p->ai_canonname, n); *(uint32_t *)(w + 20) = (uint32_t)(uintptr_t)cn; }
+        }
+        if (p->ai_addr && p->ai_addrlen >= 2) {
+            uint8_t *sa = (uint8_t *)malloc(p->ai_addrlen);
+            if (sa) {
+                memcpy(sa, p->ai_addr, p->ai_addrlen);
+                uint16_t hf = (uint16_t)(sa[0] | (sa[1] << 8));
+                uint16_t wf = (hf == AF_INET6) ? 23 : hf;
+                sa[0] = (uint8_t)wf; sa[1] = (uint8_t)(wf >> 8);
+                *(uint32_t *)(w + 24) = (uint32_t)(uintptr_t)sa;
+            }
+        }
+        if (prev) *(uint32_t *)(prev + 28) = (uint32_t)(uintptr_t)w; else head = (uint32_t)(uintptr_t)w;
+        prev = w;
+    }
+    freeaddrinfo(lres);
+    if (out) *out = head;
+    return 0;
+}
+uint32_t aret_freeaddrinfo(uint32_t esp) {
+    uint32_t cur = WU(0);
+    while (cur) {
+        uint8_t *w = (uint8_t *)(uintptr_t)cur;
+        uint32_t nxt = *(uint32_t *)(w + 28), cn = *(uint32_t *)(w + 20), sa = *(uint32_t *)(w + 24);
+        if (cn) free((void *)(uintptr_t)cn);
+        if (sa) free((void *)(uintptr_t)sa);
+        free(w);
+        cur = nxt;
+    }
+    return 0;
+}
 #endif /* !__wasm__ */
 
 /* GetVersionExA/W(LPOSVERSIONINFO): report a real Windows version and return
