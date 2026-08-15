@@ -981,6 +981,31 @@ uint32_t aret_ungetc(uint32_t esp) {
     *(int32_t *)(f + ARET_F_FLAG) &= ~0x10;            /* clear _IOEOF          */
     return (uint32_t)(c & 0xff);
 }
+/* Wide-char stdio (getwc/putwc/ungetwc + fgetwc/fputwc). With no locale set (the
+ * msvcrt default "C"), each wide char is one byte for the ASCII range programs use,
+ * so these mirror the byte stdio above. WEOF is msvcrt's 16-bit 0xFFFF. Measured as
+ * part of the OS wall after the C++ runtime lifts (doc 82). */
+uint32_t aret_getwc(uint32_t esp) {
+    int c = pull_byte(arg(esp, 0));
+    return c < 0 ? 0xFFFFu : (uint32_t)(unsigned)c;    /* WEOF = 0xFFFF */
+}
+uint32_t aret_fgetwc(uint32_t esp) { return aret_getwc(esp); }
+uint32_t aret_putwc(uint32_t esp) {
+    uint32_t wc = arg(esp, 0);
+    char c = (char)(wc & 0xff);
+    stdio_write(arg(esp, 1), &c, 1);
+    return wc & 0xFFFFu;                               /* returns the wchar written */
+}
+uint32_t aret_fputwc(uint32_t esp) { return aret_putwc(esp); }
+uint32_t aret_ungetwc(uint32_t esp) {
+    int c = (int)arg(esp, 0);                          /* the wchar to push back */
+    uint32_t file = arg(esp, 1);
+    if (file_fd(file) < 0 || c < 0) return 0xFFFFu;
+    uint8_t *f = (uint8_t *)(uintptr_t)file;
+    *(int32_t *)(f + ARET_F_UNGOT) = (c & 0xff) + 1;
+    *(int32_t *)(f + ARET_F_FLAG) &= ~0x10;
+    return (uint32_t)(c & 0xFFFFu);
+}
 uint32_t aret_feof(uint32_t esp) {
     uint32_t file = arg(esp, 0);
     if (file_fd(file) < 0) return 1;

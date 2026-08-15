@@ -1231,6 +1231,41 @@ uint32_t aret_strftime(uint32_t esp) {
     struct tm t = aret_unpack_tm((const int32_t *)AP(3));
     return (uint32_t)strftime(s, max, fmt ? fmt : "", &t);
 }
+/* ---- locale collation + wide time (measured OS wall, doc 82) --------------
+ * With no locale set (ARET's model, and msvcrt's default "C"), strxfrm/wcsxfrm
+ * transform IDENTICALLY: the required contract is strcoll(a,b) == strcmp of the
+ * transforms, which the identity copy satisfies. Bounded copy into dst, return
+ * the source length (excl. NUL) — exactly msvcrt's C-locale result. */
+uint32_t aret_strxfrm(uint32_t esp) {
+    char *d = AS(0); const char *s = ACS(1); size_t n = AU(2);
+    size_t len = s ? strlen(s) : 0;
+    if (d && n) { size_t c = len < n ? len : n - 1; if (s) memcpy(d, s, c); d[c] = 0; }
+    return (uint32_t)len;
+}
+uint32_t aret_wcsxfrm(uint32_t esp) {
+    uint16_t *d = (uint16_t *)AP(0); const uint16_t *s = (const uint16_t *)AP(1); size_t n = AU(2);
+    size_t len = 0; if (s) while (s[len]) len++;
+    if (d && n) { size_t c = len < n ? len : n - 1; for (size_t i = 0; i < c; i++) d[i] = s[i]; d[c] = 0; }
+    return (uint32_t)len;
+}
+/* _wcsftime(wdst, maxcount, wfmt, tm): narrow the format, host strftime, widen the
+ * result. C locale => deterministic and bit-identical to Wine's msvcrt. Returns the
+ * wchar count (excl. NUL), or 0 if it did not fit (msvcrt contract). */
+uint32_t aret_wcsftime(uint32_t esp) {
+    uint16_t *wd = (uint16_t *)AP(0); size_t max = AU(1);
+    const uint16_t *wf = (const uint16_t *)AP(2);
+    struct tm t = aret_unpack_tm((const int32_t *)AP(3));
+    char fmt[512]; size_t i = 0;
+    if (wf) for (; wf[i] && i + 1 < sizeof fmt; i++) fmt[i] = (char)(wf[i] & 0xff);
+    fmt[i] = 0;
+    char out[2048];
+    size_t r = strftime(out, sizeof out, fmt, &t);
+    if (!wd || max == 0) return 0;
+    if (r == 0 || r >= max) { wd[0] = 0; return 0; }
+    for (size_t k = 0; k < r; k++) wd[k] = (uint16_t)(unsigned char)out[k];
+    wd[r] = 0;
+    return (uint32_t)r;
+}
 /* asctime(tm) -> "Www Mmm dd hh:mm:ss yyyy\n" in a static buffer. Formatted
  * explicitly (not via host asctime) because msvcrt zero-pads the day ("09")
  * while glibc space-pads it (" 9"). */

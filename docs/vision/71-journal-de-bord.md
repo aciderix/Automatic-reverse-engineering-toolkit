@@ -8073,3 +8073,18 @@ Gardés wasm (`link`/`statvfs` absents → return 0 sound). **Garde** : `winecor
 ⇒ restent en **abort sound** (`aret_unimpl`) si atteints, jamais un faux. **Portes** : hash `19acad982194bf07` inchangé,
 win32_file/fileops/fileinfo/file_process verts. **Reste** : locale wide (`_wcsxfrm`/`_wcsftime`), stdio wide (`getwc`/`putwc`/
 `ungetwc`), introspection process/thread (`GetProcessTimes`/`Get,SetThreadContext`/affinity — à modéliser/`aret_partial`).
+
+### 2026-08-15 — [HLE][LIFT ✅] **Lot 3 — locale collation + wide stdio (`wcsxfrm`/`strxfrm`/`_wcsftime`/`getwc`/`putwc`/`ungetwc`)**
+
+Suite de l'axe OS mesuré. **Locale collation** (`aret_crt.c`, `aret_strxfrm`/`aret_wcsxfrm`) : sans locale (le défaut « C »
+de msvcrt et le modèle d'ARET), la transformation de collation est l'**identité** (le contrat `strcoll(a,b) == strcmp` des
+transformés est satisfait par une copie) ⇒ copie bornée + retourne la longueur source. **`aret_wcsftime`** : narrow du format,
+`strftime` hôte (avec `aret_unpack_tm`), widen du résultat — C-locale déterministe. **Wide stdio** (`aret_hle.c`,
+`aret_getwc`/`aret_fgetwc`/`aret_putwc`/`aret_fputwc`/`aret_ungetwc`) : en locale C, 1 octet par wchar sur l'ASCII que les
+programmes utilisent ⇒ miroir du byte-stdio (`pull_byte`/`stdio_write`/pushback `ARET_F_UNGOT`), `WEOF` = 0xFFFF (wint_t 16-bit
+msvcrt). **Garde** : `winecorpus/crt_wlocale.c` — `putwc`/`getwc` round-trip fichier (`ABCDE|n=5`), `ungetwc` (`unget=AA`),
+`wcsxfrm`/`strxfrm` (`hello len=5`), `wcsftime` d'un `struct tm` fixe (`2024-01-15 13:45:30 len=19`), imprimé char-par-char
+(évite `%ls` dans le printf HLE) — **bit-identique Wine**. **Portes** : hash `19acad982194bf07` inchangé, stdio_getc/stdio_more
+(garde la machinerie stdio partagée) + str_time_interval (strftime) + crt_strcpy_s verts. **Reste** de l'axe OS : introspection
+process/thread (`GetProcessTimes`/`Get,SetThreadContext`/affinity/`GetSystemTimeAdjustment`) — à modéliser/`aret_partial`,
+lot distinct (état process, pas des fichiers).
