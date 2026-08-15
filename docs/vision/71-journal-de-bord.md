@@ -8109,3 +8109,19 @@ n'est pas intégrée (chantier dispatcher dédié si un vrai binaire le mesure).
 win32_procinfo + win32_wfs + win32_file verts. **⇒ Axe OS wide-char mesuré (doc 82) COUVERT** en 4 lots (fichier `_w*`,
 Win32 FS/volumes `*W`, locale/stdio wide, introspection process/thread) — reste hors-scope : `Find*Volume` (GUID
 env-dépendants), VEH-avec-livraison, ThreadContext arbitraire, tous en abort sound.
+
+### 2026-08-15 — [HLE][LIFT ✅] **Mop-up des reliquats de l'axe OS (`_ultoa`/`_ltoa`/`_itoa`/`_aligned_malloc,free`/`GetTickCount64`/`SetSystemTime`/`_endthreadex`/`_p___mb_cur_max`/`_wutime`)**
+
+Les petits reliquats mesurés sur les 3 apps, faits d'un coup. **Conversions** (`aret_crt.c`) : `_ultoa`/`_ltoa`/`_itoa`
+(radix 2-36, helper `aret_int2str`). **`_p___mb_cur_max`** → `&(int=1)` (MB_CUR_MAX en locale C). **`_aligned_malloc`/
+`_aligned_free`** : over-alloc + alignement puissance-de-2 + pointeur brut stashé sous le bloc aligné. **`GetTickCount64`**
+(`aret_win32.c`) : `mono_ns()/1e6` en u64 (ajouté à `import_returns_u64`, retour edx:eax). **`SetSystemTime`** → 1 (Wine,
+sandboxé, renvoie TRUE sans toucher l'horloge — vérité terrain ⇒ on matche, horloge hôte inchangée). **`_endthreadex`** →
+`aret_ExitThread` (sortie de fibre). **`_wutime`** (`aret_hle.c`) : `utimes` sur le chemin traduit ; **subtilité** — le `_wutime`
+nu est l'export **32-bit-time legacy** de msvcrt (`struct _utimbuf` = 2×4 o), pas `_wutime64` (16 o) ; mesuré : lire des champs
+64-bit rendait `mtime=526314` (dépassement) vs Wine `1000000000` ⇒ `aret_wutime` lit du **32-bit** (`_wutime64`/`_wutime32`
+fournis pour les deux autres). **Garde** : `winecorpus/crt_leftovers.c` — `ultoa=ffffffff`, `ltoa=-42`, `itoa=11111111`,
+`mbcurmax=1`, alignement 64, `GetTickCount64>0`, `SetSystemTime=1`, `_wutime`→`mtime=1000000000` relu via `_wstat64` —
+**bit-identique Wine**. **Portes** : hash `19acad982194bf07` inchangé, crt_wpath/wlocale/win32_procinfo/thread_join verts.
+**⇒ Axe OS wide-char mesuré ENTIÈREMENT moppé** (seuls restent les 3 aborts sound assumés : `Find*Volume`, VEH-livraison,
+ThreadContext). Prochain : re-tester un vrai binaire tiers end-to-end au-delà de jsoncpp.

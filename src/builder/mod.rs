@@ -467,6 +467,7 @@ fn import_returns_u64(sym: &str) -> bool {
             | "aret_strtoll" | "aret_strtoull" | "aret_wcstoll" | "aret_wcstoull"
             | "aret_strtoi64" | "aret_strtoui64" | "aret_atoi64" | "aret_wtoi64"
             | "aret_lseeki64" | "aret_telli64" | "aret_ftelli64" | "aret_filelengthi64"
+            | "aret_GetTickCount64"
     )
 }
 

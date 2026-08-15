@@ -84,6 +84,8 @@ static uint64_t mono_ns(void) {
 }
 
 uint32_t aret_GetTickCount(uint32_t esp) { (void)esp; return (uint32_t)(mono_ns() / 1000000ull); }
+/* GetTickCount64 -> 64-bit ms since boot (edx:eax; import_returns_u64). */
+uint64_t aret_GetTickCount64(uint32_t esp) { (void)esp; return mono_ns() / 1000000ull; }
 
 /* QueryPerformanceCounter(LARGE_INTEGER* out) — 64-bit nanosecond counter. */
 uint32_t aret_QueryPerformanceCounter(uint32_t esp) {
@@ -5341,6 +5343,13 @@ uint32_t aret_GetProcessAffinityMask(uint32_t esp) {
     return 1;
 }
 uint32_t aret_SetProcessAffinityMask(uint32_t esp) { (void)esp; return 1; }
+/* SetSystemTime(SYSTEMTIME*) -> BOOL. Setting the host clock is out of scope (and
+ * privileged); Wine, sandboxed in its prefix, returns TRUE without touching the real
+ * clock -- ARET matches that (reports success, host clock unchanged). */
+uint32_t aret_SetSystemTime(uint32_t esp) { (void)esp; return 1; }
+/* _endthreadex(retval): terminate the calling fiber (same as ExitThread). */
+uint32_t aret_ExitThread(uint32_t esp);   /* fwd: defined with the fiber scheduler below */
+uint32_t aret_endthreadex(uint32_t esp) { return aret_ExitThread(esp); }
 #ifndef __wasm__
 /* GetProcessTimes/GetThreadTimes(h, *creation, *exit, *kernel, *user) -> BOOL.
  * Kernel/user are the real host CPU times (getrusage); creation is captured once at

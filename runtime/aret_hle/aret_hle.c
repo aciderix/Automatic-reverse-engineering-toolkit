@@ -2926,6 +2926,25 @@ uint32_t aret_wfindnext(uint32_t esp) { return aret_findnext(esp); } /* honors s
  * the default `_wfindfirst`/`_wfindnext` share the same `_wfinddata32_t` layout here. */
 uint32_t aret_wfindfirst32(uint32_t esp) { return aret_wfindfirst(esp); }
 uint32_t aret_wfindnext32(uint32_t esp) { return aret_wfindnext(esp); }
+/* _wutime{,32,64}(wpath, _utimbuf*): set a file's access/modification times. The
+ * struct is two time fields (32- or 64-bit); NULL means "now". Host utimes(2). */
+static uint32_t aret_wutime_impl(uint32_t esp, int wide_time) {
+    char name[1024], path[1024];
+    aret_w2n((const uint16_t *)(uintptr_t)arg(esp, 0), name, sizeof name);
+    translate_path(name, path, sizeof path);
+    uint32_t tb = arg(esp, 1);
+    if (!tb) return (uint32_t)(utimes(path, NULL) == 0 ? 0 : -1);
+    int64_t at, mt;
+    if (wide_time) { at = *(const int64_t *)(uintptr_t)tb; mt = *(const int64_t *)(uintptr_t)(tb + 8); }
+    else { at = *(const int32_t *)(uintptr_t)tb; mt = *(const int32_t *)(uintptr_t)(tb + 4); }
+    struct timeval tv[2] = { { (time_t)at, 0 }, { (time_t)mt, 0 } };
+    return (uint32_t)(utimes(path, tv) == 0 ? 0 : -1);
+}
+uint32_t aret_wutime64(uint32_t esp) { return aret_wutime_impl(esp, 1); }
+uint32_t aret_wutime32(uint32_t esp) { return aret_wutime_impl(esp, 0); }
+/* Bare `_wutime` is msvcrt's LEGACY 32-bit-time export (`struct _utimbuf` = two
+ * 32-bit fields); the 64-bit form is imported as `_wutime64`. */
+uint32_t aret_wutime(uint32_t esp)   { return aret_wutime_impl(esp, 0); }
 
 /* ---- file end / file times (FILETIME <-> POSIX) ---------------------------
  * FILETIME = 100-ns ticks since 1601-01-01 UTC. */

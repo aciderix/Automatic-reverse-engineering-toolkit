@@ -1266,6 +1266,45 @@ uint32_t aret_wcsftime(uint32_t esp) {
     wd[r] = 0;
     return (uint32_t)r;
 }
+
+/* ---- small CRT leftovers (measured OS wall mop-up, doc 82) ---------------- */
+/* _ultoa/_ltoa/_itoa(value, str, radix) -> str. Integer to string, radix 2..36. */
+static char *aret_int2str(unsigned long v, char *s, int radix, int neg) {
+    if (!s || radix < 2 || radix > 36) { if (s) s[0] = 0; return s; }
+    char tmp[36]; int i = 0;
+    do { unsigned d = (unsigned)(v % (unsigned)radix); tmp[i++] = d < 10 ? (char)('0' + d) : (char)('a' + d - 10); v /= (unsigned)radix; } while (v);
+    char *p = s;
+    if (neg) *p++ = '-';
+    while (i) *p++ = tmp[--i];
+    *p = 0;
+    return s;
+}
+uint32_t aret_ultoa(uint32_t esp) { return RP(aret_int2str(AU(0), AS(1), AI(2), 0)); }
+uint32_t aret_ltoa(uint32_t esp) {
+    int32_t v = (int32_t)AU(0); int radix = AI(2); char *s = AS(1);
+    if (radix == 10 && v < 0) return RP(aret_int2str((unsigned long)(-(int64_t)v), s, 10, 1));
+    return RP(aret_int2str((unsigned long)(uint32_t)v, s, radix, 0));
+}
+uint32_t aret_itoa(uint32_t esp) { return aret_ltoa(esp); }
+/* _p___mb_cur_max() -> int*: pointer to MB_CUR_MAX. In the C locale it is 1. */
+uint32_t aret_p___mb_cur_max(uint32_t esp) { (void)esp; static int mb = 1; return RP(&mb); }
+/* _aligned_malloc(size, alignment) / _aligned_free(ptr): over-allocate, align, and
+ * stash the original malloc pointer just below the aligned block so free recovers it. */
+uint32_t aret_aligned_malloc(uint32_t esp) {
+    size_t size = AU(0), align = AU(1);
+    if (align < sizeof(void *)) align = sizeof(void *);
+    if (align & (align - 1)) return 0;                 /* alignment must be a power of two */
+    void *raw = malloc(size + align + sizeof(void *));
+    if (!raw) return 0;
+    uintptr_t a = ((uintptr_t)raw + sizeof(void *) + align - 1) & ~(uintptr_t)(align - 1);
+    ((void **)a)[-1] = raw;
+    return (uint32_t)a;
+}
+uint32_t aret_aligned_free(uint32_t esp) {
+    void *p = (void *)(uintptr_t)AU(0);
+    if (p) free(((void **)p)[-1]);
+    return 0;
+}
 /* asctime(tm) -> "Www Mmm dd hh:mm:ss yyyy\n" in a static buffer. Formatted
  * explicitly (not via host asctime) because msvcrt zero-pads the day ("09")
  * while glibc space-pads it (" 9"). */
