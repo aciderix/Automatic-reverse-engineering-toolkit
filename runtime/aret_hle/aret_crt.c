@@ -1328,6 +1328,41 @@ uint32_t aret_difftime(uint32_t esp) {
     __aret_x87_ret = difftime((time_t)(int32_t)AU(0), (time_t)(int32_t)AU(1)); __aret_x87_ret_valid = 1;
     return 0;
 }
+/* ctime(time_t*) = asctime(localtime(t)) -> "Www Mmm dd hh:mm:ss yyyy\n" in a static
+ * buffer. Formatted explicitly (msvcrt zero-pads the day, glibc space-pads). localtime
+ * is timezone-dependent but both engines read the same host TZ. */
+static char *aret_fmt_tm(const struct tm *t, char *buf, size_t n) {
+    static const char *const wd[] = {"Sun","Mon","Tue","Wed","Thu","Fri","Sat"};
+    static const char *const mo[] = {"Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"};
+    if (!t || t->tm_wday < 0 || t->tm_wday > 6 || t->tm_mon < 0 || t->tm_mon > 11) return 0;
+    snprintf(buf, n, "%s %s %02d %02d:%02d:%02d %d\n", wd[t->tm_wday], mo[t->tm_mon],
+             t->tm_mday, t->tm_hour, t->tm_min, t->tm_sec, t->tm_year + 1900);
+    return buf;
+}
+uint32_t aret_ctime(uint32_t esp) {
+    const int32_t *p = (const int32_t *)AP(0);
+    static char buf[32];
+    if (!p) return 0;
+    time_t tt = (time_t)*p;
+    return aret_fmt_tm(localtime(&tt), buf, sizeof buf) ? RP(buf) : 0;
+}
+uint32_t aret_ctime32(uint32_t esp) { return aret_ctime(esp); }
+uint32_t aret_ctime64(uint32_t esp) {
+    const int64_t *p = (const int64_t *)AP(0);          /* __time64_t */
+    static char buf[32];
+    if (!p) return 0;
+    time_t tt = (time_t)*p;
+    return aret_fmt_tm(localtime(&tt), buf, sizeof buf) ? RP(buf) : 0;
+}
+/* _fpreset(): reinitialize the FP unit. ARET's x87 state is per-op / runtime-net
+ * managed, with no persistent masked-exception state to clear -> a sound no-op. */
+uint32_t aret_fpreset(uint32_t esp) { (void)esp; return 0; }
+/* __fpecode(): pointer to the per-thread last FP-exception code. ARET does not raise
+ * maskable FP exceptions (div/idiv #DE trap hard) -> the clean state is 0. */
+uint32_t aret_fpecode(uint32_t esp) { (void)esp; static int code = 0; return RP(&code); }
+/* __pxcptinfoptrs(): pointer to the per-thread pointer to CRT exception info. No
+ * pending exception context in this model -> a valid slot holding NULL. */
+uint32_t aret_pxcptinfoptrs(uint32_t esp) { (void)esp; static void *p = 0; return RP(&p); }
 /* system(cmd): forward to the host shell (the program intends to run it). msvcrt returns
  * the command's EXIT CODE, not the raw wait-status, so extract it (WEXITSTATUS == (st>>8)
  * & 0xff on Linux; done inline to avoid a sys/wait.h dependency here). NULL command ->

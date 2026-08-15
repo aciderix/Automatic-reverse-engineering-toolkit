@@ -8245,3 +8245,16 @@ sans DNS + wildcard `AI_PASSIVE` + littéral `inet_ntoa`), `gethostname` compar�
 **bit-identique Wine**. **Portes** : hash `19acad982194bf07` inchangé (HLE-only), difftest 272/272, win32_winsock (inc.1)
 non régressé. **Reste** (increment 3) : `gethostbyname`/`getnameinfo` (autre layout hostent), UDP `sendto`/`recvfrom`,
 et l'async (`WSAAsyncSelect`/overlapped/IOCP — recoupe la surface subprocess de ninja).
+
+### 2026-08-15 — [HLE ✅] **Mop-up CRT du mur post-lift (doc 90) — `ctime`/`_fpreset`/`__fpecode`/`__pxcptinfoptrs`**
+
+Reliquats CRT généraux du mur post-lift (doc 90 : `_fpreset` 58 bins, `ctime` 48, `_fpecode`/`__pxcptinfoptrs` 44), faits
+d'un coup (`aret_crt.c`). **`ctime`** (+`_ctime32`/`_ctime64`) = `asctime(localtime(t))` formaté explicitement (msvcrt
+zéro-pad le jour, glibc space-pad) → buffer statique (retour pointeur, runtime -m32). **`_fpreset`** = no-op sound (l'état
+x87 d'ARET est géré par-op/filet runtime, pas d'exception masquée persistante à effacer). **`__fpecode`** → `&(int=0)`
+(ARET ne lève pas d'exception FP masquable — div/idiv #DE trappe dur ⇒ état propre = 0). **`__pxcptinfoptrs`** →
+slot valide contenant NULL (pas de contexte d'exception en attente). **Garde** : `winecorpus/crt_ctime_fp.c` (TZ=UTC pour
+un `ctime` déterministe + `_fpreset` puis FP toujours fonctionnel) — bit-identique Wine ; `__fpecode`/`__pxcptinfoptrs`
+sont des slots CRT internes (pas de prototype public ⇒ implémentés sound mais non fixture-testables directement). Portes :
+hash `19acad982194bf07` inchangé (HLE-only), difftest 272/272. **⇒ Avec Winsock inc1+2, le mur OS post-lift mesuré est
+couvert** sauf l'axe **DLL tierces GLib/gettext** (Levier 1, plus gros, séparé).
