@@ -245,3 +245,19 @@ propres en raw) — **c'est la valeur mesurée du Levier 1** (lifter libstdc++/l
 **⇒ Verdict post-lift** : le mur n°1 réel après le runtime C++ est le **réseau (Winsock)** — famille OS bornée (~16 fns),
 générale, sound, POSIX-backée, Wine-vérifiable. Puis la **largeur DLL tierces** (GLib/gettext, Levier 1). Puis le mop-up
 CRT (`_fpreset`/`_fpecode`/`ctime`). Le raw-sweep ne pouvait pas montrer ça (tête noyée sous le runtime C++ lift-covered).
+
+## Re-mesure POST-WINSOCK (2026-08-15) — le mur bascule sur les DLL tierces GLib/gettext
+
+Après Winsock (inc 1+2) + mop-up CRT, re-mesure **exacte et instantanée** : on ré-agrège les walls persistés en ajoutant
+au filtre `WALLSWEEP_COVERED` les symboles nouvellement implémentés cette session (Winsock + `ctime`/`_fpreset`/
+`__fpecode`/`__pxcptinfoptrs`). Retirer un symbole ne change pas le compte d'un autre ⇒ classement restant exact. Résultat :
+**476/1279 (37 %) import-clean** une fois runtime C++ + Winsock + CRT couverts (vs 427 pré-Winsock ⇒ **+49 binaires**
+débloqués par la session ; Winsock touchait 93 binaires, les reliquats CRT 127). **Le mur restant est TOTALEMENT dominé par
+GLib/gettext** : `libintl_*` (gettext i18n : `gettext` 78, `bindtextdomain` 70, `textdomain` 63, `setlocale` 47,
+`dgettext` 44…) et `g_*` (GLib/GObject : `g_free` 73, `g_log` 66, `g_object_unref` 62, `g_strdup` 60, `g_malloc` 51,
+`g_type_*`, `g_hash_table_*`, `g_list_*`, `g_signal_connect_data`, `g_string_*`, `g_once_init_*`…). **Stragglers** : `zlib`
+(`inflate`/`inflateEnd` 38 — **déjà liftable**, cf. lift_zlib) ; 2 symboles **libgcc** que le filtre a ratés
+(`__emutls_get_address`/`__udivmoddi4` 38 — lift-covered en réalité) ; `wcstombs` 36 (vrai petit gap CRT wide→mb) ;
+`dllrunscript` 76 / `printf__` 38 (à identifier). **⇒ Verdict data-driven : le prochain axe est SANS APPEL GLib/gettext**
+(`libglib-2.0-0.dll` + `libintl-8.dll`) = **Levier 1** (lifter la DLL, comme libstdc++/zlib) ou shims — chantier séparé,
+plus gros. La boucle « mesurer après chaque vague » (§2) a tranché.
