@@ -8088,3 +8088,24 @@ msvcrt). **Garde** : `winecorpus/crt_wlocale.c` — `putwc`/`getwc` round-trip f
 (garde la machinerie stdio partagée) + str_time_interval (strftime) + crt_strcpy_s verts. **Reste** de l'axe OS : introspection
 process/thread (`GetProcessTimes`/`Get,SetThreadContext`/affinity/`GetSystemTimeAdjustment`) — à modéliser/`aret_partial`,
 lot distinct (état process, pas des fichiers).
+
+### 2026-08-15 — [HLE][LIFT ✅] **Lot 4 — introspection process/thread (`GetSystemTimeAdjustment`/`GetProcess,ThreadTimes`/`Get,SetProcessAffinityMask`)**
+
+Dernier lot de l'axe OS mesuré. **`GetSystemTimeAdjustment`** : les défauts d'horloge libre (156250×100ns / 156250 /
+disabled=1) — **exactement** ce que renvoie Wine (vérifié) ⇒ bit-identique. **`Get/SetProcessAffinityMask`** : ARET tourne en
+coopératif sur **1 CPU logique** (modèle fibers) ⇒ mask 1-bit, Set advisory = no-op succès ; les valeurs de mask sont
+env-dépendantes mais les **invariants** (proc ⊆ système, non-nul) matchent Wine. **`GetProcessTimes`/`GetThreadTimes`** :
+kernel/user = vrais temps CPU hôte (`getrusage`, `RUSAGE_THREAD`/`SELF`), creation capturé une fois (élapsed cohérent),
+exit=0 (en cours) ; env-dépendant, modélisé sound, non oracle-exact. **Garde** : `winecorpus/win32_procinfo.c` — n'imprime
+que le **déterministe** (`GetSystemTimeAdjustment` = `156250/156250/1`, booléens de succès, invariants affinity, `exit==0`) —
+**bit-identique Wine**.
+
+**Restent en ABORT SOUND (hors modèle, documenté §0)** : `Get/SetThreadContext` d'un thread arbitraire (les registres d'un
+autre fiber ne sont pas dans le modèle shared-stack ⇒ `aret_unimpl` si atteint, jamais un contexte deviné) ; et
+`Add/RemoveVectoredExceptionHandler` — l'**enregistrement** seul serait facile, mais la **livraison** d'une exception au VEH
+demande de câbler le VEH dans le dispatcher SEH/EH ; un enregistrement non câblé qui laisserait une faute suivre le chemin SEH
+serait une **divergence silencieuse** (viole §0) ⇒ on préfère l'**abort bruyant** à l'enregistrement, tant que la livraison
+n'est pas intégrée (chantier dispatcher dédié si un vrai binaire le mesure). **Portes** : hash `19acad982194bf07` inchangé,
+win32_procinfo + win32_wfs + win32_file verts. **⇒ Axe OS wide-char mesuré (doc 82) COUVERT** en 4 lots (fichier `_w*`,
+Win32 FS/volumes `*W`, locale/stdio wide, introspection process/thread) — reste hors-scope : `Find*Volume` (GUID
+env-dépendants), VEH-avec-livraison, ThreadContext arbitraire, tous en abort sound.

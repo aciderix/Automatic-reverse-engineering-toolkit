@@ -31,6 +31,7 @@
 #ifndef __wasm__
 #include <sys/statvfs.h>   /* no filesystem statvfs under wasm32-wasi */
 #include <ucontext.h>      /* cooperative threads (fibers) — no ucontext in WASM */
+#include <sys/resource.h>  /* getrusage — process/thread CPU times */
 #endif
 #include <sys/ioctl.h>
 #include <pwd.h>          /* GetUserName reads the passwd database, as Wine does */
@@ -5309,6 +5310,70 @@ uint32_t aret_GetDiskFreeSpaceExW(uint32_t esp) {
 #else
 uint32_t aret_CreateHardLinkW(uint32_t esp) { (void)esp; return 0; }
 uint32_t aret_GetDiskFreeSpaceExW(uint32_t esp) { (void)esp; return 0; }
+#endif
+
+/* ---- process/thread introspection (measured OS wall, doc 82) --------------
+ * These report host process state. Most values are env-dependent (like
+ * GetVolumeInformation): modelled soundly, not oracle-exact. What IS exact and
+ * matches Wine: the clock-adjustment defaults and the affinity invariants. */
+static void u32_put_filetime(void *p, int64_t ft) {
+    if (!p) return;
+    uint32_t *q = (uint32_t *)p;
+    q[0] = (uint32_t)(uint64_t)ft;            /* dwLowDateTime  */
+    q[1] = (uint32_t)((uint64_t)ft >> 32);    /* dwHighDateTime */
+}
+/* GetSystemTimeAdjustment(*adjustment, *increment, *disabled) -> BOOL. The default
+ * free-running clock: 15.625 ms tick (156250 * 100ns), adjustment disabled. These
+ * are the exact values Wine reports (verified), so this is bit-identical. */
+uint32_t aret_GetSystemTimeAdjustment(uint32_t esp) {
+    uint32_t *adj = (uint32_t *)WP(0), *inc = (uint32_t *)WP(1), *dis = (uint32_t *)WP(2);
+    if (adj) *adj = 156250u;
+    if (inc) *inc = 156250u;
+    if (dis) *dis = 1u;
+    return 1;
+}
+/* Get/SetProcessAffinityMask: ARET runs cooperatively on ONE logical CPU (the fiber
+ * model), so the process/system mask is a single bit. Set is advisory -> no-op OK. */
+uint32_t aret_GetProcessAffinityMask(uint32_t esp) {
+    uint32_t *pm = (uint32_t *)WP(1), *sm = (uint32_t *)WP(2);
+    if (pm) *pm = 1u;
+    if (sm) *sm = 1u;
+    return 1;
+}
+uint32_t aret_SetProcessAffinityMask(uint32_t esp) { (void)esp; return 1; }
+#ifndef __wasm__
+/* GetProcessTimes/GetThreadTimes(h, *creation, *exit, *kernel, *user) -> BOOL.
+ * Kernel/user are the real host CPU times (getrusage); creation is captured once at
+ * first call (so elapsed-since-creation is sensible); exit is 0 (still running). */
+static void u32_fill_times(uint32_t esp, int who) {
+    static int64_t creation = 0;
+    if (!creation) creation = ((int64_t)time(NULL) + 11644473600LL) * 10000000LL;
+    int64_t kern = 0, usr = 0;
+    struct rusage ru;
+    if (getrusage(who, &ru) == 0) {
+        kern = (int64_t)ru.ru_stime.tv_sec * 10000000LL + (int64_t)ru.ru_stime.tv_usec * 10;
+        usr  = (int64_t)ru.ru_utime.tv_sec * 10000000LL + (int64_t)ru.ru_utime.tv_usec * 10;
+    }
+    u32_put_filetime(WP(1), creation);
+    u32_put_filetime(WP(2), 0);
+    u32_put_filetime(WP(3), kern);
+    u32_put_filetime(WP(4), usr);
+}
+uint32_t aret_GetProcessTimes(uint32_t esp) { u32_fill_times(esp, RUSAGE_SELF); return 1; }
+uint32_t aret_GetThreadTimes(uint32_t esp) {
+#ifdef RUSAGE_THREAD
+    u32_fill_times(esp, RUSAGE_THREAD);
+#else
+    u32_fill_times(esp, RUSAGE_SELF);   /* single-fiber model: thread == process */
+#endif
+    return 1;
+}
+#else
+uint32_t aret_GetProcessTimes(uint32_t esp) {
+    u32_put_filetime(WP(1), 0); u32_put_filetime(WP(2), 0);
+    u32_put_filetime(WP(3), 0); u32_put_filetime(WP(4), 0); return 1;
+}
+uint32_t aret_GetThreadTimes(uint32_t esp) { return aret_GetProcessTimes(esp); }
 #endif
 uint32_t aret_BeginDeferWindowPos(uint32_t esp) { (void)esp; return 0x0DEF0001u; }
 uint32_t aret_DeferWindowPos(uint32_t esp) {
