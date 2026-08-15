@@ -35,6 +35,15 @@
 #endif
 #include <sys/ioctl.h>
 #include <pwd.h>          /* GetUserName reads the passwd database, as Wine does */
+#ifndef __wasm__
+#include <sys/socket.h>   /* Winsock (ws2_32) maps to the host's real BSD sockets */
+#include <netinet/in.h>
+#include <netinet/tcp.h>  /* TCP_NODELAY */
+#include <arpa/inet.h>
+#include <netdb.h>
+#include <fcntl.h>        /* FIONBIO via fcntl(O_NONBLOCK) */
+#include <errno.h>
+#endif
 
 /* G2b (doc 72): a *visible* window is presented via SDL2 (portable: Linux/macOS,
  * and WASM via Emscripten later). SDL2 is linked ONLY when the program creates a
@@ -1174,6 +1183,280 @@ uint32_t aret_VerifyVersionInfoA(uint32_t esp) {
     return 0;
 }
 uint32_t aret_VerifyVersionInfoW(uint32_t esp) { return aret_VerifyVersionInfoA(esp); }
+
+#ifndef __wasm__
+/* ============================ Winsock2 (ws2_32) =============================
+ * Measured #1 OS wall after the C++ runtime is lifted (doc 90). A Windows SOCKET
+ * is modelled as a real host POSIX fd (like the file-HANDLE model): ARET runs
+ * natively, so the host's BSD sockets ARE the network. Each call maps to its POSIX
+ * twin; the only real work is translating the constants Windows numbers differently
+ * (address family, socket-option level/name, ioctl commands, message flags, the
+ * fd_set layout, error codes). Anything not translatable -> a DEFINED Winsock
+ * failure (WSAExxx), never a silently-wrong syscall (§0). Verified vs Wine
+ * (winecorpus/win32_winsock.c: a localhost TCP round-trip). WASM has no sockets
+ * -> these are not defined there and the weak stub aborts sound. */
+#define INVALID_SOCKET_U 0xFFFFFFFFu
+#define SOCKET_ERROR_U   0xFFFFFFFFu   /* (uint32_t)(-1) */
+
+/* errno -> WSAExxx (Winsock's 10000+ error space; on Windows WSAGetLastError and
+ * GetLastError share one slot, so we store into g_last_error). The standard finite
+ * map; a program that retries on WSAEWOULDBLOCK for non-blocking I/O must see the
+ * right code. Non-blocking connect: Linux EINPROGRESS -> Windows WSAEWOULDBLOCK.
+ * Unmapped -> WSAEINVAL (a DEFINED fallback, never a raw errno guessed as a code). */
+static uint32_t wsa_from_errno(int e) {
+    switch (e) {
+        case 0: return 0;
+        case EINTR: return 10004;            case EACCES: return 10013;
+        case EFAULT: return 10014;           case EINVAL: return 10022;
+        case EMFILE: return 10024;           case EWOULDBLOCK: return 10035;
+#if defined(EAGAIN) && EAGAIN != EWOULDBLOCK
+        case EAGAIN: return 10035;
+#endif
+        case EINPROGRESS: return 10035;      /* Windows nonblocking connect => WSAEWOULDBLOCK */
+        case EALREADY: return 10037;         case ENOTSOCK: return 10038;
+        case EBADF: return 10038;            case EMSGSIZE: return 10040;
+        case EPROTOTYPE: return 10041;       case ENOPROTOOPT: return 10042;
+        case EPROTONOSUPPORT: return 10043;  case ESOCKTNOSUPPORT: return 10044;
+        case EOPNOTSUPP: return 10045;       case EAFNOSUPPORT: return 10047;
+        case EADDRINUSE: return 10048;       case EADDRNOTAVAIL: return 10049;
+        case ENETDOWN: return 10050;         case ENETUNREACH: return 10051;
+        case ENETRESET: return 10052;        case ECONNABORTED: return 10053;
+        case ECONNRESET: return 10054;       case ENOBUFS: return 10055;
+        case EISCONN: return 10056;          case ENOTCONN: return 10057;
+        case ESHUTDOWN: return 10058;        case EPIPE: return 10058;
+        case ETIMEDOUT: return 10060;        case ECONNREFUSED: return 10061;
+        case EHOSTDOWN: return 10064;        case EHOSTUNREACH: return 10065;
+        default: return 10022;               /* WSAEINVAL */
+    }
+}
+static uint32_t wsa_fail(void) { g_last_error = wsa_from_errno(errno); return SOCKET_ERROR_U; }
+
+uint32_t aret_WSAGetLastError(uint32_t esp) { (void)esp; return g_last_error; }
+uint32_t aret_WSASetLastError(uint32_t esp) { g_last_error = WU(0); return 0; }
+
+/* WSAStartup(wVersionRequested, lpWSAData): report success + the requested version.
+ * WSADATA (x86, packed): 0 wVersion(u16) 2 wHighVersion(u16) 4 szDescription[257]
+ * 261 szSystemStatus[129] 390 iMaxSockets(u16) 392 iMaxUdpDg(u16) 394 lpVendorInfo. */
+uint32_t aret_WSAStartup(uint32_t esp) {
+    uint16_t req = (uint16_t)WU(0);
+    uint8_t *d = (uint8_t *)WP(1);
+    if (!d) { g_last_error = 10014; return 10014; }   /* WSAEFAULT */
+    memset(d, 0, 400);
+    d[0] = (uint8_t)req; d[1] = (uint8_t)(req >> 8);  /* wVersion = requested */
+    d[2] = 2; d[3] = 2;                               /* wHighVersion = 2.2 */
+    memcpy(d + 4, "WinSock 2.0", 11);
+    return 0;
+}
+uint32_t aret_WSACleanup(uint32_t esp) { (void)esp; return 0; }
+
+/* Address family: AF_INET(2) identical Win/Linux; AF_INET6 differs (Win 23/Linux 10);
+ * AF_UNSPEC(0) identical. Others -> caller gets WSAEAFNOSUPPORT (defined failure). */
+static int wsa_af_to_host(uint32_t af) {
+    if (af == 2) return AF_INET;
+    if (af == 23) return AF_INET6;
+    if (af == 0) return AF_UNSPEC;
+    return -1;
+}
+/* Copy a guest sockaddr into a host one, translating ONLY the family field (the
+ * sin/sin6 byte layouts are otherwise identical on i386). Returns host length, 0 on
+ * bad input. */
+static socklen_t wsa_sa_to_host(const uint8_t *g, uint32_t glen, struct sockaddr_storage *h) {
+    if (!g || glen < 2 || glen > sizeof *h) return 0;
+    memcpy(h, g, glen);
+    uint16_t fam = (uint16_t)(g[0] | (g[1] << 8));
+    uint16_t hf = (fam == 23) ? AF_INET6 : fam;          /* 2->2, 23->10 */
+    ((uint8_t *)h)[0] = (uint8_t)hf; ((uint8_t *)h)[1] = (uint8_t)(hf >> 8);
+    return (socklen_t)glen;
+}
+/* Reverse: write a host sockaddr back to the guest out-param, family translated,
+ * clamped to the caller's capacity; *gcap set to the true host length (Windows sets
+ * the actual size even when it exceeds the buffer). */
+static void wsa_sa_from_host(uint8_t *g, uint32_t *gcap, const struct sockaddr_storage *h, socklen_t hlen) {
+    if (!g || !gcap) return;
+    uint32_t cap = *gcap, n = (uint32_t)hlen; if (n > cap) n = cap;
+    if (n >= 2) {
+        memcpy(g, h, n);
+        uint16_t hf = (uint16_t)(((const uint8_t *)h)[0] | (((const uint8_t *)h)[1] << 8));
+        uint16_t wf = (hf == AF_INET6) ? 23 : hf;        /* 10->23, 2->2 */
+        g[0] = (uint8_t)wf; g[1] = (uint8_t)(wf >> 8);
+    }
+    *gcap = (uint32_t)hlen;
+}
+
+uint32_t aret_socket(uint32_t esp) {
+    int af = wsa_af_to_host(WU(0));
+    if (af < 0) { g_last_error = 10047; return INVALID_SOCKET_U; }  /* WSAEAFNOSUPPORT */
+    int fd = socket(af, (int)WU(1), (int)WU(2));       /* SOCK_STREAM/DGRAM identical */
+    if (fd < 0) { wsa_fail(); return INVALID_SOCKET_U; }
+    return (uint32_t)fd;
+}
+uint32_t aret_closesocket(uint32_t esp) { return close((int)WU(0)) < 0 ? wsa_fail() : 0; }
+uint32_t aret_bind(uint32_t esp) {
+    struct sockaddr_storage ss;
+    socklen_t hl = wsa_sa_to_host((const uint8_t *)WP(1), WU(2), &ss);
+    if (!hl) { g_last_error = 10014; return SOCKET_ERROR_U; }
+    return bind((int)WU(0), (struct sockaddr *)&ss, hl) < 0 ? wsa_fail() : 0;
+}
+uint32_t aret_connect(uint32_t esp) {
+    struct sockaddr_storage ss;
+    socklen_t hl = wsa_sa_to_host((const uint8_t *)WP(1), WU(2), &ss);
+    if (!hl) { g_last_error = 10014; return SOCKET_ERROR_U; }
+    return connect((int)WU(0), (struct sockaddr *)&ss, hl) < 0 ? wsa_fail() : 0;
+}
+uint32_t aret_listen(uint32_t esp) { return listen((int)WU(0), (int)WU(1)) < 0 ? wsa_fail() : 0; }
+uint32_t aret_accept(uint32_t esp) {
+    struct sockaddr_storage ss; socklen_t sl = sizeof ss;
+    int fd = accept((int)WU(0), (struct sockaddr *)&ss, &sl);
+    if (fd < 0) { wsa_fail(); return INVALID_SOCKET_U; }
+    wsa_sa_from_host((uint8_t *)WP(1), (uint32_t *)WP(2), &ss, sl);
+    return (uint32_t)fd;
+}
+uint32_t aret_shutdown(uint32_t esp) { return shutdown((int)WU(0), (int)WU(1)) < 0 ? wsa_fail() : 0; }
+uint32_t aret_getsockname(uint32_t esp) {
+    struct sockaddr_storage ss; socklen_t sl = sizeof ss;
+    if (getsockname((int)WU(0), (struct sockaddr *)&ss, &sl) < 0) return wsa_fail();
+    wsa_sa_from_host((uint8_t *)WP(1), (uint32_t *)WP(2), &ss, sl);
+    return 0;
+}
+uint32_t aret_getpeername(uint32_t esp) {
+    struct sockaddr_storage ss; socklen_t sl = sizeof ss;
+    if (getpeername((int)WU(0), (struct sockaddr *)&ss, &sl) < 0) return wsa_fail();
+    wsa_sa_from_host((uint8_t *)WP(1), (uint32_t *)WP(2), &ss, sl);
+    return 0;
+}
+/* recv/send message flags: MSG_OOB(1)/PEEK(2)/DONTROUTE(4) identical; Windows
+ * MSG_WAITALL is 0x8 vs Linux 0x100 -> translate. Unknown flag -> defined failure. */
+static int wsa_msgflags(uint32_t wf, int *ok) {
+    int lf = 0; *ok = 1;
+    if (wf & 0x1) lf |= MSG_OOB;
+    if (wf & 0x2) lf |= MSG_PEEK;
+    if (wf & 0x4) lf |= MSG_DONTROUTE;
+    if (wf & 0x8) lf |= MSG_WAITALL;
+    if (wf & ~0xFu) *ok = 0;
+    return lf;
+}
+uint32_t aret_send(uint32_t esp) {
+    int ok; int fl = wsa_msgflags(WU(3), &ok);
+    if (!ok) { g_last_error = 10022; return SOCKET_ERROR_U; }
+    ssize_t n = send((int)WU(0), WP(1), (size_t)WU(2), fl | MSG_NOSIGNAL);
+    return n < 0 ? wsa_fail() : (uint32_t)n;
+}
+uint32_t aret_recv(uint32_t esp) {
+    int ok; int fl = wsa_msgflags(WU(3), &ok);
+    if (!ok) { g_last_error = 10022; return SOCKET_ERROR_U; }
+    ssize_t n = recv((int)WU(0), WP(1), (size_t)WU(2), fl);
+    return n < 0 ? wsa_fail() : (uint32_t)n;
+}
+/* setsockopt/getsockopt: Windows numbers the level and option name differently from
+ * Linux, and the SO_* values ALL differ, so we translate a proven table of the
+ * common int-valued options (identical optval layout). Anything not in the table ->
+ * WSAENOPROTOOPT (defined failure), never a wrong option set silently. SO_LINGER is
+ * excluded on purpose (its struct differs in size). */
+static int wsa_sockopt(uint32_t wl, uint32_t wn, int *level, int *name) {
+    if (wl == 0xFFFFu) {                    /* SOL_SOCKET */
+        *level = SOL_SOCKET;
+        switch (wn) {
+            case 0x0004: *name = SO_REUSEADDR; return 1;
+            case 0x0008: *name = SO_KEEPALIVE; return 1;
+            case 0x0020: *name = SO_BROADCAST; return 1;
+            case 0x0100: *name = SO_OOBINLINE; return 1;
+            case 0x1001: *name = SO_SNDBUF;    return 1;
+            case 0x1002: *name = SO_RCVBUF;    return 1;
+            case 0x1005: *name = SO_SNDLOWAT;  return 1;
+            case 0x1004: *name = SO_RCVLOWAT;  return 1;
+            case 0x1007: *name = SO_ERROR;     return 1;
+            case 0x1008: *name = SO_TYPE;      return 1;
+            default: return 0;
+        }
+    }
+    if (wl == 6u) { *level = IPPROTO_TCP; return wn == 1u ? (*name = TCP_NODELAY, 1) : 0; }
+    return 0;
+}
+uint32_t aret_setsockopt(uint32_t esp) {
+    int level, name;
+    if (!wsa_sockopt(WU(1), WU(2), &level, &name)) { g_last_error = 10042; return SOCKET_ERROR_U; }
+    return setsockopt((int)WU(0), level, name, WP(3), (socklen_t)WU(4)) < 0 ? wsa_fail() : 0;
+}
+uint32_t aret_getsockopt(uint32_t esp) {
+    int level, name;
+    if (!wsa_sockopt(WU(1), WU(2), &level, &name)) { g_last_error = 10042; return SOCKET_ERROR_U; }
+    socklen_t sl = 0; uint32_t *pl = (uint32_t *)WP(4);
+    if (pl) sl = (socklen_t)*pl;
+    if (getsockopt((int)WU(0), level, name, WP(3), &sl) < 0) return wsa_fail();
+    if (pl) *pl = (uint32_t)sl;
+    return 0;
+}
+/* ioctlsocket: FIONBIO (set non-blocking) and FIONREAD (bytes readable) — the two
+ * that matter; Windows encodes the cmd differently from Linux. Others -> failure. */
+uint32_t aret_ioctlsocket(uint32_t esp) {
+    int s = (int)WU(0); uint32_t cmd = WU(1); uint32_t *argp = (uint32_t *)WP(2);
+    if (cmd == 0x8004667Eu) {                          /* FIONBIO */
+        int fl = fcntl(s, F_GETFL, 0);
+        if (fl < 0) return wsa_fail();
+        fl = (argp && *argp) ? (fl | O_NONBLOCK) : (fl & ~O_NONBLOCK);
+        return fcntl(s, F_SETFL, fl) < 0 ? wsa_fail() : 0;
+    }
+    if (cmd == 0x4004667Fu) {                          /* FIONREAD */
+        int n = 0;
+        if (ioctl(s, FIONREAD, &n) < 0) return wsa_fail();
+        if (argp) *argp = (uint32_t)n;
+        return 0;
+    }
+    g_last_error = 10022; return SOCKET_ERROR_U;
+}
+/* select: the Windows fd_set is { u_int fd_count; SOCKET fd_array[64]; } (an array
+ * of handles), the host's is a bitmask — translate both ways. The first arg (nfds)
+ * is ignored on Windows; we compute maxfd. timeval is identical on i386. */
+static void wsa_fdset_in(const uint8_t *w, fd_set *h, int *maxfd) {
+    if (!w) return;
+    uint32_t cnt; memcpy(&cnt, w, 4); if (cnt > 64) cnt = 64;
+    for (uint32_t i = 0; i < cnt; i++) {
+        uint32_t fd; memcpy(&fd, w + 4 + i * 4, 4);
+        if ((int)fd >= 0 && fd < FD_SETSIZE) { FD_SET((int)fd, h); if ((int)fd > *maxfd) *maxfd = (int)fd; }
+    }
+}
+static void wsa_fdset_out(uint8_t *w, const fd_set *h) {
+    if (!w) return;
+    uint32_t cnt; memcpy(&cnt, w, 4); if (cnt > 64) cnt = 64;
+    uint32_t keep = 0;
+    for (uint32_t i = 0; i < cnt; i++) {
+        uint32_t fd; memcpy(&fd, w + 4 + i * 4, 4);
+        if ((int)fd >= 0 && fd < FD_SETSIZE && FD_ISSET((int)fd, h)) { memcpy(w + 4 + keep * 4, &fd, 4); keep++; }
+    }
+    memcpy(w, &keep, 4);
+}
+uint32_t aret_select(uint32_t esp) {
+    uint8_t *wr = (uint8_t *)WP(1), *ww = (uint8_t *)WP(2), *we = (uint8_t *)WP(3), *wt = (uint8_t *)WP(4);
+    fd_set rs, ws, es; FD_ZERO(&rs); FD_ZERO(&ws); FD_ZERO(&es);
+    int maxfd = -1;
+    wsa_fdset_in(wr, &rs, &maxfd); wsa_fdset_in(ww, &ws, &maxfd); wsa_fdset_in(we, &es, &maxfd);
+    struct timeval tv, *ptv = NULL;
+    if (wt) { int32_t s, u; memcpy(&s, wt, 4); memcpy(&u, wt + 4, 4); tv.tv_sec = s; tv.tv_usec = u; ptv = &tv; }
+    int r = select(maxfd + 1, wr ? &rs : NULL, ww ? &ws : NULL, we ? &es : NULL, ptv);
+    if (r < 0) return wsa_fail();
+    wsa_fdset_out(wr, &rs); wsa_fdset_out(ww, &ws); wsa_fdset_out(we, &es);
+    return (uint32_t)r;
+}
+/* __WSAFDIsSet(fd, set): the ws2_32 helper that FD_ISSET expands to — is `fd` in the
+ * Windows (array-form) fd_set? */
+uint32_t aret_WSAFDIsSet(uint32_t esp) {
+    uint32_t fd = WU(0); const uint8_t *w = (const uint8_t *)WP(1);
+    if (!w) return 0;
+    uint32_t cnt; memcpy(&cnt, w, 4); if (cnt > 64) cnt = 64;
+    for (uint32_t i = 0; i < cnt; i++) { uint32_t f; memcpy(&f, w + 4 + i * 4, 4); if (f == fd) return 1; }
+    return 0;
+}
+/* Byte-order helpers (pure): network order = big-endian, same result on both engines
+ * (same host). inet_addr parses dotted IPv4 -> u32 network order (INADDR_NONE on error). */
+uint32_t aret_htons(uint32_t esp) { return htons((uint16_t)WU(0)); }
+uint32_t aret_ntohs(uint32_t esp) { return ntohs((uint16_t)WU(0)); }
+uint32_t aret_htonl(uint32_t esp) { return htonl(WU(0)); }
+uint32_t aret_ntohl(uint32_t esp) { return ntohl(WU(0)); }
+uint32_t aret_inet_addr(uint32_t esp) {
+    const char *cp = WCS(0);
+    return cp ? (uint32_t)inet_addr(cp) : INVALID_SOCKET_U;
+}
+#endif /* !__wasm__ */
 
 /* GetVersionExA/W(LPOSVERSIONINFO): report a real Windows version and return
  * TRUE, exactly as Windows/Wine do (Wine 9 reports 6.2.9200 NT). The caller sets

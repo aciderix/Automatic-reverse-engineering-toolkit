@@ -581,3 +581,14 @@ findData à l'arg 2). **Garde** : `winecorpus/win32_verquery.c` (bit-identique W
 `19acad982194bf07` inchangé, difftest 272/272, funcdiff 0-div, cpudiff 6/0, gnuehdiff 7/7. **Reste hors happy-path** :
 ninja *build* réel (exécution des règles) = surface sous-processus/IOCP/named-pipes/VEH (`CreateNamedPipeA`/
 `ConnectNamedPipe`/`CreateIoCompletionPort`/`GenerateConsoleCtrlEvent`), axe OS restant mesuré, non bloquant pour `-n`.
+
+### 🌐 Chantier Winsock (ws2_32) — increment 1 (2026-08-15) : le mur OS n°1 post-lift attaqué par la donnée
+
+Le sweep post-lift (doc 90) a désigné **Winsock/sockets** comme la surface OS n°1 une fois le runtime C++ lifté. Increment 1
+livre le **chemin TCP cœur** bit-identique Wine (`winecorpus/win32_winsock.c`, round-trip localhost mono-processus). Modèle :
+`SOCKET`==fd POSIX hôte (comme HANDLE==fd fichier) ; chaque appel = jumeau POSIX ; travail = traduire les constantes que
+Windows numérote autrement (famille, level/optname setsockopt, flags msg, ioctl, fd_set, erreurs errno→WSAExxx) — hors
+modèle → **échec WSA défini**, jamais un syscall faux (§0). Couvre socket/bind/connect/listen/accept/send/recv/select/
+setsockopt/getsockname/ioctlsocket/htons…/closesocket/WSAStartup + `__WSAFDIsSet`. `@N` déjà dans `stdcall_pops` (import-lib
+ws2_32) ⇒ 0 ABI. Portes : hash inchangé, difftest 272/272. **Reste** : getaddrinfo/gethostby*/inet_ntoa (retour pointeur),
+UDP, async. C'est le 1er cran d'un axe mesuré (~50-67 bins/fn) qui rendra runnable la classe des vrais binaires réseau.

@@ -8188,3 +8188,37 @@ bit-identique Wine). Additions runtime-C pures (aucun Rust touché) ⇒ hash `19
 `GenerateConsoleCtrlEvent`, `WriteConsoleOutputA`, `GetProcessId`/`GetSystemTimes` + les aborts sound assumés
 (`Add/RemoveVectoredExceptionHandler`, `Get/SetThreadContext`, `Find*VolumeW`) — non poursuivi car le build réel est
 plafonné par le `CreateProcess`-of-exe (limite dure), pas par ces shims.
+
+### 2026-08-15 — [HLE][WIN32 ✅] **Winsock2 (ws2_32) — increment 1 : le chemin TCP cœur, bit-identique Wine (mur OS n°1 post-lift, doc 90)**
+
+Le sweep post-lift (doc 90) désigne **Winsock/sockets** comme surface OS n°1 une fois le runtime C++ lifté (~16 fns,
+40-67 bins). Increment 1 = le chemin TCP complet. **Modèle** : un `SOCKET` Windows = un **fd POSIX hôte** (comme le modèle
+HANDLE==fd du fichier) — ARET tourne en natif, les sockets BSD de l'hôte SONT le réseau. Chaque appel mappe sur son jumeau
+POSIX ; le seul vrai travail = traduire les **constantes que Windows numérote autrement** :
+- **famille d'adresse** : AF_INET(2) identique, AF_INET6 (Win 23 → Linux 10), traduite dans le champ `sa_family` du
+  sockaddr (layouts sin/sin6 sinon identiques sur i386) ;
+- **level/optname setsockopt** : SOL_SOCKET (Win 0xFFFF → 1) + **toutes** les SO_* diffèrent (SO_REUSEADDR Win 4 → Linux 2,
+  etc.) ⇒ table prouvée des options int-valuées courantes ; hors table → **WSAENOPROTOOPT (échec défini)**, jamais une
+  option posée à tort ; SO_LINGER exclu (struct de taille différente) ;
+- **flags recv/send** : OOB/PEEK/DONTROUTE identiques, MSG_WAITALL (Win 0x8 → Linux 0x100) traduit, bit inconnu → échec ;
+- **ioctlsocket** : FIONBIO→fcntl(O_NONBLOCK), FIONREAD→ioctl ; autre → échec défini ;
+- **fd_set** : Windows = `{count; SOCKET[64]}` (tableau) vs bitmask hôte → conversion aller/retour pour `select` +
+  `__WSAFDIsSet` (ce que `FD_ISSET` compile) ;
+- **erreurs** : `errno` → **WSAExxx** (map finie standard ; EINPROGRESS→WSAEWOULDBLOCK pour connect non-bloquant ; unmapped
+  → WSAEINVAL défini). WSAGetLastError/GetLastError partagent `g_last_error` (comme sur Windows).
+
+**Livré** (`aret_win32.c`, `#ifndef __wasm__` — WASM n'a pas de sockets ⇒ non défini ⇒ weak-stub abort sound) :
+WSAStartup/WSACleanup, WSAGetLastError/WSASetLastError, socket/closesocket, bind/connect/listen/accept/shutdown,
+getsockname/getpeername, send/recv, setsockopt/getsockopt, ioctlsocket, select/`__WSAFDIsSet`, htons/ntohs/htonl/ntohl,
+inet_addr. **`@N` déjà dans stdcall_pops** (import-lib ws2_32) ⇒ zéro travail ABI.
+
+**Garde** : `winecorpus/win32_winsock.c` — round-trip TCP localhost **mono-processus** (un `connect` bloquant vers un
+socket loopback en écoute complète dans le backlog kernel ⇒ client+serveur dans un thread, déterministe) : ping/serveur,
+pong/client, `select` readable, ports non imprimés — **bit-identique Wine**. **2 pièges attrapés par la mesure** : (a)
+`printf("bind=%d listen=%d", bind(...), listen(...))` = **UB d'ordre d'évaluation** (listen auto-bind avant bind ⇒ EINVAL) —
+bug de FIXTURE, pas ARET (strace l'a montré : listen avant bind) → séparé en instructions ; (b) Wine headless fuit
+`ERROR_MOD_NOT_FOUND(126)` dans le last-error **avant main** (échec du driver de fenêtre) ⇒ ne pas imprimer
+`WSAGetLastError` après WSAStartup (bruit environnemental). **Harnais** : `-lws2_32` ajouté à la ligne de lien oracle
+(additif, inoffensif). **Portes** : hash `19acad982194bf07` inchangé (HLE-only), difftest 272/272, win32_file/crt_sopen
+verts. **Reste** (increments suivants) : getaddrinfo/gethostbyname/inet_ntoa (retour de pointeur → alloc guest à valider),
+UDP sendto/recvfrom, WSA* async (WSAAsyncSelect/overlapped).
