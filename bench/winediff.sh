@@ -157,6 +157,28 @@ run_one() {
     done < "$CORPUS/$name.withlocaldll"
     [ -n "$miss" ] && { echo "SKIP  $name ($miss not in mingw runtime dirs)"; return 2; }
   fi
+  # Optional shim-vs-redist validation (winecorpus/NAME.winedll): DLL basenames to copy
+  # into $WD so the Wine ORACLE loads the real redist DLL, while ARET routes its imports
+  # to HLE shims — NOT lifted (no --with-dll). Unlike .withlocaldll (which lifts), this
+  # validates a hand-written shim against the genuine DLL. The app links the exports via
+  # an import lib built from NAME.def (dlltool). DLLs resolve from the mingw runtime dirs
+  # and bench/.cache; SKIP if a DLL or the .def is absent (ephemeral-container friendly).
+  if [ -f "$CORPUS/$name.winedll" ]; then
+    [ -f "$CORPUS/$name.def" ] || { echo "SKIP  $name (no $name.def for winedll import lib)"; return 2; }
+    miss=""
+    while IFS= read -r dll || [ -n "$dll" ]; do
+      [ -z "$dll" ] && continue
+      local found=""
+      for d in "${MINGW_DLL_DIRS[@]}" "$DIR/.cache"; do [ -f "$d/$dll" ] && found="$d/$dll" && break; done
+      if [ -n "$found" ]; then cp -f "$found" "$WD/$dll"; else miss="$dll"; fi
+    done < "$CORPUS/$name.winedll"
+    [ -n "$miss" ] && { echo "SKIP  $name ($miss not found for winedll)"; return 2; }
+    if "${MINGW%-gcc}-dlltool" -d "$CORPUS/$name.def" -l "$WD/$name.winedll.a" 2>"$WD/err"; then
+      imp_lib="$imp_lib $WD/$name.winedll.a"
+    else
+      echo "FAIL  $name (dlltool winedll: $(head -1 "$WD/err"))"; return 1
+    fi
+  fi
   # Link the common Win32 libs a guard might reference (version info, OLE/COM,
   # BSTR, common controls). Harmless for programs that use none — the imports are
   # demand-loaded.

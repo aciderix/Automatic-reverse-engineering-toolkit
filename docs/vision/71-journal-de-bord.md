@@ -8258,3 +8258,27 @@ un `ctime` déterministe + `_fpreset` puis FP toujours fonctionnel) — bit-iden
 sont des slots CRT internes (pas de prototype public ⇒ implémentés sound mais non fixture-testables directement). Portes :
 hash `19acad982194bf07` inchangé (HLE-only), difftest 272/272. **⇒ Avec Winsock inc1+2, le mur OS post-lift mesuré est
 couvert** sauf l'axe **DLL tierces GLib/gettext** (Levier 1, plus gros, séparé).
+
+### 2026-08-15 — [HLE][I18N ✅] **gettext (libintl) — identité C-locale, mur post-lift n°2 (doc 90) ; + affordance harnais `.winedll`**
+
+Après le mur OS Winsock, la re-mesure (doc 90) désigne **GLib/gettext** (DLL tierces) comme axe suivant. **Test pré-lift
+§0** : `libintl-8.dll` = 0 forwarder (vrai code) mais importe `libgcc` + **`libiconv-2.dll`** ⇒ lifter tire une chaîne.
+**Choix sound moins cher pour gettext** : avec **aucun catalogue de traduction chargé** — l'état d'ARET, et le comportement
+**DÉFINI** en locale C / quand aucun `.mo` n'est trouvé — `gettext(msgid)` rend **msgid inchangé**. C'est le résultat
+spécifié, pas une devinette (même posture que notre collation C-locale). Donc **shim identité** (pas de lift, pas de
+libiconv), couvre ~78 bins. Livré (`aret_crt.c`, cdecl, 0 `@N`) : `libintl_gettext`/`dgettext`/`dcgettext` (→msgid),
+`ngettext`/`dngettext`/`dcngettext` (règle plurielle C : n==1?s1:s2), `textdomain`/`bindtextdomain`
+(stockage+retour pointeur, défaut "messages"), `bind_textdomain_codeset` (identité), `libintl_setlocale`/`fprintf`/`free`
+(routés vers les shims CRT existants ; `setlocale` partage la limite C-locale P1bis, doc 70 §5).
+
+**Validation « test proprement » (demande utilisateur) — nouvelle affordance harnais `.winedll`** : valide un **shim**
+contre la **VRAIE DLL redist** (≠ `.withlocaldll` qui *lifte*). `NAME.winedll` copie les DLL dans le work-dir pour que
+**l'oracle Wine charge la vraie `libintl-8.dll`**, tandis qu'ARET route les imports vers ses shims (pas de `--with-dll`) ;
+l'app lie les exports via un import-lib généré de `NAME.def` (dlltool). DLL résolues depuis les dirs mingw + `bench/.cache` ;
+SKIP propre si absentes (conteneur éphémère). `libintl-8.dll`+`libiconv-2.dll` récupérées de msys2 (`gettext-0.22.4`/
+`libiconv-1.19`) dans `bench/.cache` (non commitées, LGPL redist). **Garde** : `winecorpus/win32_gettext.{c,def,winedll}` —
+`gettext("Hello, world")`→identité, `ngettext(…,1/5)`→plurielle C, `textdomain`/`bindtextdomain`→valeurs stockées, **ARET
+(shims) bit-identique à Wine chargeant la vraie libintl**. **Portes** : hash `19acad982194bf07` inchangé (HLE-only),
+difftest 272/272, winediff clean SKIP=0/FAIL=1 (flake connu `lift_stdthrow`, task #31, passe seul — 0 régression réelle).
+**Reste de l'axe GLib/gettext** : `g_*` (GLib/GObject — vraies structures de données) = **Levier 1 lift** de
+`libglib-2.0-0.dll` (+ sa chaîne libintl/libiconv/libpcre/libwinpthread) — chantier plus gros, séparé.

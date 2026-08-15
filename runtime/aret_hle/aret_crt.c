@@ -1115,6 +1115,43 @@ uint32_t aret_wcsnicmp(uint32_t esp) {
 uint32_t aret_wcsicoll(uint32_t esp) { return aret_wcsicmp(esp); }
 uint32_t aret_wcscoll(uint32_t esp) { return aret_wcscmp(esp); }
 
+/* ---- gettext (libintl) — C-locale / no-catalog identity (measured post-lift wall,
+ * doc 90: libintl_gettext 78 bins, bindtextdomain 70, textdomain 63, dgettext 44…).
+ * With no translation catalog loaded — ARET's state, and the DEFINED behavior in the
+ * C locale / when no .mo file is found — gettext returns the msgid UNCHANGED. That is
+ * gettext's specified result, not a guess (same stance as our C-locale collation).
+ * The `libintl_*` names are the actual mingw libintl exports programs import
+ * (`gettext(x)` is #defined to `libintl_gettext(x)`). All cdecl (no @N pop). */
+uint32_t aret_libintl_gettext(uint32_t esp)   { return AU(0); }                      /* (msgid) -> msgid */
+uint32_t aret_libintl_dgettext(uint32_t esp)  { return AU(1); }                      /* (domain, msgid) */
+uint32_t aret_libintl_dcgettext(uint32_t esp) { return AU(1); }                      /* (domain, msgid, category) */
+uint32_t aret_libintl_ngettext(uint32_t esp)  { return AU(2) == 1 ? AU(0) : AU(1); } /* (s1, s2, n): C plural rule */
+uint32_t aret_libintl_dngettext(uint32_t esp) { return AU(3) == 1 ? AU(1) : AU(2); } /* (domain, s1, s2, n) */
+uint32_t aret_libintl_dcngettext(uint32_t esp){ return AU(3) == 1 ? AU(1) : AU(2); } /* (domain, s1, s2, n, cat) */
+/* textdomain/bindtextdomain return a pointer the caller may read (not free); we keep
+ * the current values in static buffers. Default domain "messages", as libintl. */
+static char g_td_domain[256] = "messages";
+static char g_td_dir[1024] = "";
+uint32_t aret_libintl_textdomain(uint32_t esp) {
+    const char *d = ACS(0);
+    if (d) { strncpy(g_td_domain, d, sizeof g_td_domain - 1); g_td_domain[sizeof g_td_domain - 1] = 0; }
+    return RP(g_td_domain);
+}
+uint32_t aret_libintl_bindtextdomain(uint32_t esp) {
+    const char *dir = ACS(1);
+    if (dir) { strncpy(g_td_dir, dir, sizeof g_td_dir - 1); g_td_dir[sizeof g_td_dir - 1] = 0; return RP(g_td_dir); }
+    return g_td_dir[0] ? RP(g_td_dir) : 0;              /* query with NULL: current binding, else NULL */
+}
+uint32_t aret_libintl_bind_textdomain_codeset(uint32_t esp) { return AU(1); }        /* (domain, codeset): identity (no transcode) */
+/* libintl wrappers over CRT functions -> route to the existing shims. setlocale
+ * shares the C-locale limitation documented at aret_wcscoll / doc 70 §5 (P1bis). */
+uint32_t aret_setlocale(uint32_t esp);
+uint32_t aret_fprintf(uint32_t esp);
+uint32_t aret_free(uint32_t esp);
+uint32_t aret_libintl_setlocale(uint32_t esp) { return aret_setlocale(esp); }
+uint32_t aret_libintl_fprintf(uint32_t esp)   { return aret_fprintf(esp); }
+uint32_t aret_libintl_free(uint32_t esp)      { return aret_free(esp); }
+
 uint32_t aret_wcschr(uint32_t esp) {
     const uint16_t *s = (const uint16_t *)(uintptr_t)a32(esp, 0);
     uint16_t c = (uint16_t)a32(esp, 1);

@@ -1,0 +1,7 @@
+LIBRARY libintl-8.dll
+EXPORTS
+libintl_gettext
+libintl_dgettext
+libintl_ngettext
+libintl_textdomain
+libintl_bindtextdomain
