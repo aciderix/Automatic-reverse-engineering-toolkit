@@ -538,3 +538,16 @@ un axe **HLE classique** (comme les familles palette/shell32/CSIDL déjà faites
 cf. §wallsweep). Les apps ne tournent pas bout-en-bout **pas** à cause du C++ mais de cette surface OS — et certaines ne sont
 pas des CLI propres (`pzstd --version` timeoute **sous Wine** aussi). jsoncpp reste la preuve end-to-end propre ; l'axe OS/CRT
 `_w*` est le prochain chantier data-driven.
+
+### ✅ AXE OS wide-char COUVERT (2026-08-15) — 4 lots, boucle mesure→fix→re-mesure bouclée
+
+Les 4 lots (fichier `_w*`, Win32 FS/volumes `*W`, locale/stdio wide, introspection process/thread), chacun un shim mince
+réutilisant les corps narrow + garde bit-identique Wine : `crt_wpath`, `win32_wfs`, `crt_wlocale`, `win32_procinfo`.
+**Re-mesure `--mode walls` (runtime lifté) sur les 3 apps** : **0** des familles couvertes ne reste non-implémentée (tout le
+set `_w*`/`wcsxfrm`/`wcsftime`/`getwc`/`putwc`/`GetVolumeInformationW`/`RemoveDirectoryW`/`CreateHardLinkW`/`GetDiskFreeSpaceExW`/
+`GetProcessTimes`/`GetThreadTimes`/`*AffinityMask`/`GetSystemTimeAdjustment` a **disparu du mur**). **Restent** (3/3 apps) :
+(a) **abort sound assumé** — `Find{First,Next}VolumeW`/`FindVolumeClose` (GUID env-dépendants), `Get/SetThreadContext`
+(hors shared-stack), `Add/RemoveVectoredExceptionHandler` (livraison non câblée) ; (b) **petits reliquats faciles** non encore
+faits — `_wutime`, `_ultoa`, `_aligned_malloc`/`_aligned_free`, `_endthreadex`, `_p___mb_cur_max`, `GetTickCount64`,
+`SetSystemTime` (privilégié). Le gros de l'axe OS wide-char mesuré est **franchi** ; le reste est du mop-up borné + 3 aborts
+sound documentés. Principe sacré tenu partout (jamais un faux ; abort bruyant sur le non-modélisable).
