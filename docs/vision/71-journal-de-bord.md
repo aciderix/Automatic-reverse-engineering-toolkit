@@ -8059,3 +8059,17 @@ non mappé/échec → erreur msvcrt définie, jamais un faux 0). **Garde** : `wi
 hash `19acad982194bf07` inchangé (HLE hors empreinte transpile), `crt_findfirst` (narrow, garde le filler modifié) + fileio +
 str_direction verts. **Reste de l'axe OS** (lots suivants) : Win32 FS/volumes `*W` (`CreateHardLinkW`/`RemoveDirectoryW`/
 `GetVolumeInformationW`/`Find*VolumeW`), locale (`_wcsxfrm`/`_wcsftime`), `getwc`/`putwc`, introspection process/thread.
+
+### 2026-08-15 — [HLE][LIFT ✅] **Lot 2 — Win32 FS/volumes wide-char (`*W`)**
+
+Suite de l'axe OS mesuré. Ajouté (`aret_win32.c`, mêmes helpers `u32_w2n`/`u32_a2w`/`translate_path`) : `CreateDirectoryW`,
+`RemoveDirectoryW`, `CreateHardLinkW` (POSIX `link(target,new)`), `GetVolumeInformationW` (nom/serial/FS synthétiques comme la
+version A — env-dépendant, non oracle-exact), `GetDiskFreeSpaceExW` (ULARGE_INTEGER × 3 via `statvfs` du répertoire traduit).
+Gardés wasm (`link`/`statvfs` absents → return 0 sound). **Garde** : `winecorpus/win32_wfs.c` — crée/supprime un dossier
+(`RemoveDirectoryW`), écrit un fichier + `CreateHardLinkW` + relit le lien (`linkread=12345` prouve le hardlink), booléen de
+`GetVolumeInformationW`, `GetDiskFreeSpaceExW` succès + invariant `avail≤total` — n'imprime que du **déterministe**,
+**bit-identique Wine**. **`FindFirstVolumeW`/`FindNextVolumeW`/`FindVolumeClose` DIFFÉRÉS** : l'énumération de volumes rend des
+**GUID `\\?\Volume{…}\` env-dépendants** impossibles à matcher Wine bit-à-bit et fabriquer un GUID = valeur devinée (viole §0)
+⇒ restent en **abort sound** (`aret_unimpl`) si atteints, jamais un faux. **Portes** : hash `19acad982194bf07` inchangé,
+win32_file/fileops/fileinfo/file_process verts. **Reste** : locale wide (`_wcsxfrm`/`_wcsftime`), stdio wide (`getwc`/`putwc`/
+`ungetwc`), introspection process/thread (`GetProcessTimes`/`Get,SetThreadContext`/affinity — à modéliser/`aret_partial`).

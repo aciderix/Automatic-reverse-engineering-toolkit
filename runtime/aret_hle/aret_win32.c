@@ -5250,6 +5250,66 @@ uint32_t aret_GetVolumeInformationA(uint32_t esp) {
     if (fsn && fsns) { const char *s = "NTFS"; uint32_t n = 0; for (; s[n] && n < fsns - 1; n++) fsn[n] = s[n]; fsn[n] = 0; }
     return 1;
 }
+/* ---- Win32 wide-char FS surface (`*W`) ------------------------------------
+ * Measured (doc 82, 2026-08-15) as part of the OS wall after the C++ runtime
+ * lifts. Each is the ANSI core with the path narrowed (u32_w2n) then run through
+ * translate_path + the same host syscall. Volume/disk geometry that Windows would
+ * report is env-dependent, so callers get the same success/shape as the ANSI form
+ * (not oracle-checked for the exact bytes, exactly like GetVolumeInformationA). */
+uint32_t aret_CreateDirectoryW(uint32_t esp) {
+    char name[1024], path[1024];
+    u32_w2n((const uint16_t *)WP(0), name, sizeof name);
+    translate_path(name, path, sizeof path);
+    return mkdir(path, 0777) == 0 ? 1 : 0;
+}
+uint32_t aret_RemoveDirectoryW(uint32_t esp) {
+    char name[1024], path[1024];
+    u32_w2n((const uint16_t *)WP(0), name, sizeof name);
+    translate_path(name, path, sizeof path);
+    return rmdir(path) == 0 ? 1 : 0;
+}
+uint32_t aret_GetVolumeInformationW(uint32_t esp) {
+    uint16_t *vn = (uint16_t *)WP(1); uint32_t vns = WU(2);
+    uint32_t *serial = (uint32_t *)WP(3), *maxc = (uint32_t *)WP(4), *flags = (uint32_t *)WP(5);
+    uint16_t *fsn = (uint16_t *)WP(6); uint32_t fsns = WU(7);
+    if (vn && vns) u32_a2w("ARET", vn, (int)vns);
+    if (serial) *serial = 0x41524554u;
+    if (maxc) *maxc = 255;
+    if (flags) *flags = 0x00000002u;              /* FS_CASE_IS_PRESERVED */
+    if (fsn && fsns) u32_a2w("NTFS", fsn, (int)fsns);
+    return 1;
+}
+#ifndef __wasm__
+/* CreateHardLinkW(lpFileName=new, lpExistingFileName=target, lpSA) -> BOOL.
+ * POSIX link(target, new). */
+uint32_t aret_CreateHardLinkW(uint32_t esp) {
+    char nlink[1024], nexist[1024], plink[1024], pexist[1024];
+    u32_w2n((const uint16_t *)WP(0), nlink, sizeof nlink);
+    u32_w2n((const uint16_t *)WP(1), nexist, sizeof nexist);
+    translate_path(nlink, plink, sizeof plink);
+    translate_path(nexist, pexist, sizeof pexist);
+    return link(pexist, plink) == 0 ? 1 : 0;
+}
+/* GetDiskFreeSpaceExW(dir, *availToCaller, *total, *totalFree) -> BOOL; each OUT is
+ * a ULARGE_INTEGER (64-bit byte count). Host statvfs of the (translated) directory. */
+uint32_t aret_GetDiskFreeSpaceExW(uint32_t esp) {
+    char name[1024], path[1024];
+    const uint16_t *w = (const uint16_t *)WP(0);
+    if (w) { u32_w2n(w, name, sizeof name); translate_path(name, path, sizeof path); }
+    else snprintf(path, sizeof path, ".");
+    struct statvfs vfs;
+    if (statvfs(path[0] ? path : ".", &vfs) != 0) return 0;
+    uint64_t frsz = (uint64_t)vfs.f_frsize;
+    uint64_t *p;
+    if ((p = (uint64_t *)WP(1))) *p = (uint64_t)vfs.f_bavail * frsz;
+    if ((p = (uint64_t *)WP(2))) *p = (uint64_t)vfs.f_blocks * frsz;
+    if ((p = (uint64_t *)WP(3))) *p = (uint64_t)vfs.f_bfree * frsz;
+    return 1;
+}
+#else
+uint32_t aret_CreateHardLinkW(uint32_t esp) { (void)esp; return 0; }
+uint32_t aret_GetDiskFreeSpaceExW(uint32_t esp) { (void)esp; return 0; }
+#endif
 uint32_t aret_BeginDeferWindowPos(uint32_t esp) { (void)esp; return 0x0DEF0001u; }
 uint32_t aret_DeferWindowPos(uint32_t esp) {
     int i = u32_win_idx(WU(1));
