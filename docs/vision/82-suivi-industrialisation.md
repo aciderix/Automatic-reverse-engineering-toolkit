@@ -551,3 +551,15 @@ set `_w*`/`wcsxfrm`/`wcsftime`/`getwc`/`putwc`/`GetVolumeInformationW`/`RemoveDi
 faits — `_wutime`, `_ultoa`, `_aligned_malloc`/`_aligned_free`, `_endthreadex`, `_p___mb_cur_max`, `GetTickCount64`,
 `SetSystemTime` (privilégié). Le gros de l'axe OS wide-char mesuré est **franchi** ; le reste est du mop-up borné + 3 aborts
 sound documentés. Principe sacré tenu partout (jamais un faux ; abort bruyant sur le non-modélisable).
+
+### 🎯 2ᵉ VRAI BINAIRE TIERS end-to-end (2026-08-15) — ninja 1.13.2 (build tool C++), sortie identique Wine
+
+Après le mop-up OS, re-test d'un vrai binaire au-delà de jsoncpp : **ninja** (le build system, C++ dense — `std::string`/
+`std::map`/`std::vector`/iostream/exceptions/dispatch de sous-outils), lifté avec les 3 runtimes (libstdc++/libgcc/
+libwinpthread). **`ninja --version` → `1.13.2`** et **`ninja -t list` → les 19 lignes de sous-outils**, **identiques bit-à-bit
+à Wine** (modulo la normalisation CRLF du harnais — Wine sort `\r\n`, ARET `\n`, comme toutes les fixtures). ninja exerce
+**bien plus** du runtime C++ que le throw unique de jsoncpp : conteneurs, formatage de chaînes, iostream, parsing d'arguments,
+table de sous-commandes. **Baseline Wine** : les DLL runtime doivent être **à côté** de l'exe (sinon rc=53 DLL-not-found) —
+comme ARET les lifte via `--with-dll`. ⇒ Deux vrais binaires tiers C++ tournent maintenant end-to-end via le dispatcher EH +
+runtime C++ GNU lifté + surface OS HLE : **jsoncpp** (throw/catch bout-en-bout) et **ninja** (CLI C++ réaliste). Reste hors
+happy-path (ninja *build* réel) : IOCP/named-pipes/VEH — axe OS restant, mesuré, non bloquant pour `--version`/`-t`.
