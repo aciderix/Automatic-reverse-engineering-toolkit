@@ -230,7 +230,16 @@ difftest **272/272** · transpile-diff **4/4** (H=`19acad982194bf07`) · winedif
 `proof_ntreg.sh`/`proof_ntreg_native.sh` registre real-ABI, **`proof_reg_native.sh` = `reg.c` de Wine ENTIER**) · **ehdiff 6/6** (SEH `seh_except`
 + C++ `throw_catch`/`throw_dtor`/`throw_across`/`throw_byval`/`throw_static` — throw/catch, destructeur d'unwind, multi-frames, catch-by-value, CRT statique — bit-identiques Wine) · **gnuehdiff 7/7** (GNU/Itanium C++ `eh_throw_int`/`eh_throw_derived`/`eh_throw_dtor`/`eh_catch_byval`/`eh_rethrow`/`eh_multi_inherit`/`eh_throw_in_catch` — throw/catch, sous-typage, destructeurs d'unwind, catch-by-value, `__cxa_rethrow`, héritage multiple à offset non nul, throw d'une NOUVELLE exception depuis un catch — bit-identiques Wine, `bench/gnuehdiff.sh`) · cpudiff vert (per-instruction + séquences génératives) · funcdiff corpus **0 divergence** (lift **~20,6k** scorées /
 **~20k appels** — **imports (stubs `@N` + `@0` scalaires) + appels indirects résolus + intrinsèques mémoire host-backés (memmove/memcpy)** ; scratch sous-esp exclu ; opt ~10k scorées) · SMT **11/11** · in-place **3/3** · magicdiv **2³²** ·
-recompilabilité **100 %** · WASM **7/7**.
+recompilabilité **100 %** · WASM **7/7** · **lifting-DLL** (winecorpus, `--with-dll`/`.withlocaldll`) : comctl32 (imagelist/progress),
+lift_zlib, lift_libgcc, lift_libstdcxx, lift_stdexcept, lift_stdthrow, lift_stddtor, **lift_stdstring** (std::string heap `_M_create`
+thiscall via thunk d'import) — tous bit-identiques Wine.
+
+**🎯 1er vrai binaire tiers C++ complet (2026-08-15)** : **jsoncpp** (`Json::Value(objectValue).asInt()` → `Json::LogicError`
+lancée depuis libjsoncpp, attrapée en `std::exception&`) tourne **bout-en-bout bit-identique Wine** sur libjsoncpp+libstdc+++
+libgcc+libwinpthread **liftés** (throw réel, unwind, catch, `.what()`, formatage ostringstream). 3 bugs de lift-correctness
+**généraux** corrigés pour y arriver — pseudo-relocs mingw multi-module (une liste/module, base rebasée), double static/runtime
+des pseudo-relocs données (relocateur DllMain), callee-pop `ret N` thiscall propagé à travers un thunk d'import `jmp [IAT]`
+(doc 71/82, 2026-08-15).
 
 ---
 
