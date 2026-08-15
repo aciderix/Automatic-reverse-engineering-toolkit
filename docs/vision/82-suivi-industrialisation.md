@@ -511,3 +511,30 @@ Task séparée. C'est la 1ʳᵉ **mesure corpus** réelle : elle confirme que l'
 > Wine — sans le fix : crash/hang). **Bilan session : 3 bugs de lift-correctness GÉNÉRAUX corrigés** (pseudo-relocs
 > multi-module + double static/runtime + callee-pop thiscall via thunk d'import) ⇒ **le 1er vrai binaire tiers C++ (jsoncpp)
 > tourne bout-en-bout via le dispatcher EH d'ARET sur runtime C++ GNU lifté.** Prochain : d'autres binaires du corpus (doc 90).
+
+### 📊 MESURE post-milestone (2026-08-15) — le mur a BOUGÉ : le runtime C++ n'est plus le mur, c'est la surface OS/CRT
+
+Question data-driven après le milestone jsoncpp : **une fois le runtime C++ lifté (correctement), quel est le prochain mur ?**
+Mesure sur les **3 apps throw-users** du corpus EH (`ninja`, `pzstd`, `fluidsynth` — mingw32, échantillon doc 90) : `--mode
+walls` **AVEC** les 3 runtimes liftés (`--with-dll` libstdc++/libgcc/libwinpthread), imports non-implémentés restants agrégés.
+
+**Constat n°1 — l'axe runtime C++ est CLOS** : **0** import C++ (`_Z*`/`__cxa_*`/`_Unwind_*`/`__gxx_*`) ne reste
+non-implémenté sur les 3 apps une fois le runtime lifté. Les 3 fixes de la session (pseudo-relocs multi-module + double
+static/runtime + callee-pop thiscall via thunk) rendent le lift du runtime C++ **correct end-to-end**, ce que jsoncpp prouve
+bout-en-bout. Le mur mesuré dominant de doc 90 (37-47 % des binaires importent le runtime C++) est **franchi** pour ces binaires.
+
+**Constat n°2 — le mur suivant = surface OS/CRT, deux familles** (chacune sur les 3/3 apps) :
+- **CRT MSVCRT wide-char / locale** : `_wopen`/`_wstat64`/`_wfindfirst32`/`_wfindnext32`/`_wmkdir`/`_wchdir`/`_wgetcwd`/
+  `_wfullpath`/`_wchmod`/`_wutime` (famille **fichier Unicode**), `_wcsxfrm`/`_wcsftime`/`wcsxfrm`/`strxfrm` (collation/locale),
+  `getwc`/`putwc`/`ungetwc`, `_aligned_malloc`/`_aligned_free`, `_endthreadex`, `_ultoa`, `_p___mb_cur_max`.
+- **Win32 OS** : `CreateHardLinkW`/`RemoveDirectoryW`/`GetVolumeInformationW`/`GetDiskFreeSpaceExW`/`Find{First,Next}VolumeW`/
+  `FindVolumeClose` (**FS/volumes Unicode**), `GetProcessTimes`/`GetThreadTimes`/`Get/SetThreadContext`/`{Get,Set}ProcessAffinityMask`/
+  `GetTickCount64`/`GetSystemTimeAdjustment` (**introspection process/thread + horloge**), `{Add,Remove}VectoredExceptionHandler`.
+
+**⇒ Verdict** : le prochain axe **mesuré** (post-runtime-C++) est la **largeur HLE OS**, dominé par la **famille fichier
+Unicode `_w*`/`*W`** (ouvrir/statter/lister/créer des fichiers et volumes en wide-char) + l'introspection process/thread. C'est
+un axe **HLE classique** (comme les familles palette/shell32/CSIDL déjà faites), pas une nouvelle brique de fond. **Caveat** :
+échantillon de 3 apps (les throw-users runnables du cache) ; carte **statique** post-lift (ne certifie pas le comportement,
+cf. §wallsweep). Les apps ne tournent pas bout-en-bout **pas** à cause du C++ mais de cette surface OS — et certaines ne sont
+pas des CLI propres (`pzstd --version` timeoute **sous Wine** aussi). jsoncpp reste la preuve end-to-end propre ; l'axe OS/CRT
+`_w*` est le prochain chantier data-driven.
