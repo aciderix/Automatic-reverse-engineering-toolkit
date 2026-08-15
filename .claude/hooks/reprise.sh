@@ -27,13 +27,18 @@ Tu viens d'être compacté. AVANT toute action, exécute ce rituel :
 
   1. Relis EN ENTIER  docs/vision/70-reference-etat-methode-reste.md
   2. Relis EN ENTIER  docs/vision/80-orientations-architecturales.md
-                 et  docs/vision/81-industrialisation.md
-  3. Relis les DERNIÈRES ENTRÉES de docs/vision/71-journal-de-bord.md
-  4. Relis les DERNIERS COMMITS (rappelés ci-dessous)
-  5. ÉNUMÈRE toutes les règles de travail — principe sacré §0, doctrine §1,
+                 docs/vision/81-industrialisation.md
+             et  docs/vision/82-suivi-industrialisation.md (TRACKER VIVANT —
+                 c'est là que vit l'état du travail en cours ; dernières entrées
+                 rappelées ci-dessous)
+  3. Relis  docs/vision/90-corpus-sources.md (sources + MESURE du corpus : c'est
+     la carte data-driven des prochains murs — on priorise par la donnée)
+  4. Relis les DERNIÈRES ENTRÉES de docs/vision/71-journal-de-bord.md
+  5. Relis les DERNIERS COMMITS (rappelés ci-dessous)
+  6. ÉNUMÈRE toutes les règles de travail — principe sacré §0, doctrine §1,
      méthode §2 (doc 70) et §3 (doc 80). Elles sont et resteront TOUJOURS
      incontournables.
-  6. Fais le point, puis poursuis le travail en cours.
+  7. Fais le point, puis poursuis le travail en cours.
 
 Cette consigne est permanente : elle vaut pour chaque compression, sans qu'on
 ait à te la redonner.
@@ -51,6 +56,10 @@ git log --oneline -10 2>/dev/null
 echo
 echo "--- Dernières entrées du journal 71 (titres) ---"
 grep -n '^### ' "$D/71-journal-de-bord.md" 2>/dev/null | tail -8
+
+echo
+echo "--- Dernières entrées du tracker 82 (titres — état du travail en cours) ---"
+grep -nE '^(### |> \*\*)' "$D/82-suivi-industrialisation.md" 2>/dev/null | tail -8
 
 echo
 echo "--- État de l'arbre ---"
