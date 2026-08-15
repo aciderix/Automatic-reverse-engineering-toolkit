@@ -7976,3 +7976,33 @@ pas une vtable valide) = **mur distinct** (construction dense `std::__cxx11::ost
 `lift_libstdcxx`), borné à une session suivante. **Outillage** : winedbg avec `DYNAMIC_BASE` effacé (charge à base préférée,
 adresses fixes) + `$CanDeferOnBPByAddr`/`pass` (fautes guard-page de croissance de pile) ; couple winedbg↔gdb sur adresses
 identiques (relay/traceur inutiles — calcul intra-module, aucune API).
+
+### 2026-08-15 — [LOADER][LIFT ✅] **Pseudo-relocs : ne PAS static-patcher les cibles DONNÉES des DLL dont le relocateur runtime tourne (double application)**
+
+Suite directe du fix précédent. Les listes pseudo-reloc de tous les modules appliquées, jsoncpp franchit le mur VTT mais
+crashe dans `std::basic_ostream::sentry` (via `std::__ostream_insert`, l'`operator<<`) sur un **vptr d'objet faux**. winedbg :
+vptr correct de l'ostringstream = **RVA 0x1866d8** (`_ZTV…basic_ostringstream+0xc`, `*(vptr-12)=0x40`) ; ARET stockait **RVA
+0x31ca08** (pas une vtable). Traçage : une table de données jsoncpp (RVA 0x3d310, lue par le ctor) valait **0x6266d8 (correct)
+juste après le map** mais **0x7bca08 après les ctors**. Un **watchpoint gdb** a désigné `sub_4686e0` =
+**`_pei386_runtime_relocator` mingw** (appelé par le **DllMain** lifté de jsoncpp) re-patchant `0x6266d8 → 0x7bca08` = vtable
+**+ 2·delta**.
+
+**Cause** : ARET applique les pseudo-relocs **statiquement** (avant lift, car il démarre à auto-main et le C fige les
+immédiats) **ET** exécute le `DllMain` de chaque DLL lifté, dont le `_pei386_runtime_relocator` applique **la même formule**
+`*(target) += (*(slot) − slot_addr)` une **2ᵉ** fois. Sur une cible **DONNÉES** = double-application **vivante** (le C lifté
+lit `*(target)` au runtime) ⇒ valeur doublée ⇒ pointeur de vtable hors-bornes ⇒ SIGSEGV. Sur une cible **CODE**, l'écriture
+runtime tombe dans le `.text` **guest** non exécuté (ARET exécute le C compilé) ⇒ inoffensive — mais le patch **statique** du
+code reste indispensable (il fige l'immédiat correct au transpile).
+
+**Fix** (`apply_pseudo_relocs_for_module`) : pour un module dont le **DllMain est invoqué** (`relocator_bases` = hinstances de
+`primary.dll_inits`), ne static-patcher **que les cibles en section exécutable** (code) ; les cibles **données** vont au
+relocateur runtime du DLL. L'EXE (auto-main saute son entrée CRT ⇒ relocateur jamais exécuté) et un DLL **sans** DllMain
+gardent le patch complet. Symétrique/sound : chaque cible patchée **exactement une fois**.
+
+**Portes** : hash **`19acad982194bf07` inchangé**, difftest transpile 4/4, **0 régression** — `lift_libstdcxx` (iostream /
+`std::cout`, précisément ce chemin de données auto-importées) + `lift_stdexcept`/`stdthrow`/`stddtor` + `lift_libgcc`/`zlib` +
+`comctl32_imagelist`/`progress` **verts**. **Effet** : 0x47d310 reste **0x6266d8**, le `sentry` passe, jsoncpp progresse
+(`sub_454890` 22264→22289) et bute au **mur #3** — `Json::LogicError::LogicError(const std::string&)` (`sub_450930`), un
+`string[len]=0` où `len` vaut un **pointeur** au lieu d'une petite longueur (même signature), dans la construction du
+`std::string` du message. Borné là (§2). **Bilan** : 2 bugs de lift-correctness **généraux** corrigés cette session
+(application multi-module + double static/runtime des pseudo-relocs) ; jsoncpp franchit 3 murs ; suite en session dédiée.

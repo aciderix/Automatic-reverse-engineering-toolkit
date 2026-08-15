@@ -1017,7 +1017,14 @@ pub fn load_with_modules(primary_data: &[u8], dlls: &[(String, Vec<u8>)]) -> Res
     // own image base, not rebased) plus each merged DLL (at its rebased `hinstance`).
     let mut module_bases = vec![primary.image_base];
     module_bases.extend(modules.iter().map(|m| m.hinstance));
-    apply_runtime_pseudo_relocs(&mut primary, &module_bases, &resolved);
+    // Modules whose OWN mingw runtime pseudo-relocator will run at startup: those whose
+    // DllMain ARET invokes (`dll_inits`, keyed by rebased hinstance). For those, the
+    // relocator applies the data fixups at runtime, so ARET must not ALSO static-patch
+    // their data targets (that double-applies). The exe (auto-main skips its CRT entry,
+    // so its relocator never runs) and any DLL with no DllMain are absent here and keep
+    // the full static patch.
+    let relocator_bases: BTreeSet<u64> = primary.dll_inits.iter().map(|&(_, hinst)| hinst).collect();
+    apply_runtime_pseudo_relocs(&mut primary, &module_bases, &relocator_bases, &resolved);
     Ok(primary)
 }
 
@@ -1035,7 +1042,12 @@ pub fn load_with_modules(primary_data: &[u8], dlls: &[(String, Vec<u8>)]) -> Res
 /// (`resolved`) are touched: there the real value is known and correct. Slots left to the
 /// HLE (patched at runtime by `aret_data_import`) are untouched — so a build with no lifted
 /// DLLs (`resolved` empty) is a complete **no-op** (transpile hash unchanged).
-fn apply_runtime_pseudo_relocs(primary: &mut Program, module_bases: &[u64], resolved: &BTreeMap<u64, u64>) {
+fn apply_runtime_pseudo_relocs(
+    primary: &mut Program,
+    module_bases: &[u64],
+    relocator_bases: &BTreeSet<u64>,
+    resolved: &BTreeMap<u64, u64>,
+) {
     if resolved.is_empty() {
         return;
     }
@@ -1057,7 +1069,7 @@ fn apply_runtime_pseudo_relocs(primary: &mut Program, module_bases: &[u64], reso
     for i in 0..bases.len() {
         let base = bases[i];
         let hi = bases.get(i + 1).copied().unwrap_or(u64::MAX);
-        apply_pseudo_relocs_for_module(primary, base, hi, resolved);
+        apply_pseudo_relocs_for_module(primary, base, hi, relocator_bases.contains(&base), resolved);
     }
 }
 
@@ -1068,6 +1080,7 @@ fn apply_pseudo_relocs_for_module(
     primary: &mut Program,
     base: u64,
     hi: u64,
+    runs_relocator: bool,
     resolved: &BTreeMap<u64, u64>,
 ) {
     let rva_in_image = |rva: u32| primary.section_at(base + rva as u64).is_some();
@@ -1129,6 +1142,20 @@ fn apply_pseudo_relocs_for_module(
             }
             v
         });
+        // If this module's own runtime pseudo-relocator will run (its DllMain is invoked,
+        // `runs_relocator`), it applies the SAME `old + (*(slot) − slot_addr)` fixup at
+        // startup. For a DATA target that is a live double-application (ARET static + the
+        // relocator) → the value ends up adjusted twice (measured on jsoncpp: an ostream
+        // vtable pointer became `vtable + 2·delta`, an unmapped vptr → SIGSEGV). So there we
+        // must NOT static-patch data; the relocator does it correctly at runtime. A CODE
+        // target still needs the static patch: its immediate is baked into the compiled C at
+        // transpile time, and the relocator's write lands in the (dead) guest `.text` that
+        // ARET never executes. The exe's relocator does NOT run (ARET starts at auto-main),
+        // and a DLL with no DllMain never runs one either, so those keep the full patch.
+        let is_code = primary.section_at(code_va).map(|s| s.executable).unwrap_or(false);
+        if runs_relocator && !is_code {
+            continue;
+        }
         let Some(old) = old else { continue };
         // v2 fix: new = old + (real import value − imp-slot address), truncated to size.
         let mask = if bits >= 64 { u64::MAX } else { (1u64 << bits) - 1 };
