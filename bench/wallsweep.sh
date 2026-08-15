@@ -17,27 +17,43 @@
 # to it by construction. The two are used together, always.
 set -u
 ARET="${ARET:-target/release/aret}"
+# Parallelism + per-binary caps. `--mode walls` on each binary is fully independent
+# (one static map per PE, aggregated afterwards from its own file), so running them
+# in parallel is behaviour-preserving — same per-binary files, same aggregation. A
+# per-process wall-clock timeout AND a virtual-memory cap keep one pathological giant
+# DLL (a huge LLVM/Qt/z3 blob) from stalling the run or OOM-killing its siblings: it
+# fails cleanly ("analysis failed") instead. All three are env-tunable.
+JOBS="${WALLSWEEP_JOBS:-$(nproc 2>/dev/null || echo 4)}"
+TIMEOUT="${WALLSWEEP_TIMEOUT:-120}"          # seconds of wall-clock per binary
+MEMKB="${WALLSWEEP_MEMKB:-3500000}"          # per-process virtual-memory cap (~3.5 GB)
 [ $# -ge 1 ] || { echo "usage: bash bench/wallsweep.sh <dir-of-exes> [more-dirs...]"; exit 2; }
 
 tmp="$(mktemp -d)"; trap 'rm -rf "$tmp"' EXIT
-n=0; skipped=0
+
+# 1) Collect PE files (fast serial 2-byte magic check) into a NUL-delimited list.
+#    PE check: DOS 'MZ' magic (0x4d5a). Non-PE files are skipped silently.
+list="$tmp/.pelist"; : >"$list"; skipped=0
 for dir in "$@"; do
   for f in "$dir"/*; do
     [ -f "$f" ] || continue
-    # PE check: DOS 'MZ' magic (0x4d5a). Skip non-PE files silently.
     magic="$(od -An -tx1 -N2 "$f" 2>/dev/null | tr -d ' ')"
-    [ "$magic" = "4d5a" ] || { skipped=$((skipped+1)); continue; }
-    name="$(basename "$f")"
-    if "$ARET" "$f" --mode walls >"$tmp/$name.walls" 2>/dev/null && \
-       grep -q "ARET wall map" "$tmp/$name.walls"; then
-      n=$((n+1))
-    else
-      echo "  (analysis failed: $name)" >&2
-      rm -f "$tmp/$name.walls"
-    fi
+    if [ "$magic" = "4d5a" ]; then printf '%s\0' "$f" >>"$list"; else skipped=$((skipped+1)); fi
   done
 done
-echo "analyzed $n PE(s) ($skipped non-PE skipped)"
+
+# 2) Analyze in parallel (JOBS-way). Each PE -> its own $name.walls file, exactly as
+#    before. A failed/timed-out/OOM'd analysis leaves no valid map -> reported + removed.
+export ARET tmp TIMEOUT MEMKB
+_wallsweep_one() {
+  f="$1"; name="$(basename "$f")"; out="$tmp/$name.walls"
+  ( ulimit -v "$MEMKB" 2>/dev/null; timeout "$TIMEOUT" "$ARET" "$f" --mode walls ) >"$out" 2>/dev/null
+  if ! grep -q "ARET wall map" "$out"; then echo "  (analysis failed: $name)" >&2; rm -f "$out"; fi
+}
+export -f _wallsweep_one
+xargs -0 -a "$list" -P "$JOBS" -I{} bash -c '_wallsweep_one "$1"' _ {}
+
+n="$(find "$tmp" -maxdepth 1 -name '*.walls' | wc -l)"
+echo "analyzed $n PE(s) ($skipped non-PE skipped; ${JOBS}-way, ${TIMEOUT}s + ${MEMKB}KB/bin caps)"
 
 python3 - "$tmp" "$n" <<'PY'
 import sys, os, glob, re
