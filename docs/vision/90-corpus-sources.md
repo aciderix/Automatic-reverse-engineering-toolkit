@@ -185,3 +185,34 @@ loader sont une **suppression de mur GÉNÉRALE et PROUVÉE** — bout-en-bout b
 loader adressent des populations DISJOINTES** : l'EH débloque les 102 throw-users ; les 77 non-throw attendent surtout
 **plus de DLL liftées** (axe Levier 1 distinct) + de la récupération d'appels indirects. La preuve la plus propre des fixes
 reste la **fixture** (iostream), le corpus étant trop lourd pour un compte end-to-end net.
+
+## 3e sweep (2026-08-15) — post-runtime-C++/OS : le verdict TIENT, et le mur #1 est désormais LIFT-COVERED
+
+Re-mesure `wallsweep.sh` (désormais **parallélisé 4-way**, ~20 min au lieu de ~2 h) sur les mêmes **1313 PE32** après
+les gains de la session (3 fixes de lift-correctness du runtime C++ + axe OS wide-char couvert + jsoncpp/ninja
+end-to-end). **1276 analysés** (37 gros blobs LLVM/Qt/z3 dépassent le plafond mémoire/timeout ⇒ échec propre, comme
+prévu) — **119 propres / 1157 avec murs**.
+
+**Instructions non-liftées = BRUIT confirmé** (3e fois) : `int`/`ud2`/`in`/`int3`/`insb`/`outsd`/`popad`/`daa`/`outsb`/
+`pushad`/`arpl`/`insd`/`hlt`/`das`/`bound`/`les`/`aaa`/`sti` + même `push`/`pop`/`mov`/`jmp`/`shl`/`div` à bas compte
+dispersés = **data-décodée-en-code** + I/O port privilégié → abort correct. **SEULE lacune plausiblement RÉELLE** : le
+**trio SSE `psllq` (45 bins/6369 sites), `pinsrd` (69/4346), `cvtdq2pd` (48/4610)** — **non modélisés** dans `lift.rs`
+(vérifié : 0 match, alors que ~41 autres ops packed le sont) ⇒ vraies cibles de vectorisation, liftables+vérifiables vs
+Unicorn (cpudiff), touchant ~45-69 binaires. À confirmer au cas par cas (exécutable vs data) avant d'implémenter.
+
+**Imports manquants = LE SIGNAL, et il est IDENTIQUE aux 2 sweeps précédents : le RUNTIME C++ GNU domine** — `operator
+new`/`delete` (`Znwj` 365, `ZdlPvj` 275, `ZdlPv` 202, `ZdaPv` 188, `Znaj` 183), la famille `std::__throw_*`
+(`__throw_length_error` 278, `__throw_logic_error` 251, `__throw_bad_array_new_length` 163, `__throw_bad_alloc` 148,
+`__throw_bad_cast` 141, `__throw_out_of_range_fmt` 123, `__throw_bad_function_call` 104), `std::string`
+(`_M_create` 197, `_M_replace` 167, `_M_assign` 162, `_M_append` 113, `_M_dispose` 105), iostream (`__ostream_insert`
+188, `ios_base::Init` 158, `basic_ios::init` 157, `ostream::put`/`flush`/`operator<<`), `std::locale` (186/159),
+`ctype::_M_widen_init` 132, `_Rb_tree_*` (144/143/132), `cxa_guard_acquire/release` (137), `divdi3`/`udivdi3` (119/108).
+
+**⇒ VERDICT (l'interprétation est le point) :** le raw-sweep **reconfirme** le runtime C++ GNU comme mur n°1 par largeur
+(**reproductible sur 3 sweeps**) — MAIS ce mur est désormais **LIFT-COVERED** : la session a prouvé **2 vrais binaires
+tiers end-to-end** (jsoncpp throw/catch, ninja `-n`) en **liftant** libstdc++/libgcc/libwinpthread à côté (`--with-dll`,
+Levier 1), pas en écrivant 40 shims. Le raw-sweep ne **voit pas** le lift (il compte les imports statiques). Donc la tête
+n'est **pas** « 40 shims à écrire » : c'est « le lift du runtime C++ est la réponse, et il marche ». **Le vrai prochain
+mur mesuré est POST-LIFT** (ce qui bloque APRÈS avoir lifté le runtime = surface OS + lift-correctness C++ dense), qu'un
+raw-sweep ne montre pas ⇒ il faut un sweep **`--with-dll`** ciblé (comme la mesure 3-apps de 2026-08-15) pour le
+cartographier. Cibles data-désignées immédiates, indépendantes du lift : le **trio SSE** (général, vérifiable Unicorn).
