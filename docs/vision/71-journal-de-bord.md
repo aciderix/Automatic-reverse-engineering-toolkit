@@ -8168,3 +8168,23 @@ invariant `GetActiveProcessorCount`). **Portes** : hash **`19acad982194bf07` inc
 réel (exécution des règles) = surface OS sous-processus/IOCP/named-pipes/VEH (`CreateNamedPipeA`/`ConnectNamedPipe`/
 `CreateIoCompletionPort`/`GenerateConsoleCtrlEvent` encore dans le listing statique) — axe OS restant, mesuré, non
 bloquant pour `-n`.
+
+### 2026-08-15 — [HLE ✅] **Mop-up CRT général mesuré sur le mur de build réel de ninja (`_sopen`, `isleadbyte`)**
+
+`--mode walls` sur ninja (runtimes liftés) après le milestone `-n` classe le mur d'un **vrai build** : l'essentiel est la
+surface sous-processus/async (IOCP/named-pipes) — **bornée par une limite dure** : un build réel lance les compilateurs
+enfants via `CreateProcess` d'un `.exe`, qui reste un **échec sound** (pas de Windows pour exécuter l'enfant, doc 70 §5.0)
+⇒ câbler l'IOCP ne produirait pas un build fonctionnel (§2 : pas d'effort sans bénéfice mesuré). Restaient dans la liste
+**deux gaps CRT GÉNÉRAUX** (toute app, pas une rustine ninja), faits proprement :
+- **`_sopen(path, oflag, shflag[, pmode])`** (`aret_hle.c`) : open share-mode ; path (arg 0) et oflag `_O_*` (arg 1)
+  partagent le layout exact de `_open`, le `shflag` `_SH_*` est un advisory single-process sans sens POSIX, pmode = perms
+  de création (déjà 0666) ⇒ sémantique fichier **identique à `_open`**, route sur le même cœur.
+- **`isleadbyte(c)`** (`aret_crt.c`) → 0 : en locale C/SBCS (la seule modélisée, comme `IsDBCSLeadByte`/`_ismbblead`)
+  aucun octet n'est un lead byte.
+
+**Garde** : `winecorpus/crt_sopen_leadbyte.c` (round-trip `_sopen` write→read, miss→échec, `isleadbyte` 0/256 —
+bit-identique Wine). Additions runtime-C pures (aucun Rust touché) ⇒ hash `19acad982194bf07` inchangé par construction.
+**Reste du mur build-réel** : IOCP/named-pipes (`Create/ConnectNamedPipe`/`*IoCompletion*`/`GetOverlappedResult`),
+`GenerateConsoleCtrlEvent`, `WriteConsoleOutputA`, `GetProcessId`/`GetSystemTimes` + les aborts sound assumés
+(`Add/RemoveVectoredExceptionHandler`, `Get/SetThreadContext`, `Find*VolumeW`) — non poursuivi car le build réel est
+plafonné par le `CreateProcess`-of-exe (limite dure), pas par ces shims.

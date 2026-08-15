@@ -551,6 +551,10 @@ uint32_t aret_iswgraph(uint32_t esp)  { uint32_t c = AU(0); return c < 128 && is
  * one modelled, matching IsDBCSLeadByte=0 — no byte is a multibyte lead or trail. */
 uint32_t aret_ismbblead(uint32_t esp)  { (void)esp; return 0; }
 uint32_t aret_ismbbtrail(uint32_t esp) { (void)esp; return 0; }
+/* isleadbyte(c): true iff `c` is the first byte of a multibyte character in the
+ * current locale. In the single-byte C/en-US locale (the only one modelled,
+ * matching IsDBCSLeadByte=0) no byte is ever a lead byte -> 0. */
+uint32_t aret_isleadbyte(uint32_t esp) { (void)esp; return 0; }
 uint32_t aret_ismbblead_l(uint32_t esp)  { (void)esp; return 0; }
 uint32_t aret_ismbbtrail_l(uint32_t esp) { (void)esp; return 0; }
 

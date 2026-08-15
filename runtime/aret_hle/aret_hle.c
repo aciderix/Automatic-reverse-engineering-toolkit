@@ -2492,6 +2492,13 @@ uint32_t aret_open(uint32_t esp) {
     return (uint32_t)(fd < 0 ? (uint32_t)-1 : (uint32_t)fd);
 }
 
+/* _sopen(path, oflag, shflag [, pmode]): share-mode open. The path (arg 0) and
+ * the msvcrt _O_* oflag (arg 1) share _open's exact layout; the shflag (_SH_*
+ * share mode) is a single-process advisory that has no meaning on POSIX, and
+ * pmode is the create permission (we already create 0666). So the file semantics
+ * are identical to _open -> route to the same core. */
+uint32_t aret_sopen(uint32_t esp) { return aret_open(esp); }
+
 /* ---- msvcrt stat family + CRT file-info group -----------------------------
  * msvcrt's `struct _stat` (a.k.a. _stat32, 36 bytes) and `struct _stati64`
  * (48 bytes) have a FIXED Windows field layout that does NOT match a natural
