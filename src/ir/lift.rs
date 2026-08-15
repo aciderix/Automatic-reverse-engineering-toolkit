@@ -1167,7 +1167,13 @@ pub fn lift(insn: &Insn, bits: u32) -> Vec<Stmt> {
     }
 
     match ins.mnemonic() {
-        Mnemonic::Nop | Mnemonic::Endbr32 | Mnemonic::Endbr64 => vec![Stmt::Nop],
+        Mnemonic::Nop | Mnemonic::Endbr32 | Mnemonic::Endbr64
+        // Cache-prefetch hints and the spin-loop PAUSE have NO architectural effect
+        // (no register/memory/flag change) — a pure performance hint the CPU may ignore.
+        // The shared-stack model runs one fiber at a time, so PAUSE is likewise a no-op.
+        // Sound to drop (Unicorn treats them the same). Measured on ninja (`prefetcht0`).
+        | Mnemonic::Prefetcht0 | Mnemonic::Prefetcht1 | Mnemonic::Prefetcht2
+        | Mnemonic::Prefetchnta | Mnemonic::Prefetchw | Mnemonic::Pause => vec![Stmt::Nop],
         // Direction flag: `cld` clears DF (forward), `std` sets it (backward). The
         // string-op lifting reads DF to pick the element-advance sign, so both are
         // real writes now (not no-ops). DF reads 0 at entry (SSA init) = the ABI's

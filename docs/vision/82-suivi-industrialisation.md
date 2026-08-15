@@ -563,3 +563,21 @@ table de sous-commandes. **Baseline Wine** : les DLL runtime doivent être **à 
 comme ARET les lifte via `--with-dll`. ⇒ Deux vrais binaires tiers C++ tournent maintenant end-to-end via le dispatcher EH +
 runtime C++ GNU lifté + surface OS HLE : **jsoncpp** (throw/catch bout-en-bout) et **ninja** (CLI C++ réaliste). Reste hors
 happy-path (ninja *build* réel) : IOCP/named-pipes/VEH — axe OS restant, mesuré, non bloquant pour `--version`/`-t`.
+
+### 🎯 ninja `-n` (dry-run) end-to-end (2026-08-15) — le front-end complet de ninja tourne, sortie identique Wine
+
+Suite de « 2ᵉ vrai binaire tiers » : au-delà de `--version`/`-t list`, **`ninja -n`** (dry-run) exerce le **front-end
+complet** — parseur de manifeste + graphe de dépendances + ordonnancement + impression des commandes. Sur un manifeste
+test (règles `cc`/`link`, 3 cibles), sortie **bit-identique Wine** (`[1/3] CC a.o` / `[2/3] CC b.o` / `[3/3] LINK prog`,
+CRLF normalisé). **8 murs OS de démarrage** levés, tous **sound** (computation pure vérifiée OU échec **défini** faisant
+basculer l'appelant sur un repli — jamais une valeur fabriquée) : `prefetcht0/1/2/nta/w`+`pause` (no-op lifter, aucun
+effet architectural, additif ⇒ hash inchangé), `GetActive/MaximumProcessorCount`→1 (1 CPU logique, modèle fibers),
+`GetLogicalProcessorInformationEx`→échec défini (repli sur GetActiveProcessorCount), famille **job-object** (handle
+opaque bénin — ninja groupe ses enfants dans un job, ARET les lance en processus hôte sans imbriquer de job),
+`VerSetConditionMask` (pur bit-packing = algo Wine, u64), `VerifyVersionInfo` (compare à la version rapportée 6.2.9200 via
+condition 3-bit, comme `RtlVerifyVersionInfo` — **non winediff-vérifiable** car Wine compare à SA version réelle, mais
+exercé bit-identique par `ninja -n` bout-en-bout), `FindFirstFileExA/W` (hints ignorés, même cœur opendir/fnmatch,
+findData à l'arg 2). **Garde** : `winecorpus/win32_verquery.c` (bit-identique Wine). **Portes** : hash
+`19acad982194bf07` inchangé, difftest 272/272, funcdiff 0-div, cpudiff 6/0, gnuehdiff 7/7. **Reste hors happy-path** :
+ninja *build* réel (exécution des règles) = surface sous-processus/IOCP/named-pipes/VEH (`CreateNamedPipeA`/
+`ConnectNamedPipe`/`CreateIoCompletionPort`/`GenerateConsoleCtrlEvent`), axe OS restant mesuré, non bloquant pour `-n`.

@@ -8125,3 +8125,46 @@ fournis pour les deux autres). **Garde** : `winecorpus/crt_leftovers.c` — `ult
 **bit-identique Wine**. **Portes** : hash `19acad982194bf07` inchangé, crt_wpath/wlocale/win32_procinfo/thread_join verts.
 **⇒ Axe OS wide-char mesuré ENTIÈREMENT moppé** (seuls restent les 3 aborts sound assumés : `Find*Volume`, VEH-livraison,
 ThreadContext). Prochain : re-tester un vrai binaire tiers end-to-end au-delà de jsoncpp.
+
+### 2026-08-15 — [HLE][LIFT ✅] **`ninja -n` (dry-run) tourne bit-identique Wine — 8 murs de démarrage OS levés + no-op lifter prefetch/pause**
+
+Après `--version`/`-t list`, on pousse ninja vers un **vrai plan de build** : `ninja -n` (dry-run) parse le manifeste,
+construit le graphe de dépendances, ordonne les cibles et **imprime les commandes** sans les exécuter. Sur un manifeste
+test (`build.ninja` : règles `cc`/`link`, cibles `a.o`/`b.o`/`prog`), la sortie ARET est **identique bit-à-bit à Wine**
+(CRLF normalisé) : `[1/3] CC a.o` / `[2/3] CC b.o` / `[3/3] LINK prog`. Ça exerce le front-end complet de ninja (parseur
+de manifeste + graphe + ordonnancement), bien plus que le dispatch de sous-outils.
+
+**8 murs OS de démarrage levés** (chacun sound — computation pure vérifiée, ou **échec DÉFINI** qui fait basculer
+l'appelant sur un repli, jamais une valeur fabriquée) :
+- **prefetcht0/1/2/nta/w + pause** (`src/ir/lift.rs`) : hints de préchargement de cache et le PAUSE de spin-loop n'ont
+  **aucun effet architectural** (ni registre, ni mémoire, ni drapeau) → `Nop` (Unicorn les traite pareil ; le modèle
+  shared-stack ne court qu'un fiber ⇒ PAUSE = no-op). **Additif** (ne reprend que des sites qui abortaient ⇒ hash inchangé).
+- **`GetActiveProcessorCount`/`GetMaximumProcessorCount`** → 1 (ARET coopératif sur 1 CPU logique, modèle fibers).
+- **`GetLogicalProcessorInformationEx`** → échec défini (`*len=0`, `ERROR_NOT_SUPPORTED`) : la topologie CPU
+  variable-longueur est hors modèle ⇒ l'appelant retombe sur `GetActiveProcessorCount` (1 CPU) — **sound**, jamais
+  une topologie inventée.
+- **Famille job-object** (`CreateJobObjectA/W`/`AssignProcessToJobObject`/`SetInformationJobObject`/`TerminateJobObject`/
+  `IsProcessInJob`/`QueryInformationJobObject`) : sur Windows, ninja groupe ses enfants dans un job (mort-avec-le-parent).
+  ARET lance les enfants en processus hôte (modèle sous-processus, doc 82) et n'imbrique **jamais** de job ⇒ handle opaque
+  bénin (create OK, assign/set/terminate no-op succès, `IsProcessInJob`→FALSE, `QueryInformationJobObject`→échec défini).
+  Un dry-run pose ça mais ne lance aucun enfant ⇒ rien d'observable n'en dépend.
+- **`VerSetConditionMask(mask,type,cond)`** → u64 (`import_returns_u64`, `src/builder/mod.rs`) : helper de **pur
+  bit-packing** (aucun état OS), la condition 3-bit posée au slot du bit-type — **exactement l'algo de Wine** ⇒
+  bit-identique. `mask=27` vérifié.
+- **`VerifyVersionInfoA/W`** : compare les champs demandés à la version rapportée par ARET (6.2.9200, cohérente avec
+  `GetVersionEx`) via la condition 3-bit par champ, exactement comme `RtlVerifyVersionInfo` de Wine — groupe
+  numéro-de-version en compare **lexicographique** (major, minor, build, SP-major, SP-minor) testé une fois avec la
+  condition de groupe, plateforme/produit par-champ. **Computation pure ⇒ déterministe.** ⚠️ **Non winediff-vérifiable
+  directement** (Wine compare à SA propre version réelle via `RtlGetVersion`, ARET à sa 6.2 fixe) — mais exercé
+  **bit-identique** par `ninja -n` bout-en-bout, et les invariants (`VerSetConditionMask`, `FindFirstFileExA`,
+  `GetActiveProcessorCount≥1`) gardés par fixture.
+- **`FindFirstFileExA/W`** (`aret_hle.c`) : les args supplémentaires (niveau d'info, recherche nom-vs-device,
+  LARGE_FETCH) sont des **hints** ; l'énumération est identique et remplir tout `WIN32_FIND_DATA` est un sur-ensemble
+  sûr de `FindExInfoBasic` → route sur le même cœur opendir/fnmatch (findData à l'arg **2**, pas 1).
+
+**Garde ajoutée** : `winecorpus/win32_verquery.c` (bit-identique Wine — `VerSetConditionMask mask=27`, `FindFirstFileExA`,
+invariant `GetActiveProcessorCount`). **Portes** : hash **`19acad982194bf07` inchangé**, difftest **272/272**, funcdiff
+**0 divergence** (21859 scorées), cpudiff **6/0**, gnuehdiff 7/7 — tout vert. **Reste hors happy-path** : ninja *build*
+réel (exécution des règles) = surface OS sous-processus/IOCP/named-pipes/VEH (`CreateNamedPipeA`/`ConnectNamedPipe`/
+`CreateIoCompletionPort`/`GenerateConsoleCtrlEvent` encore dans le listing statique) — axe OS restant, mesuré, non
+bloquant pour `-n`.

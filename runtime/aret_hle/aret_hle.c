@@ -2182,6 +2182,19 @@ uint32_t aret_FindNextFileA(uint32_t esp) {
     return (uint32_t)aret_fill_find(st, (uint8_t *)(uintptr_t)arg(esp, 1));
 }
 uint32_t aret_FindNextFileW(uint32_t esp) { return aret_FindNextFileA(esp); }
+/* FindFirstFileEx(name, infoLevelId, findData, searchOp, searchFilter, flags): the
+ * extra args are performance HINTS (info level, name-vs-device search, LARGE_FETCH) —
+ * the enumeration itself is identical, and filling the full WIN32_FIND_DATA is a safe
+ * superset of FindExInfoBasic. Route to the same opendir/fnmatch core. findData is at
+ * arg 2 (not arg 1 as in FindFirstFile). Measured on ninja (`-n`). */
+uint32_t aret_FindFirstFileExA(uint32_t esp) {
+    return aret_find_first((const char *)(uintptr_t)arg(esp, 0), (uint8_t *)(uintptr_t)arg(esp, 2), 0);
+}
+uint32_t aret_FindFirstFileExW(uint32_t esp) {
+    char name[1024];
+    aret_w2n((const uint16_t *)(uintptr_t)arg(esp, 0), name, sizeof name);
+    return aret_find_first(name, (uint8_t *)(uintptr_t)arg(esp, 2), 1);
+}
 uint32_t aret_FindClose(uint32_t esp) {
     aret_find_t *st = (aret_find_t *)(uintptr_t)arg(esp, 0);
     if (!st) return 0;

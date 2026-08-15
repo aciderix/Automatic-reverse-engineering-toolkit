@@ -1067,6 +1067,113 @@ uint32_t aret_GetSystemInfo(uint32_t esp) {
     return 0;
 }
 uint32_t aret_GetNativeSystemInfo(uint32_t esp) { return aret_GetSystemInfo(esp); }
+/* Processor-count queries: ARET runs cooperatively on ONE logical CPU (fiber model). */
+uint32_t aret_GetActiveProcessorCount(uint32_t esp) { (void)esp; return 1; }
+uint32_t aret_GetMaximumProcessorCount(uint32_t esp) { (void)esp; return 1; }
+/* GetLogicalProcessorInformationEx(rel, buffer, *len) -> BOOL. Reporting the full CPU
+ * topology (variable-length SYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX) is out of scope;
+ * return a DEFINED failure so callers fall back to GetSystemInfo/GetActiveProcessorCount
+ * (which report 1 CPU) — sound, never a fabricated topology. */
+uint32_t aret_GetLogicalProcessorInformationEx(uint32_t esp) {
+    uint32_t *len = (uint32_t *)WP(2);
+    if (len) *len = 0;
+    g_last_error = 50u;       /* ERROR_NOT_SUPPORTED */
+    return 0;
+}
+
+/* Job objects: on Windows, ninja groups its child processes in a job so they die with
+ * it. ARET runs children as host processes (subprocess model, doc 82) and never nests
+ * jobs, so the job is a benign opaque handle: create succeeds, assign/set/terminate are
+ * no-op success, "is in a job" is false. A dry run (`ninja -n`) sets this up but runs
+ * no child, so nothing observable depends on it. */
+uint32_t aret_CreateJobObjectW(uint32_t esp) { (void)esp; return 0x4A0B0001u; }
+uint32_t aret_CreateJobObjectA(uint32_t esp) { return aret_CreateJobObjectW(esp); }
+uint32_t aret_AssignProcessToJobObject(uint32_t esp) { (void)esp; return 1; }
+uint32_t aret_SetInformationJobObject(uint32_t esp) { (void)esp; return 1; }
+uint32_t aret_TerminateJobObject(uint32_t esp) { (void)esp; return 1; }
+uint32_t aret_IsProcessInJob(uint32_t esp) {
+    uint32_t *res = (uint32_t *)WP(2);   /* IsProcessInJob(hProc, hJob, *pbResult) */
+    if (res) *res = 0;                   /* not currently in a job */
+    return 1;
+}
+/* QueryInformationJobObject: the accounting/limit classes we do not track -> a DEFINED
+ * failure so callers proceed (ninja treats it as "no job info"), never fabricated stats. */
+uint32_t aret_QueryInformationJobObject(uint32_t esp) {
+    uint32_t *ret = (uint32_t *)WP(4);
+    if (ret) *ret = 0;
+    g_last_error = 50u;       /* ERROR_NOT_SUPPORTED */
+    return 0;
+}
+/* VerSetConditionMask(mask, type, condition) -> ULONGLONG. A PURE bit-packing helper
+ * (no OS state): the 3-bit condition is placed at the slot for the single type bit.
+ * Exactly Wine's algorithm -> bit-identical. Returns u64 (edx:eax; import_returns_u64). */
+uint64_t aret_VerSetConditionMask(uint32_t esp) {
+    uint64_t mask = (uint64_t)WU(0) | ((uint64_t)WU(1) << 32);
+    uint32_t type = WU(2); uint32_t cond = WU(3) & 0x7u;
+    if (type == 0) return mask;
+    int shift = -1;
+    if (type & 0x80u) shift = 7 * 3;              /* VER_PRODUCT_TYPE      */
+    else if (type & 0x40u) shift = 6 * 3;         /* VER_SUITENAME         */
+    else if (type & 0x20u) shift = 5 * 3;         /* VER_SERVICEPACKMAJOR  */
+    else if (type & 0x10u) shift = 4 * 3;         /* VER_SERVICEPACKMINOR  */
+    else if (type & 0x08u) shift = 3 * 3;         /* VER_PLATFORMID        */
+    else if (type & 0x04u) shift = 2 * 3;         /* VER_BUILDNUMBER       */
+    else if (type & 0x02u) shift = 1 * 3;         /* VER_MAJORVERSION      */
+    else if (type & 0x01u) shift = 0;             /* VER_MINORVERSION      */
+    if (shift >= 0) mask |= (uint64_t)cond << shift;
+    return mask;
+}
+/* VerifyVersionInfo(OSVERSIONINFOEX*, typeMask, conditionMask) -> BOOL. Compares the
+ * requested fields against ARET's reported version (6.2.9200, matching GetVersionEx)
+ * using the 3-bit condition per field, exactly like Wine's RtlVerifyVersionInfo: the
+ * version-number group is a lexicographic compare (major, minor, build, SP-major,
+ * SP-minor) whose result is tested once with the group condition; platform/product are
+ * per-field. Pure computation -> deterministic and Wine-consistent. */
+static int aret_ver_apply(int res, uint32_t cond) {
+    switch (cond) {
+        case 1: return res == 0;   /* VER_EQUAL         */
+        case 2: return res > 0;    /* VER_GREATER       */
+        case 3: return res >= 0;   /* VER_GREATER_EQUAL */
+        case 4: return res < 0;    /* VER_LESS          */
+        case 5: return res <= 0;   /* VER_LESS_EQUAL    */
+        default: return 1;
+    }
+}
+uint32_t aret_VerifyVersionInfoA(uint32_t esp) {
+    const uint8_t *info = (const uint8_t *)(uintptr_t)WU(0);
+    uint32_t type = WU(1);
+    uint64_t cm = (uint64_t)WU(2) | ((uint64_t)WU(3) << 32);
+    if (!info || type == 0) { g_last_error = 87u; return 0; } /* ERROR_INVALID_PARAMETER */
+    /* Current version (matches aret_GetVersionEx: Windows 8, 6.2.9200 NT). */
+    const uint32_t c_major = 6, c_minor = 2, c_build = 9200, c_plat = 2;
+    const uint16_t c_spmaj = 0, c_spmin = 0; const uint8_t c_prod = 1 /*VER_NT_WORKSTATION*/;
+    uint32_t r_major = *(const uint32_t *)(info + 4),  r_minor = *(const uint32_t *)(info + 8);
+    uint32_t r_build = *(const uint32_t *)(info + 12), r_plat  = *(const uint32_t *)(info + 16);
+    uint16_t r_spmaj = *(const uint16_t *)(info + 148), r_spmin = *(const uint16_t *)(info + 150);
+    uint8_t  r_prod  = *(const uint8_t  *)(info + 154);
+#define VCMP(a, b) ((a) < (b) ? -1 : ((a) > (b) ? 1 : 0))
+#define VCOND(slot) ((uint32_t)((cm >> ((slot) * 3)) & 0x7u))
+    int ok = 1;
+    if (type & (0x1u | 0x2u | 0x4u | 0x10u | 0x20u)) {
+        uint32_t cond = (type & 0x2u) ? VCOND(1) : (type & 0x1u) ? VCOND(0)
+                      : (type & 0x4u) ? VCOND(2) : (type & 0x20u) ? VCOND(5) : VCOND(4);
+        int res = 0, done = 0;
+        if ((type & 0x2u)  && !done) { res = VCMP(c_major, r_major); done = res != 0; }
+        if ((type & 0x1u)  && !done) { res = VCMP(c_minor, r_minor); done = res != 0; }
+        if ((type & 0x4u)  && !done) { res = VCMP(c_build, r_build); done = res != 0; }
+        if ((type & 0x20u) && !done) { res = VCMP(c_spmaj, r_spmaj); done = res != 0; }
+        if ((type & 0x10u) && !done) { res = VCMP(c_spmin, r_spmin); }
+        if (!aret_ver_apply(res, cond)) ok = 0;
+    }
+    if (type & 0x8u)  { if (!aret_ver_apply(VCMP(c_plat, r_plat), VCOND(3))) ok = 0; }
+    if (type & 0x80u) { if (!aret_ver_apply(VCMP(c_prod, r_prod), VCOND(7))) ok = 0; }
+#undef VCMP
+#undef VCOND
+    if (ok) return 1;
+    g_last_error = 1150u;    /* ERROR_OLD_WIN_VERSION */
+    return 0;
+}
+uint32_t aret_VerifyVersionInfoW(uint32_t esp) { return aret_VerifyVersionInfoA(esp); }
 
 /* GetVersionExA/W(LPOSVERSIONINFO): report a real Windows version and return
  * TRUE, exactly as Windows/Wine do (Wine 9 reports 6.2.9200 NT). The caller sets
