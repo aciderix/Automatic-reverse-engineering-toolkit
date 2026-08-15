@@ -439,3 +439,29 @@ Task séparée. C'est la 1ʳᵉ **mesure corpus** réelle : elle confirme que l'
 > l'`__imp` doit résoudre vers un **autre point** de la vtable (adresse-point vs symbole), soit l'adresse de pile de l'objet
 > sous Wine fait « marcher » l'addition. **Trancher = winedbg sur l'original** (valeurs runtime de `*(0x6529038c)`,
 > `*(vtable-12)`, `ebx`, `ecx`) — analyse statique épuisée. Localisation maximale atteinte ; suite = session winedbg dédiée.
+
+> **✅ CAUSE RACINE TROUVÉE ET CORRIGÉE (2026-08-15, winedbg) — pseudo-relocs multi-module : ARET n'appliquait QU'UNE
+> liste sur N.** La session winedbg dédiée a tranché. libjsoncpp désactivée-ASLR (bit `DYNAMIC_BASE` effacé ⇒ charge à
+> sa base préférée 0x65240000, adresses fixes), bp au site du crash. Sous Wine, l'instruction `a1 8c 03 29 65`
+> (`mov 0x6529038c,%eax` dans le fichier) est **désassemblée `mov 0x781956ac,%eax` = libstdc+++0x1856ac** : **Wine a
+> RÉÉCRIT l'opérande** (relocalisation pseudo-runtime mingw, auto-import de **données** inter-DLL). `0x781956ac` =
+> **`_ZTTNSt7__cxx1119basic_ostringstreamIcSt11char_traitsIcESaIcEEE + 4`** = la **VTT** (Virtual Table Table) de
+> `std::ostringstream` ; `eax=*(VTT+4)`=construction-vtable ; `*(eax-12)=0x40` = **petit offset de base virtuelle**
+> `basic_ios` — construction à héritage **virtuel parfaitement légitime** (jsoncpp formate son message d'erreur via
+> `throwLogicError`→`ostringstream`). **ARET lisait l'opérande NON réécrit** `0x49038c` → `*(0x49038c)`=0x6258c8
+> (la vtable `__class_type_info`, contenu du slot **voisin** 0x5038c) → `*(vt-12)`=0x51dea0 (un pointeur) → écriture
+> hors-bornes. **Deux slots adjacents** : 0x50388 importe la VTT ostringstream, 0x5038c importe `__class_type_info` ;
+> l'immédiat bakée `0x5038c` = slot(0x50388)+4, et la pseudo-reloc (sym=0x50388) doit le réécrire → VTT+4. **Bug** :
+> `apply_runtime_pseudo_relocs` (a) s'arrêtait à la **1ʳᵉ** liste trouvée (`break 'find`) et (b) calculait
+> `slot_va = primary.image_base + sym` (base **exe**), alors qu'un lift multi-module a **une liste par module** avec des
+> RVA relatives à la base **rebasée de CE module**. ARET appliquait donc la liste de l'**exe** (jtest) et ignorait celles
+> de jsoncpp/libstdc++. **Fix général** (`src/loader/mod.rs`) : appliquer **chaque** liste avec la base rebasée de son
+> module (modules placés contigus/ascendants ⇒ frontière = base suivante). Portée : **tout auto-import de données inter-DLL**
+> (`std::cout`, iostream, VTT…). Portes : hash **19acad982194bf07 inchangé** (no-op hors multi-module), difftest **272/272**,
+> cargo test **79+**, **0 régression lifting-DLL** (lift_libgcc/zlib/libstdcxx/stdexcept/stdthrow/stddtor/comctl32 verts).
+> **jsoncpp franchit le mur VTT** (le ctor `sub_454890` progresse, construit l'ostringstream) **puis bute plus loin** :
+> nouveau crash dans du code **libstdc++** (`sub_526010`, usage de l'ostringstream) sur un **vptr d'objet garbage**
+> (`*(objet)=0x7bca08` n'est pas une vtable valide) — **mur suivant distinct** = construction dense de `std::ostringstream`
+> (`__cxx11`, héritage virtuel + VTT complet), plus riche que l'`ostream` de `lift_libstdcxx`. Outil-couple validé :
+> **winedbg (vérité Wine) ↔ gdb (ARET) sur les mêmes adresses** (le relay/traceur ne servent pas ici — calcul intra-module,
+> aucune API). Suite = forensics du vptr d'ostringstream (borné : session suivante).

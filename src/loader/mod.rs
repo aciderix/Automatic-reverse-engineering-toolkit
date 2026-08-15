@@ -1013,7 +1013,11 @@ pub fn load_with_modules(primary_data: &[u8], dlls: &[(String, Vec<u8>)]) -> Res
         sec.data[off..off + 4].copy_from_slice(&bytes);
         primary.imports.remove(&slot);
     }
-    apply_runtime_pseudo_relocs(&mut primary, &resolved);
+    // Bases of every module whose pseudo-reloc list may need applying: the exe (at its
+    // own image base, not rebased) plus each merged DLL (at its rebased `hinstance`).
+    let mut module_bases = vec![primary.image_base];
+    module_bases.extend(modules.iter().map(|m| m.hinstance));
+    apply_runtime_pseudo_relocs(&mut primary, &module_bases, &resolved);
     Ok(primary)
 }
 
@@ -1031,11 +1035,41 @@ pub fn load_with_modules(primary_data: &[u8], dlls: &[(String, Vec<u8>)]) -> Res
 /// (`resolved`) are touched: there the real value is known and correct. Slots left to the
 /// HLE (patched at runtime by `aret_data_import`) are untouched — so a build with no lifted
 /// DLLs (`resolved` empty) is a complete **no-op** (transpile hash unchanged).
-fn apply_runtime_pseudo_relocs(primary: &mut Program, resolved: &BTreeMap<u64, u64>) {
+fn apply_runtime_pseudo_relocs(primary: &mut Program, module_bases: &[u64], resolved: &BTreeMap<u64, u64>) {
     if resolved.is_empty() {
         return;
     }
-    let base = primary.image_base;
+    // A multi-module lift folds ONE pseudo-reloc list PER module (the exe plus each
+    // lifted DLL) into the merged image — and each list's `sym`/`target` are RVAs
+    // relative to THAT module's own base (they are raw RVAs stored as data, so the
+    // base-relocation pass at merge time leaves them unchanged). So we must apply every
+    // module's list with its OWN rebased base. Modules are placed contiguously in
+    // ascending order (merge appends each DLL above the current max), so a module owns
+    // the address range `[base, next_base)`. Stopping at the first list, or using the
+    // exe base for a DLL's list, leaves that DLL's data auto-imports unpatched — e.g.
+    // jsoncpp's `std::ostringstream` VTT reference (slot 0x50388) kept its baked
+    // immediate pointing at the ADJACENT `__class_type_info` vtable slot, so a
+    // virtual-base construction read a function pointer where it expected a small
+    // vbase-offset and stored a vptr out of bounds → SIGSEGV (doc 82, jsoncpp).
+    let mut bases: Vec<u64> = module_bases.to_vec();
+    bases.sort_unstable();
+    bases.dedup();
+    for i in 0..bases.len() {
+        let base = bases[i];
+        let hi = bases.get(i + 1).copied().unwrap_or(u64::MAX);
+        apply_pseudo_relocs_for_module(primary, base, hi, resolved);
+    }
+}
+
+/// Apply one module's runtime pseudo-reloc list. `base` = that module's rebased image
+/// base; the module owns the merged address range `[base, hi)` (`hi` = the next
+/// module's base). The list's entries carry RVAs relative to `base`.
+fn apply_pseudo_relocs_for_module(
+    primary: &mut Program,
+    base: u64,
+    hi: u64,
+    resolved: &BTreeMap<u64, u64>,
+) {
     let rva_in_image = |rva: u32| primary.section_at(base + rva as u64).is_some();
     // Locate the v2 list by its 12-byte header {magic1=0, magic2=0, version=1} in a
     // read-only (non-executable) section — mingw emits it in `.rdata`. Stripped binaries
@@ -1043,7 +1077,7 @@ fn apply_runtime_pseudo_relocs(primary: &mut Program, resolved: &BTreeMap<u64, u
     // the first entry (sym/target are in-image RVAs, size flag ∈ {8,16,32}).
     let mut list: Option<(u64, u64)> = None; // (first item VA, section end VA)
     'find: for s in &primary.sections {
-        if s.executable {
+        if s.executable || s.address < base || s.address >= hi {
             continue;
         }
         let d = &s.data;

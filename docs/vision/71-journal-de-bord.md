@@ -7940,3 +7940,39 @@ dans `main`. Sortie `start`/`oor: vector::_M_range_check: __n (which is 5) >= th
   (landing pad de cleanup en `f`, sélecteur 0) **avant** le catch de `main`. Marche **out of the box** (machinerie 2c + 3b
   combinée) ⇒ pas une ligne de code, juste la fixture-garde `winecorpus/lift_stddtor.cpp` (bit-identique Wine, winediff
   235/237). Confirme que multi-frame unwind + dtor intermédiaire + throw-depuis-libstdc++ se composent correctement.
+
+### 2026-08-15 — [LOADER][LIFT ✅] **Pseudo-relocs mingw multi-module : appliquer TOUTES les listes (une par module), pas la première — mur de lift-correctness de jsoncpp**
+
+Forensics dédiée du crash jsoncpp (task #39, doc 82). **Cause racine trouvée par winedbg (vérité Wine) ↔ gdb (ARET)** sur
+les mêmes adresses. Le ctor global `sub_454890` de libjsoncpp formate un message d'erreur (`throwLogicError`) via un
+`std::ostringstream`, dont la construction (héritage **virtuel** + **VTT**) lit une entrée de VTT via un **auto-import de
+données inter-DLL** (relocalisation pseudo-runtime mingw). Guest : `mov 0x6529038c,%eax` — dans le **fichier** l'opérande
+est 0x6529038c (jsoncpp), mais **Wine RÉÉCRIT l'opérande → 0x781956ac = `_ZTT...basic_ostringstream + 4`** (la VTT dans
+libstdc++). Puis `eax=*(VTT+4)`=construction-vtable, `*(eax-12)=0x40` = **petit offset de base virtuelle** `basic_ios`
+(légitime). **ARET lisait l'opérande NON réécrit** `0x49038c` → `*(0x49038c)` = la vtable `__class_type_info` (contenu du
+slot **voisin** 0x5038c) → `*(vt-12)`=0x51dea0 (**un pointeur**, pas un offset) → `objet + pointeur` **hors-bornes** → SIGSEGV.
+**Deux slots adjacents** : 0x50388 = import de la VTT ostringstream, 0x5038c = import de `__class_type_info` ; l'immédiat
+bakée `0x5038c` = slot(0x50388)+4, et la pseudo-reloc (`sym=0x50388`) doit le réécrire → VTT+4.
+
+**Bug (`apply_runtime_pseudo_relocs`, `src/loader/mod.rs`)** : (a) s'arrêtait à la **1ʳᵉ liste trouvée** (`break 'find`) et
+(b) calculait `slot_va = primary.image_base + sym` avec la base de l'**exe**. Or un lift multi-module fold **une liste
+pseudo-reloc PAR module** (exe + chaque DLL liftée), chacune avec des `sym`/`target` en **RVA relatives à la base rebasée
+de CE module** (ce sont des RVA stockées en données, la passe de base-reloc du merge ne les touche pas). ARET appliquait donc
+la liste de l'**exe** (jtest) — correctement — et **ignorait celles de jsoncpp et libstdc++** ⇒ les auto-imports de données
+de ces DLL gardaient leur immédiat non patché.
+
+**Fix général** : appliquer **chaque** liste avec la **base rebasée de son module**. Les modules sont placés contigus et
+ascendants (`merge_modules` empile chaque DLL au-dessus du max courant) ⇒ un module possède la plage `[base, base_suivante)`.
+Nouveau `apply_pseudo_relocs_for_module(base, hi)` bouclé sur `[primary.image_base] + [m.hinstance …]` triés ; le scan de la
+liste est restreint aux sections `[base, hi)` et les entrées appliquées avec `base`. Débloque **tout auto-import de données
+inter-DLL** (`std::cout`/`cin`/`cerr`, iostream, VTT, type_info importés) — pas seulement jsoncpp.
+
+**Portes** : hash **`19acad982194bf07` inchangé** (`resolved` vide hors multi-module ⇒ early-return ⇒ no-op ; single-binary
+intact), **difftest 272/272**, **cargo test 79+** (dont les tests loader/merge_modules), **0 régression lifting-DLL**
+(`lift_libgcc`/`lift_zlib`/`lift_libstdcxx`/`lift_stdexcept`/`lift_stdthrow`/`lift_stddtor`/`comctl32_imagelist` verts).
+**Effet mesuré** : jsoncpp franchit le mur VTT — `sub_454890` progresse, construit l'ostringstream, appelle libstdc++ ;
+**crash suivant plus loin** dans `sub_526010` (libstdc++, usage du stream) sur un **vptr d'objet garbage** (`*(objet)` n'est
+pas une vtable valide) = **mur distinct** (construction dense `std::__cxx11::ostringstream`, plus riche que l'`ostream` de
+`lift_libstdcxx`), borné à une session suivante. **Outillage** : winedbg avec `DYNAMIC_BASE` effacé (charge à base préférée,
+adresses fixes) + `$CanDeferOnBPByAddr`/`pass` (fautes guard-page de croissance de pile) ; couple winedbg↔gdb sur adresses
+identiques (relay/traceur inutiles — calcul intra-module, aucune API).
