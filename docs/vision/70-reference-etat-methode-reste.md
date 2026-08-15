@@ -234,12 +234,18 @@ recompilabilité **100 %** · WASM **7/7** · **lifting-DLL** (winecorpus, `--wi
 lift_zlib, lift_libgcc, lift_libstdcxx, lift_stdexcept, lift_stdthrow, lift_stddtor, **lift_stdstring** (std::string heap `_M_create`
 thiscall via thunk d'import) — tous bit-identiques Wine.
 
-**🎯 1er vrai binaire tiers C++ complet (2026-08-15)** : **jsoncpp** (`Json::Value(objectValue).asInt()` → `Json::LogicError`
-lancée depuis libjsoncpp, attrapée en `std::exception&`) tourne **bout-en-bout bit-identique Wine** sur libjsoncpp+libstdc+++
-libgcc+libwinpthread **liftés** (throw réel, unwind, catch, `.what()`, formatage ostringstream). 3 bugs de lift-correctness
-**généraux** corrigés pour y arriver — pseudo-relocs mingw multi-module (une liste/module, base rebasée), double static/runtime
-des pseudo-relocs données (relocateur DllMain), callee-pop `ret N` thiscall propagé à travers un thunk d'import `jmp [IAT]`
-(doc 71/82, 2026-08-15).
+**🎯 DEUX vrais binaires tiers C++ end-to-end (2026-08-15), bit-identiques Wine** (runtime C++ GNU **lifté** —
+libstdc++/libgcc/libwinpthread via `--with-dll`) : **jsoncpp** (`Json::Value(objectValue).asInt()` → `Json::LogicError`
+attrapée en `std::exception&` : throw réel, unwind, catch, `.what()`, ostringstream) et **ninja 1.13.2** (`--version`,
+`-t list`, **`-n` dry-run** = parseur de manifeste + graphe + ordonnancement). 3 bugs de lift-correctness **généraux**
+corrigés (pseudo-relocs mingw multi-module ; double static/runtime des pseudo-relocs données ; callee-pop `ret N` thiscall
+via thunk `jmp [IAT]`). **Axe OS wide-char COUVERT** (fichier `_w*`, Win32 FS/volumes `*W`, locale/stdio wide, introspection
+process/thread + reliquats `_sopen`/`isleadbyte`/…). **Mesure corpus post-lift (doc 90, 2026-08-15)** : lifter le runtime
+C++ rend **427/1279 (33 %)** binaires import-clean ⇒ le **prochain mur OS mesuré = Winsock/sockets** (`ws2_32`, ~16 fns,
+40-67 bins), puis largeur DLL tierces (GLib/gettext), puis mop-up CRT. Détail 71/82/90.
+
+**Nouvelles fixtures** (bit-identiques Wine) : `win32_verquery` (VerSetConditionMask/VerifyVersionInfo/FindFirstFileEx),
+`crt_sopen_leadbyte`, + l'axe OS wide-char (`crt_wpath`/`win32_wfs`/`crt_wlocale`/`win32_procinfo`/`crt_leftovers`).
 
 ---
 
