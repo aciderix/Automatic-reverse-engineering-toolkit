@@ -1230,7 +1230,7 @@ pub fn transpile(
     // function (which pops its own stack args) must raise the caller's esp by N,
     // or esp drifts N low per call (BusyBox `cksum` crashes on the indirectly
     // called FAST_FUNC CRC handler). Empty unless the program has such a function.
-    ir::build::set_callee_pops(ir::build::compute_callee_pops(funcs));
+    ir::build::set_callee_pops(ir::build::compute_callee_pops(prog, funcs));
 
     std::fs::create_dir_all(out_dir)
         .with_context(|| format!("failed to create {}", out_dir.display()))?;

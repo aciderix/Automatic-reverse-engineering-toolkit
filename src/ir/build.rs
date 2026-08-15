@@ -864,7 +864,21 @@ pub(crate) fn has_callee_pops() -> bool {
 /// `C2` — the unambiguous callee-pops-args encoding) and map its entry to N.
 /// Plain `ret` (`C3`, N=0) and non-returning functions are omitted, so only
 /// genuine `__stdcall`/`FAST_FUNC` callees ever get a pop modelled.
-pub fn compute_callee_pops(funcs: &[&Function]) -> HashMap<u64, u16> {
+/// The absolute slot address of an import thunk `jmp dword [abs32]` (`ff 25 …`), i.e.
+/// a memory-operand jump with no base/index register (an IAT / function-pointer slot).
+/// `None` for RIP-relative, register-indexed (jump tables), or non-memory jumps.
+fn abs_mem_jmp_slot(ins: &iced_x86::Instruction) -> Option<u64> {
+    if ins.op0_kind() != iced_x86::OpKind::Memory
+        || ins.memory_base() != iced_x86::Register::None
+        || ins.memory_index() != iced_x86::Register::None
+        || ins.is_ip_rel_memory_operand()
+    {
+        return None;
+    }
+    Some(ins.memory_displacement64())
+}
+
+pub fn compute_callee_pops(prog: &crate::loader::Program, funcs: &[&Function]) -> HashMap<u64, u16> {
     use iced_x86::Mnemonic;
     let mut m = HashMap::new();
     for f in funcs {
@@ -906,6 +920,25 @@ pub fn compute_callee_pops(funcs: &[&Function]) -> HashMap<u64, u16> {
             // recovered function's entry: that is the tail call.
             if t != 0 && t != f.entry && !f.blocks.contains_key(&t) && entries.contains(&t) {
                 tail.push((f.entry, t));
+            } else if t == 0 {
+                // An import thunk `jmp [IAT slot]` (`ff 25 <abs32>`): after the
+                // multi-module loader resolves the slot to a LIFTED export, its content
+                // is that export's recovered entry — so this is a tail call to it, and
+                // the caller must honour the TARGET's `ret N`. `near_branch_target` is 0
+                // for a memory-operand jmp, so the direct-edge test above misses it; a
+                // thiscall member thunk (e.g. `std::string::_M_create(size_type&, uint)`,
+                // `ret 8`) then left every caller's esp 8 low → a std::string built by
+                // lifted libstdc++ reloaded its length from the drifted slot as garbage
+                // → OOB write (doc 82, jsoncpp Json::LogicError). Only a slot resolving
+                // to a recovered entry is followed (unknown target ⇒ nothing learned).
+                if let Some(slot) = abs_mem_jmp_slot(ins) {
+                    if let Some(dest) = prog.read_u32(slot) {
+                        let dest = dest as u64;
+                        if entries.contains(&dest) && dest != f.entry {
+                            tail.push((f.entry, dest));
+                        }
+                    }
+                }
             }
         }
     }

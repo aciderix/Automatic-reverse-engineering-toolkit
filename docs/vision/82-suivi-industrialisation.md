@@ -489,3 +489,25 @@ Task séparée. C'est la 1ʳᵉ **mesure corpus** réelle : elle confirme que l'
 > signature** (valeur devant être petite = pointeur) dans la construction du `std::string` du message. **Mur suivant, borné.**
 > Bilan session : **2 bugs de lift-correctness GÉNÉRAUX corrigés** (pseudo-relocs multi-module + double-patch), jsoncpp
 > franchit 3 murs successifs ; le binaire dense en révélera d'autres — continuation en session suivante.
+
+> **🎯 MILESTONE (2026-08-15) — jsoncpp tourne BOUT-EN-BOUT, bit-identique Wine. 1er VRAI binaire tiers complet.**
+> Le mur #3 était un **esp-drift de 8** dans le `std::string` du message de `Json::LogicError`. Guest (winedbg + gdb) :
+> `_M_construct` (chemin heap, len>15) appelle `basic_string::_M_create(size_type&, uint)` via le thunk
+> `sub_4682f8 = jmp *[IAT]` ; `_M_create` est **`__thiscall`** (this en ecx, 2 args pile, **`ret 8`**) — le `sub $8,%esp`
+> juste après le call le prouve. **`compute_callee_pops` ne propageait le pop des tail-calls que pour les `jmp` DIRECTS**
+> (`near_branch_target`) ; le thunk `jmp *[IAT]` (indirect) était ignoré ⇒ pop=0 ⇒ chaque appelant de `_M_create`
+> laissait esp **8 bas** ⇒ la longueur relue depuis le slot dérivé = **pointeur garbage** (0xc2f4190 au lieu de 0x20) ⇒
+> `string[len]=0` hors-bornes → SIGSEGV. **Fix général** (`compute_callee_pops`, `src/ir/build.rs`) : suivre AUSSI le
+> tail-call d'un thunk `jmp [abs32]` dont le slot IAT (résolu par le loader multi-module) pointe une **fonction récupérée**
+> ⇒ le pop de la cible (`ret 8`) se propage. Reçoit `prog` pour lire le contenu du slot ; helper `abs_mem_jmp_slot`.
+> **Additif** : un slot non résolu vers une entrée récupérée n'ajoute aucune arête (imports système ⇒ `stdcall_pops`
+> inchangé) ⇒ **hash `19acad982194bf07` inchangé**, single-binary intact. **Résultat** : `jtest.exe`
+> (`Json::Value(objectValue).asInt()` → `Json::LogicError` : `Json::Exception` : `std::exception`, sur libjsoncpp +
+> libstdc++ + libgcc + libwinpthread liftés) sort **`start` / `caught: Value is not convertible to Int.` / `done`** = Wine.
+> **Portée** : tout appel à une fonction membre `__thiscall`/`__stdcall` d'une DLL liftée via un thunk d'import (massif en
+> C++ : `std::string`, conteneurs, iostream). **Portes** : hash inchangé, difftest **272/272**, **funcdiff 0 divergence**
+> (21859 scorées), cargo test **79+**, **0 régression lifting-DLL** (8 fixtures vertes). **Garde ajoutée** :
+> `winecorpus/lift_stdstring` (une `std::string` >15 chars = chemin heap `_M_create` thiscall, throw/catch, bit-identique
+> Wine — sans le fix : crash/hang). **Bilan session : 3 bugs de lift-correctness GÉNÉRAUX corrigés** (pseudo-relocs
+> multi-module + double static/runtime + callee-pop thiscall via thunk d'import) ⇒ **le 1er vrai binaire tiers C++ (jsoncpp)
+> tourne bout-en-bout via le dispatcher EH d'ARET sur runtime C++ GNU lifté.** Prochain : d'autres binaires du corpus (doc 90).

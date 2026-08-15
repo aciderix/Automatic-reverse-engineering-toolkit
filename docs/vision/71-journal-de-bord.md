@@ -8006,3 +8006,37 @@ gardent le patch complet. Symétrique/sound : chaque cible patchée **exactement
 `string[len]=0` où `len` vaut un **pointeur** au lieu d'une petite longueur (même signature), dans la construction du
 `std::string` du message. Borné là (§2). **Bilan** : 2 bugs de lift-correctness **généraux** corrigés cette session
 (application multi-module + double static/runtime des pseudo-relocs) ; jsoncpp franchit 3 murs ; suite en session dédiée.
+
+### 2026-08-15 — [ABI][LIFT ✅] **🎯 MILESTONE — jsoncpp tourne BOUT-EN-BOUT (1er vrai binaire tiers) : callee-pop `ret 8` propagé à travers un thunk d'import `jmp [IAT]`**
+
+Le 3ᵉ et dernier mur de jsoncpp était un **esp-drift de 8** dans la construction du `std::string` du message de
+`Json::LogicError`. Guest (winedbg + gdb) : `basic_string::_M_construct` (chemin heap, len>15) appelle
+`basic_string::_M_create(size_type&, uint)` via le thunk `sub_4682f8 = jmp *[IAT]`. `_M_create` est **`__thiscall`**
+(this en ecx, 2 args pile) et **pop 8** (`ret 8`) — le `sub $8,%esp` émis juste après le `call` dans le guest le confirme
+(le compilateur ré-alloue les 8 octets que le callee a poppés). Mesure : la longueur (0x20) stockée à `[frame+0x10]`, relue
+après l'appel depuis un slot esp-relatif décalé de 8 ⇒ **0xc2f4190 (pointeur garbage)** ⇒ `string[len]=0` hors-bornes → SIGSEGV.
+
+**Cause** : `compute_callee_pops` (`src/ir/build.rs`) ne propageait le pop d'un tail-call que pour les `jmp` **DIRECTS**
+(`near_branch_target()`). Le thunk d'import `jmp *[IAT]` (`ff 25 <abs32>`) a `near_branch_target()==0` ⇒ ignoré ⇒ son pop
+restait 0 ⇒ tout appelant de `_M_create` (via le thunk) popait 0 au lieu de 8 ⇒ **esp 8 bas** silencieusement pour le reste
+de la fonction. Invisible en single-binaire (les thunks pointent des imports système, gérés par `stdcall_pops`) ; n'apparaît
+qu'en **lift multi-module**, où le slot IAT est **résolu par le loader vers un export lifté** (une fonction récupérée).
+
+**Fix** : `compute_callee_pops` reçoit désormais `prog` et, pour un `jmp [abs32]` (helper `abs_mem_jmp_slot` : opérande
+mémoire, sans base/index, non RIP-relatif), **lit le contenu du slot** (le VA d'export résolu) ; si c'est l'entrée d'une
+fonction **récupérée**, l'arête tail-call est ajoutée ⇒ le point-fixe propage le `ret N` de la cible au thunk, puis au
+caller. **Sound et additif** : un slot ne résolvant PAS vers une entrée récupérée (import système, valeur opaque) n'ajoute
+rien ⇒ `stdcall_pops` inchangé, comportement single-binaire identique ⇒ **hash `19acad982194bf07` inchangé**.
+
+**Résultat** : `jtest.exe` (`Json::Value(Json::objectValue).asInt()` lance `Json::LogicError` : `Json::Exception` :
+`std::exception` **depuis libjsoncpp**, sur les 4 DLL liftées) sort **`start` / `caught: Value is not convertible to Int.`
+/ `done`** = Wine, rc 0. **Le 1er vrai binaire tiers C++ tourne bout-en-bout** via le dispatcher EH d'ARET sur le runtime
+C++ GNU lifté (throw réel, unwind, catch, `.what()`, formatage ostringstream, tout).
+
+**Portée** : tout appel à une fonction membre `__thiscall`/`__stdcall` d'une DLL liftée via un thunk d'import — massif en
+C++ (`std::string`, conteneurs, iostream, tout objet copié/déplacé). **Portes** : hash inchangé, **difftest 272/272**,
+**funcdiff 0 divergence** (21859 scorées / 20459 appels), cargo test **79+**, **0 régression lifting-DLL** (lift_libstdcxx/
+stdexcept/stdthrow/stddtor/libgcc/zlib + comctl32_imagelist/progress verts). **Garde** : `winecorpus/lift_stdstring.cpp`
+(+ `.withlocaldll`) — une `std::string` >15 chars (chemin heap `_M_create` thiscall) construite/copiée/jetée à travers
+libstdc++ lifté, longueur + texte imprimés, **bit-identique Wine** ; sans le fix, crash/hang (esp-drift). **Bilan session :
+3 bugs de lift-correctness GÉNÉRAUX** (pseudo-relocs multi-module, double static/runtime, callee-pop thiscall via thunk).
