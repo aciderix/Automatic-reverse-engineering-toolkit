@@ -247,6 +247,17 @@ C++ rend **427/1279 (33 %)** binaires import-clean ⇒ le **prochain mur OS mesu
 **Nouvelles fixtures** (bit-identiques Wine) : `win32_verquery` (VerSetConditionMask/VerifyVersionInfo/FindFirstFileEx),
 `crt_sopen_leadbyte`, + l'axe OS wide-char (`crt_wpath`/`win32_wfs`/`crt_wlocale`/`win32_procinfo`/`crt_leftovers`).
 
+**🌐 WINSOCK — le mur OS n°1 post-lift ATTAQUÉ (2026-08-15, doc 90/82)** : increments 1+2 = le **haut du mur socket
+couvert** (chaque fonction du top-40 mesuré). `SOCKET`==fd POSIX hôte (le réseau hôte EST le réseau) ; traductions sound de
+toutes les constantes que Windows numérote autrement (famille/level/optname/flags/ioctl/fd_set/errno→WSAExxx) ; hors
+modèle = échec WSA défini. Couvre WSAStartup/socket/bind/connect/listen/accept/send/recv/select/`__WSAFDIsSet`/
+set,getsockopt/ioctlsocket/get{sock,peer}name/shutdown/htons…/closesocket/WSAGet,SetLastError + getaddrinfo/freeaddrinfo
+(rebuild ADDRINFOA en mémoire guest)/inet_addr/inet_ntoa/gethostname. `@N` déjà dans la table (import-lib ws2_32) ⇒ 0 ABI.
+Gardes `win32_winsock`/`win32_winsock_dns` bit-identiques Wine. + **mop-up CRT** du même mur (`ctime`/`_fpreset`/
+`__fpecode`/`__pxcptinfoptrs`, garde `crt_ctime_fp`). **⇒ Mur OS post-lift mesuré COUVERT** sauf l'axe DLL tierces
+GLib/gettext (Levier 1, séparé). Reste Winsock : UDP (sendto/recvfrom), gethostbyname/getnameinfo, async (WSAAsyncSelect/
+overlapped/IOCP — recoupe la surface subprocess plafonnée). Détail 71/82.
+
 ---
 
 ## 4. Ce qui est FAIT (toutes les cartes en main)

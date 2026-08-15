@@ -592,3 +592,16 @@ modèle → **échec WSA défini**, jamais un syscall faux (§0). Couvre socket/
 setsockopt/getsockname/ioctlsocket/htons…/closesocket/WSAStartup + `__WSAFDIsSet`. `@N` déjà dans `stdcall_pops` (import-lib
 ws2_32) ⇒ 0 ABI. Portes : hash inchangé, difftest 272/272. **Reste** : getaddrinfo/gethostby*/inet_ntoa (retour pointeur),
 UDP, async. C'est le 1er cran d'un axe mesuré (~50-67 bins/fn) qui rendra runnable la classe des vrais binaires réseau.
+
+### ✅ Mur OS post-lift COUVERT (2026-08-15) — Winsock (inc 1+2) + mop-up CRT ; reste = DLL tierces GLib/gettext (séparé)
+
+Boucle mesure→fix bouclée sur le mur post-lift (doc 90). **Winsock inc 1** (TCP cœur) + **inc 2** (résolution de noms /
+retour pointeur) couvrent **chaque fonction socket du top-40 mesuré**, bit-identiques Wine (`win32_winsock`,
+`win32_winsock_dns`). Modèle `SOCKET`==fd POSIX hôte ; traductions sound des constantes Windows≠Linux (famille, sockopt,
+flags, ioctl, fd_set, errno→WSAExxx) ; hors-modèle = échec WSA défini (§0). `@N` déjà dans `stdcall_pops` (import-lib
+ws2_32) ⇒ 0 ABI. **Mop-up CRT** du même mur : `ctime`/`_fpreset`/`__fpecode`/`__pxcptinfoptrs` (`crt_ctime_fp`).
+Portes : hash `19acad982194bf07` inchangé (HLE-only), difftest 272/272, winediff complet 197 pass / 1 flake connu
+(`lift_stdthrow`, task #31, passe seul) / ~49 SKIP environnementaux — **0 régression**. **Reste du mur post-lift** :
+(a) **axe DLL tierces GLib/gettext** (`g_*`/`libintl_*`, ~50-78 bins) = Levier 1 (lifter glib-2.0/libintl) ou shims,
+chantier séparé plus gros ; (b) Winsock résiduel (UDP, gethostbyname/getnameinfo, async/IOCP recoupant la surface
+subprocess plafonnée). Prochain axe data-driven = re-mesurer le mur post-Winsock (les `g_*` remontent en tête).
