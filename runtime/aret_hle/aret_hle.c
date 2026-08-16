@@ -4012,6 +4012,75 @@ uint32_t __aret_gs(void) {
 #define ARET_CXX_EH_CODE 0xE06D7363u
 static void aret_cxx_dispatch(uint32_t esp, uint32_t *rec);   /* fwd */
 static const char *aret_cxx_thrown_name(uint32_t pthrow);     /* fwd */
+
+/* Vectored Exception Handlers (VEH). `AddVectoredExceptionHandler(First, Handler)`
+ * installs a handler run FIRST-CHANCE on every exception, ahead of the frame-based
+ * fs:[0] chain (and ahead of C++ EH). glib and libwinpthread install one at startup
+ * as a safety net — fired only on an actual exception, so a program that never faults
+ * (the common path) just needs the registration to return a valid cookie. Model: an
+ * ordered registry (First inserts at the head, the call order Windows guarantees)
+ * returning an opaque non-null cookie; `Remove` unlinks it. Delivery runs the list in
+ * aret_RaiseException: a handler returns EXCEPTION_CONTINUE_EXECUTION (0xFFFFFFFF) to
+ * resume, or EXCEPTION_CONTINUE_SEARCH (0) to defer to the next VEH then the SEH chain.
+ * Hardware faults (SIGSEGV/#DE) are NOT routed here yet — same deferral as the frame
+ * SEH above — so an uncaught fault still aborts LOUDLY, never a silent continue (§0). */
+#define ARET_VEH_MAX 32
+static uint32_t aret_veh_handler[ARET_VEH_MAX];
+static uint32_t aret_veh_cookie[ARET_VEH_MAX];
+static int aret_veh_n;
+static uint32_t aret_veh_next = 1;
+uint32_t aret_AddVectoredExceptionHandler(uint32_t esp) {
+    uint32_t first = arg(esp, 0), handler = arg(esp, 1);
+    if (handler == 0 || aret_veh_n >= ARET_VEH_MAX) return 0;   /* NULL cookie on failure */
+    uint32_t cookie = aret_veh_next++;
+    int at = aret_veh_n;
+    if (first) {                                                /* insert at the head */
+        for (int i = aret_veh_n; i > 0; i--) {
+            aret_veh_handler[i] = aret_veh_handler[i - 1];
+            aret_veh_cookie[i]  = aret_veh_cookie[i - 1];
+        }
+        at = 0;
+    }
+    aret_veh_handler[at] = handler;
+    aret_veh_cookie[at]  = cookie;
+    aret_veh_n++;
+    return cookie;
+}
+uint32_t aret_RemoveVectoredExceptionHandler(uint32_t esp) {
+    uint32_t cookie = arg(esp, 0);
+    for (int i = 0; i < aret_veh_n; i++) {
+        if (aret_veh_cookie[i] == cookie) {
+            for (int j = i; j < aret_veh_n - 1; j++) {
+                aret_veh_handler[j] = aret_veh_handler[j + 1];
+                aret_veh_cookie[j]  = aret_veh_cookie[j + 1];
+            }
+            aret_veh_n--;
+            return 1;                                           /* non-zero = success */
+        }
+    }
+    return 0;
+}
+/* First-chance VEH delivery: build EXCEPTION_POINTERS{rec,ctx} and call each handler
+ * cdecl with that single pointer. Returns 1 if a handler asked to CONTINUE_EXECUTION
+ * (caller returns to resume), else 0 (defer to the SEH chain). Iterates over a snapshot
+ * so a handler that removes itself mid-dispatch is safe. */
+static int aret_veh_dispatch(uint32_t esp, uint32_t *rec, uint32_t *ctx) {
+    if (aret_veh_n == 0) return 0;
+    uint32_t ep[2];
+    ep[0] = (uint32_t)(uintptr_t)rec;    /* EXCEPTION_POINTERS.ExceptionRecord */
+    ep[1] = (uint32_t)(uintptr_t)ctx;    /* EXCEPTION_POINTERS.ContextRecord   */
+    uint32_t snap[ARET_VEH_MAX];
+    int n = aret_veh_n;
+    for (int i = 0; i < n; i++) snap[i] = aret_veh_handler[i];
+    for (int i = 0; i < n; i++) {
+        uint32_t hesp = esp - 0x80;
+        uint32_t *cf = (uint32_t *)(uintptr_t)hesp;
+        cf[1] = (uint32_t)(uintptr_t)ep;                        /* [esp+4] = EXCEPTION_POINTERS* */
+        uint32_t disp = (uint32_t)aret_call(snap[i], hesp, 0, 0, 0, 0, 0, 0, 0);
+        if (disp == 0xFFFFFFFFu) return 1;                      /* EXCEPTION_CONTINUE_EXECUTION */
+    }
+    return 0;
+}
 uint32_t aret_RaiseException(uint32_t esp) {
     aret_teb_init();
     uint32_t code = arg(esp, 0), flags = arg(esp, 1);
@@ -4028,6 +4097,11 @@ uint32_t aret_RaiseException(uint32_t esp) {
         const uint32_t *ap = (const uint32_t *)(uintptr_t)argp;
         for (uint32_t i = 0; i < rec[4]; i++) rec[5 + i] = ap[i];
     }
+    uint32_t ctx[200];                   /* a zeroed CONTEXT (defined, benign)  */
+    memset(ctx, 0, sizeof(ctx));
+    /* Vectored handlers run FIRST-CHANCE, before frame-based SEH and before C++ EH
+     * (Windows order). One asking CONTINUE_EXECUTION resumes the caller. */
+    if (aret_veh_dispatch(esp, rec, ctx)) return 0;
     /* A C++ throw: params are {EH-magic, pObject, pThrowInfo} (now in rec[5..7]). Route to the
      * C++ two-phase dispatch (type match, unwind destructors, catch transfer) — the same path
      * as an imported _CxxThrowException, so a statically-linked CRT (throw funnels through this
@@ -4038,9 +4112,6 @@ uint32_t aret_RaiseException(uint32_t esp) {
                 aret_cxx_thrown_name(rec[7]), (unsigned)rec[7]);
         abort();
     }
-    uint32_t ctx[200];                   /* a zeroed CONTEXT (defined, benign)  */
-    memset(ctx, 0, sizeof(ctx));
-
     uint32_t *teb = (uint32_t *)(uintptr_t)__aret_fs();
     uint32_t frame = teb[0];             /* ExceptionList head       */
     while (frame != 0 && frame != 0xFFFFFFFFu) {

@@ -670,3 +670,17 @@ abortaient ⇒ hash `19acad982194bf07` inchangé). **Portes** : cpudiff (9 vecte
 difftest 272/272. **Reste du gap lifter** : x87 `fldenv`/`fnstenv` (incrément séparé — soundness du status-word à traiter,
 pas un simple additif). Après ça, l'axe lifter distinct sera clos et il ne restera pour libglib end-to-end que les 5
 imports HLE déférés **si** exercés.
+
+### 🌐 VRAI PROGRAMME glib end-to-end (2026-08-16) — gspawn : boucle mur-par-mur, VEH levé, mesure vivante
+Choix utilisateur : faire tourner un **vrai** programme libglib bout-en-bout pour que **la donnée désigne le mur suivant**.
+Cible **`gspawn-win32-helper-console.exe`** (pur libglib, oracle Wine déterministe). Chaîne `--with-dll` = 6 DLL liftables
+(glib+libgcc+libpcre2+libintl+libiconv+libwinpthread). **Récupération propre** (4810 fns, 0 appel réel non résolu). **Carte
+des murs libglib** : seul vrai gap lifter CPU = **`fnstenv`/`fldenv`** (6 sites, feholdexcept — hors chemin démarrage) ; le
+reste = data-en-code (abort correct). **Séquence des murs runtime** (le vrai binaire les révèle un par un, comme WinMerge/ninja) :
+1. ✅ **VEH `AddVectoredExceptionHandler`/`Remove`** (mur démarrage, libglib+libwinpthread) — registre + livraison first-chance
+   dans `aret_RaiseException`, sound (fautes matérielles → abort fort). Garde `win32_veh` bit-identique Wine, ehdiff 6/6, hash
+   inchangé.
+2. 🔜 **`GetProcAddress(ntdll,"RtlGetVersion")`** — glib asserte non-NULL ; ARET rend NULL ⇒ `GLib-CRITICAL`. Prochain cran :
+   résolution dynamique de `RtlGetVersion` (version Windows rapportée, cohérente avec `VerifyVersionInfo`/`GetVersionEx` = 6.2.9200).
+Les autres imports du mur (locale `EnumSystemLocalesA`/`GetLocaleInfoA`, `GetComputerNameW`, `HeapSetInformation`, `fwprintf`,
+`mbstowcs`, `_wspawnv`…) ne bloqueront **que s'ils sont atteints** — la boucle les fera remonter dans l'ordre réel.

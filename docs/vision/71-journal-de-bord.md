@@ -8405,3 +8405,27 @@ inchangé**. **Portes** : cpudiff vert (per-instruction avec 9 vecteurs neufs + 
 (21859 lift / 10808 opt scorées), difftest **272/272**, difftest_transpile **4/4**. **⇒ Le dernier axe lifter data-désigné
 est comblé** ; reste x87 `fldenv`/`fnstenv` (incrément séparé, soundness à traiter avec soin). Ce gain est **général**
 (vectorisation graphisme/hash/boucles auto-vectorisées) et débloque au passage le lift libglib côté SSE.
+
+### 2026-08-16 — [HLE][SEH ✅] **VEH (AddVectoredExceptionHandler/Remove) — mur n°1 mesuré d'un vrai programme glib lifté (gspawn)**
+
+**Boucle data-driven, vrai binaire.** Choisi avec l'utilisateur : faire tourner un **vrai programme glib** bout-en-bout pour
+que la donnée **désigne le prochain mur** (plutôt que combler `fnstenv` à l'aveugle). Cible = **`gspawn-win32-helper-console.exe`**
+(seul exe **purement libglib** du paquet MSYS2 ; sortie déterministe sous Wine : `Bail out! ERROR:...assertion failed:
+(argc >= ARG_COUNT)`, rc 3). Chaîne liftée `--with-dll` (6 DLL, toutes liftables-propres : libglib + libgcc + libpcre2 +
+libintl + libiconv + libwinpthread ; libintl/libiconv 0 forwarder). **Récupération propre** : 4810 fonctions (4387 liftées),
+**0 appel direct réel non résolu**. **Carte des murs** : le **seul** vrai gap lifter CPU de tout libglib = **`fnstenv`/
+`fldenv`** (3+3 sites, idiome feholdexcept) — mais **pas** sur le chemin de démarrage ; tout le reste (75 instr.) = données-
+décodées-en-code (`ud2`/`int 0x29`/`pop es`/`sti`/`int3`/I/O privilégié) → abort correct.
+
+**Le run a désigné le mur n°1 réel : `AddVectoredExceptionHandler`** (importé par libglib **et** libwinpthread, installé au
+**démarrage** avant `main`). Modèle **sound** : registre ordonné de handlers (`First`=tête, l'ordre d'appel garanti par
+Windows) rendant un **cookie opaque non-nul** ; `Remove` délie ; **livraison first-chance** câblée dans `aret_RaiseException`
+(avant la chaîne fs:[0] et avant l'EH C++, l'ordre Windows) — un handler rend `EXCEPTION_CONTINUE_EXECUTION` (0xFFFFFFFF)
+pour reprendre, ou `CONTINUE_SEARCH` (0) pour déférer. **Fautes matérielles NON routées ici** (même déferral que la SEH de
+cadre) ⇒ une faute non-attrapée **aborte fort**, jamais un continue silencieux (§0). `@N` déjà tabulés (Add@8/Remove@4,
+vérité import-lib). **Garde** : `winecorpus/win32_veh.c` — register VEH → `RaiseException(0xDEADBEEF)` → le handler voit
+code/flags/params exacts et rend CONTINUE_EXECUTION → l'exécution **reprend** après le raise → Remove — **bit-identique Wine**.
+**Portes** : hash `19acad982194bf07` inchangé (HLE-only), **ehdiff 6/6** (0 régression SEH/EH C++ malgré le câblage dans
+RaiseException), difftest_transpile 4/4. **⇒ VEH lève le mur de démarrage** ; gspawn avance jusqu'au **mur n°2 : glib appelle
+`GetProcAddress(ntdll, "RtlGetVersion")` et asserte non-NULL** (ARET rend NULL ⇒ `GLib-CRITICAL ... RtlGetVersion != NULL`).
+Prochain cran = résolution dynamique de `RtlGetVersion`.
