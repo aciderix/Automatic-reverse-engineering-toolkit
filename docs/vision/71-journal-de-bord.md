@@ -8282,3 +8282,19 @@ SKIP propre si absentes (conteneur éphémère). `libintl-8.dll`+`libiconv-2.dll
 difftest 272/272, winediff clean SKIP=0/FAIL=1 (flake connu `lift_stdthrow`, task #31, passe seul — 0 régression réelle).
 **Reste de l'axe GLib/gettext** : `g_*` (GLib/GObject — vraies structures de données) = **Levier 1 lift** de
 `libglib-2.0-0.dll` (+ sa chaîne libintl/libiconv/libpcre/libwinpthread) — chantier plus gros, séparé.
+
+### 2026-08-15 — [HLE][I18N][SOUNDNESS ✅] **gettext rendu « correct ou abort » — garde de catalogue réel (suite du §0, décision utilisateur)**
+
+Suite à une remarque de l'utilisateur (juste, §0) : l'identité `gettext(msgid)=msgid` n'est correcte **que** sans catalogue ;
+un programme en locale traduisante avec un vrai `.mo` obtiendrait `hello`→`bonjour` sous Wine mais `hello`→`hello` sous
+ARET = **faux silencieux**. Ce n'était pas un nouveau trou (il hérite de P1bis setlocale), mais présenté trop confiant.
+**Fix (a) appliqué** : `gettext`/`dgettext`/`dcgettext`/`ngettext`/`dngettext`/`dcngettext` gardés par
+`aret_gettext_would_translate(domain)` — renvoie l'identité **seulement** si on **prouve** qu'aucune traduction n'aurait
+lieu (locale C/POSIX/vide ⇒ pas de traduction ; sinon, on stat le `.mo` que gettext chargerait :
+`<dir>/<locale>/LC_MESSAGES/<domain>.mo` avec les fallbacks locale standard, `dir` = bindtextdomain lié (`translate_path`)
+ou `/usr/share/locale`). Si un **vrai catalogue applicable existe** (locale non-C + `.mo` présent) ⇒ **`aret_unmodelled`
+abort bruyant** (jamais l'anglais en silence). **Prouvé (probe transpilé)** : (A) LANG absent → `hello` (identité) ;
+(B) LANG=fr_FR sans `.mo` → `hello` (identité — comme le vrai gettext) ; (C) LANG=fr_FR + `.mo` réel → **abort** exit 134,
+message clair. **(b) noté** comme fix racine : corriger P1bis (setlocale aborte sur locales non-C) rendrait toute la
+famille C-locale (collation incluse) prouvablement sûre d'un coup — doc 70 §5 P1bis. **Portes** : hash `19acad982194bf07`
+inchangé (HLE-only), difftest 272/272, `win32_gettext` toujours bit-identique Wine (garde inerte en locale C du harnais).

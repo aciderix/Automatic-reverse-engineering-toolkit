@@ -30,6 +30,7 @@
 #include <locale.h>
 #include <math.h>
 #include <errno.h>
+#include <sys/stat.h>   /* gettext catalog-existence guard (stat a real .mo) */
 
 /* Read cdecl argument `i` (a 32-bit word) from the modelled stack. */
 static inline uint32_t a32(uint32_t esp, int i) {
@@ -1115,23 +1116,72 @@ uint32_t aret_wcsnicmp(uint32_t esp) {
 uint32_t aret_wcsicoll(uint32_t esp) { return aret_wcsicmp(esp); }
 uint32_t aret_wcscoll(uint32_t esp) { return aret_wcscmp(esp); }
 
-/* ---- gettext (libintl) — C-locale / no-catalog identity (measured post-lift wall,
- * doc 90: libintl_gettext 78 bins, bindtextdomain 70, textdomain 63, dgettext 44…).
- * With no translation catalog loaded — ARET's state, and the DEFINED behavior in the
- * C locale / when no .mo file is found — gettext returns the msgid UNCHANGED. That is
- * gettext's specified result, not a guess (same stance as our C-locale collation).
- * The `libintl_*` names are the actual mingw libintl exports programs import
- * (`gettext(x)` is #defined to `libintl_gettext(x)`). All cdecl (no @N pop). */
-uint32_t aret_libintl_gettext(uint32_t esp)   { return AU(0); }                      /* (msgid) -> msgid */
-uint32_t aret_libintl_dgettext(uint32_t esp)  { return AU(1); }                      /* (domain, msgid) */
-uint32_t aret_libintl_dcgettext(uint32_t esp) { return AU(1); }                      /* (domain, msgid, category) */
-uint32_t aret_libintl_ngettext(uint32_t esp)  { return AU(2) == 1 ? AU(0) : AU(1); } /* (s1, s2, n): C plural rule */
-uint32_t aret_libintl_dngettext(uint32_t esp) { return AU(3) == 1 ? AU(1) : AU(2); } /* (domain, s1, s2, n) */
-uint32_t aret_libintl_dcngettext(uint32_t esp){ return AU(3) == 1 ? AU(1) : AU(2); } /* (domain, s1, s2, n, cat) */
-/* textdomain/bindtextdomain return a pointer the caller may read (not free); we keep
- * the current values in static buffers. Default domain "messages", as libintl. */
+/* ---- gettext (libintl) — measured post-lift wall (doc 90: libintl_gettext 78 bins,
+ * bindtextdomain 70, textdomain 63, dgettext 44…).
+ *
+ * CONTRACT (§0, "correct or abort — never a silent false): gettext returns the msgid
+ * UNCHANGED only when we can PROVE no translation would occur — the C/POSIX locale (no
+ * translations by definition) OR no real .mo catalog present at the resolved path. That
+ * is gettext's own specified result, not a guess. If a REAL applicable catalog exists
+ * (a non-C locale with the .mo file gettext would load), we do NOT model message
+ * translation, so we ABORT LOUDLY rather than silently return the untranslated string
+ * as if it were the translation (e.g. "hello" where the truth is "bonjour").
+ *   Root-cause note (b): the residual way to reach a translating locale at all is the
+ * documented setlocale gap P1bis (setlocale reports "C" for every locale instead of
+ * aborting on ones it cannot model). Fixing P1bis makes gettext identity provably safe
+ * across the whole locale family; tracked in doc 70 §5 P1bis.
+ * The `libintl_*` names are the actual mingw exports (`gettext(x)` => `libintl_gettext`).
+ * All cdecl (no @N pop). */
 static char g_td_domain[256] = "messages";
 static char g_td_dir[1024] = "";
+/* Does a real .mo catalog that gettext WOULD load exist for `domain`? (=> translation
+ * would happen and identity would be WRONG). 0 when the locale is C/POSIX or no matching
+ * .mo is on disk — the cases where gettext itself returns the msgid. Mirrors gettext's
+ * path resolution <dir>/<locale>/LC_MESSAGES/<domain>.mo with the standard locale
+ * fallbacks (strip @modifier, .codeset, _TERRITORY). */
+static int aret_mo_on_disk(const char *dir, const char *loc, const char *domain) {
+    char path[2600]; struct stat st;
+    snprintf(path, sizeof path, "%s/%s/LC_MESSAGES/%s.mo", dir, loc, domain);
+    return stat(path, &st) == 0 && S_ISREG(st.st_mode);
+}
+static int aret_gettext_would_translate(const char *domain) {
+    const char *l = getenv("LC_ALL");
+    if (!l || !*l) l = getenv("LC_MESSAGES");
+    if (!l || !*l) l = getenv("LANG");
+    if (!l || !*l) return 0;                                            /* no locale -> C -> no translation */
+    if (!strcmp(l, "C") || !strcmp(l, "POSIX") ||
+        !strncmp(l, "C.", 2) || !strncmp(l, "POSIX.", 6)) return 0;     /* C/POSIX(.codeset) -> no translation */
+    if (!domain || !*domain) domain = g_td_domain;
+    char hostdir[2048];
+    if (g_td_dir[0]) translate_path(g_td_dir, hostdir, sizeof hostdir); /* bound dir (Windows->host) */
+    else strcpy(hostdir, "/usr/share/locale");                         /* libintl's default search root */
+    /* Try the locale as-is, then progressively normalized (matches gettext's fallbacks). */
+    char cand[256];
+    for (int form = 0; form < 4; form++) {
+        strncpy(cand, l, sizeof cand - 1); cand[sizeof cand - 1] = 0;
+        char *p;
+        if (form >= 1 && (p = strchr(cand, '@'))) *p = 0;              /* drop @modifier */
+        if (form >= 2 && (p = strchr(cand, '.'))) *p = 0;              /* drop .codeset */
+        if (form >= 3 && (p = strchr(cand, '_'))) *p = 0;              /* drop _TERRITORY */
+        if (aret_mo_on_disk(hostdir, cand, domain)) return 1;
+    }
+    return 0;
+}
+static void aret_gettext_guard(const char *domain) {
+    if (aret_gettext_would_translate(domain))
+        aret_unmodelled("gettext: a real .mo catalog applies for this locale/domain; "
+                        "message translation is not modelled (returning the untranslated "
+                        "msgid would be a silent false) — see doc 70 P1bis");
+}
+uint32_t aret_libintl_gettext(uint32_t esp)   { aret_gettext_guard(NULL);   return AU(0); }         /* (msgid) */
+uint32_t aret_libintl_dgettext(uint32_t esp)  { aret_gettext_guard(ACS(0)); return AU(1); }         /* (domain, msgid) */
+uint32_t aret_libintl_dcgettext(uint32_t esp) { aret_gettext_guard(ACS(0)); return AU(1); }         /* (domain, msgid, category) */
+uint32_t aret_libintl_ngettext(uint32_t esp)  { aret_gettext_guard(NULL);   return AU(2) == 1 ? AU(0) : AU(1); }
+uint32_t aret_libintl_dngettext(uint32_t esp) { aret_gettext_guard(ACS(0)); return AU(3) == 1 ? AU(1) : AU(2); }
+uint32_t aret_libintl_dcngettext(uint32_t esp){ aret_gettext_guard(ACS(0)); return AU(3) == 1 ? AU(1) : AU(2); }
+/* textdomain/bindtextdomain return a pointer the caller may read (not free); we keep
+ * the current values in static buffers. Default domain "messages", as libintl. These
+ * only record binding state (no translation) -> no guard needed. */
 uint32_t aret_libintl_textdomain(uint32_t esp) {
     const char *d = ACS(0);
     if (d) { strncpy(g_td_domain, d, sizeof g_td_domain - 1); g_td_domain[sizeof g_td_domain - 1] = 0; }

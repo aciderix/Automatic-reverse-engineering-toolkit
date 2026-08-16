@@ -1149,6 +1149,14 @@ mode d'échec que le §0 interdit. Trouvé en mesurant `_wcsicoll` (ordinal en l
 locale C**, mais rien ne garantit qu'on y est. **Fix propre** : accepter `NULL` (requête), `"C"` et `"POSIX"` → `"C"` ; **abort sound** sur
 toute autre locale (y compris `""`, qui demande la locale système). ⚠️ À faire avec la porte winediff complète : `""` est courant et
 certains binaires du corpus peuvent l'appeler — mesurer d'abord combien, puis trancher (abort vs modéliser la locale système).
+> **(b) — fix RACINE de la famille locale (noté 2026-08-15, décision utilisateur).** Corriger P1bis (setlocale aborte sur les
+> locales non-C non modélisées) rend **prouvablement sûrs d'un coup** tous les membres de la famille C-locale : collation
+> (`_wcsicoll`/`wcscoll`/`strxfrm`), formats, **et `gettext`** — car aucun programme ne pourrait alors *être* en locale
+> traduisante. **En attendant**, chaque membre est rendu *correct-ou-abort* individuellement : ✅ **`gettext` gardé
+> (2026-08-15)** — identité msgid **seulement** si aucun catalogue `.mo` réel ne s'applique (locale C, ou pas de `.mo` au
+> chemin résolu) ; si un vrai catalogue applicable existe (locale non-C + `.mo` présent), **abort bruyant** au lieu de rendre
+> l'anglais en silence (`aret_gettext_would_translate`, `aret_crt.c` ; prouvé : identité en C / non-C-sans-`.mo`, abort en
+> non-C-avec-`.mo`). La collation reste sous le caveat P1bis brut (pas encore gardée individuellement).
 
 ### P1ter — `__aret_callee_pop` : « inconnu » vs « cdecl prouvé » (nuance mesurée 2026-07-26 — **PAS le bug qu'on croyait**)
 Première lecture (fausse) : « 55 VAs non récupérées reçoivent un pop deviné à 0 ». **Mesure de contrôle** : ces VAs sont des
