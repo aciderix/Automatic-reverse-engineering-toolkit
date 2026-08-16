@@ -985,6 +985,11 @@ uint32_t aret_HeapSize(uint32_t esp) {
 }
 uint32_t aret_HeapCreate(uint32_t esp) { (void)esp; return 1; }
 uint32_t aret_HeapDestroy(uint32_t esp) { (void)esp; return 1; }
+/* HeapSetInformation(heap, class, info, len) -> BOOL. Advisory heap tuning
+ * (LFH enable / HeapEnableTerminationOnCorruption): unobservable to program
+ * logic and a no-op over the host heap. Return TRUE, exactly as Wine does — the
+ * caller (glib/CRT startup) only checks success. */
+uint32_t aret_HeapSetInformation(uint32_t esp) { (void)esp; return 1; }
 
 /* VirtualAlloc(addr, size, type, protect) — back it with the allocator (we
  * ignore the requested base; the program uses the returned pointer). */
@@ -3254,7 +3259,14 @@ static int aret_handle_fd(uint32_t h) { return (h <= 2u) ? (int)h : -1; }
  * -1, and BusyBox added a length to that, dereferenced ~0x1, and crashed. */
 uint32_t aret_open_osfhandle(uint32_t esp) { return WU(0); }
 uint32_t aret_get_osfhandle(uint32_t esp) { return WU(0); }
-uint32_t aret_SetErrorMode(uint32_t esp)                 { (void)esp; return 0; }
+/* Error mode (SetErrorMode/GetErrorMode): the flags suppress OS error UI (fault
+ * dialogs, GetLastError popups) — cosmetic in ARET (no such UI), but the value is
+ * observable, so track it so a Set-then-Get round-trips and Set returns the previous
+ * mode, exactly as Windows/Wine. SetProcessDEPPolicy is an advisory hardening no-op. */
+static uint32_t g_error_mode = 0;
+uint32_t aret_SetErrorMode(uint32_t esp) { uint32_t p = g_error_mode; g_error_mode = WU(0); return p; }
+uint32_t aret_GetErrorMode(uint32_t esp) { (void)esp; return g_error_mode; }
+uint32_t aret_SetProcessDEPPolicy(uint32_t esp) { (void)esp; return 1; } /* TRUE, no-op (as Wine) */
 /* Console code pages: a process with no console (output redirected to a pipe/
  * file, as under the differential harness) reports 0, like Windows/Wine; a real
  * console reports a code page (the US OEM default). */

@@ -683,8 +683,12 @@ reste = data-en-code (abort correct). **Séquence des murs runtime** (le vrai bi
 2. ✅ **`GetProcAddress` résout par nom → shims** (mur n°2) + **`RtlGetVersion`** (6.2.9200 NT, cohérent GetVersionEx). Réutilise
    la machinerie delay-load (VA synthétique appelable) ; non-modélisé → 0 sound. Garde `win32_getproc` bit-identique Wine
    (invariants ; build exact env-dépendant), hash inchangé, 3 fixtures GetProcAddress vertes.
-3. 🔜 **`HeapSetInformation`** (mur n°3) — shim mince (no-op → TRUE, comme Wine). + warning glib **« TLS callback not invoked »** :
-   les callbacks TLS PE des DLL liftées ne sont pas invoqués par le loader (glib continue mais l'avertit ⇒ divergence de sortie
-   à corriger pour un bit-identique complet).
-Les autres imports du mur (locale `EnumSystemLocalesA`/`GetLocaleInfoA`, `GetComputerNameW`, `fwprintf`, `mbstowcs`,
-`_wspawnv`…) ne bloqueront **que s'ils sont atteints** — la boucle les fera remonter dans l'ordre réel.
+3. ✅ **Batch shims démarrage** (murs n°3-4) : `HeapSetInformation`/`SetProcessDEPPolicy` (no-op advisory → TRUE, comme Wine),
+   `GetErrorMode`/`SetErrorMode` (mode tracké, round-trip fidèle). Garde `win32_procpolicy` bit-identique Wine.
+4. ✅ **🎯 JALON — gspawn tourne END-TO-END** : tout le démarrage GLib + `main` + assertion `argc >= ARG_COUNT` + message
+   `Bail out! ERROR:.../gspawn-win32-helper.c:190:main: assertion failed` **identique à Wine**. **libglib s'exécute réellement**
+   (lifté, 6 DLL). Seule divergence : 2 warnings **`TLS callback not invoked`** (callbacks TLS PE des DLL liftées non invoqués
+   par le loader) + code de sortie (abort ELF 134 vs Windows 3, convention plateforme).
+5. 🔜 **Callbacks TLS PE** au process-attach (feature loader générale, comme DllMain) = dernier cran vers le bit-identique complet.
+Les imports restants (`EnumSystemLocalesA`/`GetLocaleInfoA`, `GetComputerNameW`, `fwprintf`, `mbstowcs`, `_wspawnv`…) n'étaient
+**pas** sur le chemin gspawn (jamais atteints) — la boucle a prouvé qu'on ne code que ce que le vrai binaire exerce.

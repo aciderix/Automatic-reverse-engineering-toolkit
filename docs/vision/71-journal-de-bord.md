@@ -8448,3 +8448,20 @@ on compare les invariants, pas le build, comme `_getdrive`). **Portes** : hash `
 GetProcAddress existantes vertes (crt_ctype_table/lwr_s/strcpy_s — 0 régression du passage 0→non-0). **⇒ gspawn avance au
 mur n°3 : `HeapSetInformation`** (+ un warning glib « TLS callback not invoked » — les callbacks TLS PE des DLL liftées ne
 sont pas encore invoqués par le loader ; glib continue mais l'avertit).
+
+### 2026-08-16 — [HLE ✅][🎯 JALON] **gspawn (vrai libglib) tourne END-TO-END — batch de shims de démarrage ; sortie = Wine**
+
+Suite de la boucle mur-par-mur gspawn. Trois shims de démarrage, tous **no-op advisory sound → succès** (comme Wine) :
+**`HeapSetInformation`** (tuning tas LFH/terminate-on-corruption, inobservable → TRUE), **`SetProcessDEPPolicy`** (durcissement
+DEP → TRUE), **`GetErrorMode`/`SetErrorMode`** rendus **fidèles** (mode d'erreur tracké : Set rend le précédent, Get relit —
+round-trip observable). `@N` déjà tabulés. **Garde** : `winecorpus/win32_procpolicy.c` (round-trip error-mode, HeapSetInformation,
+SetProcessDEPPolicy) — **bit-identique Wine**. **⇒ 🎯 JALON : `gspawn-win32-helper-console.exe` (vrai programme libglib tiers)
+tourne BOUT-EN-BOUT** — tout le démarrage GLib + `main` + l'assertion `argc >= ARG_COUNT` + le formatage `g_error` + le message :
+```
+ERROR:.../gspawn-win32-helper.c:190:main: assertion failed: (argc >= ARG_COUNT)
+Bail out! ERROR:.../gspawn-win32-helper.c:190:main: assertion failed: (argc >= ARG_COUNT)
+```
+**identique à Wine**. **libglib s'exécute réellement** (lifté avec sa chaîne de 6 DLL). **Seule divergence restante** : 2 lignes
+`GLib-CRITICAL: TLS callback not invoked` (ARET n'invoque pas encore les **callbacks TLS PE** des DLL liftées) + le code de
+sortie (abort ELF 134 vs Windows 3, convention de plateforme). ⇒ Prochain cran pour le bit-identique **complet** : invoquer les
+callbacks TLS PE au process-attach (feature loader générale, comme DllMain).
