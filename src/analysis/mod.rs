@@ -319,50 +319,34 @@ fn preceded_by_terminator(prog: &Program, global: &BTreeMap<u64, Insn>, addr: u6
     if addr == 0 {
         return false;
     }
-    if boundary_at(prog, global, addr, false) {
+    if boundary_at(prog, global, addr) {
         return true;
     }
     // (C) NOP-padding boundary: GCC/mingw aligns the next function by filling the gap
-    // after the preceding one's terminator with single-byte `nop` (0x90) — the FPO
-    // callee here (a `qsort`/`GCompareFunc` comparator opening `mov eax,[esp+4]`) sits
-    // right after such a run, so neither (A) (the terminator is not *adjacent*) nor (B)
-    // (the adjacent byte is a nop, not int3/ret) fires. Skip a *bounded* nop run (at
-    // most an alignment pad, so <= 15 bytes) and require a real terminator boundary
-    // just before it. NOP is a single-byte instruction, so skipping it cannot desync;
-    // the run is only trusted for an already address-taken candidate (a data pointer /
-    // stored code immediate), and a coincidental interior match still lands on a proven
-    // boundary → sound (worst case a dead function, never a miscompile).
+    // after the preceding one's terminator with single-byte `nop` (0x90) — an FPO callee
+    // (a `qsort`/`GCompareFunc` comparator opening `mov eax,[esp+4]`) sits right after
+    // such a run, so neither (A) (the terminator is not *adjacent*) nor (B) (the adjacent
+    // byte is a nop, not int3/ret) fires. Skip a *bounded* nop run (at most an alignment
+    // pad, so <= 15 bytes) and require a **proven terminator** (a recovered `ret`/`jmp`,
+    // or `int3`/`ret` padding) just before it. NOP is a single-byte instruction, so
+    // skipping it cannot desync. Only proven terminators are accepted here — a `call`
+    // (might return) or bare alignment (might be an intra-function loop-head pad) are
+    // NOT boundaries: an earlier version accepted those and force-split a real libstdc++
+    // function at a loop head → an infinite loop (a miscompile). Terminator-proven only.
     let mut n = 1u64;
     while n <= 15 && prog.read_from(addr - n).and_then(|b| b.first().copied()) == Some(0x90) {
-        // A `call` ending where the padding begins is also a boundary here: GCC emits
-        // inter-function alignment padding only at a function's END, and a *returning*
-        // call is followed by its return-point code, never by padding — so a call right
-        // before the pad ended the function (a noreturn `abort`/`g_error`/`longjmp`
-        // tail, common in glib/libffi). `allow_call` is enabled ONLY on this padded
-        // path; a bare call immediately before `addr` (no pad) is a normal returning
-        // call whose fallthrough IS `addr`, not a boundary.
-        if boundary_at(prog, global, addr - n, true) {
+        if boundary_at(prog, global, addr - n) {
             return true;
         }
         n += 1;
     }
-    // The terminator that ended the previous function may itself be unrecovered (a
-    // lone FPO callee whose predecessor is also only pointer-reached). But a `nop` run
-    // (n > 1 bytes consumed above) ending at a 16-byte-aligned address is unambiguously
-    // GCC's inter-function alignment fill (-falign-functions=16 is the default): a
-    // function never contains a multi-byte single-`nop` run just before a 16-aligned
-    // interior point. With the address-taken pointer already proving the address is
-    // taken, this settles that it is a genuine START. Require at least two 0x90 bytes
-    // (n > 2 after the walk; a single 0x90 could be a real instruction) and 16-byte
-    // alignment (the padding's whole purpose).
-    n > 2 && addr % 16 == 0
+    false
 }
 
 /// True when `addr` is a proven function boundary: a decoded terminator ends exactly
-/// there (A), or the byte before it is one-byte `int3`/`ret` padding (B). `allow_call`
-/// additionally accepts a `call` terminator, sound only when alignment padding follows
-/// it (see `preceded_by_terminator`). See there for the full soundness argument.
-fn boundary_at(prog: &Program, global: &BTreeMap<u64, Insn>, addr: u64, allow_call: bool) -> bool {
+/// there (A), or the byte before it is one-byte `int3`/`ret` padding (B). See
+/// `preceded_by_terminator` for the soundness argument.
+fn boundary_at(prog: &Program, global: &BTreeMap<u64, Insn>, addr: u64) -> bool {
     if addr == 0 {
         return false;
     }
@@ -375,8 +359,7 @@ fn boundary_at(prog: &Program, global: &BTreeMap<u64, Insn>, addr: u64, allow_ca
     for k in 1..=15u64 {
         if let Some(prev) = global.get(&(addr - k)) {
             if prev.next_addr() == addr {
-                return matches!(prev.flow, Flow::Return | Flow::Jump)
-                    || (allow_call && prev.flow == Flow::Call);
+                return matches!(prev.flow, Flow::Return | Flow::Jump);
             }
         }
     }
@@ -1069,13 +1052,7 @@ fn global_decode(
                                 cands.insert(v);
                             } else if global.contains_key(&v)
                                 && ((trusted && looks_like_func_start(prog, v, false))
-                                    || bare_stub_in_table
-                                    // A lone address-taken pointer whose target sits at a
-                                    // proven boundary (a recovered terminator, int3, or
-                                    // aligned nop padding just before it) is likewise a
-                                    // genuine start the sweep absorbed by falling through
-                                    // the predecessor's noreturn tail-call into the pad.
-                                    || preceded_by_terminator(prog, &global, v))
+                                    || bare_stub_in_table)
                             {
                                 // Already decoded, but a confirmed function-pointer
                                 // table (>= 3 consecutive code pointers) says `v` is a

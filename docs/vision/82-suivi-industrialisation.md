@@ -701,11 +701,16 @@ code de sortie (abort 134 ELF vs 3 Windows, convention plateforme). **3ᵉ vrai 
 1ᵉʳ basé libglib. La boucle mesure→fix a validé la doctrine : les ~13 autres imports « manquants » (locale/spawn) **jamais
 atteints** ⇒ on ne code que ce que le vrai binaire exerce ; et `fnstenv`/`fldenv` confirmé **hors** de ce chemin.
 
-### 🎯🎯 gobject-query (vrai libgobject) = WINE OCTET POUR OCTET (2026-08-16)
-Cible plus riche que gspawn : **`gobject-query froots`** (arbre des types fondamentaux GObject, 47 lignes) tourne
-end-to-end, **rc 0, sortie identique à Wine**, chaîne de **8 DLL** liftées (+ libgobject + libffi récupéré MSYS2). **4ᵉ vrai
-binaire tiers** (jsoncpp, ninja, gspawn, gobject-query). Mur levé = **récup de pointeur de fonction FPO isolé** (`GCompareFunc`
-`qsort`) : `preceded_by_terminator` saute le padding `nop` GCC + accepte un `call` noreturn ou une cible alignée-16 comme
-frontière, étendu au bras `forced`. Sound (candidat address-taken ⇒ pire cas abort). Garde `lift_fpocmp` bit-identique Wine ;
-hash inchangé ; funcdiff 0-div avec **+317 fonctions** scorées (la nouvelle récup lifte plus, tout correct). ⇒ Le seul vrai
-gap lifter CPU restant de la famille glib demeure **`fnstenv`/`fldenv`** (toujours hors des chemins exercés).
+### ⚠️ gobject-query — récup FPO SOUND ajoutée, mais PAS end-to-end (2026-08-16, leçon §0/§2)
+Cible plus riche : **`gobject-query`** (libgobject + son système de types), chaîne de **8 DLL** (+ libgobject + libffi MSYS2).
+Mur nouveau = **récup d'un pointeur de fonction FPO isolé** (`GCompareFunc` `qsort`) derrière le **padding `nop` de GCC**.
+**Retenu (sound)** : `preceded_by_terminator` saute le run de `nop` puis exige un **terminateur PROUVÉ** (`ret`/`jmp`/`int3`),
+bras non-forced → récupère le comparateur libgobject `0x5e23d0`. Garde `lift_fpocmp` bit-identique Wine.
+**⚠️ Révoqué (miscompile)** : des frontières **devinées** (un `call` supposé noreturn ; repli « ≥2 nop + aligné-16 » sans
+terminateur ; + extension du bras `forced`) faisaient passer gobject-query bout-en-bout **mais force-scindaient une vraie
+fonction libstdc++ à une tête de boucle → boucle infinie** (miscompile invisible à funcdiff, vu seulement au run end-to-end de
+`lift_libstdcxx` ; committé trop tôt — faute). **Reverté** ; il ne reste que la récup terminateur-prouvée. **Conséquence
+honnête** : gobject-query **aborte proprement** (sound) sur un pointeur FPO de **libffi** (prédécesseur `call` noreturn non
+récupéré) — le récupérer sainement demande une **passe noreturn-aware**, pas une devinette de padding. **⇒ Toujours 3 vrais
+binaires end-to-end** (jsoncpp, ninja, gspawn). Portes après revert : hash inchangé, difftest 272/272, funcdiff 0-div
+(+223 fonctions), `lift_libstdcxx` vert. Le gap lifter CPU glib restant demeure `fnstenv`/`fldenv`.
