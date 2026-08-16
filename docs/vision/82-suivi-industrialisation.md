@@ -634,3 +634,18 @@ bout-en-bout demande de combler ce **résidu borné multi-familles** (threading 
 mappable fibers ; + WSA-event = Winsock inc3 ; + console/misc/CRT) + quelques vrais gaps lifter SSE/x87. **Chantier
 multi-increment** (comme libstdc++ l'a été), **désormais mesuré et borné**. Prochain cran naturel : la famille **threading
 moderne** (SRWLock + condition variables), générale (pas que glib) et adossée au scheduler fibers prouvé.
+
+### 🔧 Résidu libglib : 54 → 31 (2026-08-15) — 3 familles threading/socket comblées
+
+Après 3 familles (SRWLock+condvar, thread-pool+`*Ex`, Winsock async/event), re-mesure `--mode walls` libglib : **résidu
+54 → 31 imports** (~23 effacés, les « durs » adossés au scheduler fibers + socle Winsock). **Restant (31)**, tous
+petits/bornés :
+- **pthread** (7 : `pthread_mutex_*`/`key_create`/`get,setspecific`/`once`) — = libwinpthread (déjà lifté ailleurs) ou shims
+  mappant nos primitives thread (mutex/TLS/once).
+- **console** (4 : `AllocConsole`/`AttachConsole`/`Peek,ReadConsoleInputW`).
+- **misc Win32** (`CommandLineToArgvW`/`ExpandEnvironmentStringsW`/`GetShortPathNameW`/`GetTimeFormatW`/
+  `GetFileInformationByHandleEx`/`DeviceIoControl`/`SetEnvironmentVariableW`/`SHGetKnownFolderPath`/`RegLoadMUIStringW`) +
+  **VEH** (`Add,RemoveVectoredExceptionHandler` — abort sound déféré).
+- **CRT** (`isnan`/`kbhit`/`wctomb`/`_wputenv`/`_wspawnvp,vpe`/`_ui64toa_s`/`_getdrive`/`libintl_sprintf`).
+- **gaps lifter** SSE (`pinsrw`/`psllq`) + x87 (`fldenv`/`fnstenv`) — axe lifter distinct.
+⇒ le gros threading est fait ; le reste est surtout des **shims stateless** + pthread (mappable) + VEH-déféré + 2 gaps lifter.
