@@ -8465,3 +8465,23 @@ Bail out! ERROR:.../gspawn-win32-helper.c:190:main: assertion failed: (argc >= A
 `GLib-CRITICAL: TLS callback not invoked` (ARET n'invoque pas encore les **callbacks TLS PE** des DLL liftées) + le code de
 sortie (abort ELF 134 vs Windows 3, convention de plateforme). ⇒ Prochain cran pour le bit-identique **complet** : invoquer les
 callbacks TLS PE au process-attach (feature loader générale, comme DllMain).
+
+### 2026-08-16 — [LOADER ✅][🎯 BIT-IDENTIQUE] **Callbacks TLS PE des DLL liftées — gspawn = Wine octet pour octet**
+
+Dernier maillon du run gspawn : ARET lançait `DllMain` des DLL liftées mais **pas les callbacks TLS PE** (répertoire
+`IMAGE_DIRECTORY_ENTRY_TLS`, tableau `.CRT$XLB` exécuté par le loader Windows au process/thread-attach). glib en enregistre un
+et **avertit s'il n'a pas tourné** (`GLib-CRITICAL: TLS callback not invoked`). **Feature loader générale** (comme DllMain) :
+`parse_pe_tls_dir_rva` (répertoire de données 9), `Program::read_tls_callbacks()` lit `AddressOfCallBacks` (offset 12) → tableau
+de VAs absolues null-terminé (borné 256), **lu AVANT le rebasing** (valeurs absolues à la base propre du module) puis décalé de
+`delta` — même patron que les ctors. Chaque callback est **semé comme fonction** (récupéré/lifté) et collecté en
+`prog.tls_inits = [(callback_va, hinstance)]`. Le builder les émet au démarrage **avant** les DllMain (ordre Windows), en frame
+stdcall 3 args `cb(hinstance, DLL_PROCESS_ATTACH=1, 0)`. **Gaté multi-module** (`tls_inits` vide pour un binaire seul ⇒ **hash
+`19acad982194bf07` inchangé**). **Garde** : `winecorpus/lift_tlscb.{c,dll.c}` — DLL compagnon avec un vrai répertoire TLS PE
+(`.CRT$XLB` + `_tls_used`, TLS natif sans emutls), callback qui pose un flag à PROCESS_ATTACH, l'app relit `tls_ran=1
+tls_reason=1` — **bit-identique Wine** (vérifié non-vacant : la valeur EST 1 des deux côtés).
+
+**⇒ 🎯 gspawn-win32-helper-console.exe (vrai libglib tiers) = Wine OCTET POUR OCTET** (stdout **et** stderr, après
+normalisation CRLF du harnais ; le mur « TLS callback not invoked » a disparu). Seul écart : code de sortie (abort ELF 134 vs
+Windows 3, convention de plateforme). **libglib s'exécute end-to-end, sortie identique à Wine.** **Portes** : hash inchangé,
+difftest 272/272, **7 fixtures lifting-DLL vertes** (lift_zlib/libgcc/libstdcxx/stdthrow/stdstring/comctl32_imagelist/progress —
+0 régression du changement loader), lift_tlscb bit-identique Wine.

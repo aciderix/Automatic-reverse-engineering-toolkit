@@ -689,6 +689,14 @@ reste = data-en-code (abort correct). **Séquence des murs runtime** (le vrai bi
    `Bail out! ERROR:.../gspawn-win32-helper.c:190:main: assertion failed` **identique à Wine**. **libglib s'exécute réellement**
    (lifté, 6 DLL). Seule divergence : 2 warnings **`TLS callback not invoked`** (callbacks TLS PE des DLL liftées non invoqués
    par le loader) + code de sortie (abort ELF 134 vs Windows 3, convention plateforme).
-5. 🔜 **Callbacks TLS PE** au process-attach (feature loader générale, comme DllMain) = dernier cran vers le bit-identique complet.
-Les imports restants (`EnumSystemLocalesA`/`GetLocaleInfoA`, `GetComputerNameW`, `fwprintf`, `mbstowcs`, `_wspawnv`…) n'étaient
-**pas** sur le chemin gspawn (jamais atteints) — la boucle a prouvé qu'on ne code que ce que le vrai binaire exerce.
+5. ✅ **Callbacks TLS PE** au process-attach (feature loader générale, comme DllMain) : `parse_pe_tls_dir_rva` + `read_tls_callbacks`
+   (répertoire 9, `AddressOfCallBacks`), lus avant rebasing puis décalés, semés comme fonctions, émis avant DllMain
+   (`cb(hinstance, PROCESS_ATTACH, 0)`). Gaté multi-module (hash inchangé). Garde `lift_tlscb` (DLL compagnon à vrai répertoire
+   TLS PE) bit-identique Wine ; 7 fixtures lifting-DLL vertes.
+
+### 🎯🎯 gspawn (vrai libglib) = WINE OCTET POUR OCTET (2026-08-16)
+`gspawn-win32-helper-console.exe` lifté (6 DLL) sort désormais **stdout ET stderr identiques à Wine** (normalisation CRLF du
+harnais) : tout le démarrage GLib + `main` + assertion + `Bail out!`, **plus aucun** `TLS callback not invoked`. Seul écart =
+code de sortie (abort 134 ELF vs 3 Windows, convention plateforme). **3ᵉ vrai binaire tiers end-to-end** (après jsoncpp, ninja),
+1ᵉʳ basé libglib. La boucle mesure→fix a validé la doctrine : les ~13 autres imports « manquants » (locale/spawn) **jamais
+atteints** ⇒ on ne code que ce que le vrai binaire exerce ; et `fnstenv`/`fldenv` confirmé **hors** de ce chemin.

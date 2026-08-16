@@ -1428,6 +1428,21 @@ pub fn transpile(
             "    {{ uint32_t *csp=(uint32_t*)top; csp[0]=0; sub_{va:x}((uint64_t)(uintptr_t)top, 0, 0, 0, 0); }}\n"
         ));
     }
+    // PE TLS callbacks: the Windows loader runs these at process attach, BEFORE each
+    // DllMain, as `cb(hinstance, DLL_PROCESS_ATTACH=1, 0)` — same 3-arg stdcall frame
+    // as DllMain. A lifted DLL may register one (glib does, and warns if it never ran).
+    // Only non-empty for a multi-module lift, so a single-binary transpile is unaffected.
+    let mut tls_init_decls = String::new();
+    let mut tls_init_calls = String::new();
+    for &(cb, base) in &prog.tls_inits {
+        tls_init_decls.push_str(&format!(
+            "         uint64_t sub_{cb:x}(uint64_t,uint64_t,uint64_t,uint64_t,uint64_t);\n"
+        ));
+        tls_init_calls.push_str(&format!(
+            "    {{ uint32_t *tsp=(uint32_t*)top; tsp[0]=0; tsp[1]=0x{base:x}u; tsp[2]=1u; tsp[3]=0u; \
+             sub_{cb:x}((uint64_t)(uintptr_t)top, 0x{base:x}u, 1u, 0, 0); }}\n"
+        ));
+    }
     let main_c = format!(
         "#include <stdint.h>\n\n\
          /* One shared machine stack for all transpiled functions (UBT M3). */\n\
@@ -1443,6 +1458,7 @@ pub fn transpile(
          uint64_t sub_{entry:x}(uint64_t __esp, uint64_t a, uint64_t c, uint64_t d, uint64_t b);\n\
          {dll_init_decls}\
          {ctor_decls}\
+         {tls_init_decls}\
          int main(int argc, char **argv) {{\n\
          \x20   aret_real_argc = argc; aret_real_argv = argv;\n\
          {map_call}    uint8_t *top = aret_stack + sizeof(aret_stack) - 64;\n\
@@ -1451,6 +1467,7 @@ pub fn transpile(
          \x20      them and dereferences near the top hits real memory, not a fake VA. */\n\
          \x20   __aret_set_stack_bounds((uint32_t)(uintptr_t)(aret_stack + sizeof(aret_stack)),\n\
          \x20                           (uint32_t)(uintptr_t)aret_stack);\n\
+         {tls_init_calls}\
          {dll_init_calls}\
          {ctor_calls}\
          {argv_prep}\

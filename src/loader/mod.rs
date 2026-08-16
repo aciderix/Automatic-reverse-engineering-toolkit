@@ -189,6 +189,15 @@ pub struct Program {
     /// These vary from binary to binary, so FLIRT signature generation wildcards
     /// them (an absolute operand like `mov reg,[abs32]` must not pin a signature).
     pub base_relocs: BTreeSet<u64>,
+    /// VA of this module's PE TLS directory (IMAGE_DIRECTORY_ENTRY_TLS), 0 if none.
+    /// `read_tls_callbacks()` reads its callback array from here.
+    pub tls_dir_va: u64,
+    /// TLS callbacks to run at process attach (DLL lifting): each `(callback_va,
+    /// hinstance)` is a merged module's rebased `PIMAGE_TLS_CALLBACK`, called as
+    /// `cb(hinstance, DLL_PROCESS_ATTACH, 0)` before the app entry — just like
+    /// `dll_inits`. The Windows loader runs these on process/thread attach; glib
+    /// registers one at startup and warns if it never ran. Empty unless DLLs merged.
+    pub tls_inits: Vec<(u64, u64)>,
 }
 
 /// A resolved static relocation: the branch/data target address (when the symbol
@@ -307,6 +316,7 @@ impl Program {
 
         let relocs = parse_static_relocs(&obj);
         let base_relocs = parse_pe_base_relocs(data);
+        let tls_dir_va = parse_pe_tls_dir_rva(data).map(|rva| image_base + rva as u64).unwrap_or(0);
 
         Ok(Program {
             format: format!("{:?}", obj.format()),
@@ -323,7 +333,39 @@ impl Program {
             pe_imports,
             relocs,
             base_relocs,
+            tls_dir_va,
+            tls_inits: Vec::new(),
         })
+    }
+
+    /// PE TLS callbacks read from the loaded image at this module's own base:
+    /// IMAGE_TLS_DIRECTORY32.AddressOfCallBacks (offset 12) points to a
+    /// null-terminated array of absolute callback VAs. Each is a
+    /// `PIMAGE_TLS_CALLBACK(PVOID DllHandle, DWORD Reason, PVOID Reserved)` the
+    /// Windows loader runs at process/thread attach. Empty if there is no TLS
+    /// directory, no callback array, or the addresses are unreadable. Read BEFORE
+    /// rebasing (the values are absolute VAs at this module's own base). Bounded so a
+    /// corrupt array can't loop forever.
+    pub fn read_tls_callbacks(&self) -> Vec<u64> {
+        let mut out = Vec::new();
+        if self.tls_dir_va == 0 {
+            return out;
+        }
+        let Some(aoc) = self.read_u32(self.tls_dir_va + 12) else { return out };
+        let mut p = aoc as u64;
+        if p == 0 {
+            return out;
+        }
+        for _ in 0..256 {
+            match self.read_u32(p) {
+                Some(0) | None => break,
+                Some(cb) => {
+                    out.push(cb as u64);
+                    p += 4;
+                }
+            }
+        }
+        out
     }
 
     /// Resolved branch target of a relocation lying within the instruction at
@@ -638,6 +680,23 @@ fn parse_pe_base_relocs(data: &[u8]) -> BTreeSet<u64> {
         .unwrap_or_default()
 }
 
+/// RVA of the PE TLS directory (IMAGE_DIRECTORY_ENTRY_TLS), or None when absent/empty
+/// or on any parse error (best-effort, like the other parse_pe_* helpers).
+fn parse_pe_tls_dir_rva(data: &[u8]) -> Option<u32> {
+    use object::read::pe::ImageNtHeaders;
+    use object::pe;
+    fn collect<Nt: ImageNtHeaders>(data: &[u8]) -> Option<u32> {
+        let dos = pe::ImageDosHeader::parse(data).ok()?;
+        let mut offset = dos.nt_headers_offset() as u64;
+        let (_nt, dirs) = Nt::parse(data, &mut offset).ok()?;
+        let dir = dirs.get(pe::IMAGE_DIRECTORY_ENTRY_TLS)?;
+        let rva = dir.virtual_address.get(object::LittleEndian);
+        let size = dir.size.get(object::LittleEndian);
+        (rva != 0 && size != 0).then_some(rva)
+    }
+    collect::<pe::ImageNtHeaders32>(data).or_else(|| collect::<pe::ImageNtHeaders64>(data))
+}
+
 /// Parse a PE import table into a map of IAT slot virtual address -> imported
 /// name. Returns empty for non-PE inputs or on any parse error (best-effort).
 fn parse_pe_imports(data: &[u8]) -> BTreeMap<u64, String> {
@@ -717,6 +776,9 @@ pub struct LoadedModule {
     /// The module's C++ global constructors, rebased to the merged image (call order).
     /// libstdc++'s here are what construct `std::cout`/`cin`/`cerr`.
     pub ctors: Vec<u64>,
+    /// The module's PE TLS callbacks, rebased to the merged image. Run at process
+    /// attach (`cb(hinstance, DLL_PROCESS_ATTACH, 0)`) before the app entry.
+    pub tls_callbacks: Vec<u64>,
 }
 
 /// Normalize a DLL name for matching: lowercase, drop a trailing `.dll`. So
@@ -883,6 +945,10 @@ pub fn merge_modules(
         // __do_global_ctors, which ARET no-ops — so they must be run explicitly).
         let ctors: Vec<u64> =
             recover_ctor_list(&dll).into_iter().map(|va| (va as i64 + delta) as u64).collect();
+        // TLS callbacks, read at the DLL's own base (values are absolute VAs), then
+        // shifted to the merged image — same pattern as ctors.
+        let tls_callbacks: Vec<u64> =
+            dll.read_tls_callbacks().into_iter().map(|va| (va as i64 + delta) as u64).collect();
 
         apply_base_relocations(&mut dll.sections, &dll.base_relocs, delta)?;
         for s in &mut dll.sections {
@@ -922,6 +988,14 @@ pub fn merge_modules(
                 is_function: true,
             });
         }
+        // Seed each TLS callback as a function so recovery lifts it (like the entry).
+        for &cb in &tls_callbacks {
+            primary.symbols.entry(cb).or_insert_with(|| KnownSymbol {
+                address: cb,
+                name: format!("TlsCallback_{cb:x}"),
+                is_function: true,
+            });
+        }
         // Fold the module's own symbols (shifted) in too, without clobbering.
         for (addr, sym) in std::mem::take(&mut dll.symbols) {
             let a = (addr as i64 + delta) as u64;
@@ -940,7 +1014,14 @@ pub fn merge_modules(
             primary.pe_imports.entry(s).or_insert(imp);
         }
         primary.sections.append(&mut dll.sections);
-        loaded.push(LoadedModule { name, exports, init_entry, hinstance: new_base, ctors });
+        loaded.push(LoadedModule {
+            name,
+            exports,
+            init_entry,
+            hinstance: new_base,
+            ctors,
+            tls_callbacks,
+        });
     }
     Ok(loaded)
 }
@@ -971,6 +1052,13 @@ pub fn load_with_modules(primary_data: &[u8], dlls: &[(String, Vec<u8>)]) -> Res
         .iter()
         .filter(|m| m.init_entry != 0)
         .map(|m| (m.init_entry, m.hinstance))
+        .collect();
+    // PE TLS callbacks to run at process attach, before the app entry (a lifted DLL
+    // may register one — glib does — and warn if it never ran). Each keeps its own
+    // module's hinstance as the DllHandle argument, like dll_inits.
+    primary.tls_inits = modules
+        .iter()
+        .flat_map(|m| m.tls_callbacks.iter().map(move |&cb| (cb, m.hinstance)))
         .collect();
     // C++ global constructors to run at startup (the builder emits calls): each lifted
     // DLL's ctors first, in load order (libstdc++'s build std::cout/cin/cerr), then the
@@ -1760,6 +1848,7 @@ mod tests {
                 },
             ],
             ctors: Vec::new(),
+            tls_callbacks: Vec::new(),
         };
         let imp = |dll: &str, name: Option<&str>, ord: Option<u32>| PeImport {
             dll: dll.into(),
@@ -1794,6 +1883,7 @@ mod tests {
             hinstance: 0,
             exports: parse_pe_exports(&gdi),
             ctors: Vec::new(),
+            tls_callbacks: Vec::new(),
         };
         let resolved = resolve_module_imports(&app_imports, std::slice::from_ref(&gdi_mod));
         assert!(!resolved.is_empty(), "comctl32 imports from gdi32 should resolve");
