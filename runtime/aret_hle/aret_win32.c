@@ -2189,6 +2189,9 @@ struct u32_fiber {
     uint32_t   wait_h[64];       /* Wait set (MAXIMUM_WAIT_OBJECTS)                  */
     int        wait_n, wait_all;
     uint32_t   wait_cs;          /* CRITICAL_SECTION being acquired (0 = none)      */
+    uint32_t   wait_srw;         /* SRWLOCK being acquired (0 = none)               */
+    int        wait_srw_excl;    /* 1 = exclusive acquire, 0 = shared               */
+    uint32_t   wait_cv;          /* CONDITION_VARIABLE slept on (0 = none)          */
     int        has_timeout;      /* this wait/sleep has a finite deadline           */
     int        timed_out;        /* it was woken by the deadline, not a signal      */
     uint64_t   wake_time;        /* virtual-clock deadline (ms) if has_timeout      */
@@ -2227,6 +2230,68 @@ static int u32_cs_owner(uint32_t cs) {
     int s = u32_cs_slot(cs);
     return s < 0 ? 0 : g_cs[s].owner;
 }
+
+/* SRWLOCK table (Slim Reader/Writer Lock, keyed by &lock; the SRWLOCK itself is an
+ * opaque pointer-sized word we leave alone, as Wine does). Non-recursive: `writer` =
+ * fiber index+1 of the exclusive owner (0 = none); `readers` = number of shared
+ * holders. Exclusive blocks while any writer or reader holds it; shared blocks while a
+ * writer holds it. Cooperative fibers: a blocker parks and the scheduler runs holders
+ * until they release. */
+#define U32_MAX_SRW 256
+static struct { uint32_t lock; int writer, readers; } g_srw[U32_MAX_SRW];
+static int g_nsrw;
+static int u32_srw_slot(uint32_t lock) {
+    for (int i = 0; i < g_nsrw; i++) if (g_srw[i].lock == lock) return i;
+    return -1;
+}
+static int u32_srw_ensure(uint32_t lock) {
+    int s = u32_srw_slot(lock);
+    if (s >= 0) return s;
+    if (g_nsrw >= U32_MAX_SRW) { aret_unmodelled("SRWLOCK: table full"); return -1; }
+    s = g_nsrw++;
+    g_srw[s].lock = lock; g_srw[s].writer = 0; g_srw[s].readers = 0;
+    return s;
+}
+/* Can fiber `i` acquire `lock` in the requested mode right now? (Also the scheduler's
+ * runnable predicate for a fiber parked on this lock.) */
+static int u32_srw_acquirable(uint32_t lock, int excl, int i) {
+    int s = u32_srw_slot(lock);
+    if (s < 0) return 1;
+    if (excl) return g_srw[s].writer == 0 && g_srw[s].readers == 0;
+    return g_srw[s].writer == 0 || g_srw[s].writer == i + 1;
+}
+static void u32_srw_take(uint32_t lock, int excl, int i) {
+    int s = u32_srw_ensure(lock);
+    if (s < 0) return;
+    if (excl) g_srw[s].writer = i + 1; else g_srw[s].readers++;
+}
+static void u32_srw_release(uint32_t lock, int excl, int i) {
+    int s = u32_srw_slot(lock);
+    if (s < 0) return;
+    if (excl) { if (g_srw[s].writer == i + 1) g_srw[s].writer = 0; }
+    else      { if (g_srw[s].readers > 0) g_srw[s].readers--; }
+}
+
+/* CONDITION_VARIABLE table (keyed by &cv). `grants` = wakes handed out but not yet
+ * consumed by a waiter; capped at the number of current waiters so a Wake never leaks
+ * to a future sleeper. A waiter parked on the cv is runnable once grants > 0. */
+#define U32_MAX_CV 256
+static struct { uint32_t cv; int grants; } g_cv[U32_MAX_CV];
+static int g_ncv;
+static int u32_cv_slot(uint32_t cv) {
+    for (int i = 0; i < g_ncv; i++) if (g_cv[i].cv == cv) return i;
+    return -1;
+}
+static int u32_cv_ensure(uint32_t cv) {
+    int s = u32_cv_slot(cv);
+    if (s >= 0) return s;
+    if (g_ncv >= U32_MAX_CV) { aret_unmodelled("CONDITION_VARIABLE: table full"); return -1; }
+    s = g_ncv++;
+    g_cv[s].cv = cv; g_cv[s].grants = 0;
+    return s;
+}
+static int u32_cv_grants(uint32_t cv) { int s = u32_cv_slot(cv); return s < 0 ? 0 : g_cv[s].grants; }
+static int u32_cv_waiters(uint32_t cv);   /* defined after g_nfiber is in scope below */
 
 /* Event objects (doc 80 incr. 3). manual-reset stays signaled until ResetEvent;
  * auto-reset releases exactly one waiter then self-resets (consumed at wait). */
@@ -2336,8 +2401,16 @@ static void u32_handle_acquire(uint32_t h, int me) {
 /* A blocked fiber is signal-runnable when its wait condition clears: a CRITICAL_
  * SECTION it wants is free, or its handle wait set is satisfied. A *pure* timed
  * sleep (no handles) is never signal-runnable — only the virtual clock wakes it. */
+static int u32_cv_waiters(uint32_t cv) {
+    int n = 0;
+    for (int i = 0; i < g_nfiber; i++)
+        if (g_fiber[i].state == FST_BLOCKED && g_fiber[i].wait_cv == cv) n++;
+    return n;
+}
 static int u32_fiber_runnable(int i) {
     struct u32_fiber *f = &g_fiber[i];
+    if (f->wait_srw) return u32_srw_acquirable(f->wait_srw, f->wait_srw_excl, i);
+    if (f->wait_cv) return u32_cv_grants(f->wait_cv) > 0;
     if (f->wait_cs) { int o = u32_cs_owner(f->wait_cs); return o == 0 || o == i + 1; }
     if (f->wait_n == 0) return 0;                 /* pure Sleep → woken by the clock only */
     return u32_wait_ok(f);
@@ -2746,6 +2819,89 @@ uint32_t aret_LeaveCriticalSection(uint32_t esp) {
     if (s >= 0 && g_cs[s].owner == g_cur + 1 && g_cs[s].rec > 0)
         if (--g_cs[s].rec == 0) g_cs[s].owner = 0;     /* fully released → waiters may take it */
     return 0;
+}
+
+/* -------- SRWLOCK (Slim Reader/Writer Lock) — modern threading, fiber-backed -------- */
+/* Block the running fiber until it can take `lock` in the requested mode, then take it. */
+static void u32_srw_acquire(uint32_t lock, int excl) {
+    int me = g_cur;
+    for (;;) {
+        if (u32_srw_acquirable(lock, excl, me)) { u32_srw_take(lock, excl, me); return; }
+        u32_sched_ensure();
+        g_fiber[me].wait_srw = lock; g_fiber[me].wait_srw_excl = excl;
+        g_fiber[me].state = FST_BLOCKED;
+        u32_to_sched();
+        g_fiber[me].wait_srw = 0;
+    }
+}
+uint32_t aret_InitializeSRWLock(uint32_t esp) { u32_srw_ensure(WU(0)); return 0; }
+uint32_t aret_AcquireSRWLockExclusive(uint32_t esp) { u32_srw_acquire(WU(0), 1); return 0; }
+uint32_t aret_AcquireSRWLockShared(uint32_t esp)    { u32_srw_acquire(WU(0), 0); return 0; }
+uint32_t aret_ReleaseSRWLockExclusive(uint32_t esp) { u32_srw_release(WU(0), 1, g_cur); return 0; }
+uint32_t aret_ReleaseSRWLockShared(uint32_t esp)    { u32_srw_release(WU(0), 0, g_cur); return 0; }
+uint32_t aret_TryAcquireSRWLockExclusive(uint32_t esp) {
+    if (u32_srw_acquirable(WU(0), 1, g_cur)) { u32_srw_take(WU(0), 1, g_cur); return 1; }
+    return 0;
+}
+uint32_t aret_TryAcquireSRWLockShared(uint32_t esp) {
+    if (u32_srw_acquirable(WU(0), 0, g_cur)) { u32_srw_take(WU(0), 0, g_cur); return 1; }
+    return 0;
+}
+
+/* -------- CONDITION_VARIABLE — atomically release-lock, block, re-acquire -------- */
+uint32_t aret_InitializeConditionVariable(uint32_t esp) { u32_cv_ensure(WU(0)); return 0; }
+uint32_t aret_WakeConditionVariable(uint32_t esp) {
+    uint32_t cv = WU(0); int s = u32_cv_ensure(cv);
+    if (s < 0) return 0;
+    int w = u32_cv_waiters(cv);                        /* cap grants at #waiters (no leak) */
+    if (g_cv[s].grants < w) g_cv[s].grants++;
+    return 0;
+}
+uint32_t aret_WakeAllConditionVariable(uint32_t esp) {
+    uint32_t cv = WU(0); int s = u32_cv_ensure(cv);
+    if (s < 0) return 0;
+    g_cv[s].grants = u32_cv_waiters(cv);               /* release every current waiter */
+    return 0;
+}
+/* Core: release `lock` (SRW excl/shared, or a CRITICAL_SECTION), block on `cv` until a
+ * Wake grant or the timeout, then re-acquire `lock`. Returns 1 on wake, 0 on timeout
+ * (WAIT_TIMEOUT / ERROR_TIMEOUT). is_cs picks the lock kind. */
+static uint32_t u32_condvar_sleep(uint32_t cv, uint32_t lock, int is_cs, int shared, uint32_t ms) {
+    int me = g_cur, s = u32_cv_ensure(cv);
+    if (s < 0) return 0;
+    /* release the held lock */
+    if (is_cs) { int cs = u32_cs_slot(lock); if (cs >= 0) { g_cs[cs].rec = 0; g_cs[cs].owner = 0; } }
+    else         u32_srw_release(lock, !shared, me);
+    u32_sched_ensure();
+    struct u32_fiber *f = &g_fiber[me];
+    uint32_t ret = 1;
+    if (ms == 0 && g_cv[s].grants == 0) {              /* 0-timeout poll: no grant -> timeout */
+        ret = 0; g_last_error = 0x102u;               /* WAIT_TIMEOUT */
+    } else {
+        f->wait_cv = cv;
+        f->has_timeout = (ms != U32_INFINITE && ms != 0);
+        f->wake_time = g_vclock + ms; f->timed_out = 0;
+        for (;;) {
+            f->state = FST_BLOCKED; u32_to_sched();
+            if (g_cv[s].grants > 0) { g_cv[s].grants--; break; }   /* consumed a wake */
+            if (f->timed_out) { ret = 0; g_last_error = 0x102u; break; }
+        }
+        f->wait_cv = 0; f->has_timeout = 0;
+    }
+    /* re-acquire the lock before returning (may block) */
+    if (is_cs) { int me2 = g_cur; for (;;) { int cs = u32_cs_ensure(lock); if (cs < 0) break;
+                    if (g_cs[cs].owner == 0 || g_cs[cs].owner == me2 + 1) { g_cs[cs].owner = me2 + 1; g_cs[cs].rec++; break; }
+                    u32_sched_ensure(); g_fiber[me2].wait_cs = lock; g_fiber[me2].state = FST_BLOCKED; u32_to_sched(); g_fiber[me2].wait_cs = 0; } }
+    else         u32_srw_acquire(lock, !shared);
+    return ret;
+}
+/* SleepConditionVariableSRW(cv, srw, ms, flags): flags bit 1 = CONDITION_VARIABLE_LOCKMODE_SHARED. */
+uint32_t aret_SleepConditionVariableSRW(uint32_t esp) {
+    return u32_condvar_sleep(WU(0), WU(1), 0, (WU(3) & 1u) ? 1 : 0, WU(2));
+}
+/* SleepConditionVariableCS(cv, cs, ms). */
+uint32_t aret_SleepConditionVariableCS(uint32_t esp) {
+    return u32_condvar_sleep(WU(0), WU(1), 1, 0, WU(2));
 }
 /* -------- Event objects (doc 80 incr. 3) -------- */
 uint32_t aret_CreateEventA(uint32_t esp) { return u32_create_event(WI(1), WI(2), u32_name_hash(WP(3), 0)); }

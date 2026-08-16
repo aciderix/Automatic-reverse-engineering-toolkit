@@ -8298,3 +8298,21 @@ abort bruyant** (jamais l'anglais en silence). **Prouvé (probe transpilé)** : 
 message clair. **(b) noté** comme fix racine : corriger P1bis (setlocale aborte sur locales non-C) rendrait toute la
 famille C-locale (collation incluse) prouvablement sûre d'un coup — doc 70 §5 P1bis. **Portes** : hash `19acad982194bf07`
 inchangé (HLE-only), difftest 272/272, `win32_gettext` toujours bit-identique Wine (garde inerte en locale C du harnais).
+
+### 2026-08-15 — [HLE][THREAD ✅] **Threading moderne : SRWLOCK + CONDITION_VARIABLE (1ʳᵉ famille du résidu libglib, adossée aux fibers)**
+
+Le résidu mesuré du lift libglib (doc 82) est dominé par le **threading moderne**. 1ʳᵉ famille livrée, générale (pas que
+glib — SRWLock/condvar sont partout dans le Win32 moderne), sur le **scheduler fibers coopératif prouvé** (§4.7). **SRWLOCK**
+(Slim Reader/Writer Lock, keyé par `&lock`, non récursif) : `Initialize`, `Acquire/Release/TryAcquire` × `Exclusive`
+(writer unique, bloque si writer OU reader) / `Shared` (readers multiples, bloque si writer) — même patron que
+CriticalSection (park + retry, prédicat `u32_srw_acquirable` ajouté au `u32_fiber_runnable` du scheduler). **CONDITION_
+VARIABLE** : `Initialize`, `Wake`/`WakeAll`, `SleepConditionVariableSRW`/`SleepConditionVariableCS` = **release atomique du
+lock + block sur la CV + re-acquire** ; `grants` (wakes en attente, **plafonnés au nombre de waiters** ⇒ aucun leak vers un
+futur dormeur), consommés à la sortie (re-check comme les events auto-reset) ; timeout fini honoré par l'horloge virtuelle.
+Champs fibers ajoutés (`wait_srw`/`wait_srw_excl`/`wait_cv`, zérotés à `u32_spawn`). **Garde** :
+`winecorpus/thread_srwlock.c` — 4 threads × 1000 incréments sous SRW exclusif avec **yield sous le lock** (`counter=4000`
+= exclusion mutuelle réelle, un lock no-op perdrait des incréments) + ping condition-variable (`cv_ready=1`) + interplay
+shared/exclusive (`TryAcquireExclusive` échoue tant que 2 readers tiennent, réussit après) — **bit-identique Wine**.
+**Portes** : hash `19acad982194bf07` inchangé (HLE-only), difftest 272/272, **5 fixtures fibers existantes vertes**
+(thread_critsec/pool/mutex_sem/event/join — 0 régression scheduler). **Reste du résidu libglib** : thread-pool
+(`CreateThreadpoolWork`…), Winsock async/event (inc3), console, misc Win32, CRT, + gaps lifter SSE/x87.
