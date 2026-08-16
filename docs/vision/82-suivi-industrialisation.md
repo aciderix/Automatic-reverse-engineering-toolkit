@@ -723,3 +723,15 @@ La mesure tranche : **Win32 HLE ≈ couvert** (0 API OS dans la tête) ; mur n°
    cache d'objets (lift-once-reuse). Briques 2a (détection+classification), 2b (résolution fichier), 2c (re-mesure du gain).
 **Discipline (leçon miscompile)** : toute brique lift multi-module passe le **run end-to-end `lift_libstdcxx`** avant commit.
 **Écartés** : récup noreturn de gobject (étroite/risquée), `fnstenv`/`fldenv` (hors chemins exercés).
+
+### ✅ Auto-lift runtime C++ (`--auto-lift`) — briques 2a + 2c FAITES (2026-08-16)
+**2a** : flag opt-in qui lit les imports de l'exe, classe (OS=shim / runtime=lift), **résout** le fichier (à côté de l'exe →
+`--dll-path` → `bench/.cache`) et **lifte récursivement** — plus de `--with-dll` manuel. Sound (introuvable → shim-bound, pas
+un crash) ; défaut intact (hash inchangé) ; garde `lift_autolift` bit-identique Wine ; **gspawn `--auto-lift` = Wine
+octet-pour-octet** end-to-end (6 DLL auto-résolues).
+**2c (mesure du gain)** : sur 2 vrais binaires C++ purs-runtime, l'auto-lift fait chuter le mur d'imports non-implémentés
+**84→28** (bin2header) et **63→38** (ninja) en auto-résolvant libstdc++/libgcc — **zéro chemin manuel**. Résidu = surtout
+`libwinpthread` (absent de ce sous-corpus → shim-bound sound) + qq gaps HLE ; chaîne complète présente ⇒ import-clean (cf.
+gspawn = Wine). **Caveat mesure** : le corpus renomme les DLL avec un préfixe sha (dedup) ⇒ la résolution par-nom est
+bridée ici — un **vrai redistribuable** (DLL correctement nommées à côté de l'exe) résout pleinement. **Reste (2b, raffinement)** :
+recherche élargie (dossiers toolchain, dé-préfixage), et re-mesure corpus-large quand la résolution est robuste.
