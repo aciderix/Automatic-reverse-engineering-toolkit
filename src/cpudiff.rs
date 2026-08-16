@@ -1778,6 +1778,16 @@ fn corpus() -> Vec<Vec<u8>> {
         vec![0x66, 0x0f, 0x73, 0xf8, 0x03], // pslldq    xmm0, 3
         vec![0x66, 0x0f, 0x73, 0xf8, 0x09], // pslldq    xmm0, 9
         vec![0x66, 0x0f, 0x73, 0xf8, 0x0e], // pslldq    xmm0, 14
+        // psllq immediate (group 14 /6): shift each 64-bit lane; a count >=64 zeroes it
+        vec![0x66, 0x0f, 0x73, 0xf0, 0x05], // psllq     xmm0, 5
+        vec![0x66, 0x0f, 0x73, 0xf0, 0x45], // psllq     xmm0, 0x45 (>=64 -> 0)
+        // pinsrw / pinsrd — insert a word/dword from a GP reg (ecx) into lane imm
+        vec![0x66, 0x0f, 0xc4, 0xc1, 0x03],       // pinsrw xmm0, ecx, 3 (low half)
+        vec![0x66, 0x0f, 0xc4, 0xc1, 0x05],       // pinsrw xmm0, ecx, 5 (high half)
+        vec![0x66, 0x0f, 0x3a, 0x22, 0xc1, 0x02], // pinsrd xmm0, ecx, 2 (high half)
+        vec![0x66, 0x0f, 0x3a, 0x22, 0xc1, 0x01], // pinsrd xmm0, ecx, 1 (low half)
+        // cvtdq2pd — convert the low two int32 of the source to two doubles
+        vec![0xf3, 0x0f, 0xe6, 0xc1],             // cvtdq2pd xmm0, xmm1
         // packed single-precision float (0F): arith, min/max, sqrt, cvt, bitwise,
         // compare, unpack, movmask (GP result)
         vec![0x0f, 0x58, 0xc1],       // addps     xmm0, xmm1

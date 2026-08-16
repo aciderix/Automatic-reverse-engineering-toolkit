@@ -8384,3 +8384,24 @@ autre fibre, hors shared-stack), `GetTimeFormatW` (formatage locale risqué). **
 essentiellement COMPLÈTE** (54 → 5, tous déférés). Reste pour un run libglib bout-en-bout : ces 5 imports **si** exercés
 (VEH/ThreadContext probablement hors chemin commun) + les **gaps lifter SSE** (`pinsrw`/`psllq`) / **x87** (`fldenv`/
 `fnstenv`) — axe lifter distinct.
+
+### 2026-08-16 — [LIFT][SSE ✅] **Trio SSE data-désigné (doc 90) : `psllq`/`pinsrw`/`pinsrd`/`cvtdq2pd` liftés, bit-identiques Unicorn**
+
+Le sweep corpus (doc 90, **reproductible sur 3 passes**) désignait le **trio SSE** `psllq` (45 bins/6369 sites),
+`pinsrd` (69/4346), `cvtdq2pd` (48/4610) comme **les seules lacunes de lift plausiblement réelles** (tout le reste =
+data-décodée-en-code + I/O privilégié → abort correct) ; le résidu libglib pointait `pinsrw`/`psllq` en plus. Ces ops
+n'étaient **pas modélisées** dans `lift.rs` (0 match, alors que ~41 autres packed le sont) → `Asm`/abort. **4 bras
+ajoutés**, chacun **prouvé bit-identique Unicorn** (cpudiff, 9 nouveaux vecteurs `per_instruction_corpus`) :
+- **`psllq xmm, imm8`** (group 14 /6) — décale chaque lane 64-bit ; **compte ≥ 64 ⇒ lane à 0** (le shift C ≥ largeur est
+  UB, donc folded à la constante). *(La forme registre `psllq xmm,xmm` reste à faire au besoin — non désignée par la donnée.)*
+- **`pinsrw xmm, r32/m16, imm8`** — insère un word (16 bits bas du GP/mémoire) dans le lane `imm&7` (masque+OR sur la
+  moitié 64-bit visée).
+- **`pinsrd xmm, r/m32, imm8`** (SSE4.1) — insère un dword dans le lane `imm&3` (même patron, masque 32 bits).
+- **`cvtdq2pd xmm, xmm/m64`** — convertit les **2 int32 bas** de la source en **2 doubles** ; réutilise l'helper existant
+  `__fp_i32_64` (`(double)(int32_t)`), aucun nouvel helper d'émission (le lane haut prend les bits 32..63).
+Enregistrées dans `is_scalar_float()` (routage lane-128 `read_xmm128`/`write_xmm128`). **Additif par construction** — ces
+bras ne reprennent que des cas qui **abortaient**, donc aucun programme fonctionnel ne change : **hash `19acad982194bf07`
+inchangé**. **Portes** : cpudiff vert (per-instruction avec 9 vecteurs neufs + séquences + random), funcdiff **0 divergence**
+(21859 lift / 10808 opt scorées), difftest **272/272**, difftest_transpile **4/4**. **⇒ Le dernier axe lifter data-désigné
+est comblé** ; reste x87 `fldenv`/`fnstenv` (incrément séparé, soundness à traiter avec soin). Ce gain est **général**
+(vectorisation graphisme/hash/boucles auto-vectorisées) et débloque au passage le lift libglib côté SSE.

@@ -661,3 +661,12 @@ lift : libgcc + libpcre2 + libwinpthread. Reste pour le run bout-en-bout : ces 5
 SSE (`pinsrw`/`psllq`) / x87 (`fldenv`/`fnstenv`) = **axe lifter distinct** (recoupe le trio SSE mesuré doc 90). Prochain
 cran naturel : soit tenter un vrai programme glib end-to-end (voir ce qui bloque à l'exécution), soit combler les gaps
 lifter SSE/x87 (généraux, au-delà de glib).
+
+### ✅ Trio SSE data-désigné COMBLÉ (2026-08-16) — `psllq`/`pinsrw`/`pinsrd`/`cvtdq2pd` bit-identiques Unicorn
+Le côté **SSE** des gaps lifter (doc 90, trio reproductible sur 3 sweeps ; + `pinsrw` du résidu libglib) est **fait et
+prouvé** : 4 bras dans `lift.rs` (`psllq imm` avec clamp ≥64→0, `pinsrw` lane `imm&7`, `pinsrd` lane `imm&3`, `cvtdq2pd`
+low-2-int32→2-doubles via `__fp_i32_64`), enregistrés dans `is_scalar_float()`, **additifs** (ne reprennent que des cas qui
+abortaient ⇒ hash `19acad982194bf07` inchangé). **Portes** : cpudiff (9 vecteurs neufs + séquences), funcdiff 0-div,
+difftest 272/272. **Reste du gap lifter** : x87 `fldenv`/`fnstenv` (incrément séparé — soundness du status-word à traiter,
+pas un simple additif). Après ça, l'axe lifter distinct sera clos et il ne restera pour libglib end-to-end que les 5
+imports HLE déférés **si** exercés.

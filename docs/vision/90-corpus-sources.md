@@ -227,6 +227,10 @@ sur les **1279 binaires**. Résultat : **427/1279 (33 %) n'ont AUCUN import rest
 propres en raw) — **c'est la valeur mesurée du Levier 1** (lifter libstdc++/libgcc/libwinpthread débloque l'import-wall de
 33 % du corpus). Les **15236 symboles C++ filtrés couvrent 567 binaires**.
 
+**MàJ 2026-08-16** : le **trio SSE** (`psllq`/`pinsrd`/`cvtdq2pd` + `pinsrw`) — seules lacunes de lift plausiblement
+réelles de ces sweeps — est désormais **lifté et prouvé bit-identique Unicorn** (cpudiff), hash inchangé. La partie SSE de
+l'axe lifter est close ; reste x87 `fldenv`/`fnstenv` (incrément séparé). Détail : doc 71 (2026-08-16) + doc 82.
+
 **Mur POST-LIFT restant (par #binaires) — 3 familles nettes :**
 1. **Winsock2 / sockets BSD (`ws2_32.dll`) = LA surface OS dominante** : `WSAGetLastError` 67, `closesocket` 66,
    `WSAStartup` 62, `setsockopt` 59, `ioctlsocket` 58, `connect` 55, `htons` 55, `recv` 54, `socket` 54, `htonl` 53,

@@ -102,6 +102,7 @@ fn is_scalar_float(ins: &Instruction) -> bool {
             | Unpcklpd | Unpckhpd | Addpd | Subpd | Mulpd | Divpd
             | Addps | Subps | Mulps | Divps | Minps | Maxps | Sqrtps | Cvtdq2ps
             | Cmpps | Andps | Orps | Andnps | Shufps | Movmskps | Unpcklps | Unpckhps
+            | Psllq | Pinsrw | Pinsrd | Cvtdq2pd
     )
 }
 
@@ -1486,6 +1487,57 @@ pub fn lift(insn: &Insn, bits: u32) -> Vec<Stmt> {
                 ins,
                 bin(BinOp::Shr, lo, n.clone()),
                 bin(BinOp::Shr, hi, n)
+            ))
+        }
+        // psllq imm: shift each 64-bit lane left. A count >= 64 zeroes the lane (per the
+        // ISA; a raw C shift by >= width is UB, so fold it to 0 at the constant count).
+        Mnemonic::Psllq if ins.op_kind(1) == OpKind::Immediate8 => {
+            let sh = ins.immediate(1);
+            let (lo, hi) = some_or_asm!(read_xmm128(ins, 0));
+            if sh >= 64 {
+                some_or_asm!(write_xmm128(ins, konst(0), konst(0)))
+            } else {
+                let n = konst(sh as i128);
+                some_or_asm!(write_xmm128(ins, bin(BinOp::Shl, lo, n.clone()), bin(BinOp::Shl, hi, n)))
+            }
+        }
+        // pinsrw: insert a 16-bit word (from a GP reg's low half or m16) into lane imm&7.
+        Mnemonic::Pinsrw => {
+            let n = (ins.immediate(2) & 7) as u32;
+            let (lo, hi) = some_or_asm!(read_xmm128(ins, 0));
+            let src = some_or_asm!(op_value(ins, 1));
+            let shift = ((n & 3) * 16) as i128;
+            let word = bin(BinOp::Shl, bin(BinOp::And, src, konst(0xffff)), konst(shift));
+            let clear = konst(!(0xffff_i128 << shift));
+            if n < 4 {
+                some_or_asm!(write_xmm128(ins, bin(BinOp::Or, bin(BinOp::And, lo, clear), word), hi))
+            } else {
+                some_or_asm!(write_xmm128(ins, lo, bin(BinOp::Or, bin(BinOp::And, hi, clear), word)))
+            }
+        }
+        // pinsrd (SSE4.1): insert a 32-bit dword (GP reg or m32) into lane imm&3.
+        Mnemonic::Pinsrd => {
+            let n = (ins.immediate(2) & 3) as u32;
+            let (lo, hi) = some_or_asm!(read_xmm128(ins, 0));
+            let src = some_or_asm!(op_value(ins, 1));
+            let shift = ((n & 1) * 32) as i128;
+            let dword = bin(BinOp::Shl, bin(BinOp::And, src, konst(0xffff_ffff)), konst(shift));
+            let clear = konst(!(0xffff_ffff_i128 << shift));
+            if n < 2 {
+                some_or_asm!(write_xmm128(ins, bin(BinOp::Or, bin(BinOp::And, lo, clear), dword), hi))
+            } else {
+                some_or_asm!(write_xmm128(ins, lo, bin(BinOp::Or, bin(BinOp::And, hi, clear), dword)))
+            }
+        }
+        // cvtdq2pd: convert the LOW two int32 of the source to two doubles.
+        // __fp_i32_64 already does (double)(int32_t)low32; the high lane takes bits 32..63.
+        Mnemonic::Cvtdq2pd => {
+            let (slo, _) = some_or_asm!(read_xmm128(ins, 1));
+            let hi = bin(BinOp::Shr, slo.clone(), konst(32));
+            some_or_asm!(write_xmm128(
+                ins,
+                fcall("__fp_i32_64", vec![slo]),
+                fcall("__fp_i32_64", vec![hi])
             ))
         }
         // Unpack/interleave. The *high* variants are the low ones applied to the
