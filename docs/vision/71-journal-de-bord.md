@@ -8369,3 +8369,18 @@ et `foo\bar`), `_ui64toa_s`=ffffffffffffffff, `wctomb`=1 A, `_kbhit`=0 — **bit
 locale risqué), `Add,RemoveVectoredExceptionHandler` (VEH livraison non câblée), `Get,SetThreadContext` (registres d'un
 autre fibre hors shared-stack). **Reste résidu libglib** : `SHGetKnownFolderPath`, `GetFileInformationByHandleEx`, + gaps
 lifter SSE (`pinsrw`/`psllq`) / x87 (`fldenv`/`fnstenv`).
+
+### 2026-08-15 — [HLE ✅] **Batch B2 (GetFileInformationByHandleEx + SHGetKnownFolderPath) — résidu HLE libglib 26 → 5 (que des déférés)**
+
+`GetFileInformationByHandleEx` (HANDLE==fd, depuis `fstat` : `FileStandardInfo`(1)=AllocationSize/EndOfFile/nlink/Directory,
+`FileBasicInfo`(0)=4 FILETIMEs+attrs ; autres classes → échec défini). `SHGetKnownFolderPath` (API GUID moderne) : table
+des FOLDERID courants (Profile/RoamingAppData/LocalAppData/Documents/Desktop/ProgramData) → mêmes chemins modélisés que la
+famille CSIDL, path `CoTaskMemAlloc`'d (CoTaskMemFree-able) ; GUID inconnu → `E_INVALIDARG` ; chemin env-dépendant ⇒ contrat
+testé (S_OK + path C:), pas oracle-comparé. **Garde** : `winecorpus/win32_glib_batch2.c` — FileStandardInfo (`eof=5 dir=0`),
+SHGetKnownFolderPath(Profile)→C:, GUID bogus→échec — **bit-identique Wine**. **Portes** : hash `19acad982194bf07` inchangé,
+difftest 272/272. **⇒ Résidu HLE libglib : 26 → 5** (avec libwinpthread lifté). **Les 5 restants sont tous DÉFÉRÉS sound
+et documentés** : `Add,RemoveVectoredExceptionHandler` (VEH livraison non câblée), `Get,SetThreadContext` (registres d'un
+autre fibre, hors shared-stack), `GetTimeFormatW` (formatage locale risqué). **⇒ La surface HLE d'imports de libglib est
+essentiellement COMPLÈTE** (54 → 5, tous déférés). Reste pour un run libglib bout-en-bout : ces 5 imports **si** exercés
+(VEH/ThreadContext probablement hors chemin commun) + les **gaps lifter SSE** (`pinsrw`/`psllq`) / **x87** (`fldenv`/
+`fnstenv`) — axe lifter distinct.

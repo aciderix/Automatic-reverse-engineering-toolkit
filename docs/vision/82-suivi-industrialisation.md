@@ -649,3 +649,15 @@ petits/bornés :
 - **CRT** (`isnan`/`kbhit`/`wctomb`/`_wputenv`/`_wspawnvp,vpe`/`_ui64toa_s`/`_getdrive`/`libintl_sprintf`).
 - **gaps lifter** SSE (`pinsrw`/`psllq`) + x87 (`fldenv`/`fnstenv`) — axe lifter distinct.
 ⇒ le gros threading est fait ; le reste est surtout des **shims stateless** + pthread (mappable) + VEH-déféré + 2 gaps lifter.
+
+### ✅ Surface HLE libglib COMPLÈTE (2026-08-15) — résidu imports 54 → 5 (tous déférés sound)
+
+En comblant les familles threading (SRWLock/condvar, thread-pool), Winsock inc3 (async/event), le batch CRT+Win32 env/path/
+console+file-info+known-folder, ET en **liftant libwinpthread** (pthread couvert par le lift, pas de shim), le résidu
+d'imports HLE de `libglib-2.0-0.dll` passe de **54 → 5**. Les 5 restants sont **tous déférés sound + documentés** :
+VEH (`Add,RemoveVectoredExceptionHandler`, livraison non câblée), `Get,SetThreadContext` (hors shared-stack), `GetTimeFormatW`
+(formatage locale risqué, non deviné). **⇒ La surface HLE d'imports de libglib est essentiellement complète.** Chaîne de
+lift : libgcc + libpcre2 + libwinpthread. Reste pour le run bout-en-bout : ces 5 imports **si** atteints + les gaps lifter
+SSE (`pinsrw`/`psllq`) / x87 (`fldenv`/`fnstenv`) = **axe lifter distinct** (recoupe le trio SSE mesuré doc 90). Prochain
+cran naturel : soit tenter un vrai programme glib end-to-end (voir ce qui bloque à l'exécution), soit combler les gaps
+lifter SSE/x87 (généraux, au-delà de glib).

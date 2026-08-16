@@ -3947,6 +3947,37 @@ uint32_t aret_PeekConsoleInputA(uint32_t esp) { return aret_PeekConsoleInputW(es
  * polling for input sees none rather than blocking on absent input). */
 uint32_t aret_ReadConsoleInputW(uint32_t esp) { uint32_t *n = (uint32_t *)WP(3); if (n) *n = 0; return 1; }
 uint32_t aret_ReadConsoleInputA(uint32_t esp) { return aret_ReadConsoleInputW(esp); }
+/* GetFileInformationByHandleEx(hFile, class, buf, size) — HANDLE==fd, from fstat.
+ * FileStandardInfo(1): {i64 AllocationSize; i64 EndOfFile; u32 NumberOfLinks; u8
+ * DeletePending; u8 Directory} (24 b). FileBasicInfo(0): 4 FILETIMEs + u32 attrs (40 b).
+ * Other classes -> defined failure (never a fabricated record). */
+uint32_t aret_GetFileInformationByHandleEx(uint32_t esp) {
+    int fd = (int)WU(0); uint32_t cls = WU(1); uint8_t *buf = (uint8_t *)WP(2); uint32_t size = WU(3);
+    struct stat st;
+    if (fstat(fd, &st) != 0) { g_last_error = 6u; return 0; }
+    if (cls == 1) {                                    /* FileStandardInfo */
+        if (!buf || size < 24) { g_last_error = 122u; return 0; }
+        memset(buf, 0, 24);
+        int64_t alloc = (int64_t)st.st_blocks * 512, eof = (int64_t)st.st_size;
+        memcpy(buf + 0, &alloc, 8); memcpy(buf + 8, &eof, 8);
+        uint32_t nl = (uint32_t)st.st_nlink; memcpy(buf + 16, &nl, 4);
+        buf[21] = S_ISDIR(st.st_mode) ? 1 : 0;
+        return 1;
+    }
+    if (cls == 0) {                                    /* FileBasicInfo */
+        if (!buf || size < 40) { g_last_error = 122u; return 0; }
+        memset(buf, 0, 40);
+        int64_t ct = ((int64_t)st.st_ctime + 11644473600LL) * 10000000LL;
+        int64_t at = ((int64_t)st.st_atime + 11644473600LL) * 10000000LL;
+        int64_t wt = ((int64_t)st.st_mtime + 11644473600LL) * 10000000LL;
+        memcpy(buf + 0, &ct, 8); memcpy(buf + 8, &at, 8); memcpy(buf + 16, &wt, 8); memcpy(buf + 24, &ct, 8);
+        uint32_t attr = S_ISDIR(st.st_mode) ? 0x10u : 0x80u;
+        memcpy(buf + 32, &attr, 4);
+        return 1;
+    }
+    g_last_error = 50u;                                /* ERROR_NOT_SUPPORTED */
+    return 0;
+}
 
 /* DeleteFileA — AUTO-MARSHALLED from DeleteFileW by `gen_win32_sigs.py --marshal
  * DeleteFileA` (doc 82, layer 2). Widen the input path (u32_a2w), pass nothing else,
@@ -8935,6 +8966,39 @@ static void shell_put_wide(uint16_t *dst, const char *src) {
     size_t i = 0;
     for (; src[i]; i++) dst[i] = (unsigned char)src[i];
     dst[i] = 0;
+}
+
+/* SHGetKnownFolderPath(REFKNOWNFOLDERID rfid, flags, hToken, LPWSTR* ppszPath) -> HRESULT:
+ * the modern GUID-based folder API. Maps the common FOLDERIDs glib uses to the same
+ * modelled paths as the CSIDL family, CoTaskMemAlloc's a wide path (CoTaskMemFree-able).
+ * Unknown GUID -> E_INVALIDARG (defined failure). The exact path is environment-dependent
+ * (like SHGetSpecialFolderPath) -> callers get a valid modelled path, not oracle-compared. */
+uint32_t aret_SHGetKnownFolderPath(uint32_t esp) {
+    const uint8_t *g = (const uint8_t *)WP(0);
+    uint32_t *ppath = (uint32_t *)WP(3);
+    if (ppath) *ppath = 0;
+    if (!g) return 0x80070057u;                        /* E_INVALIDARG */
+    static const struct { uint8_t id[16]; const char *path; } tbl[] = {
+        {{0x8F,0x85,0x6C,0x5E,0x22,0x0E,0x60,0x47,0x9A,0xFE,0xEA,0x33,0x17,0xB6,0x71,0x73}, "C:\\users\\aret"},                    /* Profile */
+        {{0xDB,0x85,0xB6,0x3E,0xF9,0x65,0xF6,0x4C,0xA0,0x3A,0xE3,0xEF,0x65,0x72,0x9F,0x3D}, "C:\\users\\aret\\AppData\\Roaming"}, /* RoamingAppData */
+        {{0x85,0x27,0xB3,0xF1,0xBA,0x6F,0xCF,0x4F,0x9D,0x55,0x7B,0x8E,0x7F,0x15,0x70,0x91}, "C:\\users\\aret\\AppData\\Local"},   /* LocalAppData */
+        {{0xD0,0x9A,0xD3,0xFD,0x8F,0x23,0xAF,0x46,0xAD,0xB4,0x6C,0x85,0x48,0x03,0x69,0xC7}, "C:\\users\\aret\\Documents"},        /* Documents */
+        {{0x3A,0xCC,0xBF,0xB4,0x2C,0xDB,0x4C,0x42,0xB0,0x29,0x7F,0xE9,0x9A,0x87,0xC6,0x41}, "C:\\users\\aret\\Desktop"},          /* Desktop */
+        {{0x82,0x5D,0xAB,0x62,0xC1,0xFD,0xC3,0x4D,0xA9,0xDD,0x07,0x0D,0x1D,0x49,0x5D,0x97}, "C:\\ProgramData"},                   /* ProgramData */
+    };
+    for (unsigned k = 0; k < sizeof tbl / sizeof tbl[0]; k++) {
+        if (memcmp(g, tbl[k].id, 16) == 0) {
+            shell_ensure_dir(tbl[k].path);
+            size_t n = strlen(tbl[k].path);
+            uint16_t *w = (uint16_t *)malloc((n + 1) * 2);
+            if (!w) return 0x8007000Eu;                /* E_OUTOFMEMORY */
+            shell_put_wide(w, tbl[k].path);
+            u32_com_track(w, (n + 1) * 2);
+            if (ppath) *ppath = (uint32_t)(uintptr_t)w;
+            return 0;                                  /* S_OK */
+        }
+    }
+    return 0x80070057u;                                /* E_INVALIDARG: unknown folder id */
 }
 
 uint32_t aret_SHGetSpecialFolderLocation(uint32_t esp) {
