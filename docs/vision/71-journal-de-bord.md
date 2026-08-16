@@ -8552,3 +8552,17 @@ binaires suivants (coût par binaire = l'app seule) — ce qui rend l'auto-lift 
 marqueur `.autolift` (le harnais utilise `--auto-lift` au lieu de `--with-dll` ; la DLL compagnon est à côté de l'exe) —
 bit-identique Wine. **Portes** : hash `19acad982194bf07` inchangé (défaut intact), difftest 272/272, `lift_zlib` (chemin
 `--with-dll` refactoré) vert. **Reste** : brique 2b (résolution élargie/toolchain) + 2c (re-mesurer le gain « import-clean »).
+
+### 2026-08-16 — [INDUS ✅] **Auto-lift brique 2b — recherche toolchain + `ARET_DLL_PATH` (libwinpthread & co résolus seuls)**
+
+Suite de 2a : `--auto-lift` cherche désormais aussi dans les **dossiers de toolchain mingw** (best-effort, en **dernier**
+recours) et un env `ARET_DLL_PATH` (séparé par `:`), après la copie **à côté de l'exe** (qui reste prioritaire — c'est celle
+contre laquelle le binaire a été bâti/testé). `toolchain_dll_dirs()` énumère `/usr/lib/gcc/i686-w64-mingw32/<ver>-{posix,win32}`
++ `/usr/i686-w64-mingw32/{lib,bin}` + `sys-root/mingw/bin` (chacun **si existant** — toolchain absente ⇒ moins de dossiers,
+jamais d'erreur). Ordre : exe-dir → `--dll-path` → `$ARET_DLL_PATH` → `bench/.cache` → toolchain. **Preuve** : gspawn
+`--auto-lift` depuis un dossier **sans** libwinpthread → il le **résout depuis `/usr/i686-w64-mingw32/lib`** et lifte la
+chaîne de 6 DLL (plus de « not found »). **Caveat honnête** : le fallback toolchain est best-effort (variante threading
+posix/win32 = premier trouvé) ; la copie **shippée à côté de l'exe** reste la vérité et gagne toujours. **Portes** : hash
+`19acad982194bf07` inchangé, `lift_autolift`/`lift_zlib` bit-identiques Wine. **⇒ Brique 2 (auto-lift) fonctionnelle
+bout-en-bout** : détection (2a) + résolution beside-exe/toolchain (2b) + gain mesuré (2c). Reste (plus tard) : dé-préfixage
+du corpus (dedup sha) + re-mesure corpus-large.

@@ -200,6 +200,34 @@ fn is_system_dll(name: &str) -> bool {
         || n.starts_with("vcruntime")
 }
 
+/// Mingw toolchain directories where the GCC runtime DLLs live, for `--auto-lift`'s
+/// best-effort fallback (a binary that did not ship libwinpthread/libstdc++/libgcc
+/// beside itself). Best-effort and host-specific: each is included only if it exists,
+/// so a missing toolchain just yields fewer search dirs (never an error). The gcc
+/// version subdirs (`.../i686-w64-mingw32/<ver>-posix|win32`) are enumerated rather
+/// than globbed. Always a *fallback* — the copy beside the exe is checked first.
+fn toolchain_dll_dirs() -> Vec<PathBuf> {
+    let mut v = Vec::new();
+    if let Ok(rd) = std::fs::read_dir("/usr/lib/gcc/i686-w64-mingw32") {
+        for e in rd.flatten() {
+            if e.path().is_dir() {
+                v.push(e.path());
+            }
+        }
+    }
+    for d in [
+        "/usr/i686-w64-mingw32/lib",
+        "/usr/i686-w64-mingw32/bin",
+        "/usr/i686-w64-mingw32/sys-root/mingw/bin",
+    ] {
+        let p = PathBuf::from(d);
+        if p.is_dir() {
+            v.push(p);
+        }
+    }
+    v
+}
+
 /// Auto-resolve the runtime DLLs an exe needs (`--auto-lift`): walk its import table,
 /// and for every non-system DLL find the file (beside the exe → `--dll-path` → cache)
 /// and read it, recursing through each found DLL's own imports. Returns `(name, bytes)`
@@ -212,10 +240,18 @@ fn auto_resolve_dlls(
 ) -> Vec<(String, Vec<u8>)> {
     use std::collections::{BTreeMap, BTreeSet, VecDeque};
     let exe_dir = exe_path.parent().map(|p| p.to_path_buf()).unwrap_or_default();
-    let cache = std::path::PathBuf::from("bench/.cache");
+    // Search order (first hit wins): beside the exe (what the binary shipped with, the
+    // authoritative copy) → explicit --dll-path → $ARET_DLL_PATH → bench/.cache → the
+    // mingw toolchain dirs (best-effort fallback for a runtime DLL the binary did not
+    // ship, e.g. libwinpthread/libstdc++/libgcc; the posix/win32 variant is first-found).
+    let env_dirs: Vec<PathBuf> = std::env::var_os("ARET_DLL_PATH")
+        .map(|s| std::env::split_paths(&s).collect())
+        .unwrap_or_default();
     let dirs: Vec<PathBuf> = std::iter::once(exe_dir)
         .chain(search_dirs.iter().cloned())
-        .chain(std::iter::once(cache))
+        .chain(env_dirs)
+        .chain(std::iter::once(PathBuf::from("bench/.cache")))
+        .chain(toolchain_dll_dirs())
         .collect();
     let find = |name: &str| -> Option<Vec<u8>> {
         for d in &dirs {
