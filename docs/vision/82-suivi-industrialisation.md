@@ -605,3 +605,32 @@ Portes : hash `19acad982194bf07` inchangé (HLE-only), difftest 272/272, winedif
 (a) **axe DLL tierces GLib/gettext** (`g_*`/`libintl_*`, ~50-78 bins) = Levier 1 (lifter glib-2.0/libintl) ou shims,
 chantier séparé plus gros ; (b) Winsock résiduel (UDP, gethostbyname/getnameinfo, async/IOCP recoupant la surface
 subprocess plafonnée). Prochain axe data-driven = re-mesurer le mur post-Winsock (les `g_*` remontent en tête).
+
+### 📐 FAISABILITÉ libglib-2.0 (Levier 1, 2026-08-15) — liftable, chaîne couverte grâce à Winsock+gettext ; résidu borné
+
+Test pré-lift §0 de l'axe **GLib** (mur post-lift n°1 restant, doc 90). **`libglib-2.0-0.dll`** (1,67 Mo, **0 forwarder** =
+vrai code). Chaîne d'imports : kernel32/msvcrt/advapi32/shell32/user32/**ole32** (HLE couvert) + **WS2_32** (couvert cette
+session) + **libintl-8** (shims gettext cette session) + libgcc (lifté) + **`libpcre2-8-0.dll`** (nouveau, mais **liftable
+autonome** : 737 Ko, 0 forwarder, kernel32+msvcrt seuls — comme zlib). **⇒ toute la chaîne est liftable/couverte** (les 2
+gains OS de la session — Winsock + gettext — ont débloqué 2 des dépendances de glib).
+
+**Mesure `--mode walls` (libglib + libgcc + libpcre2 liftés)** : **1871 fonctions récupérées (1697 liftées, 15 partial-asm,
+159 host-backées), 0 appel direct non résolu** ⇒ récupération structurelle **propre**. **Résidu = 54 imports HLE** en
+familles cohérentes + **48 instructions / 94 sites** (SSE `pinsrw`/`psllq` réels + x87 `fldenv`/`fnstenv` + bruit
+`int/ud2`). Les 54 imports :
+- **Threading moderne** : SRWLock (`Acquire/Release/TryAcquire/InitializeSRWLock`), condition variables
+  (`Initialize/Sleep/Wake/WakeAllConditionVariable`), thread-pool (`Create/Submit/Close/WaitForThreadpoolWork`),
+  `WaitForSingle/MultipleObjectsEx` — **mappent sur le modèle fibers** (comme CriticalSection).
+- **pthread** (`pthread_mutex_*`/`key_create`/`get,setspecific`/`once`) — = libwinpthread (déjà lifté ailleurs) ou nos shims thread.
+- **Winsock async/event** (`WSACreateEvent`/`WSAEventSelect`/`WSAEnumNetworkEvents`/`WSASocketW`/`WSADuplicateSocketW`/
+  `WSASetEvent`/`WSACloseEvent`) — **increment 3 de Winsock**.
+- **Console** (`AllocConsole`/`AttachConsole`/`Peek,ReadConsoleInputW`), **VEH** (déféré sound), **misc Win32**
+  (`CommandLineToArgvW`/`ExpandEnvironmentStringsW`/`GetShortPathNameW`/`GetTimeFormatW`/`GetFileInformationByHandleEx`/
+  `DeviceIoControl`/`SetEnvironmentVariableW`/`SHGetKnownFolderPath`/`RegLoadMUIStringW`), **CRT** (`isnan`/`kbhit`/`wctomb`/
+  `_wputenv`/`_wspawnvp,vpe`/`_ui64toa_s`/`_getdrive`/`libintl_sprintf`).
+
+**⇒ Verdict** : libglib est **liftable** (comme libstdc++), le socle est prouvé par la mesure. Le lift *fonctionnel*
+bout-en-bout demande de combler ce **résidu borné multi-familles** (threading moderne SRWLock/condvar/threadpool = le gros,
+mappable fibers ; + WSA-event = Winsock inc3 ; + console/misc/CRT) + quelques vrais gaps lifter SSE/x87. **Chantier
+multi-increment** (comme libstdc++ l'a été), **désormais mesuré et borné**. Prochain cran naturel : la famille **threading
+moderne** (SRWLock + condition variables), générale (pas que glib) et adossée au scheduler fibers prouvé.
