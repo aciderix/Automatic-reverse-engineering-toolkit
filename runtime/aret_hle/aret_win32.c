@@ -3841,6 +3841,113 @@ static void u32_w2n(const uint16_t *s, char *d, int cap) {
     int i = 0; if (s) for (; s[i] && i < cap - 1; i++) d[i] = (char)(s[i] & 0xFF); d[i] = 0;
 }
 
+/* ---- Win32 batch enabling the libglib lift (doc 82) ------------------------- */
+/* ExpandEnvironmentStringsW(src, dst, size): %VAR% substitution; size in WCHARs.
+ * Mirrors the ANSI version, widened. Returns the WCHAR count needed (incl NUL). */
+uint32_t aret_ExpandEnvironmentStringsW(uint32_t esp) {
+    const uint16_t *wsrc = (const uint16_t *)WP(0); uint16_t *wdst = (uint16_t *)WP(1); uint32_t size = WU(2);
+    if (!wsrc) return 0;
+    char src[4096]; u32_w2n(wsrc, src, sizeof src);
+    char out[4096]; size_t o = 0;
+    for (const char *p = src; *p && o < sizeof out - 1;) {
+        const char *e;
+        if (*p == '%' && (e = strchr(p + 1, '%'))) {
+            size_t nl = (size_t)(e - p - 1); char name[256];
+            if (nl < sizeof name) {
+                memcpy(name, p + 1, nl); name[nl] = 0;
+                const char *v = getenv(name);
+                if (v) { size_t vl = strlen(v); if (o + vl < sizeof out - 1) { memcpy(out + o, v, vl); o += vl; } }
+                p = e + 1; continue;
+            }
+        }
+        out[o++] = *p++;
+    }
+    out[o] = 0;
+    uint32_t need = (uint32_t)o + 1;
+    if (wdst && size >= need) for (uint32_t i = 0; i < need; i++) wdst[i] = (uint16_t)(unsigned char)out[i];
+    return need;
+}
+/* SetEnvironmentVariableW(name, value): setenv; NULL value removes it. */
+uint32_t aret_SetEnvironmentVariableW(uint32_t esp) {
+    char name[512]; u32_w2n((const uint16_t *)WP(0), name, sizeof name);
+    const uint16_t *wv = (const uint16_t *)WP(1);
+    if (wv) { char val[4096]; u32_w2n(wv, val, sizeof val); return setenv(name, val, 1) == 0 ? 1 : 0; }
+    unsetenv(name); return 1;
+}
+/* GetShortPathNameW(long, short, cch): no 8.3 mapping is modelled, so the short path
+ * IS the long path (a valid, sound result — Windows returns the long form when no short
+ * exists). The path must exist, as on Windows. */
+uint32_t aret_GetShortPathNameW(uint32_t esp) {
+    const uint16_t *wl = (const uint16_t *)WP(0); uint16_t *ws = (uint16_t *)WP(1); uint32_t cch = WU(2);
+    if (!wl) return 0;
+    char lp[2048]; u32_w2n(wl, lp, sizeof lp);
+    char host[2048]; translate_path(lp, host, sizeof host);
+    struct stat st; if (stat(host, &st) != 0) { g_last_error = 2u; return 0; }
+    uint32_t len = 0; while (wl[len]) len++;
+    if (ws && cch > len) { for (uint32_t i = 0; i <= len; i++) ws[i] = wl[i]; return len; }
+    return len + 1;                                    /* required size incl NUL */
+}
+/* CommandLineToArgvW(cmdline, *pNumArgs) -> LPWSTR* : parse a wide command line into an
+ * argv[] using the standard Windows rules (argv[0] special; elsewhere 2n backslashes +
+ * quote => n backslashes + toggle in-quote, 2n+1 => n backslashes + literal quote). One
+ * LocalAlloc'd block holds the pointer array then the strings (LocalFree'd once). */
+uint32_t aret_CommandLineToArgvW(uint32_t esp) {
+    const uint16_t *cl = (const uint16_t *)WP(0); uint32_t *pn = (uint32_t *)WP(1);
+    static uint16_t empty[1] = {0};
+    const uint16_t *s = cl ? cl : empty;
+    /* Upper bounds: at most (len/2 + 2) args, and at most len+1 wchars of content. */
+    uint32_t len = 0; while (s[len]) len++;
+    uint32_t maxargs = len / 2 + 2;
+    uint32_t need = maxargs * 4 + (len + maxargs + 1) * 2;   /* ptr array + strings */
+    uint8_t *blk = (uint8_t *)malloc(need);
+    if (!blk) { if (pn) *pn = 0; g_last_error = 8u; return 0; }
+    uint32_t *argv = (uint32_t *)blk;
+    uint16_t *out = (uint16_t *)(blk + maxargs * 4);
+    int argc = 0; const uint16_t *p = s;
+    /* argv[0]: quoted -> until next quote (no escapes); else until whitespace. */
+    argv[argc++] = (uint32_t)(uintptr_t)out;
+    if (*p == '"') { p++; while (*p && *p != '"') *out++ = *p++; if (*p == '"') p++; }
+    else           { while (*p && *p != ' ' && *p != '\t') *out++ = *p++; }
+    *out++ = 0;
+    for (;;) {
+        while (*p == ' ' || *p == '\t') p++;
+        if (!*p) break;
+        argv[argc++] = (uint32_t)(uintptr_t)out;
+        int inq = 0;
+        for (;;) {
+            if (!*p || (!inq && (*p == ' ' || *p == '\t'))) break;
+            int bs = 0; while (*p == '\\') { bs++; p++; }
+            if (*p == '"') { int i; for (i = 0; i < bs / 2; i++) *out++ = '\\'; if (bs & 1) { *out++ = '"'; p++; } else { inq = !inq; p++; } }
+            else { int i; for (i = 0; i < bs; i++) *out++ = '\\'; if (*p && !(!inq && (*p == ' ' || *p == '\t'))) *out++ = *p++; }
+        }
+        *out++ = 0;
+    }
+    if (pn) *pn = (uint32_t)argc;
+    return (uint32_t)(uintptr_t)argv;
+}
+/* DeviceIoControl(handle, code, inBuf, inLen, outBuf, outLen, *bytesRet, overlapped):
+ * we model no device control codes -> a DEFINED failure (never a fabricated result). */
+uint32_t aret_DeviceIoControl(uint32_t esp) {
+    uint32_t *ret = (uint32_t *)WP(6); if (ret) *ret = 0;
+    g_last_error = 50u;                                /* ERROR_NOT_SUPPORTED */
+    return 0;
+}
+/* RegLoadMUIStringW: loads a localized (MUI) registry string. Not modelled -> defined failure. */
+uint32_t aret_RegLoadMUIStringW(uint32_t esp) { (void)esp; return 2u; /* ERROR_FILE_NOT_FOUND */ }
+uint32_t aret_RegLoadMUIStringA(uint32_t esp) { (void)esp; return 2u; }
+/* Console: headless model. AllocConsole succeeds (a virtual console, like Wine);
+ * AttachConsole to a parent fails (no parent console); console INPUT is empty. */
+uint32_t aret_AllocConsole(uint32_t esp)  { (void)esp; return 1; }
+uint32_t aret_AttachConsole(uint32_t esp) { (void)esp; g_last_error = 6u /*ERROR_INVALID_HANDLE*/; return 0; }
+uint32_t aret_FreeConsole(uint32_t esp)   { (void)esp; return 1; }
+/* PeekConsoleInputW(h, buf, len, *numRead): no input pending -> 0 records read, TRUE. */
+uint32_t aret_PeekConsoleInputW(uint32_t esp) { uint32_t *n = (uint32_t *)WP(3); if (n) *n = 0; return 1; }
+uint32_t aret_PeekConsoleInputA(uint32_t esp) { return aret_PeekConsoleInputW(esp); }
+/* ReadConsoleInputW: no console input in the headless model -> 0 records, TRUE (a caller
+ * polling for input sees none rather than blocking on absent input). */
+uint32_t aret_ReadConsoleInputW(uint32_t esp) { uint32_t *n = (uint32_t *)WP(3); if (n) *n = 0; return 1; }
+uint32_t aret_ReadConsoleInputA(uint32_t esp) { return aret_ReadConsoleInputW(esp); }
+
 /* DeleteFileA — AUTO-MARSHALLED from DeleteFileW by `gen_win32_sigs.py --marshal
  * DeleteFileA` (doc 82, layer 2). Widen the input path (u32_a2w), pass nothing else,
  * call the wide core; NULL propagates as NULL. This is the first generated marshalling

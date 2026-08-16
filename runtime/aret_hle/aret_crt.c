@@ -1450,6 +1450,61 @@ uint32_t aret_fpecode(uint32_t esp) { (void)esp; static int code = 0; return RP(
 /* __pxcptinfoptrs(): pointer to the per-thread pointer to CRT exception info. No
  * pending exception context in this model -> a valid slot holding NULL. */
 uint32_t aret_pxcptinfoptrs(uint32_t esp) { (void)esp; static void *p = 0; return RP(&p); }
+
+/* ---- CRT batch enabling the libglib lift (doc 82) --------------------------- */
+/* isnan(double): the arg is a double on the cdecl stack (2 words). Returns nonzero
+ * if NaN. (msvcrt exports `isnan`/`_isnan`.) */
+uint32_t aret_isnan(uint32_t esp) {
+    union { uint64_t u; double d; } v; v.u = (uint64_t)AU(0) | ((uint64_t)AU(1) << 32);
+    return isnan(v.d) ? 1u : 0u;
+}
+uint32_t aret_finite(uint32_t esp) {
+    union { uint64_t u; double d; } v; v.u = (uint64_t)AU(0) | ((uint64_t)AU(1) << 32);
+    return isfinite(v.d) ? 1u : 0u;
+}
+/* _kbhit(): keyboard hit pending? Headless -> never (0). */
+uint32_t aret_kbhit(uint32_t esp) { (void)esp; return 0; }
+/* _getdrive(): current drive number (1=A:). We present C: (3), the modelled root. */
+uint32_t aret_getdrive(uint32_t esp) { (void)esp; return 3; }
+/* wctomb(char* s, wchar_t wc): C-locale single-byte encode. s==NULL -> 0 (no
+ * state-dependent encoding). wc<256 fits one byte; above the C locale cannot encode -> -1. */
+uint32_t aret_wctomb(uint32_t esp) {
+    char *s = AS(0); uint32_t wc = AU(1);
+    if (!s) return 0;
+    if (wc < 256) { s[0] = (char)wc; return 1; }
+    return (uint32_t)-1;
+}
+/* _ui64toa_s(unsigned __int64 v, char* buf, size_t size, int radix) -> 0 / errno.
+ * v occupies two cdecl words. */
+uint32_t aret_ui64toa_s(uint32_t esp) {
+    uint64_t v = (uint64_t)AU(0) | ((uint64_t)AU(1) << 32);
+    char *buf = AS(2); size_t size = AU(3); int radix = AI(4);
+    if (!buf || size == 0 || radix < 2 || radix > 36) { if (buf && size) buf[0] = 0; return 22u; /* EINVAL */ }
+    char tmp[65]; int i = 0;
+    do { unsigned d = (unsigned)(v % (unsigned)radix); tmp[i++] = d < 10 ? (char)('0' + d) : (char)('a' + d - 10); v /= (unsigned)radix; } while (v);
+    if ((size_t)i + 1 > size) { buf[0] = 0; return 34u; /* ERANGE */ }
+    int o = 0; while (i) buf[o++] = tmp[--i];
+    buf[o] = 0;
+    return 0;
+}
+/* _wputenv(const wchar_t* "NAME=VALUE"): narrow it and putenv. */
+uint32_t aret_wputenv(uint32_t esp) {
+    const uint16_t *w = (const uint16_t *)AP(0);
+    if (!w) return (uint32_t)-1;
+    char buf[1024]; size_t i = 0;
+    for (; w[i] && i + 1 < sizeof buf; i++) buf[i] = (char)(w[i] & 0xff);
+    buf[i] = 0;
+    static char *slots[64]; static int nslot;            /* putenv keeps the string; own it */
+    char *s = (nslot < 64) ? (slots[nslot] = strdup(buf), slots[nslot++]) : strdup(buf);
+    return (uint32_t)(s && putenv(s) == 0 ? 0 : -1);
+}
+/* _wspawnvp/_wspawnvpe(mode, path, argv[, envp]): launch a child .exe. ARET is
+ * single-process and cannot run a PE child (doc 70 §5.0) -> defined failure. */
+uint32_t aret_wspawnvp(uint32_t esp)  { (void)esp; return (uint32_t)-1; }
+uint32_t aret_wspawnvpe(uint32_t esp) { (void)esp; return (uint32_t)-1; }
+/* libintl_sprintf -> the CRT sprintf. */
+uint32_t aret_sprintf(uint32_t esp);
+uint32_t aret_libintl_sprintf(uint32_t esp) { return aret_sprintf(esp); }
 /* system(cmd): forward to the host shell (the program intends to run it). msvcrt returns
  * the command's EXIT CODE, not the raw wait-status, so extract it (WEXITSTATUS == (st>>8)
  * & 0xff on Linux; done inline to avoid a sys/wait.h dependency here). NULL command ->

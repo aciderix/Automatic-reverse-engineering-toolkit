@@ -8350,3 +8350,22 @@ WSA-event référence `g_event`/`u32_event_idx`/`g_wsaevsel` (section fibers) �
 ⇒ symboles non déclarés ; déplacée **après** la machinerie d'events. **Portes** : hash `19acad982194bf07` inchangé
 (HLE-only), difftest 272/272, **8 fixtures thread/winsock vertes** (0 régression scheduler/event/socket). **Résidu libglib
 restant** : pthread, console, misc Win32, CRT, gaps lifter SSE/x87.
+
+### 2026-08-15 — [HLE ✅] **Batch CRT + Win32 env/path/console du résidu libglib (doc 82) ; pthread = couvert par le lift**
+
+Après les 3 familles threading/socket, batch des petits shims stateless du résidu libglib. **Constat pthread** : lifter
+**libwinpthread** (déjà prouvé jsoncpp/ninja) dans la chaîne efface les 7 `pthread_*` (résidu 31→26) ⇒ pthread = **couvert
+par le lift**, pas de shim. **CRT** (`aret_crt.c`) : `isnan`/`finite` (double sur pile cdecl), `_kbhit`→0 (headless),
+`_getdrive`→3 (C:, modèle ; **env-dépendant** : Wine mappe le cwd Unix en Z:=26 ⇒ shimmé sound, non oracle-comparé),
+`wctomb` (C-locale 1 octet <256, sinon -1), `_ui64toa_s`, `_wputenv`, `_wspawnvp`/`_wspawnvpe`→échec défini (enfant PE
+impossible, §5.0), `libintl_sprintf`→`aret_sprintf`. **Win32** (`aret_win32.c`) : `ExpandEnvironmentStringsW`/
+`SetEnvironmentVariableW`/`GetShortPathNameW` (variantes W des A existantes ; short=long faute de 8.3, chemin doit exister),
+`CommandLineToArgvW` (**vraies règles de quoting Windows** : argv[0] spécial, 2n backslashes+quote⇒n+toggle, 2n+1⇒n+quote
+littéral ; un seul bloc LocalAlloc), `DeviceIoControl`→échec défini (`ERROR_NOT_SUPPORTED`), `RegLoadMUIStringW`→échec
+défini, **console** (`AllocConsole`→1, `AttachConsole`→échec no-parent, `Peek,ReadConsoleInputW`→0 record TRUE, headless).
+**Garde** : `winecorpus/win32_glib_batch.c` — expand `[%VAR%]`→`[hello]`, `CommandLineToArgvW` (3 args dont `"hello world"`
+et `foo\bar`), `_ui64toa_s`=ffffffffffffffff, `wctomb`=1 A, `_kbhit`=0 — **bit-identique Wine**. **Portes** : hash
+`19acad982194bf07` inchangé (HLE-only), difftest 272/272. **Différé sound** (documenté) : `GetTimeFormatW` (formatage
+locale risqué), `Add,RemoveVectoredExceptionHandler` (VEH livraison non câblée), `Get,SetThreadContext` (registres d'un
+autre fibre hors shared-stack). **Reste résidu libglib** : `SHGetKnownFolderPath`, `GetFileInformationByHandleEx`, + gaps
+lifter SSE (`pinsrw`/`psllq`) / x87 (`fldenv`/`fnstenv`).
