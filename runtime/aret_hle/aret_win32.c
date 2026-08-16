@@ -2192,6 +2192,8 @@ struct u32_fiber {
     uint32_t   wait_srw;         /* SRWLOCK being acquired (0 = none)               */
     int        wait_srw_excl;    /* 1 = exclusive acquire, 0 = shared               */
     uint32_t   wait_cv;          /* CONDITION_VARIABLE slept on (0 = none)          */
+    uint32_t   pool_work;        /* PTP_WORK if this fiber runs a thread-pool callback */
+    int        is_pool;          /* 1 = thread-pool callback (3-arg CALLBACK frame)  */
     int        has_timeout;      /* this wait/sleep has a finite deadline           */
     int        timed_out;        /* it was woken by the deadline, not a signal      */
     uint64_t   wake_time;        /* virtual-clock deadline (ms) if has_timeout      */
@@ -2292,6 +2294,12 @@ static int u32_cv_ensure(uint32_t cv) {
 }
 static int u32_cv_grants(uint32_t cv) { int s = u32_cv_slot(cv); return s < 0 ? 0 : g_cv[s].grants; }
 static int u32_cv_waiters(uint32_t cv);   /* defined after g_nfiber is in scope below */
+
+/* Thread-pool work item (Vista TP API). A malloc'd struct, returned to the program as
+ * the opaque PTP_WORK handle. Each SubmitThreadpoolWork spawns a fiber running the
+ * callback; `pending` counts submitted-but-unfinished callbacks; `cancelled` (set by
+ * WaitForThreadpoolWorkCallbacks(…, TRUE)) makes not-yet-started callbacks skip. */
+struct u32_tpwork { uint32_t cb, ctx; int pending, cancelled; };
 
 /* Event objects (doc 80 incr. 3). manual-reset stays signaled until ResetEvent;
  * auto-reset releases exactly one waiter then self-resets (consumed at wait). */
@@ -2526,10 +2534,25 @@ static void u32_sleep(uint32_t ms) {
 static void u32_fiber_trampoline(void) {
     struct u32_fiber *f = &g_fiber[g_cur];
     uint32_t *sp = (uint32_t *)(uintptr_t)(f->mstack + U32_FIBER_MSTACK - 64);
-    sp[0] = 0;                          /* return address (proc never returns here) */
-    sp[1] = f->param;                   /* LPVOID lpParameter @ [esp+4]             */
-    uint64_t r = aret_call(f->start, (uint64_t)(uintptr_t)sp, 0, 0, 0, 0, 0, 0, 0);
-    f->exit_code = (uint32_t)r;
+    if (f->is_pool) {
+        /* Thread-pool CALLBACK(instance, context, work) — 3 stdcall args. A callback
+         * cancelled before it started is skipped; either way it decrements pending. */
+        struct u32_tpwork *w = (struct u32_tpwork *)(uintptr_t)f->pool_work;
+        if (w && !w->cancelled) {
+            sp[0] = 0;                      /* return address */
+            sp[1] = 0;                      /* PTP_CALLBACK_INSTANCE instance */
+            sp[2] = f->param;               /* PVOID context */
+            sp[3] = f->pool_work;           /* PTP_WORK work */
+            aret_call(f->start, (uint64_t)(uintptr_t)sp, 0, 0, 0, 0, 0, 0, 0);
+        }
+        if (w) w->pending--;
+        f->exit_code = 0;
+    } else {
+        sp[0] = 0;                          /* return address (proc never returns here) */
+        sp[1] = f->param;                   /* LPVOID lpParameter @ [esp+4]             */
+        uint64_t r = aret_call(f->start, (uint64_t)(uintptr_t)sp, 0, 0, 0, 0, 0, 0, 0);
+        f->exit_code = (uint32_t)r;
+    }
     f->state = FST_DONE;
     /* returns into uc_link = g_sched_ctx */
 }
@@ -2903,6 +2926,54 @@ uint32_t aret_SleepConditionVariableSRW(uint32_t esp) {
 uint32_t aret_SleepConditionVariableCS(uint32_t esp) {
     return u32_condvar_sleep(WU(0), WU(1), 1, 0, WU(2));
 }
+
+/* -------- Thread pool (Vista TP work API) — each Submit runs as a fiber -------- */
+uint32_t aret_CreateThreadpoolWork(uint32_t esp) {          /* (callback, context, environ) */
+    struct u32_tpwork *w = (struct u32_tpwork *)calloc(1, sizeof *w);
+    if (!w) { g_last_error = 8u; return 0; }
+    w->cb = WU(0); w->ctx = WU(1);
+    return (uint32_t)(uintptr_t)w;
+}
+uint32_t aret_SubmitThreadpoolWork(uint32_t esp) {
+    struct u32_tpwork *w = (struct u32_tpwork *)(uintptr_t)WU(0);
+    if (!w) return 0;
+    if (g_nfiber >= U32_MAX_FIBER) { aret_unmodelled("threadpool: fiber table full"); return 0; }
+    int i = g_nfiber;
+    struct u32_fiber *f = &g_fiber[i];
+    memset(f, 0, sizeof *f);
+    f->start = w->cb; f->param = w->ctx;
+    f->pool_work = (uint32_t)(uintptr_t)w; f->is_pool = 1;
+    f->host_stack = malloc(U32_FIBER_HSTACK);
+    f->mstack = (uint8_t *)malloc(U32_FIBER_MSTACK);
+    if (!f->host_stack || !f->mstack) { free(f->host_stack); free(f->mstack); aret_unmodelled("threadpool: out of memory"); return 0; }
+    u32_sched_ensure();
+    getcontext(&f->ctx);
+    f->ctx.uc_stack.ss_sp = f->host_stack; f->ctx.uc_stack.ss_size = U32_FIBER_HSTACK;
+    f->ctx.uc_link = &g_sched_ctx;
+    makecontext(&f->ctx, u32_fiber_trampoline, 0);
+    f->state = FST_READY;
+    w->pending++;
+    g_nfiber++;                        /* publish once fully built */
+    return 0;
+}
+uint32_t aret_WaitForThreadpoolWorkCallbacks(uint32_t esp) {
+    struct u32_tpwork *w = (struct u32_tpwork *)(uintptr_t)WU(0);
+    if (!w) return 0;
+    if (WI(1)) w->cancelled = 1;                    /* cancel not-yet-started callbacks */
+    u32_sched_ensure();
+    while (w->pending > 0) { g_fiber[g_cur].state = FST_READY; u32_to_sched(); }   /* run them to completion */
+    return 0;
+}
+uint32_t aret_CloseThreadpoolWork(uint32_t esp) {
+    struct u32_tpwork *w = (struct u32_tpwork *)(uintptr_t)WU(0);
+    if (w && w->pending == 0) free(w);              /* leak if still pending (caller should Wait first) */
+    return 0;
+}
+
+/* Alertable waits: we deliver no APCs, so *Ex == the base wait (the alertable flag is a
+ * no-op without queued APCs). Same arg order, extra trailing bAlertable ignored. */
+uint32_t aret_WaitForSingleObjectEx(uint32_t esp)    { return aret_WaitForSingleObject(esp); }
+uint32_t aret_WaitForMultipleObjectsEx(uint32_t esp) { return aret_WaitForMultipleObjects(esp); }
 /* -------- Event objects (doc 80 incr. 3) -------- */
 uint32_t aret_CreateEventA(uint32_t esp) { return u32_create_event(WI(1), WI(2), u32_name_hash(WP(3), 0)); }
 uint32_t aret_CreateEventW(uint32_t esp) { return u32_create_event(WI(1), WI(2), u32_name_hash(WP(3), 1)); }

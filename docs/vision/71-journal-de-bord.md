@@ -8316,3 +8316,18 @@ shared/exclusive (`TryAcquireExclusive` échoue tant que 2 readers tiennent, ré
 **Portes** : hash `19acad982194bf07` inchangé (HLE-only), difftest 272/272, **5 fixtures fibers existantes vertes**
 (thread_critsec/pool/mutex_sem/event/join — 0 régression scheduler). **Reste du résidu libglib** : thread-pool
 (`CreateThreadpoolWork`…), Winsock async/event (inc3), console, misc Win32, CRT, + gaps lifter SSE/x87.
+
+### 2026-08-15 — [HLE][THREAD ✅] **Thread-pool Vista (CreateThreadpoolWork/Submit/Wait/Close) + attentes `*Ex` — 2ᵉ famille du résidu libglib**
+
+Suite du résidu libglib (doc 82). **Thread-pool** sur le scheduler fibers : `CreateThreadpoolWork(cb, ctx, env)` → struct
+`u32_tpwork` malloc'd rendu comme `PTP_WORK` opaque ; `SubmitThreadpoolWork` **spawn un fibre** exécutant le callback
+`CALLBACK(instance, context, work)` (frame stdcall 3 args, nouveau bras du trampoline gardé par `is_pool`) et incrémente
+`pending` ; `WaitForThreadpoolWorkCallbacks(work, cancel)` yield jusqu'à `pending==0` (les fibres pool tournent à
+complétion) — `cancel=TRUE` pose `cancelled` ⇒ les callbacks **pas encore démarrés sont sautés** (fidèle : un callback
+déjà en cours finit, un non-démarré est annulé — vérifié au trampoline) ; `CloseThreadpoolWork` free. **Attentes `*Ex`** :
+`WaitForSingleObjectEx`/`WaitForMultipleObjectsEx` = les versions de base (on ne délivre pas d'APC ⇒ le flag alertable est
+un no-op sans APC en file). **Garde** : `winecorpus/thread_pool2.c` — 5 submits d'un work (chacun ajoute 7 à une somme sous
+CRITICAL_SECTION) → `sum=35 ran=5` ; un 2ᵉ work **annulé** → `cancel_ran=0` (le callback ne tourne jamais) ;
+`WaitForSingleObjectEx` sur un event signalé → `0` — **bit-identique Wine**. **Portes** : hash `19acad982194bf07` inchangé
+(HLE-only), difftest 272/272, **4 fixtures fibers vertes** (join/critsec/pool/srwlock — 0 régression trampoline).
+**Résidu libglib restant** : Winsock async/event (inc3), pthread (libwinpthread), console, misc Win32, CRT, gaps lifter SSE/x87.
