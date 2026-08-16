@@ -104,6 +104,9 @@ uint32_t aret_delay_pop(uint32_t va);
  * stdcall pop the static path uses. Lets the delay-load resolver reach the whole HLE
  * instead of a hard-coded list. */
 int aret_hle_shim_lookup(const char *fn, uint32_t (**shim)(uint32_t), uint16_t *pop);
+/* Resolve an API name to a callable synthetic VA routed to its HLE shim (GetProcAddress
+ * / delay-load share this). 0 if the API is not modelled. Defined in aret_win32.c. */
+uint32_t aret_shim_synth_va(const char *fn);
 /* Also generated in aret_dispatch.c: the named exports of every LIFTED DLL, with the
  * VA they were rebased to. DLL lifting binds what the app imports STATICALLY (the
  * loader patches the IAT slot); this is the other direction — reaching lifted code by

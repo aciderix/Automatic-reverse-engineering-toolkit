@@ -8429,3 +8429,22 @@ code/flags/params exacts et rend CONTINUE_EXECUTION → l'exécution **reprend**
 RaiseException), difftest_transpile 4/4. **⇒ VEH lève le mur de démarrage** ; gspawn avance jusqu'au **mur n°2 : glib appelle
 `GetProcAddress(ntdll, "RtlGetVersion")` et asserte non-NULL** (ARET rend NULL ⇒ `GLib-CRITICAL ... RtlGetVersion != NULL`).
 Prochain cran = résolution dynamique de `RtlGetVersion`.
+
+### 2026-08-16 — [HLE ✅] **`GetProcAddress` résout par nom vers les shims (mur n°2 gspawn) + `RtlGetVersion`**
+
+Mur n°2 du run gspawn : `aret_GetProcAddress` rendait **NULL pour tout** (stub) ⇒ glib `_g_win32_call_rtl_version`
+`GetProcAddress(ntdll,"RtlGetVersion")` → NULL → assert `RtlGetVersion != NULL` → `GLib-CRITICAL`. **Fix général** (comme
+Wine, qui rend un vrai pointeur pour chaque API qu'il implémente) : `GetProcAddress(hMod, lpProcName)` résout le **nom** vers
+une **VA synthétique appelable** routée vers le shim HLE — **réutilise la machinerie delay-load** (`aret_call` dispatche la VA
+via `aret_delay_dispatch`, `__aret_callee_pop` lit son pop via `aret_delay_pop`) via un helper factorisé `aret_shim_synth_va`
+(table `g_delay_res` portée à 256). API non modélisée → **0** (le « not found » de GetProcAddress, que l'appelant gère) —
+jamais un faux pointeur (§0). Handle de module ignoré (le **nom** identifie l'API, même règle que le résolveur delay-load) ;
+lookup par **ordinal** (nom high-word 0) → non modélisé → 0. **+ `RtlGetVersion`** (ntdll) : remplit `RTL_OSVERSIONINFOW`
+avec la version modélisée d'ARET **6.2.9200 NT** (cohérente avec `GetVersionEx`), rend `STATUS_SUCCESS`. `@N` ajouté
+(`RtlGetVersion@4`, vérité import-lib). **Garde** : `winecorpus/win32_getproc.c` — `RtlGetVersion`/`GetVersion` résolus,
+appelables, invariants sound (STATUS_SUCCESS, NT, major≥6) ; nom bidon → NULL — **bit-identique Wine** (le **numéro de build
+exact est environnement-dépendant** : Wine rend son build émulé non-capé, ex. 10.0.19043 ; ARET reste cohérent à 6.2.9200 —
+on compare les invariants, pas le build, comme `_getdrive`). **Portes** : hash `19acad982194bf07` inchangé, 3 fixtures
+GetProcAddress existantes vertes (crt_ctype_table/lwr_s/strcpy_s — 0 régression du passage 0→non-0). **⇒ gspawn avance au
+mur n°3 : `HeapSetInformation`** (+ un warning glib « TLS callback not invoked » — les callbacks TLS PE des DLL liftées ne
+sont pas encore invoqués par le loader ; glib continue mais l'avertit).

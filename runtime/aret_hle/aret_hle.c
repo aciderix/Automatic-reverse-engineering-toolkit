@@ -3302,7 +3302,20 @@ void aret_longjmp_do(uint32_t key, int val) {
 /* kernel32 process/module/sync (best-effort) */
 uint32_t aret_GetModuleHandleA(uint32_t esp) { (void)esp; return 0x00400000u; }
 uint32_t aret_GetModuleHandleW(uint32_t esp) { (void)esp; return 0x00400000u; }
-uint32_t aret_GetProcAddress(uint32_t esp) { (void)esp; return 0; }
+/* GetProcAddress(hModule, lpProcName): resolve a named API to a CALLABLE address, like
+ * Wine (which hands back a real pointer for every API it implements) — previously a flat
+ * NULL, which made a program that GetProcAddress-probes an API it then calls fail (glib's
+ * `_g_win32_call_rtl_version` GetProcAddress's ntdll `RtlGetVersion` at startup and asserts
+ * it non-NULL). We return a synthetic VA routed to the HLE shim of that name (the delay-load
+ * mechanism); the lifted `call reg` reaches the shim with the right stdcall pop. An API we
+ * do NOT model -> 0, GetProcAddress's own "not found", which the caller handles — never a
+ * fake pointer. The module handle is ignored: a Win32 API name identifies its behaviour
+ * (same rule as the delay-load resolver). Ordinal lookups (name high word 0) -> not modelled. */
+uint32_t aret_GetProcAddress(uint32_t esp) {
+    uint32_t name = arg(esp, 1);
+    if (name == 0 || (name >> 16) == 0) return 0;   /* NULL or ordinal -> not found (sound) */
+    return aret_shim_synth_va((const char *)(uintptr_t)name);
+}
 uint32_t aret_LoadLibraryA(uint32_t esp) { (void)esp; return 0x10000000u; }
 /* LoadLibraryExA(name, hFile, flags): like LoadLibraryA, return a non-NULL fake
  * handle. The msvcrt delay-load glue probes for kernel32.dll/etc.; a NULL here

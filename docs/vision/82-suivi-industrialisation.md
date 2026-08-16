@@ -680,7 +680,11 @@ reste = data-en-code (abort correct). **Séquence des murs runtime** (le vrai bi
 1. ✅ **VEH `AddVectoredExceptionHandler`/`Remove`** (mur démarrage, libglib+libwinpthread) — registre + livraison first-chance
    dans `aret_RaiseException`, sound (fautes matérielles → abort fort). Garde `win32_veh` bit-identique Wine, ehdiff 6/6, hash
    inchangé.
-2. 🔜 **`GetProcAddress(ntdll,"RtlGetVersion")`** — glib asserte non-NULL ; ARET rend NULL ⇒ `GLib-CRITICAL`. Prochain cran :
-   résolution dynamique de `RtlGetVersion` (version Windows rapportée, cohérente avec `VerifyVersionInfo`/`GetVersionEx` = 6.2.9200).
-Les autres imports du mur (locale `EnumSystemLocalesA`/`GetLocaleInfoA`, `GetComputerNameW`, `HeapSetInformation`, `fwprintf`,
-`mbstowcs`, `_wspawnv`…) ne bloqueront **que s'ils sont atteints** — la boucle les fera remonter dans l'ordre réel.
+2. ✅ **`GetProcAddress` résout par nom → shims** (mur n°2) + **`RtlGetVersion`** (6.2.9200 NT, cohérent GetVersionEx). Réutilise
+   la machinerie delay-load (VA synthétique appelable) ; non-modélisé → 0 sound. Garde `win32_getproc` bit-identique Wine
+   (invariants ; build exact env-dépendant), hash inchangé, 3 fixtures GetProcAddress vertes.
+3. 🔜 **`HeapSetInformation`** (mur n°3) — shim mince (no-op → TRUE, comme Wine). + warning glib **« TLS callback not invoked »** :
+   les callbacks TLS PE des DLL liftées ne sont pas invoqués par le loader (glib continue mais l'avertit ⇒ divergence de sortie
+   à corriger pour un bit-identique complet).
+Les autres imports du mur (locale `EnumSystemLocalesA`/`GetLocaleInfoA`, `GetComputerNameW`, `fwprintf`, `mbstowcs`,
+`_wspawnv`…) ne bloqueront **que s'ils sont atteints** — la boucle les fera remonter dans l'ordre réel.

@@ -1587,6 +1587,19 @@ uint32_t aret_GetVersion(uint32_t esp) {
     (void)esp;
     return 6u | (2u << 8) | (9200u << 16); /* 0x23F00206 — 6.2.9200, NT */
 }
+/* RtlGetVersion(PRTL_OSVERSIONINFOW) -> NTSTATUS. The ntdll primitive the modern
+ * version query funnels through — glib's `_g_win32_call_rtl_version` GetProcAddress's
+ * it at startup and asserts it non-NULL, then reads the version. Same RTL_OSVERSIONINFOW
+ * layout and same reported version as GetVersionExW (6.2.9200 NT), so the two agree
+ * (they do on Windows/Wine). Returns STATUS_SUCCESS (0). */
+uint32_t aret_RtlGetVersion(uint32_t esp) {
+    uint32_t *v = (uint32_t *)WP(0);
+    if (v) {
+        v[1] = 6; v[2] = 2; v[3] = 9200; v[4] = 2;
+        memset((char *)&v[5], 0, 256); /* szCSDVersion[128] (WCHAR); EX tail (if sized so) left 0 */
+    }
+    return 0; /* STATUS_SUCCESS */
+}
 
 /* RtlMoveMemory(dst, src, len) -> void. Overlap-safe copy = memmove. */
 uint32_t aret_RtlMoveMemory(uint32_t esp) {
@@ -8739,8 +8752,28 @@ static const struct { const char *dll, *fn; uint32_t (*shim)(uint32_t); uint16_t
     { NULL, NULL, NULL, 0 }
 };
 #define DELAY_VA_BASE 0x7EDA0000u
-static struct { uint32_t va; uint32_t (*shim)(uint32_t); uint16_t pop; } g_delay_res[64];
+#define DELAY_VA_MAX  256
+static struct { uint32_t va; uint32_t (*shim)(uint32_t); uint16_t pop; } g_delay_res[DELAY_VA_MAX];
 static int g_delay_res_n;
+/* Resolve an API NAME to a callable synthetic VA routed to its HLE shim — the same
+ * mechanism the delay-load resolver uses (aret_call dispatches the VA through
+ * aret_delay_dispatch; __aret_callee_pop reads its pop from aret_delay_pop). Returns 0
+ * if we don't model the API. Shared by GetProcAddress and the delay-load path: a Win32
+ * API name identifies its behaviour regardless of which DLL exports it. */
+uint32_t aret_shim_synth_va(const char *fn) {
+    uint32_t (*shim)(uint32_t) = 0;
+    uint16_t pop = 0;
+    if (!fn || !aret_hle_shim_lookup(fn, &shim, &pop)) return 0;
+    for (int j = 0; j < g_delay_res_n; j++)
+        if (g_delay_res[j].shim == shim && g_delay_res[j].pop == pop) return g_delay_res[j].va;
+    if (g_delay_res_n >= DELAY_VA_MAX) return 0;
+    uint32_t va = DELAY_VA_BASE + (uint32_t)g_delay_res_n;
+    g_delay_res[g_delay_res_n].va = va;
+    g_delay_res[g_delay_res_n].shim = shim;
+    g_delay_res[g_delay_res_n].pop = pop;
+    g_delay_res_n++;
+    return va;
+}
 
 /* Dispatch a resolved delay VA (called by aret_call on a static-table miss). */
 int aret_delay_dispatch(uint32_t va, uint32_t esp, uint64_t *out) {

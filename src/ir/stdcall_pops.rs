@@ -7389,6 +7389,7 @@ static TABLE: &[(&str, u32)] = &[
     ("RtlCaptureContext", 4),
     ("RtlCaptureStackBackTrace", 16),
     ("RtlFillMemory", 12),
+    ("RtlGetVersion", 4),
     ("RtlMoveMemory", 12),
     ("RtlPcToFileHeader", 8),
     ("RtlSecureZeroMemory", 8),
