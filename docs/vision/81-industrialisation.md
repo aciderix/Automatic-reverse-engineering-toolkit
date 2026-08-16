@@ -176,6 +176,40 @@ mal diagnostiquée**. Bilan :
 - **Amélioration** : générer aussi les **prototypes typés** pour caster correctement les
   args libc (évite le bug « uint64 passé en 2 mots », 70 §7 pièges).
 
+#### I2.b — **Auto-lift du runtime** (plan 2026-08-16, désigné par la mesure doc 90)
+La re-mesure (doc 90, 1676 bins) confirme : **la surface Win32 HLE est ≈ couverte** (aucune API OS dans la tête du sweep) ;
+le **mur de largeur n°1 restant = le runtime C++** (`operator new`/`delete`, `std::string`, `ostream`, `locale`, `_Rb_tree`,
+`__cxa_guard`, `__udivdi3`… tous libstdc++/libgcc), **déjà franchi par le lift** (`--with-dll`) — mais **manuellement**. Le
+levier d'industrialisation = **rendre ce lift automatique** pour faire basculer ~500 binaires « import-clean » d'un coup.
+
+**Comment ça marche** (la machinerie de lift `load_with_modules` existe déjà — on ajoute détection + classification +
+résolution) :
+1. **Détecter** : lire la table d'imports de l'exe → liste des DLL requises.
+2. **Classer** (le seul vrai point de design, **sound**) : DLL **système** (kernel32/user32/ws2_32/ntdll/ole32…) → **shim
+   HLE** (on réimplémente l'OS ; lifter kernel32 = syscalls Windows non voulus) ; DLL **runtime/tierce** (libstdc++/libgcc/
+   libwinpthread/glib/pcre2…) → **lift**. Règle : « OS = shim, runtime embarqué = lift », liste système explicite +
+   défaut-lift pour le reste **trouvé sur disque**.
+3. **Résoudre le fichier** : à côté de l'exe (cas redistribuable) → dossier toolchain/cache connu → **repli propre** si
+   absent (shim/abort défini, **jamais** un crash).
+4. **Récursif** : suivre la chaîne (libstdc++→libgcc, glib→pcre2/intl/iconv…).
+
+**Optimisation** : (a) **cache d'objets** (I9) ⇒ le C de libstdc++ **se compile une fois**, réutilisé par tous les binaires
+suivants — le coût par binaire retombe à l'app seule ; (b) ne lifter que le **code atteignable** depuis les exports utilisés ;
+(c) possible **« runtime pack » pré-lifté** (libstdc++/libgcc/libwinpthread) en cache partagé.
+
+**Conformité §0** : l'auto-lift est **ergonomie + échelle**, PAS un changement de justesse (le code lifté reste vérifié
+« correct ou abort »). Risque = mauvaise **classification** (ne jamais lifter une DLL système) et **résolution** (absent →
+repli défini). **Opt-in ou sûr-par-défaut**.
+
+**Briques + validation** (discipline post-miscompile 2026-08-16 : toute brique touchant le lift multi-module passe le
+**run end-to-end `lift_libstdcxx`**, pas juste funcdiff, **avant** commit ; hash inchangé pour un binaire seul) :
+- **2a** — auto-détection des imports non-système + règle de classification (documentée) ; garde fixtures + lift_libstdcxx.
+- **2b** — résolution du fichier DLL (à côté de l'exe → cache → repli) ; un vrai binaire C++ **auto-lifté** = Wine.
+- **2c** — **re-mesure** (wallsweep + auto-lift) : chiffrer combien de binaires basculent « clean ».
+
+*(Préalable indépendant, non-I2 : combler les 2 dernières lacunes SSE mesurées — `pshufb` (SSSE3, 50 bins) + `andpd`
+(SSE2 packed-double, 49 bins) — dans `lift.rs`, prouvées cpudiff. Fait en premier car sûr et rapide.)*
+
 ### I3 — Classification automatique des fonctions ⬜ (aide à la priorisation)
 - **Problème.** ~40k fonctions ; analyse manuelle impossible à l'échelle.
 - **Proposition.** Phase de **reconnaissance** taguant chaque fonction : CRT MSVC / thunk

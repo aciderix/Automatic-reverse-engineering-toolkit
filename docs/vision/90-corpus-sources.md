@@ -265,3 +265,24 @@ GLib/gettext** : `libintl_*` (gettext i18n : `gettext` 78, `bindtextdomain` 70, 
 `dllrunscript` 76 / `printf__` 38 (à identifier). **⇒ Verdict data-driven : le prochain axe est SANS APPEL GLib/gettext**
 (`libglib-2.0-0.dll` + `libintl-8.dll`) = **Levier 1** (lifter la DLL, comme libstdc++/zlib) ou shims — chantier séparé,
 plus gros. La boucle « mesurer après chaque vague » (§2) a tranché.
+
+## Re-mesure POST-SESSION glib/SSE/loader (2026-08-16) — Win32 ≈ fait ; le mur = runtime C++ (lift) + 2 ops SSE
+
+**RAW sweep neuf** (`wallsweep` sur un corpus MSYS2 re-fetché : **1676 PE** analysés, 91 géants Qt6/LLVM/clang exclus au
+timeout ; **133 clean / 1543 avec gaps**). Classement **sans lift** (exe isolés), donc la tête est le runtime C++ importé,
+mais la lecture est nette :
+
+- **TOP IMPORTS = 100 % runtime C++/libgcc**, AUCUNE API Win32 dans la tête : `operator new`/`delete` (519/353),
+  `std::string::_M_create/_M_replace/_M_assign` (323/268/258), `__throw_length/logic_error` (419/383), `__ostream_insert`
+  (235), `locale` (234), `_Rb_tree_*` (208/207/197), `__cxa_guard_*` (182), `__udivdi3`/`__divdi3` (169/165), `basic_ios`/
+  `ios_base`/`ostringstream`… **⇒ Le mur de largeur n°1 = le runtime C++, DÉJÀ franchi par le lift** (`--with-dll`, comme
+  jsoncpp/ninja). L'absence de Win32 dans la tête **confirme que la surface HLE OS est essentiellement couverte** (Winsock +
+  glib-family + VEH/GetProcAddress/TLS/shims de cette session).
+- **TOP INSTRUCTIONS** : quasi tout = **données-décodées-en-code** (abort correct) — `int` (752), `ud2` (355), `in`/`out`/
+  `insb`/`outsb`/`arpl`/`popad`/`hlt`/`daa`/`bound`/`les`/`cli`/`data16`/`aaa`… **Seules 2 VRAIES lacunes vectorielles** :
+  **`pshufb`** (SSSE3, **50 bins**, 3921 sites) et **`andpd`** (SSE2 packed-double, **49 bins**, 1173 sites) — concrètes,
+  générales, cpudiff-vérifiables (comme le trio SSE).
+
+**⇒ Plan data-driven (détail doc 81 I2)** : (1) **`pshufb` + `andpd`** (gain sûr/mesuré, cpudiff) ; (2) **auto-lift du
+runtime C++** (rendre `--with-dll` automatique : détecter les DLL runtime importées + les lifter ; OS=shim / runtime=lift)
+pour basculer ~500 binaires « import-clean » d'un coup. **PAS** la récup noreturn (étroite/risquée) ni `fnstenv` (hors chemins).

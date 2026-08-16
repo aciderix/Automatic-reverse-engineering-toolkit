@@ -714,3 +714,12 @@ honnête** : gobject-query **aborte proprement** (sound) sur un pointeur FPO de 
 récupéré) — le récupérer sainement demande une **passe noreturn-aware**, pas une devinette de padding. **⇒ Toujours 3 vrais
 binaires end-to-end** (jsoncpp, ninja, gspawn). Portes après revert : hash inchangé, difftest 272/272, funcdiff 0-div
 (+223 fonctions), `lift_libstdcxx` vert. Le gap lifter CPU glib restant demeure `fnstenv`/`fldenv`.
+
+### 🎯 PLAN COURANT (2026-08-16) — désigné par re-mesure corpus (doc 90, 1676 bins)
+La mesure tranche : **Win32 HLE ≈ couvert** (0 API OS dans la tête) ; mur n°1 = **runtime C++** (lift, aujourd'hui manuel) ;
+2 vraies lacunes d'instructions = **`pshufb`/`andpd`**. Plan en 2 volets (détail doc 81 I2.b) :
+1. **`pshufb` + `andpd`** (`lift.rs`, cpudiff) — sûr/rapide, **en premier**. `pshufb` SSSE3 (50 bins), `andpd` SSE2 pd (49).
+2. **Auto-lift du runtime C++** (I2.b) — détecter+classer (OS=shim/runtime=lift)+résoudre+lifter récursif ; optimisé par le
+   cache d'objets (lift-once-reuse). Briques 2a (détection+classification), 2b (résolution fichier), 2c (re-mesure du gain).
+**Discipline (leçon miscompile)** : toute brique lift multi-module passe le **run end-to-end `lift_libstdcxx`** avant commit.
+**Écartés** : récup noreturn de gobject (étroite/risquée), `fnstenv`/`fldenv` (hors chemins exercés).
