@@ -1806,6 +1806,13 @@ fn corpus() -> Vec<Vec<u8>> {
         vec![0x0f, 0x14, 0xc1],       // unpcklps  xmm0, xmm1
         vec![0x0f, 0x15, 0xc1],       // unpckhps  xmm0, xmm1
         vec![0x0f, 0x50, 0xc1],       // movmskps  eax, xmm1
+        // packed double bitwise (66 0F): bit-identical to the *ps forms
+        vec![0x66, 0x0f, 0x54, 0xc1],       // andpd     xmm0, xmm1
+        vec![0x66, 0x0f, 0x55, 0xc1],       // andnpd    xmm0, xmm1
+        vec![0x66, 0x0f, 0x56, 0xc1],       // orpd      xmm0, xmm1
+        vec![0x66, 0x0f, 0x57, 0xc1],       // xorpd     xmm0, xmm1
+        // pshufb (SSSE3): byte shuffle by a control mask (high bit -> 0, else index 0..15)
+        vec![0x66, 0x0f, 0x38, 0x00, 0xc1], // pshufb    xmm0, xmm1
         // ---- stack / frame family (the esp-touching hotspot) --------------
         // `push`/`pop` both modify esp AND may take an esp/ebp-relative operand;
         // the source/destination effective address must be computed with the

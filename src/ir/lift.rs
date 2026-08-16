@@ -103,6 +103,7 @@ fn is_scalar_float(ins: &Instruction) -> bool {
             | Addps | Subps | Mulps | Divps | Minps | Maxps | Sqrtps | Cvtdq2ps
             | Cmpps | Andps | Orps | Andnps | Shufps | Movmskps | Unpcklps | Unpckhps
             | Psllq | Pinsrw | Pinsrd | Cvtdq2pd
+            | Pshufb | Andpd | Orpd | Andnpd
     )
 }
 
@@ -1610,18 +1611,38 @@ pub fn lift(insn: &Insn, bits: u32) -> Vec<Stmt> {
             ))
         }
         // Bitwise packed-float logic: operate on the raw 128-bit halves.
-        Mnemonic::Andps | Mnemonic::Orps | Mnemonic::Andnps => {
+        // Packed bitwise and/or/andnot — the *ps and *pd forms are bit-identical
+        // (whole-128-bit bitwise op; the float width is irrelevant to the bits).
+        Mnemonic::Andps | Mnemonic::Orps | Mnemonic::Andnps
+        | Mnemonic::Andpd | Mnemonic::Orpd | Mnemonic::Andnpd => {
             let (alo, ahi) = some_or_asm!(read_xmm128(ins, 0));
             let (blo, bhi) = some_or_asm!(read_xmm128(ins, 1));
             let (lo, hi) = match ins.mnemonic() {
-                Mnemonic::Andps => (bin(BinOp::And, alo, blo), bin(BinOp::And, ahi, bhi)),
-                Mnemonic::Orps => (bin(BinOp::Or, alo, blo), bin(BinOp::Or, ahi, bhi)),
+                Mnemonic::Andps | Mnemonic::Andpd => {
+                    (bin(BinOp::And, alo, blo), bin(BinOp::And, ahi, bhi))
+                }
+                Mnemonic::Orps | Mnemonic::Orpd => {
+                    (bin(BinOp::Or, alo, blo), bin(BinOp::Or, ahi, bhi))
+                }
                 _ => (
                     bin(BinOp::And, Expr::Unary(UnOp::Not, Box::new(alo)), blo),
                     bin(BinOp::And, Expr::Unary(UnOp::Not, Box::new(ahi)), bhi),
                 ),
             };
             some_or_asm!(write_xmm128(ins, lo, hi))
+        }
+        // pshufb (SSSE3): shuffle bytes of the destination by the source control mask —
+        // each result byte i is dst[ctrl[i] & 15] across the FULL 16-byte register, or 0
+        // when ctrl[i] bit 7 is set. Not lane-separable (an index reaches either half),
+        // so the helper takes both dst halves and one control half per output half.
+        Mnemonic::Pshufb => {
+            let (dlo, dhi) = some_or_asm!(read_xmm128(ins, 0));
+            let (clo, chi) = some_or_asm!(read_xmm128(ins, 1));
+            some_or_asm!(write_xmm128(
+                ins,
+                fcall("__pi_pshufb", vec![dlo.clone(), dhi.clone(), clo]),
+                fcall("__pi_pshufb", vec![dlo, dhi, chi])
+            ))
         }
         // shufps: low two lanes from dst, high two from src (imm8 lane selectors).
         // Reuses the dword-shuffle helpers (same 32-bit lane permutation).

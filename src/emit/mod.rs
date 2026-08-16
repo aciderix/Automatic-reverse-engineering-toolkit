@@ -188,6 +188,10 @@ pub(crate) const FLOAT_HELPERS: &str = concat!(
     // Unpack-low bytes (apply to the high 32 bits of each half for the *hi variant).
     "static inline uint64_t __pi_unpcklbw_lo(uint64_t d,uint64_t s){uint64_t r=0;for(int i=0;i<4;i++){r|=(uint64_t)(uint8_t)(d>>(i*8))<<(i*16);r|=(uint64_t)(uint8_t)(s>>(i*8))<<(i*16+8);}return r;}\n",
     "static inline uint64_t __pi_unpcklbw_hi(uint64_t d,uint64_t s){uint64_t r=0;for(int i=0;i<4;i++){r|=(uint64_t)(uint8_t)(d>>(i*8+32))<<(i*16);r|=(uint64_t)(uint8_t)(s>>(i*8+32))<<(i*16+8);}return r;}\n",
+    // pshufb (SSSE3): each of the 8 output bytes = dst[ctrl&15] over the full 16-byte
+    // register (dlo|dhi), or 0 when the control byte's bit 7 is set. `ctrl` is one 64-bit
+    // control half; `dlo`/`dhi` are the whole destination.
+    "static inline uint64_t __pi_pshufb(uint64_t dlo,uint64_t dhi,uint64_t ctrl){uint64_t r=0;for(int i=0;i<8;i++){uint8_t c=(uint8_t)(ctrl>>(i*8));uint8_t b=(c&0x80)?0:((c&15)<8?(uint8_t)(dlo>>((c&15)*8)):(uint8_t)(dhi>>(((c&15)-8)*8)));r|=(uint64_t)b<<(i*8);}return r;}\n",
     // Packed single-precision (4 floats per 128-bit reg, 2 per 64-bit half),
     // bit-exact via native IEEE-754 float per lane.
     "static inline uint64_t __ps_add(uint64_t a,uint64_t b){uint32_t l=(uint32_t)__fp_f32(__fp_g32(a)+__fp_g32(b)),h=(uint32_t)__fp_f32(__fp_g32(a>>32)+__fp_g32(b>>32));return (uint64_t)l|((uint64_t)h<<32);}\n",

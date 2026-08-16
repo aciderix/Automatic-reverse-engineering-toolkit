@@ -8517,3 +8517,18 @@ récupéré ; le récupérer proprement demande une **passe noreturn-aware** (po
 **Portes (après revert)** : hash `19acad982194bf07` **inchangé** (additif — ne récupère que des cibles non atteintes),
 difftest 272/272, **funcdiff 0 divergence** (22082 scorées, **+223** — la récup SOUND lifte plus, tout correct),
 **`lift_libstdcxx` vert (plus de hang)**, `lift_fpocmp`/`lift_tlscb` + fixtures lifting-DLL bit-identiques Wine.
+
+### 2026-08-16 — [LIFT][SSE ✅] **`pshufb` + `andpd`/`orpd`/`andnpd` — les 2 dernières lacunes SSE mesurées (doc 90)**
+
+Brique 1 du plan post-mesure (doc 90/81 I2.b) : les **seules** vraies lacunes d'instructions du re-sweep (1676 bins, le reste
+= data-en-code) étaient **`pshufb`** (SSSE3, 50 bins/3921 sites) et **`andpd`** (SSE2 packed-double, 49 bins/1173). Ajoutées
+à `lift.rs` (+ `orpd`/`andnpd`, gratuits) :
+- **`pshufb xmm, xmm/m128`** : shuffle d'octets par masque de contrôle — chaque octet résultat = `dst[ctrl&15]` sur les **16
+  octets** (non séparable en demi-lanes ; l'index atteint l'autre moitié), ou 0 si bit 7 du contrôle. Helper d'émission
+  `__pi_pshufb(dlo,dhi,ctrl)` (prend les 2 demi-dst + un demi-contrôle par demi-sortie).
+- **`andpd`/`orpd`/`andnpd`** : bitwise 128-bit, **bit-identiques** aux `*ps` (la largeur flottante n'affecte pas les bits) —
+  greffés sur le bras `Andps|Orps|Andnps`.
+Enregistrées dans `is_scalar_float()`. **Additif** (ne reprennent que des cas qui abortaient) ⇒ **hash `19acad982194bf07`
+inchangé**. **Portes** : cpudiff vert (per-instruction avec `pshufb`/`andpd`/`orpd`/`andnpd`/`xorpd` neufs + séquences +
+random), funcdiff **0 divergence** (22082 scorées), difftest_transpile 4/4. **⇒ Les lacunes d'instructions mesurées du
+corpus sont closes** (reste = data-décodée-en-code, abort correct). Prochaine brique : **auto-lift du runtime C++** (doc 81 I2.b).
