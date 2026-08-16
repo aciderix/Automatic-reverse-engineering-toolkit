@@ -8331,3 +8331,22 @@ CRITICAL_SECTION) → `sum=35 ran=5` ; un 2ᵉ work **annulé** → `cancel_ran=
 `WaitForSingleObjectEx` sur un event signalé → `0` — **bit-identique Wine**. **Portes** : hash `19acad982194bf07` inchangé
 (HLE-only), difftest 272/272, **4 fixtures fibers vertes** (join/critsec/pool/srwlock — 0 régression trampoline).
 **Résidu libglib restant** : Winsock async/event (inc3), pthread (libwinpthread), console, misc Win32, CRT, gaps lifter SSE/x87.
+
+### 2026-08-15 — [HLE][WIN32 ✅] **Winsock inc 3 — async/event (WSAEventSelect poll-based) : 3ᵉ famille du résidu libglib**
+
+3ᵉ famille du résidu libglib (doc 82), réutilisant le socle Winsock (inc1-2) + les events fibers. **Modèle WSAEventSelect
+poll-based** : `WSAEventSelect(s, hEvent, mask)` associe le masque FD_* (`FD_READ 1`/`WRITE 2`/`OOB 4`/`ACCEPT 8`/
+`CONNECT 0x10`/`CLOSE 0x20`) du socket à un event, et rend le socket non-bloquant ; l'event est **signalé quand le socket
+est RÉELLEMENT prêt** — `wsa_ready_events()` poll l'fd hôte (jamais une readiness devinée) intégré dans
+`u32_handle_signaled_for` (le scheduler re-vérifie donc à chaque tour) + un **poll bloquant dans le chemin deadlock** (si
+tous les fibres sont bloqués sur des sockets WSA, on attend l'I/O réseau sur l'hôte au lieu d'aborter à tort).
+`WSAEnumNetworkEvents` poll + remplit `WSANETWORKEVENTS` (44 o) + reset l'event. **Livré** : `WSASocketW`/`A` (→socket),
+`WSACreateEvent`/`WSASetEvent`/`WSAResetEvent`/`WSACloseEvent` (events manual-reset), `WSAEventSelect`,
+`WSAEnumNetworkEvents`, `WSAWaitForMultipleEvents` (→`u32_wait`, WSA_WAIT_EVENT_0/TIMEOUT 0x102), `WSADuplicateSocketW`/`A`
+(cross-process → échec défini). **Garde** : `winecorpus/win32_wsaevent.c` — WSAEventSelect(FD_ACCEPT) sur un listener +
+connexion cliente localhost → `WSAWaitForMultipleEvents` réveille (`wait=0`), `WSAEnumNetworkEvents` montre FD_ACCEPT
+(`accept_event=1`), accept OK ; + event manuel unset→`0x102`/set→`0` — **bit-identique Wine**. **Piège attrapé** : l'API
+WSA-event référence `g_event`/`u32_event_idx`/`g_wsaevsel` (section fibers) — placée d'abord dans le bloc Winsock *amont*
+⇒ symboles non déclarés ; déplacée **après** la machinerie d'events. **Portes** : hash `19acad982194bf07` inchangé
+(HLE-only), difftest 272/272, **8 fixtures thread/winsock vertes** (0 régression scheduler/event/socket). **Résidu libglib
+restant** : pthread, console, misc Win32, CRT, gaps lifter SSE/x87.

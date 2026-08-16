@@ -43,6 +43,7 @@
 #include <netdb.h>
 #include <fcntl.h>        /* FIONBIO via fcntl(O_NONBLOCK) */
 #include <errno.h>
+#include <poll.h>         /* WSAEventSelect readiness polling */
 #endif
 
 /* G2b (doc 72): a *visible* window is presented via SDL2 (portable: Linux/macOS,
@@ -2371,11 +2372,38 @@ static int u32_thread_resolve(uint32_t h) {
  * signaled flag; mutex → free, held by fi (recursive), or abandoned (owner DONE);
  * semaphore → count>0. Any other handle keeps the legacy always-signaled value
  * (sound in the mono-thread model). */
+/* WSAEventSelect: an event object associated with a socket's network-event mask
+ * (FD_READ 1 / FD_WRITE 2 / FD_OOB 4 / FD_ACCEPT 8 / FD_CONNECT 0x10 / FD_CLOSE 0x20).
+ * Indexed by event index. The event is "signaled" when the host socket is actually
+ * ready for a selected condition — polled on demand (never a guessed readiness). */
+#ifndef __wasm__
+static struct { int used, fd; uint32_t mask; } g_wsaevsel[U32_MAX_EVENT];
+/* Which selected FD_* conditions are ready on `fd` right now (host poll, 0 timeout). */
+static uint32_t wsa_ready_events(int fd, uint32_t mask) {
+    struct pollfd pfd; pfd.fd = fd; pfd.events = 0; pfd.revents = 0;
+    if (mask & (1u | 8u | 0x20u)) pfd.events |= POLLIN;    /* READ/ACCEPT/CLOSE -> readable */
+    if (mask & (2u | 0x10u))      pfd.events |= POLLOUT;   /* WRITE/CONNECT -> writable */
+    if (mask & 4u)                pfd.events |= POLLPRI;   /* OOB */
+    if (poll(&pfd, 1, 0) <= 0) return 0;
+    uint32_t r = 0;
+    if (pfd.revents & POLLIN)  r |= (mask & (1u | 8u | 0x20u));
+    if (pfd.revents & POLLOUT) r |= (mask & (2u | 0x10u));
+    if (pfd.revents & POLLPRI) r |= (mask & 4u);
+    if (pfd.revents & (POLLHUP | POLLERR)) r |= (mask & 0x20u);   /* FD_CLOSE */
+    return r;
+}
+#endif
 static int u32_handle_signaled_for(uint32_t h, int fi) {
     int ti = u32_thread_idx(h);
     if (ti >= 0) return g_fiber[ti].state == FST_DONE;
     int ei = u32_event_idx(h);
-    if (ei >= 0) return g_event[ei].signaled;
+    if (ei >= 0) {
+#ifndef __wasm__
+        if (g_wsaevsel[ei].used && wsa_ready_events(g_wsaevsel[ei].fd, g_wsaevsel[ei].mask))
+            g_event[ei].signaled = 1;                      /* socket ready -> signal the WSA event */
+#endif
+        return g_event[ei].signaled;
+    }
     int mi = u32_mutex_idx(h);
     if (mi >= 0) {
         int o = g_mutex[mi].owner;
@@ -2453,6 +2481,29 @@ static void u32_sched_loop(void) {
                     }
                 continue;                          /* re-loop: some are READY now */
             }
+#ifndef __wasm__
+            /* Before declaring deadlock: if any blocked fiber waits on a WSAEventSelect
+             * socket, block on the host until one is ready (a real network wait), then
+             * re-loop so the top-of-loop re-check wakes it. Not a deadlock — external I/O. */
+            {
+                struct pollfd pf[U32_MAX_EVENT]; int nf = 0;
+                for (int i = 0; i < g_nfiber && nf < U32_MAX_EVENT; i++) {
+                    if (g_fiber[i].state != FST_BLOCKED) continue;
+                    for (int k = 0; k < g_fiber[i].wait_n && nf < U32_MAX_EVENT; k++) {
+                        int e = u32_event_idx(g_fiber[i].wait_h[k]);
+                        if (e >= 0 && g_wsaevsel[e].used) {
+                            uint32_t m = g_wsaevsel[e].mask;
+                            pf[nf].fd = g_wsaevsel[e].fd; pf[nf].events = 0; pf[nf].revents = 0;
+                            if (m & (1u | 8u | 0x20u)) pf[nf].events |= POLLIN;
+                            if (m & (2u | 0x10u))      pf[nf].events |= POLLOUT;
+                            if (m & 4u)                pf[nf].events |= POLLPRI;
+                            nf++;
+                        }
+                    }
+                }
+                if (nf > 0) { poll(pf, nf, -1); continue; }   /* wait for a socket, then re-check */
+            }
+#endif
             int blocked = 0;
             for (int i = 0; i < g_nfiber; i++) if (g_fiber[i].state == FST_BLOCKED) blocked = 1;
             if (blocked) aret_unmodelled("fiber scheduler: deadlock (all live threads blocked, no timeout pending)");
@@ -2974,6 +3025,63 @@ uint32_t aret_CloseThreadpoolWork(uint32_t esp) {
  * no-op without queued APCs). Same arg order, extra trailing bAlertable ignored. */
 uint32_t aret_WaitForSingleObjectEx(uint32_t esp)    { return aret_WaitForSingleObject(esp); }
 uint32_t aret_WaitForMultipleObjectsEx(uint32_t esp) { return aret_WaitForMultipleObjects(esp); }
+
+/* -------- Winsock async/event (increment 3) — the WSAEventSelect model --------
+ * Placed here (after the event machinery) because it bridges the sockets from the
+ * Winsock block above and the event objects/g_wsaevsel of the fiber section. */
+#ifndef __wasm__
+/* WSASocketW(af, type, protocol, lpProtocolInfo, group, dwFlags): like socket(); the
+ * overlapped/protocol-info extras are not modelled (a plain socket is a sound subset). */
+uint32_t aret_WSASocketW(uint32_t esp) {
+    int af = wsa_af_to_host(WU(0));
+    if (af < 0) { g_last_error = 10047; return INVALID_SOCKET_U; }
+    int fd = socket(af, (int)WU(1), (int)WU(2));
+    if (fd < 0) { wsa_fail(); return INVALID_SOCKET_U; }
+    return (uint32_t)fd;
+}
+uint32_t aret_WSASocketA(uint32_t esp) { return aret_WSASocketW(esp); }
+/* WSA event objects are manual-reset events. */
+uint32_t aret_WSACreateEvent(uint32_t esp) { (void)esp; return u32_create_event(1, 0, 0); }
+uint32_t aret_WSASetEvent(uint32_t esp)   { int e = u32_event_idx(WU(0)); if (e >= 0) g_event[e].signaled = 1; return 1; }
+uint32_t aret_WSAResetEvent(uint32_t esp) { int e = u32_event_idx(WU(0)); if (e >= 0) g_event[e].signaled = 0; return 1; }
+uint32_t aret_WSACloseEvent(uint32_t esp) { int e = u32_event_idx(WU(0)); if (e >= 0) g_wsaevsel[e].used = 0; return 1; }
+/* WSAEventSelect(s, hEvent, lNetworkEvents): associate the socket's FD_* events with the
+ * event object (which then signals when the socket is ready). Makes the socket
+ * non-blocking, as on Windows. lNetworkEvents == 0 cancels the association. */
+uint32_t aret_WSAEventSelect(uint32_t esp) {
+    int s = (int)WU(0); int ei = u32_event_idx(WU(1)); uint32_t mask = WU(2);
+    if (ei < 0) { g_last_error = 10022; return SOCKET_ERROR_U; }
+    int fl = fcntl(s, F_GETFL, 0); if (fl >= 0) fcntl(s, F_SETFL, fl | O_NONBLOCK);
+    if (mask == 0) g_wsaevsel[ei].used = 0;
+    else { g_wsaevsel[ei].used = 1; g_wsaevsel[ei].fd = s; g_wsaevsel[ei].mask = mask; }
+    return 0;
+}
+/* WSAEnumNetworkEvents(s, hEvent, out): report which selected FD_* events are ready
+ * (polled) and reset the event. WSANETWORKEVENTS = { long lNetworkEvents; int
+ * iErrorCode[10]; } = 44 bytes; all error codes 0 (a ready condition, not an error). */
+uint32_t aret_WSAEnumNetworkEvents(uint32_t esp) {
+    int s = (int)WU(0); int ei = u32_event_idx(WU(1)); uint8_t *out = (uint8_t *)WP(2);
+    uint32_t mask = (ei >= 0 && g_wsaevsel[ei].used) ? g_wsaevsel[ei].mask : 0x3Fu;
+    uint32_t ready = wsa_ready_events(s, mask);
+    if (out) { memset(out, 0, 44); *(uint32_t *)out = ready; }
+    if (ei >= 0) g_event[ei].signaled = 0;
+    return 0;
+}
+/* WSAWaitForMultipleEvents(n, lphEvents, fWaitAll, ms, fAlertable): wait on WSA event
+ * handles. Returns WSA_WAIT_EVENT_0 + idx (== 0 + idx) or WSA_WAIT_TIMEOUT (0x102).
+ * Alertable ignored (no APCs). */
+uint32_t aret_WSAWaitForMultipleEvents(uint32_t esp) {
+    uint32_t n = WU(0); const uint32_t *h = (const uint32_t *)WP(1); int all = WI(2); uint32_t ms = WU(3);
+    if (!h || n == 0) return 0x102u;
+    int any = 0; for (uint32_t i = 0; i < n; i++) if (u32_waitable(h[i])) any = 1;
+    if (!any) return 0;
+    return u32_wait(h, (int)n, all, ms);
+}
+/* WSADuplicateSocketW: shares a socket with ANOTHER process (via a WSAPROTOCOL_INFO the
+ * peer passes to WSASocket). ARET is single-process -> not applicable; defined failure. */
+uint32_t aret_WSADuplicateSocketW(uint32_t esp) { (void)esp; g_last_error = 10022; return SOCKET_ERROR_U; }
+uint32_t aret_WSADuplicateSocketA(uint32_t esp) { return aret_WSADuplicateSocketW(esp); }
+#endif /* !__wasm__ */
 /* -------- Event objects (doc 80 incr. 3) -------- */
 uint32_t aret_CreateEventA(uint32_t esp) { return u32_create_event(WI(1), WI(2), u32_name_hash(WP(3), 0)); }
 uint32_t aret_CreateEventW(uint32_t esp) { return u32_create_event(WI(1), WI(2), u32_name_hash(WP(3), 1)); }
