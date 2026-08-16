@@ -8485,3 +8485,29 @@ normalisation CRLF du harnais ; le mur « TLS callback not invoked » a disparu)
 Windows 3, convention de plateforme). **libglib s'exécute end-to-end, sortie identique à Wine.** **Portes** : hash inchangé,
 difftest 272/272, **7 fixtures lifting-DLL vertes** (lift_zlib/libgcc/libstdcxx/stdthrow/stdstring/comctl32_imagelist/progress —
 0 régression du changement loader), lift_tlscb bit-identique Wine.
+
+### 2026-08-16 — [RECOV ✅][🎯 4ᵉ BINAIRE] **Récup de pointeur de fonction FPO isolé (padding `nop` GCC) — gobject-query = Wine**
+
+Après gspawn, cible plus riche : **`gobject-query`** (exerce **libgobject** + son système de types), chaîne `--with-dll` de
+**8 DLL** (ajout libgobject + libffi, récupéré depuis MSYS2). Mur **nouveau** (ni import ni instruction) : **appel indirect
+vers une fonction non récupérée** — un **comparateur `qsort`/`GCompareFunc`** (feuille FPO, ouvre `mov eax,[esp+4]`, aucun
+prologue standard), atteint **uniquement** via un **pointeur de fonction isolé en `.data`/`.rdata`** (pas une table ≥3).
+La récup par pointeur de données l'acceptait via `looks_like_func_start` (échoue, FPO) ou `preceded_by_terminator`
+(terminateur/`int3` **adjacent**) — mais GCC aligne la fonction à 16 avec du **padding `nop` (0x90)** après le `ret`/`call`
+noreturn du précédent, donc aucun des deux ne voyait la frontière.
+
+**Fix général** (`analysis`) : `preceded_by_terminator` **saute un run de `nop` borné** (≤15) puis vérifie la frontière
+(`boundary_at`) — (A) terminateur décodé, (B) `int3`/`ret`, **(C nouveau)** un **`call`** juste avant le padding (GCC n'émet
+du padding inter-fonction qu'en **fin** de fonction ; un call *retournant* est suivi de son code de retour, jamais de
+padding ⇒ ce call terminait la fonction, ex. tail `abort`/`g_error`/`longjmp`), **(D nouveau)** repli : ≥2 `nop` + cible
+**alignée 16** (le padding `-falign-functions=16` par défaut, quand le prédécesseur lui-même n'est pas récupéré). Étendu au
+bras **`forced`** (ré-scinder une adresse déjà absorbée en interne par la passe linéaire qui a traversé le call+nops).
+**Sound** : uniquement pour un candidat **déjà address-taken** (le pointeur prouve l'adresse prise) ; au pire un faux
+interior tombe sur une frontière prouvée ⇒ abort sound, jamais un miscompile (même argument que l'existant).
+
+**⇒ 🎯 `gobject-query froots` (arbre des types fondamentaux GObject, 47 lignes) = Wine OCTET POUR OCTET, rc 0** — **4ᵉ vrai
+binaire tiers end-to-end** (jsoncpp, ninja, gspawn, gobject-query), exerçant le système de types de libgobject. **Garde** :
+`winecorpus/lift_fpocmp.{c,dll.c}` — comparateur FPO atteint **seulement** via un pointeur `.data` `volatile` (empêche
+-O2 de le folder en immédiat de code), tri correct = récup réussie — **bit-identique Wine**. **Portes** : hash
+`19acad982194bf07` **inchangé** (additif — ne récupère que des cibles qui abortaient), difftest 272/272, **funcdiff 0
+divergence** (22176 scorées, **+317** vs avant — la nouvelle récup lifte plus, tout correct), fixtures lifting-DLL vertes.

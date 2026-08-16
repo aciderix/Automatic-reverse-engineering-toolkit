@@ -700,3 +700,12 @@ harnais) : tout le démarrage GLib + `main` + assertion + `Bail out!`, **plus au
 code de sortie (abort 134 ELF vs 3 Windows, convention plateforme). **3ᵉ vrai binaire tiers end-to-end** (après jsoncpp, ninja),
 1ᵉʳ basé libglib. La boucle mesure→fix a validé la doctrine : les ~13 autres imports « manquants » (locale/spawn) **jamais
 atteints** ⇒ on ne code que ce que le vrai binaire exerce ; et `fnstenv`/`fldenv` confirmé **hors** de ce chemin.
+
+### 🎯🎯 gobject-query (vrai libgobject) = WINE OCTET POUR OCTET (2026-08-16)
+Cible plus riche que gspawn : **`gobject-query froots`** (arbre des types fondamentaux GObject, 47 lignes) tourne
+end-to-end, **rc 0, sortie identique à Wine**, chaîne de **8 DLL** liftées (+ libgobject + libffi récupéré MSYS2). **4ᵉ vrai
+binaire tiers** (jsoncpp, ninja, gspawn, gobject-query). Mur levé = **récup de pointeur de fonction FPO isolé** (`GCompareFunc`
+`qsort`) : `preceded_by_terminator` saute le padding `nop` GCC + accepte un `call` noreturn ou une cible alignée-16 comme
+frontière, étendu au bras `forced`. Sound (candidat address-taken ⇒ pire cas abort). Garde `lift_fpocmp` bit-identique Wine ;
+hash inchangé ; funcdiff 0-div avec **+317 fonctions** scorées (la nouvelle récup lifte plus, tout correct). ⇒ Le seul vrai
+gap lifter CPU restant de la famille glib demeure **`fnstenv`/`fldenv`** (toujours hors des chemins exercés).
