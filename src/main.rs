@@ -159,6 +159,119 @@ struct Args {
     /// must match the import DLL name, e.g. `--with-dll mydll.dll=./mydll.dll`).
     #[arg(long, value_name = "NAME=PATH")]
     with_dll: Vec<String>,
+
+    /// Auto-lift the C++/third-party runtime (doc 81 I2.b): read the exe's imports,
+    /// and for every NON-system DLL it needs (libstdc++/libgcc/libwinpthread/glib/…),
+    /// find the file (beside the exe, then `--dll-path` dirs, then bench/.cache) and
+    /// lift it too — recursively through its own imports — so the app's calls dispatch
+    /// to lifted code instead of an unimplemented import. System/OS DLLs (kernel32,
+    /// user32, ws2_32, msvcrt, …) are always SHIMMED, never lifted. A runtime DLL not
+    /// found on disk is left shim-bound (a sound abort on use), never a crash. Opt-in.
+    #[arg(long)]
+    auto_lift: bool,
+
+    /// Extra directories searched by `--auto-lift` to resolve runtime DLLs (repeatable).
+    #[arg(long, value_name = "DIR")]
+    dll_path: Vec<PathBuf>,
+}
+
+/// OS / CRT DLLs that ARET reimplements as native HLE shims — never lifted by
+/// `--auto-lift` (lifting kernel32 would chase Windows syscalls; msvcrt is the C
+/// runtime ARET already models). Everything else that the exe imports and that is
+/// found on disk is a runtime/third-party DLL we lift. Match is case-insensitive and
+/// `.dll`-suffix-insensitive; the `api-ms-win-*`/`ext-ms-*` virtual sets and the
+/// versioned MSVC/UCRT CRTs are covered by prefix.
+fn is_system_dll(name: &str) -> bool {
+    let n = name.trim().to_ascii_lowercase();
+    let n = n.strip_suffix(".dll").unwrap_or(&n);
+    const SYS: &[&str] = &[
+        "kernel32", "kernelbase", "ntdll", "user32", "gdi32", "gdi32full", "advapi32",
+        "shell32", "shlwapi", "ole32", "oleaut32", "combase", "rpcrt4", "ws2_32", "wsock32",
+        "mswsock", "iphlpapi", "dnsapi", "comctl32", "comdlg32", "imm32", "winmm", "version",
+        "crypt32", "bcrypt", "secur32", "userenv", "setupapi", "winspool", "uxtheme",
+        "dwmapi", "powrprof", "psapi", "wtsapi32", "netapi32", "msvcrt", "ucrtbase", "win32u",
+        "msimg32", "usp10", "oleacc", "msvcp_win", "concrt140",
+    ];
+    SYS.contains(&n)
+        || n.starts_with("api-ms-win-")
+        || n.starts_with("ext-ms-")
+        || n.starts_with("msvcr")   // msvcr71/90/100/120…  (MSVC C runtimes)
+        || n.starts_with("msvcp")   // msvcp*  (MSVC C++ runtime — shimmed, not the GNU one)
+        || n.starts_with("vcruntime")
+}
+
+/// Auto-resolve the runtime DLLs an exe needs (`--auto-lift`): walk its import table,
+/// and for every non-system DLL find the file (beside the exe → `--dll-path` → cache)
+/// and read it, recursing through each found DLL's own imports. Returns `(name, bytes)`
+/// deduped by name. A DLL we can't find is skipped (its imports stay shim-bound — a
+/// sound abort on use, never a crash) and noted. Bounded against import cycles.
+fn auto_resolve_dlls(
+    exe_path: &std::path::Path,
+    exe_data: &[u8],
+    search_dirs: &[PathBuf],
+) -> Vec<(String, Vec<u8>)> {
+    use std::collections::{BTreeMap, BTreeSet, VecDeque};
+    let exe_dir = exe_path.parent().map(|p| p.to_path_buf()).unwrap_or_default();
+    let cache = std::path::PathBuf::from("bench/.cache");
+    let dirs: Vec<PathBuf> = std::iter::once(exe_dir)
+        .chain(search_dirs.iter().cloned())
+        .chain(std::iter::once(cache))
+        .collect();
+    let find = |name: &str| -> Option<Vec<u8>> {
+        for d in &dirs {
+            let p = d.join(name);
+            if let Ok(b) = std::fs::read(&p) {
+                return Some(b);
+            }
+            // case-insensitive fallback (import tables disagree on case with the file)
+            if let Ok(rd) = std::fs::read_dir(d) {
+                for e in rd.flatten() {
+                    if e.file_name().to_string_lossy().eq_ignore_ascii_case(name) {
+                        if let Ok(b) = std::fs::read(e.path()) {
+                            return Some(b);
+                        }
+                    }
+                }
+            }
+        }
+        None
+    };
+    let imports_of = |data: &[u8]| -> Vec<String> {
+        loader::Program::load(data)
+            .map(|p| {
+                p.pe_imports
+                    .values()
+                    .map(|i| i.dll.clone())
+                    .collect::<BTreeSet<_>>()
+                    .into_iter()
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
+    let mut resolved: BTreeMap<String, Vec<u8>> = BTreeMap::new();
+    let mut seen: BTreeSet<String> = BTreeSet::new();
+    let mut queue: VecDeque<String> = VecDeque::new();
+    for dll in imports_of(exe_data) {
+        queue.push_back(dll);
+    }
+    while let Some(dll) = queue.pop_front() {
+        let key = dll.to_ascii_lowercase();
+        if !seen.insert(key.clone()) || is_system_dll(&dll) {
+            continue;
+        }
+        match find(&dll) {
+            Some(bytes) => {
+                for next in imports_of(&bytes) {
+                    if !seen.contains(&next.to_ascii_lowercase()) {
+                        queue.push_back(next);
+                    }
+                }
+                resolved.insert(dll, bytes);
+            }
+            None => eprintln!("note: --auto-lift: {dll} not found on disk — left shim-bound"),
+        }
+    }
+    resolved.into_iter().collect()
 }
 
 /// Parse a `{ "0xhexva": "Name" }` IAT map and merge it into `prog.imports`.
@@ -337,20 +450,33 @@ fn main() -> Result<()> {
     let data = std::fs::read(&args.binary)
         .with_context(|| format!("failed to read {}", args.binary.display()))?;
 
-    let mut prog = if args.with_dll.is_empty() {
+    // Collect the DLLs to lift alongside the exe: explicit `--with-dll` first, then
+    // (if `--auto-lift`) every non-system runtime DLL the exe transitively imports and
+    // that is found on disk. Explicit entries win on a name clash.
+    let mut dlls: Vec<(String, Vec<u8>)> = Vec::new();
+    for spec in &args.with_dll {
+        let (name, path) = spec
+            .split_once('=')
+            .with_context(|| format!("--with-dll expects NAME=PATH, got `{spec}`"))?;
+        let d = std::fs::read(path).with_context(|| format!("failed to read DLL {path}"))?;
+        dlls.push((name.to_string(), d));
+    }
+    if args.auto_lift {
+        for (name, d) in auto_resolve_dlls(&args.binary, &data, &args.dll_path) {
+            if !dlls.iter().any(|(n, _)| n.eq_ignore_ascii_case(&name)) {
+                dlls.push((name, d));
+            }
+        }
+    }
+    let mut prog = if dlls.is_empty() {
         Program::load(&data)?
     } else {
-        let mut dlls = Vec::with_capacity(args.with_dll.len());
-        for spec in &args.with_dll {
-            let (name, path) = spec
-                .split_once('=')
-                .with_context(|| format!("--with-dll expects NAME=PATH, got `{spec}`"))?;
-            let d = std::fs::read(path)
-                .with_context(|| format!("failed to read DLL {path}"))?;
-            dlls.push((name.to_string(), d));
-        }
         let p = loader::load_with_modules(&data, &dlls)?;
-        eprintln!("note: lifted {} DLL module(s) alongside the binary", dlls.len());
+        eprintln!(
+            "note: lifted {} DLL module(s) alongside the binary{}",
+            dlls.len(),
+            if args.auto_lift { " (auto)" } else { "" }
+        );
         p
     };
 

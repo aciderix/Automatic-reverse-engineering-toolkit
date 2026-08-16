@@ -117,6 +117,10 @@ run_one() {
     fi
     imp_lib="$imp_lib $WD/$name.dllimp.a"       # link the app against the DLL
     withdll=(--with-dll "$dllname=$WD/$dllname") # and lift the DLL under ARET
+    # winecorpus/NAME.autolift: exercise --auto-lift instead of an explicit --with-dll.
+    # The companion DLL sits beside the exe in $WD, so auto-lift must discover + lift it
+    # by reading the exe's imports (doc 81 I2.b). Same expected output as --with-dll.
+    [ -f "$CORPUS/$name.autolift" ] && withdll=(--auto-lift)
   fi
   # Optional system-DLL lifting (winecorpus/NAME.withdll): one DLL name per line
   # (e.g. `comctl32.dll`) that ARET lifts from Wine's own PE builtins — the app

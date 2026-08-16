@@ -8532,3 +8532,23 @@ Enregistrées dans `is_scalar_float()`. **Additif** (ne reprennent que des cas q
 inchangé**. **Portes** : cpudiff vert (per-instruction avec `pshufb`/`andpd`/`orpd`/`andnpd`/`xorpd` neufs + séquences +
 random), funcdiff **0 divergence** (22082 scorées), difftest_transpile 4/4. **⇒ Les lacunes d'instructions mesurées du
 corpus sont closes** (reste = data-décodée-en-code, abort correct). Prochaine brique : **auto-lift du runtime C++** (doc 81 I2.b).
+
+### 2026-08-16 — [INDUS][LIFT ✅] **Auto-lift du runtime (`--auto-lift`) — brique 2a : détection + classification + résolution**
+
+Brique 2a du plan doc 81 I2.b (mur n°1 mesuré = runtime C++, franchi par le lift mais **manuel**). Nouveau flag **opt-in**
+`--auto-lift` : lit les imports de l'exe, et pour chaque DLL **non-système** (libstdc++/libgcc/libwinpthread/glib/pcre2…)
+**trouve le fichier** (à côté de l'exe → `--dll-path` → `bench/.cache`) et le **lifte**, **récursivement** via ses propres
+imports — plus besoin de `--with-dll NOM=CHEMIN` à la main. **Classification sound** (`is_system_dll`) : kernel32/user32/
+ws2_32/ntdll/ole32/msvcrt/ucrtbase/`api-ms-win-*`/`msvcr*`… → **toujours shimmés** (jamais liftés) ; le reste **trouvé sur
+disque** → lifté. DLL runtime **introuvable** → laissée shim-bound (abort défini à l'usage, **jamais un crash**) + note.
+`--with-dll` explicite reste prioritaire. **N'affecte PAS** le chemin par défaut ni la machinerie de lift (juste
+détection+résolution par-dessus `load_with_modules`).
+
+**Optimisation** : le **cache d'objets** (I9) fait que le C de libstdc++ **se compile une fois**, réutilisé par tous les
+binaires suivants (coût par binaire = l'app seule) — ce qui rend l'auto-lift viable à l'échelle.
+
+**Preuves** : **gspawn `--auto-lift`** (0 chemin manuel) auto-résout la **chaîne de 6 DLL** et sort **= Wine octet-pour-octet**
+(stdout **et** stderr) end-to-end, identique au `--with-dll` manuel. **Garde** : `winecorpus/lift_autolift.{c,dll.c}` +
+marqueur `.autolift` (le harnais utilise `--auto-lift` au lieu de `--with-dll` ; la DLL compagnon est à côté de l'exe) —
+bit-identique Wine. **Portes** : hash `19acad982194bf07` inchangé (défaut intact), difftest 272/272, `lift_zlib` (chemin
+`--with-dll` refactoré) vert. **Reste** : brique 2b (résolution élargie/toolchain) + 2c (re-mesurer le gain « import-clean »).
