@@ -207,6 +207,19 @@ bash bench/wallsweep.sh <dir1> [dir2…]  # AGRÈGE --mode walls sur un corpus :
 ARET_NO_OBJCACHE=1 …        # désactiver (à faire pour une preuve indépendante du cache)
 ARET_OBJCACHE=<dir> …       # emplacement (défaut $XDG_CACHE_HOME/aret/obj)
 ARET_OBJCACHE_MAX_MB=<n> …  # budget, éviction LRU en fin de build (défaut 4096)
+
+# Mode "RAM / éphémère" (choix disque ↔ mémoire — dispo AUJOURD'HUI, zéro code) : le backend
+# shell-out vers gcc/clang/llc DOIT passer par des fichiers (un process externe lit/écrit des
+# fichiers). Pour ne rien écrire sur le disque PERSISTANT, router sorties + cache vers un tmpfs
+# (RAM) — mêmes octets produits (hash inchangé), écritures en RAM :
+aret <exe> --mode transpile --out-dir /dev/shm/aret_out …   ARET_OBJCACHE=/dev/shm/aret_cache …
+#   ⚠️ tmpfs = RAM : plafond ~RAM (p.ex. 15-16 Go) vs 250 Go de disque. UNE passe (≤~600 Mo même
+#   pour une chaîne 8-DLL) tient large ; c'est l'ACCUMULATION sans nettoyage qui peut OOM (échec
+#   propre = write-error, comme "disque plein", jamais de corruption). Le cache en RAM est
+#   ÉPHÉMÈRE (perdu au reset) ⇒ pas de réutilisation inter-sessions : le défaut reste le disque.
+#   Hygiène (leçon 2026-08-16, cause réelle d'une saturation ce jour) : réutiliser UN out-dir et
+#   NE PAS purger le cache — à soi seul ça évite le remplissage, sans aucun flag.
+#   Un "vrai" zéro-fichier (pur en-process) demanderait un backend in-process (doc 80 §1.7).
 ```
 
 ```bash

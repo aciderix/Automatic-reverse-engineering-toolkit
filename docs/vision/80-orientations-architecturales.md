@@ -149,6 +149,24 @@ gratuit pour une moitié, très cher pour l'autre** — il faut séparer netteme
   prouvant le concept + bundling/WinHelp immédiat ; (2) **frontend 16-bit** (cas 2) = **le grand prix**, jalon dédié
   planifié (comme le 64-bit). Prérequis partagé avec Phase 8 (élargir le lifter au-delà du i386 32-bit).
 
+### 1.7 Backend **in-process** (zéro fichier / RAM pure) — ⚠️ optimisation, pas capacité — enregistrée, NON engagée
+**Idée (utilisateur, 2026-08-16)** : aujourd'hui le backend **shell-out** vers `gcc`/`clang`/`llc` (`std::process::Command`) —
+donc le C lifté, les `.o` et le binaire final passent **forcément par des fichiers** (un process externe lit/écrit des
+fichiers). Un mode « pur mémoire » supprimerait toute écriture disque.
+- **Faisabilité** : ⚠️ **grosse**. Il faudrait construire/compiler **en process** via l'**API LLVM** (module→objet en RAM,
+  JIT pour `--run`). Coûts cachés : (a) le backend **principal émet du C** ⇒ compilateur C in-process (**libclang**) pour le
+  lifté **et** pour tout le **runtime HLE** (`aret_hle.c`…), ou pré-compiler le HLE une fois et lier en mémoire ; (b)
+  **linkage** en mémoire ⇒ embarquer **lld** comme lib (grosse dépendance) ; (c) garder **3 cibles cohérentes** (C, LLVM,
+  WASM) et **re-valider toutes les portes** (on touche la chaîne compile/link, zone critique justesse).
+- **Utilité** : réelle mais **non bloquante** — le **mode tmpfs/RAM** (doc 70 §3, dispo aujourd'hui via `--out-dir /dev/shm`
+  + `ARET_OBJCACHE=/dev/shm`) couvre ~90 % du besoin « ne pas toucher le disque persistant » **sans une ligne de code**. Le
+  vrai « aucun fichier **jamais** » n'arrive qu'avec ce backend.
+- **Conformité** : ✅ neutre (ne change pas les octets produits ni la garantie « correct ou abort »). C'est de la plomberie
+  de sortie.
+- **Statut** : **enregistrée, non engagée**. §2 (pas de gros changement sans **bénéfice mesuré** en zone critique) ⇒ **différé**
+  jusqu'à ce que ce soit un **vrai goulot mesuré** ; d'ici là, **tmpfs + hygiène** (un seul `out-dir`, ne pas purger le cache)
+  suffisent. Convergerait naturellement avec l'ère **LLVM/ARM/WASM** (§1.5) où l'IR in-process est déjà de mise.
+
 ---
 
 ## 2. Architecture retenue — threads coopératifs (fibers)
