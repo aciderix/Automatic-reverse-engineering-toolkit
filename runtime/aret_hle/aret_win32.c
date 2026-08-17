@@ -446,6 +446,45 @@ uint32_t aret_RegOpenKeyExW(uint32_t esp)   { char s[256]; u32_w2n((const uint16
 uint32_t aret_RegOpenKeyW(uint32_t esp)     { char s[256]; u32_w2n((const uint16_t *)WP(1), s, sizeof s); return u32_reg_open(WU(0), s, WU(2)); }
 uint32_t aret_RegSetValueExW(uint32_t esp)  { char s[U32_REGNAME]; u32_w2n((const uint16_t *)WP(1), s, sizeof s); return u32_reg_setval(WU(0), s, WU(3), WU(4), WU(5)); }
 uint32_t aret_RegQueryValueExW(uint32_t esp){ char s[U32_REGNAME]; u32_w2n((const uint16_t *)WP(1), s, sizeof s); return u32_reg_queryval(WU(0), s, WU(3), WU(4), WU(5)); }
+/* RegGetValueW(hKey, subKey, valueName, dwFlags, pdwType, pvData, pcbData) -> LSTATUS:
+ * the convenience call = RegOpenKeyEx(hKey\subKey) + RegQueryValueEx(valueName), built on
+ * the registry family. It honours the RRF_RT_* type restriction (a value of a type the
+ * caller excluded -> ERROR_UNSUPPORTED_TYPE, never a value the caller would misread).
+ * Value data is stored verbatim, so a value set via the W setter reads back identically;
+ * a missing key/value is a defined failure. Exotic RRF_ flags (expand/noexpand/zero) are
+ * not modelled and left inert (the returned data is the raw stored value). */
+static uint32_t rrf_bit_for_regtype(uint32_t t) {
+    switch (t) {
+        case 0:  return 0x0001u; /* REG_NONE      -> RRF_RT_REG_NONE      */
+        case 1:  return 0x0002u; /* REG_SZ        -> RRF_RT_REG_SZ        */
+        case 2:  return 0x0004u; /* REG_EXPAND_SZ -> RRF_RT_REG_EXPAND_SZ */
+        case 3:  return 0x0008u; /* REG_BINARY    -> RRF_RT_REG_BINARY    */
+        case 4:  return 0x0010u; /* REG_DWORD     -> RRF_RT_REG_DWORD     */
+        case 7:  return 0x0020u; /* REG_MULTI_SZ  -> RRF_RT_REG_MULTI_SZ  */
+        case 11: return 0x0040u; /* REG_QWORD     -> RRF_RT_REG_QWORD     */
+        default: return 0u;
+    }
+}
+uint32_t aret_RegGetValueW(uint32_t esp) {
+    uint32_t hkey = WU(0), flags = WU(3), ptype = WU(4), pdata = WU(5), pcb = WU(6);
+    const uint16_t *wsub = (const uint16_t *)WP(1);
+    const uint16_t *wval = (const uint16_t *)WP(2);
+    uint32_t target = hkey;
+    if (wsub && wsub[0]) {                              /* open hKey\subKey */
+        char sub[256]; u32_w2n(wsub, sub, sizeof sub);
+        uint32_t sh = 0;
+        uint32_t r = u32_reg_open(hkey, sub, (uint32_t)(uintptr_t)&sh);
+        if (r) return r;
+        target = sh;
+    }
+    char val[U32_REGNAME]; if (wval) u32_w2n(wval, val, sizeof val); else val[0] = 0;
+    uint32_t vtype = 0;                                 /* read type first for the RRF check */
+    uint32_t q = u32_reg_queryval(target, val, (uint32_t)(uintptr_t)&vtype, 0, 0);
+    if (q) return q;
+    uint32_t rtmask = flags & 0x0000ffffu;              /* RRF_RT_* occupy the low word */
+    if (rtmask && !(rtmask & rrf_bit_for_regtype(vtype))) return 1630u; /* ERROR_UNSUPPORTED_TYPE */
+    return u32_reg_queryval(target, val, ptype, pdata, pcb);
+}
 uint32_t aret_RegDeleteValueW(uint32_t esp) {
     int k = u32_reg_idx(WU(0)); if (k < 0) return 6;
     char s[U32_REGNAME]; u32_w2n((const uint16_t *)WP(1), s, sizeof s);
@@ -3522,6 +3561,9 @@ uint32_t aret_CryptAcquireContextA(uint32_t esp) {
     if (phProv) *phProv = 0x43525950u; /* 'CRYP' — an opaque non-zero token */
     return 1;
 }
+/* CryptAcquireContextW — identical behaviour; the container/provider name strings are
+ * not part of the modelled contract (only the handle a caller passes on is). */
+uint32_t aret_CryptAcquireContextW(uint32_t esp) { return aret_CryptAcquireContextA(esp); }
 /* CryptGenRandom(hProv, dwLen, pbBuffer) -> BOOL. Fill the buffer with bytes. */
 uint32_t aret_CryptGenRandom(uint32_t esp) {
     uint32_t len = WU(1);

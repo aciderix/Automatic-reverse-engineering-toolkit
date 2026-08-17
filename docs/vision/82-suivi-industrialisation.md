@@ -761,3 +761,12 @@ palier** : inc 3 (introspection process + ntdll + reliquats CRT).
 `*/` dans un commentaire fermait le bloc (runtime `include_str!`'d, compilé au transpile ⇒ invisible à cargo). Garde
 `win32_procintro` bit-identique Wine (invariants). **Portes** : winediff 1/1, hash 4/4, difftest 272/272. **Reste** : inc 3b
 (CRT/registre/crypto : `_set_error_mode`/`_wgetenv`/`RegGetValueW`/`CryptAcquireContextW`).
+
+### ✅ 2ᵉ palier OS — incrément 3b + PALIER CLOS (2026-08-17)
+Reliquats CRT/registre/crypto : `_set_error_mode` (mode tracké), `_wgetenv` (buffer statique), `RegGetValueW` (open+query
+sur la famille registre, RRF_RT honoré), `CryptAcquireContextW` (= A). HLE-only, hash `19acad982194bf07` inchangé. Bug
+attrapé : `ERROR_UNSUPPORTED_TYPE` = 1630 (pas 1066). Garde `win32_crtreg` bit-identique Wine. **⇒ 2ᵉ palier OS CLOS** :
+inc 1 (FS volumes/chemins Unicode) + inc 2 (shell PIDL) + inc 3a (introspection process) + inc 3b (CRT/reg/crypto), tous
+bit-identiques Wine, en 5 commits propres. **Déféré-sound** (stub d'abort bruyant, §0) : `GetFinalPathNameByHandleW`,
+`SHCreateItemFromIDList`, `RtlCaptureContext`/`RtlGetLastNtStatus`, `_heapwalk`, `Get/SetThreadContext`+affinité. **Portes** :
+winediff 1/1, hash 4/4, difftest 272/272.

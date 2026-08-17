@@ -1498,6 +1498,32 @@ uint32_t aret_wputenv(uint32_t esp) {
     char *s = (nslot < 64) ? (slots[nslot] = strdup(buf), slots[nslot++]) : strdup(buf);
     return (uint32_t)(s && putenv(s) == 0 ? 0 : -1);
 }
+/* _wgetenv(const wchar_t* name) -> wchar_t*: narrow the name, getenv, widen the value
+ * into a static buffer (msvcrt returns a pointer into its own _wenviron cache, valid
+ * until the next call — a single static buffer matches that contract). NULL if unset. */
+uint32_t aret_wgetenv(uint32_t esp) {
+    const uint16_t *wn = (const uint16_t *)AP(0);
+    if (!wn) return 0;
+    char name[512]; size_t i = 0;
+    for (; wn[i] && i + 1 < sizeof name; i++) name[i] = (char)(wn[i] & 0xff);
+    name[i] = 0;
+    const char *v = getenv(name);
+    if (!v) return 0;
+    static uint16_t wbuf[4096]; size_t j = 0;
+    for (; v[j] && j + 1 < sizeof wbuf / sizeof wbuf[0]; j++) wbuf[j] = (uint16_t)(unsigned char)v[j];
+    wbuf[j] = 0;
+    return (uint32_t)(uintptr_t)wbuf;
+}
+/* _set_error_mode(int mode) -> previous mode. CRT-level error reporting sink (distinct
+ * from the Win32 SetErrorMode). _REPORT_ERRMODE(3) queries without changing. Tracked, so
+ * a round-trip is faithful; the sink has no visible effect in the headless model. */
+uint32_t aret_set_error_mode(uint32_t esp) {
+    static int g_crt_error_mode = 1;                    /* _OUT_TO_STDERR (msvcrt default) */
+    int mode = AI(0);
+    int prev = g_crt_error_mode;
+    if (mode != 3 /* _REPORT_ERRMODE */) g_crt_error_mode = mode;
+    return (uint32_t)prev;
+}
 /* _wspawnvp/_wspawnvpe(mode, path, argv[, envp]): launch a child .exe. ARET is
  * single-process and cannot run a PE child (doc 70 §5.0) -> defined failure. */
 uint32_t aret_wspawnvp(uint32_t esp)  { (void)esp; return (uint32_t)-1; }

@@ -8653,3 +8653,29 @@ n'a pas ; un walk vide serait trompeur) ⇒ tous laissés sur le **stub d'abort 
 **Portes** : garde `winecorpus/win32_procintro` **bit-identique Wine** (1/1), hash `19acad982194bf07` **inchangé** (4/4),
 difftest **272/272**. Reste : inc 3b (reliquats CRT/registre/crypto : `_set_error_mode`/`_wgetenv`/`RegGetValueW`/
 `CryptAcquireContextW`).
+
+### 2026-08-17 — [HLE][CRT/REG ✅] **2ᵉ palier OS, incrément 3b : reliquats CRT/registre/crypto — bit-identique Wine**
+
+Clôture du 2ᵉ palier (doc 90). Reliquats **CRT + registre + crypto**. HLE-only (CRT __cdecl = pas de `@N` ; `@N` déjà en
+table pour les Win32) ⇒ hash `19acad982194bf07` **inchangé**.
+
+- **`_set_error_mode(mode)`** (CRT, distinct du Win32 `SetErrorMode`) : puits de report d'erreur CRT, mode **tracké**
+  (`_REPORT_ERRMODE`=3 interroge sans changer) ⇒ round-trip fidèle ; sans effet visible en mode headless.
+- **`_wgetenv(name)`** : narrow-name → `getenv` → widen dans un buffer statique (msvcrt rend un pointeur dans son cache
+  `_wenviron`, valide jusqu'au prochain appel — un buffer statique unique matche ce contrat). NULL si absent.
+- **`RegGetValueW`** : la convenance `RegOpenKeyEx(hKey\subKey) + RegQueryValueEx(value)`, bâtie sur la **famille registre
+  existante**. Honore la **restriction de type RRF_RT_*** (valeur d'un type exclu par l'appelant → `ERROR_UNSUPPORTED_TYPE`,
+  jamais une valeur qu'il mésinterpréterait). Données stockées verbatim ⇒ set-W puis get-W round-trip ; clé/valeur absente
+  = échec défini. Flags exotiques (expand/zero) laissés inertes (donnée brute rendue).
+- **`CryptAcquireContextW`** : identique à la variante A (les noms container/provider ne font pas partie du contrat modélisé).
+
+**Bug attrapé par la mesure** : j'avais codé `ERROR_UNSUPPORTED_TYPE` = **1066** — c'est en réalité **1630** (0x65E) ; 1066
+est `ERROR_SERVICE_SPECIFIC_ERROR`. Symptôme = `reg_wrongtype=0` au run ARET local (avant même winediff). Corrigé.
+
+**⇒ 2ᵉ palier OS clos** (inc 1 FS volumes/chemins + inc 2 shell PIDL + inc 3a introspection + inc 3b CRT/reg/crypto),
+tous bit-identiques Wine. **Déféré-sound restant** (documenté) : `GetFinalPathNameByHandleW` (host↔DOS), `SHCreateItemFromIDList`
+(IShellItem COM), `RtlCaptureContext`/`RtlGetLastNtStatus` (shared-stack), `_heapwalk` (introspection tas),
+`Get/SetThreadContext` + affinité — tous sur stub d'abort bruyant (§0).
+
+**Portes** : garde `winecorpus/win32_crtreg` **bit-identique Wine** (1/1), hash `19acad982194bf07` **inchangé** (4/4),
+difftest **272/272**.
