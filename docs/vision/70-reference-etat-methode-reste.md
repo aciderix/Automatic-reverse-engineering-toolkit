@@ -16,6 +16,7 @@
 | **80-orientations-architecturales** | **Design des grands chantiers à venir** : fibers (threads), lifting DLL binaire, SEH in-HLE, PGL, SoftFloat, **rétro-cible Windows** (§1.6) — verdicts + conformité au principe sacré | Avant d'engager threads/DLL/SEH/indirects/x87-universel/**rétro-cible-Windows** |
 | **81-industrialisation** | **Plan d'industrialisation (document vivant)** : passer à l'échelle (traceur d'exécution, ABI-gen + lifting DLL, classification, EH générique, surface GUI/COM) — analyse critique du doc externe ChatGPT/Gemini + roadmap priorisée par la mesure | Avant/pendant la phase « scale » ; **maj à chaque incrément d'industrialisation** |
 | **82-suivi-industrialisation** | **Tracker VIVANT de l'automatisation** : les **générateurs** en place (`tools/gen_*.py`), ce qu'ils produisent/prouvent, l'état des **phases A/B/C** et le **prochain cran** (extraction depuis Wine : léger/moyen/lourd) | **Après le 70**, avant de reprendre un chantier d'automatisation ; **maj OBLIGATOIRE à chaque incrément d'automatisation** |
+| **83-propositions-externes** | **Analyse critique & triage** des documents de stratégie externes (Gemini/ChatGPT) : chaque idée confrontée au §0 et à la MESURE, verdict (déjà-fait / aligné-non-fait / différé / chargé doctrinalement) + **quand la rouvrir** | Avant d'agir sur une proposition externe ; pour retrouver « le moment venu » une idée parquée |
 | **HANDOFF / 40** | Architecture détaillée, pièges, état des lieux | Complément |
 
 **Comment un agent trouve une info** : `grep` le tag de sous-système dans **71**
