@@ -8566,3 +8566,42 @@ posix/win32 = premier trouvé) ; la copie **shippée à côté de l'exe** reste 
 `19acad982194bf07` inchangé, `lift_autolift`/`lift_zlib` bit-identiques Wine. **⇒ Brique 2 (auto-lift) fonctionnelle
 bout-en-bout** : détection (2a) + résolution beside-exe/toolchain (2b) + gain mesuré (2c). Reste (plus tard) : dé-préfixage
 du corpus (dedup sha) + re-mesure corpus-large.
+
+### 2026-08-17 — [HLE][FS ✅] **2ᵉ palier OS, incrément 1 : FS volumes/chemins Unicode — bit-identique Wine**
+
+Premier incrément du **2ᵉ palier Win32 OS** que la re-mesure `--auto-lift` a désigné (doc 90, 2026-08-16 : le runtime C++
+tombe, reste un palier borné dominé par la **famille FS volumes/chemins Unicode**). Shims HLE ajoutés dans `aret_win32.c`,
+tous **auto-routés par nom** (`aret_<Nom>`) — les `@N` étaient déjà dans `stdcall_pops.rs` (table remplie depuis les
+import-libs mingw) ⇒ **0 ABI**, changement **HLE-only** ⇒ hash `19acad982194bf07` **inchangé**.
+
+- **`GetLongPathNameW`** : identité-si-existe (aucun 8.3 modélisé ⇒ la forme longue EST l'entrée, sound comme Windows).
+  Miroir de `GetShortPathNameW`. Écho de chemin **bit-comparable**.
+- **`GetDiskFreeSpaceExA`** : marshalé depuis le cœur W (prouvé) — élargit la chaîne, forwarde les 3 out-pointers
+  `ULARGE_INTEGER` inchangés (layout identique, motif `DeleteFileA`).
+- **`GetVolumePathNameW`** : point de montage du volume = racine de lecteur `"<L>:\"` (modèle **un volume par lettre,
+  monté à la racine**). Chemin drive-qualifié ⇒ exact ; chemin **relatif** ⇒ lecteur courant (env-dépendant : Wine mappe
+  le cwd Unix sur `Z:`, notre modèle sur `C:`) ⇒ le fixture n'asserte que la **forme** (racine `"X:\"`).
+- **`SearchPathW`** : recherche `file` (+ `ext` si sans extension) dans la liste de dossiers `;`-séparée (ou le cwd si
+  `path` NULL). Compose `"<dir>\<file>"`, `filePart` pointe le nom. Longueur excl NUL / taille requise incl NUL / 0 si
+  absent. Le chemin complet est env-dépendant (Wine fully-qualifie) ⇒ fixture asserte **trouvé + filePart = le nom**.
+- **`SetFileInformationByHandle`** : HANDLE==fd. Classe modélisée `FileEndOfFileInfo(6)` → `ftruncate` (EOF fixé,
+  vérifié par `GetFileSizeEx` — **bit-comparable**). Toute autre classe → **échec DÉFINI** (`ERROR_NOT_SUPPORTED`),
+  jamais un no-op silencieux qui perdrait l'intention de l'appelant (§0/`aret_partial`).
+- **`FindFirstVolumeW`/`FindNextVolumeW`/`FindVolumeClose`** : **un** volume modélisé (le lecteur C:). Le GUID de volume
+  est **synthétique-mais-stable** (les GUID Windows sont par-système ; le contrat de l'API est un identifiant **opaque
+  énumérable**, qu'une valeur synthétique cohérente satisfait). `FindNextVolume` → `ERROR_NO_MORE_FILES` (un seul volume).
+  Le fixture asserte la **forme** `\\?\Volume{...}\` + la terminaison de l'énumération + la fermeture — jamais le GUID.
+
+**Déféré-sound (documenté, non implémenté)** : `GetFinalPathNameByHandleW` — exige une correspondance **host↔DOS**
+cohérente que le modèle n'a pas encore (un fichier ouvert par nom relatif vit dans le cwd Unix **réel**, hors de l'arbre
+de lecteurs modélisé `<prefix>/drive_c` ; produire un chemin DOS y serait un **devinement** qui divergerait de Wine).
+Le laisser sur le stub d'abort (`aret_unimplemented`) est le choix §0 correct (**bruyant, dit où**). Reste du palier :
+inc 2 (Shell PIDL), inc 3 (introspection process + ntdll + reliquats CRT).
+
+**Bug attrapé par la mesure** : ma 1ʳᵉ version du fixture assertait `"C:\"` pour le chemin **relatif** ⇒ DIFF (Wine rend
+`Z:\` car son cwd est sur Z:). Corrigé en assertant la **forme** de racine de lecteur, pas la lettre — exactement la règle
+« séparer le CONTRAT (déterministe) de la DONNÉE (environnementale) » (cf. EnumFontFamilies, GetVolumeInformation).
+
+**Portes** : garde `winecorpus/win32_wvolpath` **bit-identique Wine** (1/1), hash `19acad982194bf07` **inchangé** (4/4
+opt-levels), difftest **272/272**. Fixture = seulement des faits déterministes + invariants (écho chemin, taille EOF=4,
+bools de succès, forme GUID) ⇒ ARET = Wine octet pour octet.

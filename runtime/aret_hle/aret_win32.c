@@ -4004,6 +4004,125 @@ uint32_t aret_GetFileInformationByHandleEx(uint32_t esp) {
     return 0;
 }
 
+/* ---- Inc 1: FS volumes / Unicode paths (2nd-tier OS wall, doc 90 2026-08-16) ------
+ * Measured residual once the C++ runtime auto-lifts (doc 90 "Re-mesure AVEC --auto-lift").
+ * Same wide-char FS style as win32_wfs: EXACT where the value is deterministic (path
+ * echo, EOF size), MODELLED where it is environmental (one volume per drive root, a
+ * synthetic-but-stable volume GUID). The fixture then asserts the CONTRACT — buffer
+ * shape, enumeration termination, A/W parity, invariants — never the env-specific bytes.
+ * Nothing is a silent no-op: an unmodelled sub-case returns a DEFINED failure with a
+ * last-error (aret_partial), never a fabricated result. */
+
+/* GetLongPathNameW(short, long, cch): no 8.3 shortening is modelled, so the long path
+ * IS the input (sound — Windows returns the input when it is already the long form).
+ * The path must exist, as on Windows. Mirror of GetShortPathNameW. */
+uint32_t aret_GetLongPathNameW(uint32_t esp) {
+    const uint16_t *ws = (const uint16_t *)WP(0); uint16_t *wl = (uint16_t *)WP(1); uint32_t cch = WU(2);
+    if (!ws) return 0;
+    char lp[2048]; u32_w2n(ws, lp, sizeof lp);
+    char host[2048]; translate_path(lp, host, sizeof host);
+    struct stat st; if (stat(host, &st) != 0) { g_last_error = 2u; return 0; }
+    uint32_t len = 0; while (ws[len]) len++;
+    if (wl && cch > len) { for (uint32_t i = 0; i <= len; i++) wl[i] = ws[i]; return len; }
+    return len + 1;                                    /* required size incl NUL */
+}
+/* GetDiskFreeSpaceExA — marshalled from the (proven) W core: widen the directory-name
+ * string, forward the three ULARGE_INTEGER out-pointers unchanged (identical layout). */
+uint32_t aret_GetDiskFreeSpaceExW(uint32_t esp);
+uint32_t aret_GetDiskFreeSpaceExA(uint32_t esp) {
+    const char *s0 = (const char *)WP(0);
+    int n0 = 0; if (s0) while (s0[n0]) n0++;
+    uint16_t w0[n0 + 1]; u32_a2w(s0, w0, n0 + 1);
+    uint32_t fr[4];
+    fr[0] = s0 ? (uint32_t)(uintptr_t)w0 : 0;
+    fr[1] = WU(1); fr[2] = WU(2); fr[3] = WU(3);       /* out-pointers pass through */
+    return aret_GetDiskFreeSpaceExW((uint32_t)(uintptr_t)fr);
+}
+/* GetVolumePathNameW(fileName, volPathName, cch) -> BOOL: the volume mount point that
+ * contains the path. The model is one volume per drive letter, mounted at its root, so
+ * the mount point is the drive root "<L>:\" (with the trailing separator Windows adds).
+ * A path with no drive uses the current drive (C:), matching the single-prefix model. */
+uint32_t aret_GetVolumePathNameW(uint32_t esp) {
+    const uint16_t *wf = (const uint16_t *)WP(0); uint16_t *wo = (uint16_t *)WP(1); uint32_t cch = WU(2);
+    if (!wf) { g_last_error = 87u; return 0; }         /* ERROR_INVALID_PARAMETER */
+    char fn[2048]; u32_w2n(wf, fn, sizeof fn);
+    char root[4];
+    root[0] = (fn[0] && fn[1] == ':') ? fn[0] : 'C'; root[1] = ':'; root[2] = '\\'; root[3] = 0;
+    uint32_t len = (uint32_t)strlen(root);
+    if (!wo || cch <= len) { g_last_error = 206u; return 0; }  /* ERROR_FILENAME_EXCED_RANGE */
+    for (uint32_t i = 0; i <= len; i++) wo[i] = (uint16_t)(unsigned char)root[i];
+    return 1;
+}
+/* SearchPathW(path, file, ext, cch, buf, filePart) -> WCHAR count: find `file` (plus
+ * `ext` if it has no extension of its own) in the ';'-separated `path` list, or the
+ * current directory when `path` is NULL (the deterministic slice of the Windows default
+ * order that we model). The result is composed "<dir>\<file>"; filePart points at the
+ * file component. Returns the length excl NUL, the required size incl NUL if the buffer
+ * is too small, 0 (last-error 2) if not found. */
+uint32_t aret_SearchPathW(uint32_t esp) {
+    const uint16_t *wpath = (const uint16_t *)WP(0);
+    const uint16_t *wfile = (const uint16_t *)WP(1);
+    const uint16_t *wext  = (const uint16_t *)WP(2);
+    uint32_t cch = WU(3); uint16_t *buf = (uint16_t *)WP(4); uint32_t *pfilepart = (uint32_t *)WP(5);
+    if (!wfile) { g_last_error = 87u; return 0; }
+    char file[1024]; u32_w2n(wfile, file, sizeof file);
+    if (wext && !strchr(file, '.')) {                  /* append default extension */
+        char ext[256]; u32_w2n(wext, ext, sizeof ext);
+        strncat(file, ext, sizeof file - strlen(file) - 1);
+    }
+    char pathlist[4096]; if (wpath) u32_w2n(wpath, pathlist, sizeof pathlist); else snprintf(pathlist, sizeof pathlist, ".");
+    char found[2048] = {0}; int filepart_off = -1;
+    char work[4096]; snprintf(work, sizeof work, "%s", pathlist); char *save = NULL;
+    for (char *dir = strtok_r(work, ";", &save); dir; dir = strtok_r(NULL, ";", &save)) {
+        char cand[2048]; int n = snprintf(cand, sizeof cand, "%s\\%s", dir, file);
+        if (n <= 0 || n >= (int)sizeof cand) continue;
+        char host[2048]; translate_path(cand, host, sizeof host);
+        struct stat st;
+        if (stat(host, &st) == 0 && S_ISREG(st.st_mode)) {
+            snprintf(found, sizeof found, "%s", cand);
+            char *bs = strrchr(found, '\\'); filepart_off = bs ? (int)(bs - found + 1) : 0;
+            break;
+        }
+    }
+    if (!found[0]) { g_last_error = 2u; return 0; }
+    uint32_t len = (uint32_t)strlen(found);
+    if (!buf || cch <= len) return len + 1;
+    for (uint32_t i = 0; i <= len; i++) buf[i] = (uint16_t)(unsigned char)found[i];
+    if (pfilepart) *pfilepart = filepart_off >= 0 ? (uint32_t)(uintptr_t)(buf + filepart_off) : 0;
+    return len;
+}
+/* SetFileInformationByHandle(hFile, class, buf, size) -> BOOL — HANDLE==fd. Modelled:
+ * FileEndOfFileInfo(6) -> ftruncate (deterministic, fixture-checked). Any other class
+ * returns a DEFINED failure (never a silent no-op that would drop the caller's intent). */
+uint32_t aret_SetFileInformationByHandle(uint32_t esp) {
+    int fd = (int)WU(0); uint32_t cls = WU(1); const uint8_t *buf = (const uint8_t *)WP(2); uint32_t size = WU(3);
+    if (cls == 6) {                                    /* FileEndOfFileInfo { i64 EndOfFile } */
+        if (!buf || size < 8) { g_last_error = 122u; return 0; }
+        int64_t eof; memcpy(&eof, buf, 8);
+        if (ftruncate(fd, (off_t)eof) != 0) { g_last_error = 6u; return 0; }
+        return 1;
+    }
+    g_last_error = 50u;                                /* ERROR_NOT_SUPPORTED — unmodelled class */
+    return 0;
+}
+/* Volume enumeration — one modelled volume (the single C: drive). The GUID name is
+ * synthetic-but-stable: Windows volume GUIDs are per-system, and the API contract is an
+ * opaque, enumerable identifier, which a consistent synthetic value satisfies. The
+ * fixture asserts the CONTRACT ("\\?\Volume{...}\" shape, that enumeration terminates
+ * after one) — never the env-specific GUID bytes. */
+#define ARET_VOLUME_GUID "\\\\?\\Volume{00000000-0000-0000-0000-000000000001}\\"
+uint32_t aret_FindFirstVolumeW(uint32_t esp) {
+    uint16_t *buf = (uint16_t *)WP(0); uint32_t cch = WU(1);
+    const char *g = ARET_VOLUME_GUID; uint32_t len = (uint32_t)strlen(g);
+    if (!buf || cch <= len) { g_last_error = 234u; return 0xFFFFFFFFu; }  /* INVALID_HANDLE_VALUE */
+    for (uint32_t i = 0; i <= len; i++) buf[i] = (uint16_t)(unsigned char)g[i];
+    return 0x00010000u;                                /* opaque non-null search handle */
+}
+uint32_t aret_FindNextVolumeW(uint32_t esp) {
+    (void)esp; g_last_error = 18u; return 0;            /* ERROR_NO_MORE_FILES — one volume */
+}
+uint32_t aret_FindVolumeClose(uint32_t esp) { (void)esp; return 1; }
+
 /* DeleteFileA — AUTO-MARSHALLED from DeleteFileW by `gen_win32_sigs.py --marshal
  * DeleteFileA` (doc 82, layer 2). Widen the input path (u32_a2w), pass nothing else,
  * call the wide core; NULL propagates as NULL. This is the first generated marshalling

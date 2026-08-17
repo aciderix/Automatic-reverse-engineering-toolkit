@@ -735,3 +735,14 @@ octet-pour-octet** end-to-end (6 DLL auto-résolues).
 gspawn = Wine). **Caveat mesure** : le corpus renomme les DLL avec un préfixe sha (dedup) ⇒ la résolution par-nom est
 bridée ici — un **vrai redistribuable** (DLL correctement nommées à côté de l'exe) résout pleinement. **Reste (2b, raffinement)** :
 recherche élargie (dossiers toolchain, dé-préfixage), et re-mesure corpus-large quand la résolution est robuste.
+
+### ✅ 2ᵉ palier OS — incrément 1 : FS volumes/chemins Unicode (2026-08-17)
+Premier incrément du **2ᵉ palier Win32 OS** désigné par la re-mesure `--auto-lift` (doc 90, 2026-08-16). Famille **FS
+volumes/chemins Unicode** (dominante du résidu purs-runtime) comblée en HLE, **auto-routée par nom**, `@N` déjà en table
+⇒ **HLE-only, hash `19acad982194bf07` inchangé**. Shims : `GetLongPathNameW` (identité-si-existe), `GetDiskFreeSpaceExA`
+(marshal→W), `GetVolumePathNameW` (racine de lecteur, modèle 1 volume/lettre), `SearchPathW` (recherche `;`-liste + ext),
+`SetFileInformationByHandle` (`FileEndOfFileInfo`→`ftruncate`, autres classes = échec défini), `FindFirst/Next/CloseVolume`
+(1 volume, GUID synthétique-stable). **Déféré-sound** : `GetFinalPathNameByHandleW` (host↔DOS incohérent pour cwd réel ⇒
+stub d'abort bruyant, §0). Garde `win32_wvolpath` bit-identique Wine (fixture = contrat/invariants, pas la donnée env).
+**Portes** : winediff 1/1, hash inchangé 4/4, difftest 272/272. **Reste palier** : inc 2 (Shell PIDL), inc 3 (introspection
+process + ntdll + reliquats CRT).
