@@ -8679,3 +8679,41 @@ tous bit-identiques Wine. **Déféré-sound restant** (documenté) : `GetFinalPa
 
 **Portes** : garde `winecorpus/win32_crtreg` **bit-identique Wine** (1/1), hash `19acad982194bf07` **inchangé** (4/4),
 difftest **272/272**.
+
+### 2026-08-17 — [RECOV ✅][🎯 4ᵉ binaire tiers] **spirv-cross end-to-end : récup d'un pointeur de fonction matérialisé en registre (auto-lift)**
+
+Reprise de la boucle « piloter un vrai binaire, la donnée désigne le mur » (comme gspawn/ninja/jsoncpp). Cible **choisie
+par la mesure** : `spirv-cross.exe` (SPIR-V cross-compiler MSYS2), sélectionné dans un corpus frais parce que sa chaîne de DLL
+auto-lift est **bornée et propre** = **pur runtime C++** (libstdc++/libgcc/libwinpthread seuls, pas de lib géante type
+LLVM/Qt) — donc tout mur révélé est **général**, pas un artefact de « lib non liftée ».
+
+**Mur désigné** (auto-lift = 3 DLL, 18389 fns, 17090 liftées, `main` atteint) : abort **SOUND** `indirect call to unrecovered
+function 0x59cd10` — « refusing to guess » (§0 respecté). **Cause racine** (forensics objdump) : `0x59cd10` est une **vraie
+fonction** (prologue `sub esp,0x1c`, 16-alignée, précédée de padding `nop` GCC) dont l'adresse est prise par un unique
+`mov eax, 0x59cd10` **dans son propre corps** (handler auto-enregistré) ; l'adresse transite ensuite par un **global `.bss`
+(0x700b10) écrit au RUNTIME**, puis `mov edx,[0x700b10]; call *edx`. Ce **découplage** immédiat→global→appel la rend
+invisible à `reg_imm_reaches_indirect_call` (exige `call *reg` dans le même bloc) **et** à `abs_store_imm`/`mem_store_code_imm`
+(exigent un `mov [mem],imm` direct). De plus `0x59cd10` était **sur-absorbée** comme code intérieur d'un prédécesseur trop
+long (le linear-sweep l'a avalée), donc pas seedée comme entrée.
+
+**Fix (général, `src/analysis/mod.rs`)** : nouvelle règle `reg_imm_code_value` — un `mov reg, imm32` matérialisant une adresse
+`.text` **comme valeur** = pointeur de fonction address-taken, **quel que soit** le chemin vers l'appel (retour de fonction /
+slot `.bss` / champ). Gatée sur un **témoin de début de fonction** — prologue reconnu (`looks_like_func_start`) **ou** frontière
+prouvée (`preceded_by_terminator`) — pour qu'une constante scalaire qui tombe dans `.text` ne soit pas prise pour du code.
+Deux branches : (a) **non décodée** ⇒ seed fraîche (`cands`, aucun risque de split) ; (b) **déjà absorbée** ⇒ **re-split forcé**
+mais **UNIQUEMENT à une frontière prouvée** (`preceded_by_terminator`, jamais un prologue-guess) — c'est la garde anti-miscompile
+(la leçon du force-split de libstdc++ à une tête de boucle). `0x59cd10` = cas (b).
+
+**Résultat** : **spirv-cross tourne end-to-end, sortie programme BIT-IDENTIQUE à Wine** (`--help` : 348 lignes d'usage ;
+seules diffèrent les lignes de bruit de harnais — `note:` ARET vs `winediag` Wine). **4ᵉ vrai binaire tiers end-to-end**
+(après jsoncpp, ninja, gspawn), 1ᵉʳ débloqué par cette récup générale. Résidu sound : `Get/SetThreadContext` (hors shared-stack,
+déféré) + qq gaps.
+
+**Portes** : hash `19acad982194bf07` **inchangé** (4/4 — additif, aucun binaire existant ne change), **`lift_libstdcxx` +
+`lift_stdstring` end-to-end OK** (garde anti-miscompile, obligatoire pour tout changement de récup), difftest **272/272**,
+funcdiff **22167 scorées / 0 divergence** (**+85 fonctions neuves récupérées et prouvées bit-identiques Unicorn** — preuve que
+la règle récupère du **vrai** code, pas des faux positifs), winediff complet propre (le seul FAIL = flake de concurrence
+`lift_stdstring` « no ARET output », **vert en solo**). **Honnêteté (pas de fixture synthétique)** : le cas exact (auto-
+référence sur une fonction sur-absorbée) n'est **pas** reproductible fidèlement en C (un handler écrit en C reste atteignable
+au linear-sweep ⇒ fixture verte quel que soit le fix = fausse garde, retirée). La preuve est **funcdiff (+85, 0-div)** + le
+**vrai binaire end-to-end**, pas un fixture trompeur.

@@ -443,7 +443,11 @@ overlapped/IOCP — recoupe la surface subprocess plafonnée). Détail 71/82.
   **immédiats** (`push imm`/`mov [esp],imm` = callback par valeur), `mov reg,imm;…;
   call *reg` (`reg_imm_reaches_indirect_call`), `mov [g],imm;…;call [g]`
   (`abs_store_imm`), **`mov [reg+d],imm`** (`mem_store_code_imm` = pointeur de méthode dans un objet,
-  accepte le stub `ret` nu via `is_bare_ret_stub` — NASM OMF `struct ofmt`), **`call/jmp [disp32]`**
+  accepte le stub `ret` nu via `is_bare_ret_stub` — NASM OMF `struct ofmt`), **`mov reg, code_imm`**
+  (`reg_imm_code_value`, 2026-08-17 — adresse `.text` matérialisée **en valeur**, address-taken quel que
+  soit le chemin vers l'appel : retour de fonction / slot `.bss` / champ, donc découplée de l'appel ; gatée
+  sur témoin de début de fonction (prologue **ou** frontière prouvée), re-split forcé **uniquement** à
+  frontière prouvée = garde anti-miscompile ; handler auto-enregistré de spirv-cross), **`call/jmp [disp32]`**
   (`abs_indirect_slot`, contenu du slot), **`call [idx*4+base]`** (`indexed_call_table_base`, tables
   init/atexit NASM).
 - **Tables de saut** : bornées par `cmp idx,N;ja` ; doublons préservés (cases

@@ -770,3 +770,14 @@ inc 1 (FS volumes/chemins Unicode) + inc 2 (shell PIDL) + inc 3a (introspection 
 bit-identiques Wine, en 5 commits propres. **Déféré-sound** (stub d'abort bruyant, §0) : `GetFinalPathNameByHandleW`,
 `SHCreateItemFromIDList`, `RtlCaptureContext`/`RtlGetLastNtStatus`, `_heapwalk`, `Get/SetThreadContext`+affinité. **Portes** :
 winediff 1/1, hash 4/4, difftest 272/272.
+
+### ✅ 4ᵉ binaire tiers end-to-end : spirv-cross (récup pointeur de fonction registre) — 2026-08-17
+Boucle « piloter un vrai binaire, la donnée désigne le mur » relancée. Cible **data-sélectionnée** = `spirv-cross.exe`
+(pur runtime C++, chaîne auto-lift bornée ⇒ mur général). Mur : abort sound `indirect call to unrecovered function 0x59cd10`
+— un handler auto-enregistré dont l'adresse est matérialisée par `mov reg,&fn`, stockée dans un global `.bss` au runtime, puis
+appelée indirectement (découplée immédiat→global→appel ⇒ invisible aux règles existantes) ET sur-absorbée par un prédécesseur.
+**Fix général** (`analysis`) : `reg_imm_code_value` — `mov reg, code_imm` = pointeur address-taken, gaté sur témoin de début
+de fonction (prologue **ou** frontière prouvée), 2 branches (seed fraîche / **re-split forcé UNIQUEMENT à frontière prouvée** =
+garde anti-miscompile). **Résultat** : spirv-cross = **Wine bit-identique** (4ᵉ après jsoncpp/ninja/gspawn). **Portes** : hash
+inchangé (4/4), `lift_libstdcxx`+`lift_stdstring` end-to-end OK, difftest 272/272, funcdiff **+85 récupérées / 0-div**. Pas de
+fixture synthétique (cas auto-référence sur-absorbée non reproductible fidèlement en C ⇒ garde = funcdiff + vrai binaire).

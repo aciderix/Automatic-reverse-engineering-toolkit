@@ -702,6 +702,32 @@ fn reg_imm_reaches_indirect_call(
     None
 }
 
+/// The immediate of a `mov reg, imm32` — a `.text` code address **materialised into a
+/// register as a value**. That is address-taking a function pointer, even when the
+/// value then reaches its call site *indirectly*: as a return value, through a runtime
+/// global (a `.bss`/`.data` function-pointer slot), or a struct field — any of which
+/// decouples the immediate from the eventual `call *reg`, so `reg_imm_reaches_indirect_call`
+/// (needs the call in the same straight-line block) and `abs_store_imm`/`mem_store_code_imm`
+/// (need a direct `mov [mem], imm`) all miss it. Materialising a function entry as a value
+/// is the same strength of proof as a by-value callback push, so the caller gates `imm` on
+/// a function-start witness — a recognised prologue **or** a proven boundary
+/// (`preceded_by_terminator`) — so a scalar constant that merely lands in `.text` is not
+/// mistaken for a function. spirv-cross's self-registering handler (`mov eax,&fn; ret`,
+/// whose caller stores it in a `.bss` slot then `mov r,[slot]; call *r`) is the first wall
+/// hit when driving it end-to-end; the target is reached by no direct call and sits behind a
+/// runtime-installed pointer, so no other heuristic sees it.
+fn reg_imm_code_value(insn: &iced_x86::Instruction) -> Option<u64> {
+    use iced_x86::{Mnemonic, OpKind};
+    if insn.mnemonic() == Mnemonic::Mov
+        && insn.op0_kind() == OpKind::Register
+        && matches!(insn.op1_kind(), OpKind::Immediate32 | OpKind::Immediate32to64)
+    {
+        Some(insn.immediate(1))
+    } else {
+        None
+    }
+}
+
 /// C++ exception-handling entry recovery (MSVC/clang `__CxxFrameHandler[123]` model).
 ///
 /// A function with try/catch installs an SEH frame whose handler is a small thunk
@@ -1198,6 +1224,32 @@ fn global_decode(
                 if let Some(v) = reg_imm_reaches_indirect_call(&global, insn, &in_exec) {
                     if !global.contains_key(&v) {
                         cands.insert(v);
+                    }
+                }
+                // A code address materialised into a register as a value (`mov reg, imm`)
+                // whose target is a proven function start — an address-taken function
+                // pointer that reaches its call site indirectly (return value / `.bss`
+                // slot / field), decoupled from the `call *reg` so the same-block call
+                // rule and the direct-store rules miss it. Gated on a function-start
+                // witness so a scalar constant landing in `.text` is not taken for code.
+                if let Some(v) = reg_imm_code_value(&insn.raw) {
+                    if in_exec(v) {
+                        if !global.contains_key(&v) {
+                            // Not yet decoded → seed it fresh (no split risk), gated on a
+                            // function-start witness (prologue or a proven boundary).
+                            if looks_like_func_start(prog, v, true)
+                                || preceded_by_terminator(prog, &global, v)
+                            {
+                                cands.insert(v);
+                            }
+                        } else if preceded_by_terminator(prog, &global, v) {
+                            // Already absorbed as interior code by an over-reaching
+                            // predecessor (the self-referencing handler is decoded inside
+                            // its own over-long neighbour). Force a re-split — but ONLY at a
+                            // PROVEN boundary (`preceded_by_terminator`), never a prologue
+                            // guess, so a real function is never truncated mid-body.
+                            forced.insert(v);
+                        }
                     }
                 }
             }
