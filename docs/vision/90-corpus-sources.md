@@ -307,3 +307,29 @@ brique 2b) **lifte 3 DLL** (libstdc++/libgcc/libwinpthread) et **efface le mur r
 
 **⇒ Verdict** : l'auto-lift a **déplacé le mur** du runtime C++ (résolu) vers un **2ᵉ palier OS borné**, dominé par la famille
 **FS volumes/chemins Unicode** (+ shell PIDL). Prochain incrément HLE naturel, dans le style des familles déjà faites.
+
+## Re-mesure POST-2ᵉ-PALIER (2026-08-17) — l'OS est clos ; le 3ᵉ palier = libs applicatives tierces (LLVM/mbedTLS/ITK)
+
+Corpus frais **789 PE32** (MSYS2 mingw32 re-fetché après le restart conteneur). Mesure de l'effet des **5 incréments du
+2ᵉ palier OS** de cette session (FS volumes/chemins Unicode, shell PIDL, introspection process, CRT/reg/crypto).
+
+**Largeur directe** (nb binaires important chaque symbole neuf) : `SetFileInformationByHandle` 19, `GetLongPathNameW` 12,
+`GetDiskFreeSpaceExA`/`_wgetenv` 10, `FindFirst/Next/CloseVolume`/`ILFree` 8, `ILCreateFromPathW`/`RegGetValueW`/
+`CryptAcquireContextW` 7, `GetVolumePathNameW`/`SearchPathW`/`K32GetProcessMemoryInfo`/`_set_error_mode` 6,
+`K32EnumProcessModules`/`FlushInstructionCache`/`GetLargePageMinimum` 3. **Union = 39/789 (4,9 %)**. Chaque famille ~1–2 %
+⇒ **palier BORNÉ confirmé** (pas une traîne). Note : les binaires modernes utilisent les alias **`K32*`** (pas les noms psapi
+`EnumProcessModules` 0) — les deux sont implémentés.
+
+**Résidu POST-LIFT (le vrai 3ᵉ palier)** : wallsweep avec `WALLSWEEP_COVERED` = runtime C++ mangled (`^Zn`/`^Zd`/`^ZNSt`/
+`^ZSt`/`cxa`/`Unwind`/`divdi3`…). Une fois le runtime C++ lift-couvert (359 binaires, 401 symboles filtrés), la tête du
+classement est **100 % bibliothèques applicatives tierces C++, ZÉRO API OS** :
+- **LLVM** (`ZN4llvm11raw_ostream`, `SmallVectorBase`, `InitLLVM`, `cl::ParseCommandLineOptions`, `MemoryBuffer`,
+  `StringMapImpl`…) — 40 à 76 bins.
+- **mbedTLS / PSA crypto** (`psa_sign_*`/`psa_verify_*`/`psa_key_derivation_*`, `mbedtls_snprintf`) — 57–58 bins.
+- **ITK** (Insight Toolkit : `itk::LightObject`/`itk::Object`/`itk::ExceptionObject`) — 48–50 bins.
+
+**⇒ VERDICT** : (1) les symboles du 2ᵉ palier ont **disparu du résidu** (couverts) ; (2) la **surface OS est essentiellement
+close** — aucune API kernel/user/gdi/shell dans la tête du sweep post-lift ; (3) le **3ᵉ palier n'est PAS de l'OS** : c'est
+la **largeur de DLL applicatives tierces** (LLVM/mbedTLS/ITK, + Qt/tesseract des sweeps précédents) = axe **Levier 1 sur les
+libs d'application** (lifter ces DLL), plus gros et de nature différente des shims OS. La frontière du travail a reculé
+d'« OS » vers « grosses libs C++ tierces » — exactement la trajectoire prévue par la doctrine « OS = shim, embarqué = lift ».
