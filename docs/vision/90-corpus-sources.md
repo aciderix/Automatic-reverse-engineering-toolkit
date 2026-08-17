@@ -286,3 +286,24 @@ mais la lecture est nette :
 **⇒ Plan data-driven (détail doc 81 I2)** : (1) **`pshufb` + `andpd`** (gain sûr/mesuré, cpudiff) ; (2) **auto-lift du
 runtime C++** (rendre `--with-dll` automatique : détecter les DLL runtime importées + les lifter ; OS=shim / runtime=lift)
 pour basculer ~500 binaires « import-clean » d'un coup. **PAS** la récup noreturn (étroite/risquée) ni `fnstenv` (hors chemins).
+
+## Re-mesure AVEC `--auto-lift` (2026-08-16) — le runtime C++ tombe ; le 2ᵉ palier = FS volumes/chemins Unicode
+
+Corpus re-fetché (593 PE). Sur les binaires C++ (211 importent libstdc++), `--auto-lift` (runtime résolu depuis la toolchain,
+brique 2b) **lifte 3 DLL** (libstdc++/libgcc/libwinpthread) et **efface le mur runtime C++** : imports non-implémentés
+**-68 à -87 %** (llvm-config 75→24, llvm-jitlink 106→27, lli-child 104→27, corrade-rc 45→6). **Constat structurel** : seuls
+**5/211** binaires C++ sont « purs-runtime » ; **206** tirent aussi des **libs applicatives** (Qt6/LLVM/tesseract…) ⇒ full
+« import-clean » exige de lifter AUSSI ces libs (axe séparé, plus gros ; DLL géantes).
+
+**Le résidu (purs-runtime, agrégé /5) = un 2ᵉ palier Win32 OS bien défini** — prochain axe data-driven :
+- **FS volumes/chemins Unicode** (dominant) : `FindFirst/Next/CloseVolume` (5/5), `GetVolumePathNameW`/`GetLongPathNameW`/
+  `GetFinalPathNameByHandleW`/`GetDiskFreeSpaceExA`/`SearchPathW`/`SetFileInformationByHandle` (3/5) — famille bornée, style
+  wide-char FS déjà fait.
+- **Thread context/affinité** : `Get/SetThreadContext` (5/5), `*GroupAffinity` (3/5) — **déféré sound** (hors shared-stack).
+- **Shell PIDL** : `ILCreateFromPathW`/`ILFree`/`SHCreateItemFromIDList` (3/5) — style CSIDL déjà fait.
+- **Introspection/registre/crypto/ntdll/CRT** : `K32GetProcessMemoryInfo`/`K32EnumProcessModules`/`FlushInstructionCache`/
+  `GetLargePageMinimum`, `RegGetValueW`, `CryptAcquireContextW`, `RtlCaptureContext`/`RtlGetLastNtStatus`, `_heapwalk`/
+  `_set_error_mode`/`_wgetenv`.
+
+**⇒ Verdict** : l'auto-lift a **déplacé le mur** du runtime C++ (résolu) vers un **2ᵉ palier OS borné**, dominé par la famille
+**FS volumes/chemins Unicode** (+ shell PIDL). Prochain incrément HLE naturel, dans le style des familles déjà faites.
