@@ -746,3 +746,10 @@ volumes/chemins Unicode** (dominante du résidu purs-runtime) comblée en HLE, *
 stub d'abort bruyant, §0). Garde `win32_wvolpath` bit-identique Wine (fixture = contrat/invariants, pas la donnée env).
 **Portes** : winediff 1/1, hash inchangé 4/4, difftest 272/272. **Reste palier** : inc 2 (Shell PIDL), inc 3 (introspection
 process + ntdll + reliquats CRT).
+
+### ✅ 2ᵉ palier OS — incrément 2 : shell PIDL depuis un chemin (2026-08-17)
+`ILCreateFromPath{W,A}` + `ILFree` — **réutilisent** la machinerie PIDL existante (magic `APIL` + chemin, CoTaskMem-tracké ;
+`SHGetPathFromIDList` round-trip déjà prouvé). HLE-only, `@N` en table ⇒ hash `19acad982194bf07` inchangé. **Déféré-sound** :
+`SHCreateItemFromIDList` (IShellItem COM non modélisé ⇒ stub d'abort bruyant, §0). Garde `win32_shellpidl` bit-identique Wine
+(create/round-trip/NULL — jamais les octets env). **Portes** : winediff 1/1, hash inchangé 4/4, difftest 272/272. **Reste
+palier** : inc 3 (introspection process + ntdll + reliquats CRT).

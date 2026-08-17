@@ -8605,3 +8605,25 @@ inc 2 (Shell PIDL), inc 3 (introspection process + ntdll + reliquats CRT).
 **Portes** : garde `winecorpus/win32_wvolpath` **bit-identique Wine** (1/1), hash `19acad982194bf07` **inchangé** (4/4
 opt-levels), difftest **272/272**. Fixture = seulement des faits déterministes + invariants (écho chemin, taille EOF=4,
 bools de succès, forme GUID) ⇒ ARET = Wine octet pour octet.
+
+### 2026-08-17 — [HLE][SHELL ✅] **2ᵉ palier OS, incrément 2 : PIDL shell depuis un chemin — bit-identique Wine**
+
+Deuxième incrément du 2ᵉ palier (doc 90). Famille **shell PIDL** du résidu purs-runtime. **Réutilise la machinerie PIDL
+existante** (CSIDL, magic `APIL` + chemin Windows, bloc CoTaskMem-tracké) : rien de nouveau côté modèle, juste le point
+d'entrée « depuis un chemin ». HLE-only, `@N` déjà en table ⇒ hash `19acad982194bf07` **inchangé**.
+
+- **`ILCreateFromPathW`/`ILCreateFromPathA`** : construisent le **même** PIDL synthétique que `SHGetSpecialFolderLocation`
+  (magic + chemin, CoTaskMem-tracké) ⇒ `SHGetPathFromIDList{W,A}` (déjà prouvé) le **round-trip**. Contrat modélisé = « un
+  PIDL porteur de chemin qui round-trip son chemin » ; un vrai PIDL de namespace shell n'est **pas** modélisé (énumérateurs
+  non implémentés) ⇒ un PIDL étranger décode en FALSE, jamais un mauvais chemin. `NULL` → `NULL`.
+- **`ILFree`** : libère le bloc (nos PIDL sont des blocs CoTaskMem) — mêmes sémantiques que `CoTaskMemFree` ; `ILFree(NULL)`
+  = no-op documenté.
+
+**Déféré-sound (documenté, non implémenté)** : `SHCreateItemFromIDList` — rend un objet COM **`IShellItem`** dont la
+surface de méthodes (`GetDisplayName`/`GetAttributes`/`BindToHandler`…) n'est pas modélisée ; fabriquer une vtable
+non-vérifiable contre un oracle violerait §0. Laissé sur le **stub d'abort bruyant** (`aret_unimplemented`) — dit où —
+jusqu'à ce qu'un vrai appelant + un fixture Wine-vérifiable fixent les méthodes à honorer.
+
+**Portes** : garde `winecorpus/win32_shellpidl` **bit-identique Wine** (1/1 ; fixture = create!=NULL, round-trip non-vide,
+NULL→NULL — jamais les octets du PIDL ni le chemin canonicalisé, env-dépendants), hash `19acad982194bf07` **inchangé** (4/4),
+difftest **272/272**. Reste palier : inc 3 (introspection process + ntdll + reliquats CRT).

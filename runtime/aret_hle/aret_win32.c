@@ -9208,6 +9208,47 @@ uint32_t aret_SHGetPathFromIDListA(uint32_t esp) {
     return 1;
 }
 
+/* ---- Inc 2: shell PIDL from a path (2nd-tier OS wall, doc 90 2026-08-16) ----------
+ * ILCreateFromPath{W,A}(path) -> LPITEMIDLIST: build the SAME synthetic PIDL as the
+ * CSIDL family (magic + Windows path, CoTaskMem-tracked so ILFree/CoTaskMemFree release
+ * it) and SHGetPathFromIDList decodes it back. The contract we model is "a path-bearing
+ * PIDL that round-trips its path"; a real shell-namespace PIDL is NOT modelled (the
+ * enumerators are unimplemented) — a foreign PIDL decodes to FALSE, never a wrong path.
+ * NULL path -> NULL PIDL. */
+static uint32_t shell_il_from_winpath(const char *win) {
+    if (!win) return 0;
+    size_t n = strlen(win) + 1;
+    unsigned char *blob = (unsigned char *)malloc(4 + n);
+    if (!blob) return 0;
+    memcpy(blob, ARET_PIDL_MAGIC, 4);
+    memcpy(blob + 4, win, n);
+    u32_com_track(blob, 4 + n);             /* freeable via ILFree / CoTaskMemFree */
+    return (uint32_t)(uintptr_t)blob;
+}
+uint32_t aret_ILCreateFromPathW(uint32_t esp) {
+    const uint16_t *wp = (const uint16_t *)WP(0);
+    if (!wp) return 0;
+    char win[1024]; u32_w2n(wp, win, sizeof win);
+    return shell_il_from_winpath(win);
+}
+uint32_t aret_ILCreateFromPathA(uint32_t esp) {
+    return shell_il_from_winpath((const char *)WP(0));
+}
+/* ILFree(pidl): release a PIDL (our PIDLs are CoTaskMem blocks) — same semantics as
+ * CoTaskMemFree. ILFree(NULL) is a documented no-op. Returns void. */
+uint32_t aret_ILFree(uint32_t esp) {
+    void *p = (void *)(uintptr_t)WU(0);
+    if (!p) return 0;
+    u32_com_untrack(p);
+    free(p);
+    return 0;
+}
+/* SHCreateItemFromIDList -> DEFERRED-SOUND: it returns an IShellItem COM object whose
+ * method surface (GetDisplayName/GetAttributes/BindToHandler/...) is not modelled, and
+ * fabricating a vtable we cannot verify against an oracle would violate the sacred
+ * principle. It stays on the LOUD abort stub (aret_unimplemented) — says where — until a
+ * real caller and a Wine-checkable fixture pin down which methods it must honour. */
+
 uint32_t aret_SHGetSpecialFolderPathW(uint32_t esp) {
     /* (HWND hwnd, LPWSTR pszPath, int csidl, BOOL fCreate) -> BOOL */
     uint16_t *out = (uint16_t *)WP(1);
