@@ -6487,6 +6487,52 @@ uint32_t aret_GetProcessTimes(uint32_t esp) {
 }
 uint32_t aret_GetThreadTimes(uint32_t esp) { return aret_GetProcessTimes(esp); }
 #endif
+
+/* ---- Inc 3a: process introspection (2nd-tier OS wall, doc 90 2026-08-16) ----------
+ * K32/psapi + kernel32 queries a program makes about itself at startup. Env-dependent
+ * counters are REAL host values (getrusage) -> the fixture asserts invariants, not bytes.
+ * The K32* names are the kernel32-forwarded aliases of the psapi entrypoints. */
+
+/* GetProcessMemoryInfo(hProcess, PPROCESS_MEMORY_COUNTERS, cb) -> BOOL. Fill the counter
+ * block from the host RSS (getrusage). PROCESS_MEMORY_COUNTERS = cb + 9 fields = 40 bytes
+ * on Win32. Values are env-dependent -> fixture checks invariants (success, cb, peak>=ws). */
+uint32_t aret_GetProcessMemoryInfo(uint32_t esp) {
+    uint8_t *pmc = (uint8_t *)WP(1); uint32_t cb = WU(2);
+    if (!pmc || cb < 40) { g_last_error = 87u; return 0; }   /* ERROR_INVALID_PARAMETER */
+    long rss = 0;
+    struct rusage ru;
+    if (getrusage(RUSAGE_SELF, &ru) == 0) rss = ru.ru_maxrss * 1024;   /* ru_maxrss is KB */
+    memset(pmc, 0, cb);
+    uint32_t ws = (uint32_t)rss;
+    memcpy(pmc + 0, &cb, 4);                        /* cb (restore, memset cleared it) */
+    memcpy(pmc + 8, &ws, 4);                        /* PeakWorkingSetSize */
+    memcpy(pmc + 12, &ws, 4);                       /* WorkingSetSize */
+    memcpy(pmc + 32, &ws, 4);                       /* PagefileUsage */
+    memcpy(pmc + 36, &ws, 4);                       /* PeakPagefileUsage */
+    return 1;
+}
+uint32_t aret_K32GetProcessMemoryInfo(uint32_t esp) { return aret_GetProcessMemoryInfo(esp); }
+
+/* EnumProcessModules(hProcess, HMODULE*, cb, lpcbNeeded) -> BOOL. In the ARET model the
+ * process has ONE module (its lifted image, base 0x00400000); the "DLLs" are HLE shims,
+ * not loaded modules, so reporting the single image module is faithful, not a guess. */
+uint32_t aret_EnumProcessModules(uint32_t esp) {
+    uint32_t *mods = (uint32_t *)WP(1); uint32_t cb = WU(2); uint32_t *needed = (uint32_t *)WP(3);
+    if (needed) *needed = 4;                        /* one HMODULE fits */
+    if (mods && cb >= 4) mods[0] = 0x00400000u;     /* the process image base */
+    return 1;
+}
+uint32_t aret_K32EnumProcessModules(uint32_t esp) { return aret_EnumProcessModules(esp); }
+
+/* FlushInstructionCache(hProcess, base, size) -> BOOL. The native code is already
+ * coherent (we do not JIT) -> nothing to flush -> success. */
+uint32_t aret_FlushInstructionCache(uint32_t esp) { (void)esp; return 1; }
+
+/* GetLargePageMinimum() -> SIZE_T. The x86/x64 large-page size is 2 MiB (an architectural
+ * constant, not a guess). A system without large-page support returns 0; both are valid,
+ * so the fixture asserts membership in {0, 2MiB} rather than the exact value. */
+uint32_t aret_GetLargePageMinimum(uint32_t esp) { (void)esp; return 0x00200000u; }
+
 uint32_t aret_BeginDeferWindowPos(uint32_t esp) { (void)esp; return 0x0DEF0001u; }
 uint32_t aret_DeferWindowPos(uint32_t esp) {
     int i = u32_win_idx(WU(1));

@@ -8627,3 +8627,29 @@ jusqu'à ce qu'un vrai appelant + un fixture Wine-vérifiable fixent les méthod
 **Portes** : garde `winecorpus/win32_shellpidl` **bit-identique Wine** (1/1 ; fixture = create!=NULL, round-trip non-vide,
 NULL→NULL — jamais les octets du PIDL ni le chemin canonicalisé, env-dépendants), hash `19acad982194bf07` **inchangé** (4/4),
 difftest **272/272**. Reste palier : inc 3 (introspection process + ntdll + reliquats CRT).
+
+### 2026-08-17 — [HLE][PROC ✅] **2ᵉ palier OS, incrément 3a : introspection process (psapi K32*/kernel32) — bit-identique Wine**
+
+Troisième incrément du 2ᵉ palier (doc 90). Famille **introspection process** que les vrais programmes interrogent au
+démarrage. HLE-only, `@N` déjà en table ⇒ hash `19acad982194bf07` **inchangé**.
+
+- **`GetProcessMemoryInfo`/`K32GetProcessMemoryInfo`** : remplit `PROCESS_MEMORY_COUNTERS` (40 o) depuis le RSS hôte
+  (`getrusage`). Valeurs env-dépendantes ⇒ fixture teste les **invariants** (succès, `cb`, peak≥working-set), pas les octets.
+- **`EnumProcessModules`/`K32EnumProcessModules`** : dans le modèle ARET le process a **UN** module (son image liftée,
+  base 0x00400000) — les « DLL » sont des shims HLE, pas des modules chargés — donc rapporter l'unique module image est
+  **fidèle**, pas un devinement.
+- **`FlushInstructionCache`** : le code natif est déjà cohérent (pas de JIT) ⇒ rien à flusher ⇒ succès.
+- **`GetLargePageMinimum`** : 2 MiB (constante architecturale x86, pas un devinement) ; 0 = non supporté est aussi valide,
+  donc le fixture asserte l'appartenance à {0, 2 MiB}.
+
+**Bug attrapé (compile runtime)** : mon commentaire d'en-tête contenait `K32*/psapi` — le `*/` **fermait le bloc de
+commentaire** trop tôt ⇒ `aret_win32.c` ne compilait plus **au transpile** (invisible à `cargo build` : le runtime est
+`include_str!`'d et compilé au moment du transpile). Symptôme = winediff « no ARET output ». Corrigé (`K32/psapi`).
+
+**Déféré-sound (documenté, non implémenté)** : `RtlCaptureContext`/`RtlGetLastNtStatus` (contexte/statut CPU non capturables
+dans le modèle shared-stack — même frontière que `Get/SetThreadContext`), `_heapwalk` (exige une introspection du tas qu'on
+n'a pas ; un walk vide serait trompeur) ⇒ tous laissés sur le **stub d'abort bruyant** (§0).
+
+**Portes** : garde `winecorpus/win32_procintro` **bit-identique Wine** (1/1), hash `19acad982194bf07` **inchangé** (4/4),
+difftest **272/272**. Reste : inc 3b (reliquats CRT/registre/crypto : `_set_error_mode`/`_wgetenv`/`RegGetValueW`/
+`CryptAcquireContextW`).

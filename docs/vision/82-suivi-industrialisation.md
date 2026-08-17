@@ -753,3 +753,11 @@ process + ntdll + reliquats CRT).
 `SHCreateItemFromIDList` (IShellItem COM non modélisé ⇒ stub d'abort bruyant, §0). Garde `win32_shellpidl` bit-identique Wine
 (create/round-trip/NULL — jamais les octets env). **Portes** : winediff 1/1, hash inchangé 4/4, difftest 272/272. **Reste
 palier** : inc 3 (introspection process + ntdll + reliquats CRT).
+
+### ✅ 2ᵉ palier OS — incrément 3a : introspection process (2026-08-17)
+`GetProcessMemoryInfo`/`K32*` (getrusage), `EnumProcessModules`/`K32*` (1 module = image liftée), `FlushInstructionCache`
+(no-op, pas de JIT), `GetLargePageMinimum` (2 MiB arch). HLE-only, hash `19acad982194bf07` inchangé. **Déféré-sound** :
+`RtlCaptureContext`/`RtlGetLastNtStatus` (shared-stack), `_heapwalk` (introspection tas) ⇒ stub d'abort. Bug attrapé :
+`*/` dans un commentaire fermait le bloc (runtime `include_str!`'d, compilé au transpile ⇒ invisible à cargo). Garde
+`win32_procintro` bit-identique Wine (invariants). **Portes** : winediff 1/1, hash 4/4, difftest 272/272. **Reste** : inc 3b
+(CRT/registre/crypto : `_set_error_mode`/`_wgetenv`/`RegGetValueW`/`CryptAcquireContextW`).
