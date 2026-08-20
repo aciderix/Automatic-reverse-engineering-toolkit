@@ -37,6 +37,36 @@ if [ -n "$branch" ] && [ "$branch" != "HEAD" ]; then
   fi
 fi
 
+# Provision the closed oracle toolchain when it is absent. This remains
+# idempotent: an already prepared cloud image performs only the checks.
+needs_oracle_toolchain=false
+for executable in wine i686-w64-mingw32-gcc; do
+  command -v "$executable" >/dev/null 2>&1 || needs_oracle_toolchain=true
+done
+pkg-config --exists unicorn 2>/dev/null || needs_oracle_toolchain=true
+command -v rustup >/dev/null 2>&1 || needs_oracle_toolchain=true
+if [ "$needs_oracle_toolchain" = true ]; then
+  sudo dpkg --add-architecture i386 >/dev/null 2>&1 || true
+  sudo apt-get update >/dev/null 2>&1 || true
+  sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+    wine wine32 gcc-mingw-w64-i686 libunicorn-dev rustup >/dev/null 2>&1 || \
+    echo "warning: oracle toolchain provisioning was incomplete" >&2
+fi
+
+# Cargo.lock is format v4 and requires a current Cargo. Rustup keeps this
+# independent of the older distro Cargo that may be pre-installed in a VM.
+if command -v rustup >/dev/null 2>&1; then
+  rustup toolchain install stable --profile minimal >/dev/null 2>&1 || true
+  RUSTUP_CARGO="$(rustup which cargo 2>/dev/null || true)"
+  RUSTUP_RUSTC="$(rustup which rustc 2>/dev/null || true)"
+  if [ -n "$RUSTUP_CARGO" ] && [ -n "$RUSTUP_RUSTC" ]; then
+    export PATH="$(dirname "$RUSTUP_CARGO"):$PATH"
+    export RUSTC="$RUSTUP_RUSTC"
+  else
+    echo "warning: current Rust toolchain unavailable; Cargo.lock v4 may not build" >&2
+  fi
+fi
+
 # Build (cached after first run; warms the release binary used by the benches).
 cargo build --release
 
@@ -74,4 +104,4 @@ fi
 # report if absent rather than failing the session.
 command -v cc >/dev/null 2>&1 || echo "warning: no C compiler (cc) found — recompile/differential benches will not run" >&2
 
-echo "ARET session ready: $(cargo --version), $(cc --version 2>/dev/null | head -1), z3 $(z3 --version 2>/dev/null || echo 'absent')"
+echo "ARET session ready: $(cargo --version), $(cc --version 2>/dev/null | head -1), z3 $(z3 --version 2>/dev/null || echo 'absent'), wine $(wine --version 2>/dev/null || echo 'absent')"
