@@ -52,6 +52,22 @@ def additional_context(result: dict[str, Any]) -> str:
             lines.append(f"{key}: {value['value']}")
     if addresses:
         lines.append("Adresses pertinentes : " + ", ".join(str(item) for item in addresses[:12]))
+    catalog = result.get("pipeline_catalog", {})
+    if isinstance(catalog, dict):
+        lines.append("Pipelines ARET : consulter aret_get_pipeline_catalog ; dry_run obligatoire avant génération, réseau ou opération sensible.")
+        for policy in ("READ_ONLY", "GENERATE", "NETWORK", "SENSITIVE"):
+            names = catalog.get(policy, [])
+            if isinstance(names, list) and names:
+                shown = ", ".join(str(name) for name in names[:10])
+                suffix = " …" if len(names) > 10 else ""
+                lines.append(f"{policy}: {shown}{suffix}")
+    recent_runs = result.get("recent_pipeline_runs", [])
+    if isinstance(recent_runs, list) and recent_runs:
+        summary = "; ".join(
+            f"{item.get('pipeline_name', '?')}={item.get('result', '?')}" for item in recent_runs[:8] if isinstance(item, dict)
+        )
+        if summary:
+            lines.append("Derniers pipelines : " + summary)
     return "\n".join(line for line in lines if line).strip()[:9500]
 
 
