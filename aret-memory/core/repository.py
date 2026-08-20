@@ -147,11 +147,19 @@ class MemoryStore:
                 ),
             }
             for key, value in defaults.items():
-                conn.execute(
-                    """INSERT INTO store_metadata(key, value, updated_at) VALUES(?, ?, ?)
-                       ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at""",
-                    (key, value, utc_now()),
-                )
+                current = conn.execute(
+                    "SELECT value FROM store_metadata WHERE key=?", (key,)
+                ).fetchone()
+                if current is None:
+                    conn.execute(
+                        "INSERT INTO store_metadata(key, value, updated_at) VALUES(?, ?, ?)",
+                        (key, value, utc_now()),
+                    )
+                elif current["value"] != value:
+                    conn.execute(
+                        "UPDATE store_metadata SET value=?, updated_at=? WHERE key=?",
+                        (value, utc_now(), key),
+                    )
 
     def _auto_sync_after_commit(self) -> None:
         """Synchronise après commit SQLite seulement si une politique locale l’active.
