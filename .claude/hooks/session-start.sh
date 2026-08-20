@@ -40,6 +40,15 @@ fi
 # Build (cached after first run; warms the release binary used by the benches).
 cargo build --release
 
+# ARET-MMU is declared by the project-level .mcp.json. Make its Python SDK
+# available in every cloud session before any task needs to use the memory tools.
+# The editable install reads aret-memory/pyproject.toml and is skipped when the
+# installed distribution already resolves to this checkout.
+if ! python3 -c 'import mcp' >/dev/null 2>&1; then
+  python3 -m pip install --quiet -e "${CLAUDE_PROJECT_DIR:-.}/aret-memory" || \
+    echo "warning: ARET-MMU Python dependencies could not be installed" >&2
+fi
+
 # Z3 is needed for the level-3 SMT proofs (bench/smt_rewrites.sh). Install only
 # if missing so the hook stays fast and idempotent.
 if ! command -v z3 >/dev/null 2>&1; then
