@@ -410,6 +410,62 @@ class MemoryStore:
             "notice": "Les règles et entrées sont des pointeurs de reprise : utilisez READ/READ_BATCH pour leur contenu canonique intégral. Les commits Git sont fournis par le statut dépôt en lecture seule, jamais par SQLite.",
         }
 
+    def get_resume_protocol(self, journal_limit: int = 8, batch_size: int = 20) -> dict[str, Any]:
+        """Construit la lecture obligatoire après SessionStart ou compaction.
+
+        Les documents de méthode et d’industrialisation explicitement demandés sont représentés
+        par toutes leurs pages canonisées. Le journal 71 reste borné à ses dernières entrées.
+        Les lots respectent la limite READ_BATCH et ne contiennent jamais de contenu inventé.
+        """
+        if isinstance(journal_limit, bool) or not isinstance(journal_limit, int) or journal_limit < 1 or journal_limit > 20:
+            raise AretError("journal_limit doit être compris entre 1 et 20")
+        if isinstance(batch_size, bool) or not isinstance(batch_size, int) or batch_size < 1 or batch_size > DEFAULT_MAX_ITEMS:
+            raise AretError(f"batch_size doit être compris entre 1 et {DEFAULT_MAX_ITEMS}")
+        sources = (
+            "docs/vision/70-reference-etat-methode-reste.md",
+            "docs/vision/80-orientations-architecturales.md",
+            "docs/vision/81-industrialisation.md",
+            "docs/vision/82-suivi-industrialisation.md",
+            "docs/vision/90-corpus-sources.md",
+        )
+        journal_source = "docs/vision/71-journal-de-bord.md"
+        with self._read_connection() as conn:
+            document_pages: dict[str, list[dict[str, Any]]] = {}
+            for source_path in sources:
+                rows = [dict(row) for row in conn.execute(
+                    """SELECT DISTINCT k.id,k.title,k.type,k.status,ks.source_start_line,ks.source_end_line
+                       FROM knowledge k JOIN knowledge_source ks ON ks.knowledge_id=k.id
+                       WHERE ks.source_path=? ORDER BY ks.source_start_line ASC,k.id ASC""", (source_path,)
+                ).fetchall()]
+                for row in rows:
+                    row["address"] = make_address("knowledge", row["id"])
+                document_pages[source_path] = rows
+            journal = [dict(row) for row in conn.execute(
+                """SELECT DISTINCT k.id,k.title,k.type,k.status,ks.source_start_line,ks.source_end_line
+                   FROM knowledge k JOIN knowledge_source ks ON ks.knowledge_id=k.id
+                   WHERE ks.source_path=? ORDER BY ks.source_start_line DESC,k.id DESC LIMIT ?""", (journal_source, journal_limit)
+            ).fetchall()]
+        for row in journal:
+            row["address"] = make_address("knowledge", row["id"])
+        required_addresses = [
+            row["address"] for source_path in sources for row in document_pages[source_path]
+        ] + [row["address"] for row in journal]
+        deduplicated = list(dict.fromkeys(required_addresses))
+        batches = [deduplicated[index:index + batch_size] for index in range(0, len(deduplicated), batch_size)]
+        return {
+            "protocol_version": 1,
+            "mandatory_documents": document_pages,
+            "latest_document_71_entries": journal,
+            "required_addresses": deduplicated,
+            "required_read_batches": batches,
+            "required_address_count": len(deduplicated),
+            "batch_count": len(batches),
+            "instructions": (
+                "Barrière de reprise : lire tous les lots avec aret_read_batch avant toute opération non liée à la reprise. "
+                "Les lectures sont contrôlées par le hook PreToolUse ; toute autre opération est refusée tant que la liste n’est pas épuisée."
+            ),
+        }
+
     def register_component(self, component_id: str, title: str, description: str, actor: str) -> dict[str, Any]:
         self._require_write()
         component_id = self._validate_identifier(component_id, "Identifiant de composant")

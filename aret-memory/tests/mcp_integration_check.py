@@ -27,7 +27,7 @@ async def main() -> None:
             tools = await session.list_tools()
             names = {tool.name for tool in tools.tools}
             required = {
-                "aret_boot", "aret_restore", "aret_get_front", "aret_get_resume_brief", "aret_find", "aret_read", "aret_read_batch",
+                "aret_boot", "aret_restore", "aret_get_front", "aret_get_resume_brief", "aret_get_resume_protocol", "aret_find", "aret_read", "aret_read_batch",
                 "aret_get_forensics", "aret_get_proofs", "aret_get_related", "aret_get_roadmap", "aret_read_artifact",
                 "aret_append_knowledge", "aret_update_front", "aret_replace_front", "aret_rebuild_front",
                 "aret_record_proof", "aret_attach_proof", "aret_invalidate_proof", "aret_add_relation",

@@ -9,11 +9,13 @@ Utiliser ce skill dès qu’une tâche porte sur l’état connu d’ARET, une d
 
 ## Démarrage et reprise
 
-1. Appeler `aret_boot` au début d’une session qui utilise la mémoire.
-2. Appeler `aret_get_resume_brief` après une compression ou une reprise longue pour récupérer Front, règles, journal 71 et audit récent.
-3. Appeler `aret_restore` pour récupérer doctrine, version du Store et contexte chaud minimal lorsque la reprise enrichie n’est pas nécessaire.
-4. Appeler `aret_get_front` avant de modifier une orientation active ou une brique référencée par le Front.
-5. Considérer la mémoire SQLite comme la source canonique ; le texte de conversation n’est jamais une preuve de l’état du projet.
+1. Après `SessionStart` ou `PostCompact`, considérer la barrière de reprise comme active. Commencer exclusivement par `aret_get_resume_protocol`.
+2. Lire chacun des lots retournés avec `aret_read_batch`, sans omettre les pages canoniques des documents 70, 80, 81, 82 et 90, ni les dernières entrées du journal 71.
+3. Ne pas contourner la barrière : jusqu’à la lecture réussie de toutes les adresses requises, toute opération hors lecture est refusée. Ne pas tenter de conclure ; le contrôle de fin relancera une fois la reprise si elle est incomplète.
+4. Une fois la barrière levée, appeler `aret_boot` puis `aret_get_resume_brief` si un contexte de travail enrichi reste nécessaire. Examiner le contexte Git injecté (branche, commits, arbre) avant toute opération de synchronisation.
+5. Appeler `aret_restore` uniquement pour le contexte chaud minimal lorsque la reprise enrichie n’est pas nécessaire.
+6. Appeler `aret_get_front` avant de modifier une orientation active ou une brique référencée par le Front.
+7. Considérer la mémoire SQLite comme la source canonique ; le texte de conversation n’est jamais une preuve de l’état du projet.
 
 ## Lecture et découverte
 

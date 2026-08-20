@@ -62,6 +62,12 @@ def aret_get_resume_brief(journal_limit: int = 8, rule_limit: int = 20, audit_li
 
 
 @mcp.tool()
+def aret_get_resume_protocol(journal_limit: int = 8, batch_size: int = 20) -> dict[str, Any]:
+    """Retourne la liste et les lots de lectures obligatoires des documents 70/80/81/82/90 et des dernières entrées 71."""
+    return _call("get_resume_protocol", journal_limit=journal_limit, batch_size=batch_size)
+
+
+@mcp.tool()
 def aret_find(
     component_id: str | None = None,
     function_id: str | None = None,
