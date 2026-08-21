@@ -8717,3 +8717,47 @@ la règle récupère du **vrai** code, pas des faux positifs), winediff complet 
 référence sur une fonction sur-absorbée) n'est **pas** reproductible fidèlement en C (un handler écrit en C reste atteignable
 au linear-sweep ⇒ fixture verte quel que soit le fix = fausse garde, retirée). La preuve est **funcdiff (+85, 0-div)** + le
 **vrai binaire end-to-end**, pas un fixture trompeur.
+
+### 2026-08-17 — [INFRA ✅] **Provisioning de l'environnement survivant à un reset conteneur nu**
+
+Un reset conteneur a rendu l'image **nue** (cargo/cc/z3 seuls) : wine, mingw, `gcc -m32`, unicorn, zstd **tous perdus**, et le
+hook de provisioning existant **échouait** sur un conflit de dépendances i386 de wine (« held broken packages » via
+`libgphoto2:i386` → `libgd3:i386`). **Cause + fix (prouvés en reconstruisant la pile depuis zéro puis en re-testant)** :
+- `libgd3:i386` doit être demandé **explicitement et en premier** — sinon le résolveur apt le refuse comme dép transitive de
+  wine et tout l'install wine avorte. **C'était LE bloqueur.**
+- Ajout au hook : `g++-mingw-w64-i686` (fixtures C++ winediff), `gcc-multilib`/`g++-multilib` (`gcc -m32` des benches
+  difftest), `zstd` (extraction corpus `.zst`), + détection élargie (test direct de `gcc -m32`, car gcc-multilib n'a pas de
+  binaire propre) + ligne « ready » qui rapporte mingw/gcc-m32/unicorn pour qu'un reset incomplet soit **visible d'un coup**.
+
+**Vérifié** : build ARET ✅, hash `19acad982194bf07` (4/4) ✅, oracle wine (9.0) vert sur 3 fixtures (`win32_wvolpath`/
+`procintro`/`crtreg`) ✅. `.claude/hooks/session-start.sh` — le hook réinstalle désormais tout **automatiquement** au prochain
+reset. **Leçon** : l'oracle (wine + mingw + m32 + unicorn) est une dépendance de travail à part entière ; sa perte silencieuse
+bloque toute validation end-to-end — d'où le report explicite dans la ligne « ready ».
+
+### 2026-08-17 — [RECOV][🎯 mesure] **spirv-cross sur son VRAI chemin (SPIR-V→GLSL) — 2ᵉ mur de récup mesuré (`0x7475c0`, DLL liftée)**
+
+Suite honnête de l'entrée spirv-cross précédente : `--help` n'était **qu'un chemin** (parsing d'arg + un bloc de `cout`). Pour
+exercer la **vraie fonctionnalité**, module **SPIR-V valide fabriqué à la main** (`void main(){}` frag shader, 45 words) que
+Wine cross-compile bien en `#version 450\nvoid main(){}`. Sur ce **vrai chemin fonctionnel** (parseur SPIR-V → IR → émetteur
+GLSL), ARET va **bien plus loin** puis s'arrête **sound** (§0) sur un **nouveau mur** : `indirect call to unrecovered function
+0x7475c0`.
+
+**Étude (dans les règles) — classe DIFFÉRENTE de `0x59cd10`** :
+- `0x7475c0` est **au-dessus du `.text` de l'exe** (fini ~`0x68c000`) ⇒ dans une **DLL liftée** (runtime rebasé) ; c'est une
+  vraie fonction (`sub_7475e0` récupérée 32 o après).
+- **Son adresse n'apparaît NULLE PART statiquement** dans le C émis — ni comme immédiat (contrairement à `0x59cd10` =
+  `mov reg,imm`), ni comme pointeur de donnée. ⇒ cible **résolue au runtime via un pointeur porté par la donnée** = la classe
+  **vtable / appel virtuel C++**. La règle `reg_imm_code_value` (immédiat matérialisé) ne peut pas l'attraper : ce n'est pas
+  le même mécanisme.
+- **Question générale ouverte (à trancher au prochain cycle, sans deviner)** : la vtable est-elle **statique** (dans la `.rdata`
+  de la DLL, avec relocations) ou **construite au runtime** (tas) ? Si statique ⇒ **trou de récup général et corrigeable**
+  (scan de pointeurs-de-code **relocation-aware** sur les sections données des DLL **liftées** — toucherait toute DLL C++ à
+  vtables). Si runtime ⇒ **abort sound** (§0.4 « cible d'appel indirect non prouvée ⇒ abort »), terrain **PGL opt-in** (doc 80
+  §1.4), **jamais** sur un démonstrateur statique. Le fait que l'adresse soit **absente même des données émises** penche pour :
+  soit la `.rdata` des DLL liftées **n'est pas scannée** pour les pointeurs de code, soit les **relocations ne sont pas
+  appliquées** avant d'interpréter la donnée comme pointeur (le pointeur reste une valeur pré-rebase hors-plage). **À vérifier**
+  en cherchant, dans la `.rdata` de la DLL porteuse (probablement libstdc++), une vtable pointant cette fonction.
+
+**⇒ Le vrai chemin confirme la leçon d'honnêteté** : « end-to-end sur `--help` » ≠ « pleinement fonctionnel ». La donnée
+désigne le mur suivant = la **récup des cibles d'appels virtuels C++ dans les DLL liftées**. Rien codé (étude only) ; portes
+inchangées.

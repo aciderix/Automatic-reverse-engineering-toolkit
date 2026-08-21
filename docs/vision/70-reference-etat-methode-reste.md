@@ -248,12 +248,19 @@ recompilabilité **100 %** · WASM **7/7** · **lifting-DLL** (winecorpus, `--wi
 lift_zlib, lift_libgcc, lift_libstdcxx, lift_stdexcept, lift_stdthrow, lift_stddtor, **lift_stdstring** (std::string heap `_M_create`
 thiscall via thunk d'import) — tous bit-identiques Wine.
 
-**🎯 DEUX vrais binaires tiers C++ end-to-end (2026-08-15), bit-identiques Wine** (runtime C++ GNU **lifté** —
-libstdc++/libgcc/libwinpthread via `--with-dll`) : **jsoncpp** (`Json::Value(objectValue).asInt()` → `Json::LogicError`
-attrapée en `std::exception&` : throw réel, unwind, catch, `.what()`, ostringstream) et **ninja 1.13.2** (`--version`,
-`-t list`, **`-n` dry-run** = parseur de manifeste + graphe + ordonnancement). 3 bugs de lift-correctness **généraux**
-corrigés (pseudo-relocs mingw multi-module ; double static/runtime des pseudo-relocs données ; callee-pop `ret N` thiscall
-via thunk `jmp [IAT]`). **Axe OS wide-char COUVERT** (fichier `_w*`, Win32 FS/volumes `*W`, locale/stdio wide, introspection
+**🎯 QUATRE vrais binaires tiers C++ end-to-end, bit-identiques Wine** (runtime C++ GNU **lifté** — libstdc++/libgcc/
+libwinpthread, `--with-dll` ou **`--auto-lift`**) : **jsoncpp** (`Json::LogicError` attrapée en `std::exception&` : throw/
+unwind/catch/`.what()`/ostringstream), **ninja 1.13.2** (`-n` dry-run = parseur manifeste + graphe + ordonnancement),
+**gspawn** (vrai libglib, 6 DLL auto-liftées, = Wine octet-pour-octet), **spirv-cross** (`--help` = 348 lignes d'usage
+bit-identiques ; débloqué par la récup `reg_imm_code_value` §4.4). Bugs de lift-correctness **généraux** corrigés (pseudo-
+relocs mingw multi-module ; double static/runtime des pseudo-relocs données ; callee-pop `ret N` thiscall via thunk
+`jmp [IAT]` ; **pointeur de fonction matérialisé en registre → global .bss → appel indirect**, `reg_imm_code_value`).
+**⚠️ « end-to-end » = ce CHEMIN tourne = Wine, pas « pleinement fonctionnel »** : le vrai chemin de spirv-cross (SPIR-V→GLSL)
+va plus loin et bute (sound) sur un **2ᵉ mur de récup mesuré** `0x7475c0` = **cible d'appel virtuel C++ dans une DLL liftée**
+(classe distincte, résolue par la donnée au runtime ; étude doc 71 2026-08-17 : général si vtable statique .rdata, abort sound
+si vtable runtime — à trancher).
+**Environnement/oracle** : la pile de test (wine, mingw, `gcc -m32`, unicorn, zstd) est **auto-provisionnée** par
+`.claude/hooks/session-start.sh` — réinstallée automatiquement après un reset conteneur nu (fix `libgd3:i386`, 2026-08-17). **Axe OS wide-char COUVERT** (fichier `_w*`, Win32 FS/volumes `*W`, locale/stdio wide, introspection
 process/thread + reliquats `_sopen`/`isleadbyte`/…). **Mesure corpus post-lift (doc 90, 2026-08-15)** : lifter le runtime
 C++ rend **427/1279 (33 %)** binaires import-clean ⇒ le **prochain mur OS mesuré = Winsock/sockets** (`ws2_32`, ~16 fns,
 40-67 bins), puis largeur DLL tierces (GLib/gettext), puis mop-up CRT. Détail 71/82/90.
