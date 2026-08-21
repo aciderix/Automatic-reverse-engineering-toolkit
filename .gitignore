@@ -25,3 +25,4 @@ tools/__pycache__/
 
 # État local éphémère de la barrière de reprise ARET-MMU ; ni mémoire canonique ni preuve.
 aret-memory/.aret-memory/runtime/
+scratchpad/
