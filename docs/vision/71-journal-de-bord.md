@@ -8742,22 +8742,33 @@ Wine cross-compile bien en `#version 450\nvoid main(){}`. Sur ce **vrai chemin f
 GLSL), ARET va **bien plus loin** puis s'arrête **sound** (§0) sur un **nouveau mur** : `indirect call to unrecovered function
 0x7475c0`.
 
-**Étude (dans les règles) — classe DIFFÉRENTE de `0x59cd10`** :
-- `0x7475c0` est **au-dessus du `.text` de l'exe** (fini ~`0x68c000`) ⇒ dans une **DLL liftée** (runtime rebasé) ; c'est une
-  vraie fonction (`sub_7475e0` récupérée 32 o après).
-- **Son adresse n'apparaît NULLE PART statiquement** dans le C émis — ni comme immédiat (contrairement à `0x59cd10` =
-  `mov reg,imm`), ni comme pointeur de donnée. ⇒ cible **résolue au runtime via un pointeur porté par la donnée** = la classe
-  **vtable / appel virtuel C++**. La règle `reg_imm_code_value` (immédiat matérialisé) ne peut pas l'attraper : ce n'est pas
-  le même mécanisme.
-- **Question générale ouverte (à trancher au prochain cycle, sans deviner)** : la vtable est-elle **statique** (dans la `.rdata`
-  de la DLL, avec relocations) ou **construite au runtime** (tas) ? Si statique ⇒ **trou de récup général et corrigeable**
-  (scan de pointeurs-de-code **relocation-aware** sur les sections données des DLL **liftées** — toucherait toute DLL C++ à
-  vtables). Si runtime ⇒ **abort sound** (§0.4 « cible d'appel indirect non prouvée ⇒ abort »), terrain **PGL opt-in** (doc 80
-  §1.4), **jamais** sur un démonstrateur statique. Le fait que l'adresse soit **absente même des données émises** penche pour :
-  soit la `.rdata` des DLL liftées **n'est pas scannée** pour les pointeurs de code, soit les **relocations ne sont pas
-  appliquées** avant d'interpréter la donnée comme pointeur (le pointeur reste une valeur pré-rebase hors-plage). **À vérifier**
-  en cherchant, dans la `.rdata` de la DLL porteuse (probablement libstdc++), une vtable pointant cette fonction.
+**Étude sérieuse (forensics décisive — corrige une 1ʳᵉ classification erronée)** :
+- **Localisation exacte** : en simulant le rebase du loader (placement séquentiel 64K-aligné, `merge_modules`) + vérif au
+  désassemblage, `0x7475c0` = **libgcc** original **`0x6eb675c0`** (ordre auto-lift = libgcc d'abord). C'est une **vraie fonction
+  FPO** (ouvre sur `mov 0x4(%esp),%eax`, pas de frame `push ebp` ; helper de registration libgcc).
+- **⚠️ CORRECTION d'honnêteté** : j'avais d'abord écrit « adresse absente partout, donc vtable runtime » — **FAUX**. Mon grep
+  cherchait la chaîne `7475c0` alors que les pointeurs sont émis en **octets**. En parsant le répertoire `.reloc` à la main :
+  il existe **un pointeur statique base-relocalisé** (HIGHLOW) à `.rdata 0x6eb6bcf0` **dont la valeur = exactement
+  `0x6eb675c0`**. Donc l'adresse **EST** prise, par un **vrai pointeur de code relocalisable** (le loader le patcherait en
+  `0x7475c0`) — c'est du **STATIQUE**, pas une vtable runtime. (`objdump -R` ne le montrait pas — peu fiable sur les
+  base-relocs PE ; le parse manuel du `.reloc` tranche. Leçon : vérifier la donnée dans sa **vraie** représentation.)
+- **Cause générale de l'oubli** : le pointeur vise une fonction **FPO** que `looks_like_func_start` rejette (prologue non
+  standard), **et** elle est précédée d'un **padding NOP dont l'instruction d'avant est un `call`**, pas un terminateur prouvé
+  (`ret`/`jmp`/`int3`) — donc `preceded_by_terminator` la rejette aussi. **Les deux témoins de frontière échouent** ⇒ pas
+  seedée ⇒ l'appel indirect (qui charge ce pointeur) aborte.
 
-**⇒ Le vrai chemin confirme la leçon d'honnêteté** : « end-to-end sur `--help` » ≠ « pleinement fonctionnel ». La donnée
-désigne le mur suivant = la **récup des cibles d'appels virtuels C++ dans les DLL liftées**. Rien codé (étude only) ; portes
-inchangées.
+**⇒ Classe GÉNÉRALE, et DÉJÀ déférée cette session** : identique au pointeur FPO de libffi `0x6273b0` de gobject-query
+(« noreturn call before — needs noreturn-aware sweep, deferred »). La classe = **fonction FPO address-taken (pointeur
+relocalisé `.text`) dont le prédécesseur finit sur un `call` au lieu d'un terminateur**. Ce n'est **pas** la classe
+`reg_imm_code_value` (immédiat) ni une vtable runtime.
+
+**Fix sound (deux voies, à faire au prochain cycle)** : (1) **faire confiance au pointeur base-relocalisé vers `.text`** — c'est
+une **preuve d'address-taken définitive** (le linker a créé la reloc parce que c'est une adresse de code) ; reste juste à
+prouver que c'est un *début* (garde anti-split : seed frais si non déjà couvert, jamais de force-split sans frontière prouvée —
+la leçon du miscompile) ; profil de risque = celui de `reg_imm_code_value`. (2) **sweep noreturn-aware** (un `call` vers une
+fonction prouvée noreturn, avant padding, est une frontière). La voie (1) est la plus propre et généralise le mieux (toute DLL
+avec des tables de pointeurs de fonctions relocalisées).
+
+**⇒ Leçon d'honnêteté confirmée** : « end-to-end sur `--help` » ≠ « pleinement fonctionnel » ; et **vérifier la donnée dans sa
+vraie représentation avant de conclure** (ma 1ʳᵉ lecture « pas de pointeur » était un artefact de grep). Rien codé (étude
+seule) ; portes inchangées.

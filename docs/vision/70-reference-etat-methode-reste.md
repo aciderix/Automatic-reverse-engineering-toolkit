@@ -256,9 +256,11 @@ bit-identiques ; débloqué par la récup `reg_imm_code_value` §4.4). Bugs de l
 relocs mingw multi-module ; double static/runtime des pseudo-relocs données ; callee-pop `ret N` thiscall via thunk
 `jmp [IAT]` ; **pointeur de fonction matérialisé en registre → global .bss → appel indirect**, `reg_imm_code_value`).
 **⚠️ « end-to-end » = ce CHEMIN tourne = Wine, pas « pleinement fonctionnel »** : le vrai chemin de spirv-cross (SPIR-V→GLSL)
-va plus loin et bute (sound) sur un **2ᵉ mur de récup mesuré** `0x7475c0` = **cible d'appel virtuel C++ dans une DLL liftée**
-(classe distincte, résolue par la donnée au runtime ; étude doc 71 2026-08-17 : général si vtable statique .rdata, abort sound
-si vtable runtime — à trancher).
+va plus loin et bute (sound) sur un **2ᵉ mur de récup mesuré** `0x7475c0` = libgcc `0x6eb675c0`, une **fonction FPO
+address-taken par un pointeur base-relocalisé `.rdata`** que la récup rate car FPO (`looks_like_func_start` KO) **et**
+précédée d'un `call` (pas d'un terminateur ⇒ `preceded_by_terminator` KO). **Classe générale = celle du pointeur FPO libffi
+de gobject-query déférée** ; fix sound = faire confiance au pointeur relocalisé-vers-`.text` (+ garde anti-split) ou sweep
+noreturn-aware (étude doc 71 2026-08-17).
 **Environnement/oracle** : la pile de test (wine, mingw, `gcc -m32`, unicorn, zstd) est **auto-provisionnée** par
 `.claude/hooks/session-start.sh` — réinstallée automatiquement après un reset conteneur nu (fix `libgd3:i386`, 2026-08-17). **Axe OS wide-char COUVERT** (fichier `_w*`, Win32 FS/volumes `*W`, locale/stdio wide, introspection
 process/thread + reliquats `_sopen`/`isleadbyte`/…). **Mesure corpus post-lift (doc 90, 2026-08-15)** : lifter le runtime
