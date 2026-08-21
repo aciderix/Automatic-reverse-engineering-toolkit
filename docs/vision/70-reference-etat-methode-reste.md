@@ -267,7 +267,8 @@ fonction absorbée. Le lot noreturn a été **reverté** (§0.4). `0x7475c0` **r
 et corrigé (commit `a0c5ca8`) : `optimize_function` **droppait les deux blocs d'un cycle de fusion 2-nœuds** `A<->B` (aucune
 tête de chaîne) ⇒ panique du structureur ; chain-builder **deux passes** + `debug_assert` de couverture, **behavior-preserving**
 (hash inchangé, funcdiff 0-div). spirv-cross transpile désormais **jusqu'au bout** (mur runtime suivant = appel indirect NULL
-`0x0`). Détail doc 71 2026-08-21.
+`0x0`). Détail + **options priorisées pour la suite** (creuser le mur `0x0` [recommandé] · `fnstenv`/`fldenv` · Levier 1
+libs-tierces · noreturn **écarté-unsound**) : doc 71 2026-08-21.
 **Environnement/oracle** : la pile de test (wine, mingw, `gcc -m32`, unicorn, zstd) est **auto-provisionnée** par
 `.claude/hooks/session-start.sh` — réinstallée automatiquement après un reset conteneur nu (fix `libgd3:i386`, 2026-08-17). **Axe OS wide-char COUVERT** (fichier `_w*`, Win32 FS/volumes `*W`, locale/stdio wide, introspection
 process/thread + reliquats `_sopen`/`isleadbyte`/…). **Mesure corpus post-lift (doc 90, 2026-08-15)** : lifter le runtime

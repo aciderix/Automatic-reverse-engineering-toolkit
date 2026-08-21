@@ -8813,3 +8813,17 @@ complet) ; le mur runtime suivant = `0x0` (**vrai** appel indirect NULL), un mur
 les landing pads EH sont le contre-exemple universel ; (b) les portes closure-only (funcdiff) **ne voient pas** un miscompile
 de structuration/boucle — seule l'exécution end-to-end du vrai binaire l'attrape (règle §0 : tout ce qui touche recovery/lift
 passe `lift_libstdcxx` end-to-end **avant** commit) ; (c) chercher le mur sérieusement fait tomber un bug général voisin.
+
+**➡️ Options pour la suite (inscrites 2026-08-21, priorisées — rien d'engagé)** :
+- **(a) [RECOMMANDÉ] Creuser le mur `0x0` de spirv-cross sur son VRAI chemin** (SPIR-V→GLSL, pas `--help`) : un **appel
+  indirect NULL**. Instrumenter (I11 relay ARET↔Wine et/ou I1 tracer) pour trancher : **trou de récup *prouvable*** (une cible
+  constante que la récup rate) **vs divergence amont** (un global/champ qui vaut 0 sous ARET mais pas sous Wine). Reste dans la
+  boucle « piloter un vrai binaire → la donnée désigne le mur », la plus payante, maintenant que le transpile va au bout.
+- **(b) `fnstenv`/`fldenv`** : dernier gap lifter **x87** mesuré (doc 90/82), **hors** des chemins actuellement exercés.
+  ⚠️ **pas un simple additif** — soundness du status-word à traiter. Sûr et borné, mais faible priorité (aucun binaire ne
+  l'exige aujourd'hui).
+- **(c) Levier 1 sur les libs applicatives tierces** (LLVM/mbedTLS/ITK/Qt — le **3ᵉ palier** désigné par la donnée, doc 90
+  2026-08-17) : lifter ces DLL. Chantier **plus lourd**, de nature différente des shims OS (« OS = shim, embarqué = lift »).
+- **⛔ ÉCARTÉ — ne pas re-tenter** : la récup **noreturn-aware** *et* « faire confiance au pointeur base-relocalisé `.text` »
+  pour récupérer `0x7475c0` — **unsound** (contre-exemple universel = landing pad EH, §0.4, cf. entrée du jour). `0x7475c0`
+  reste un mur honnête jusqu'à une **preuve de *début*** (cible d'appel prouvée, ou table de pointeurs ≥3 = vtable ≠ table EH).
