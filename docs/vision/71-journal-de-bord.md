@@ -8772,3 +8772,44 @@ avec des tables de pointeurs de fonctions relocalisées).
 **⇒ Leçon d'honnêteté confirmée** : « end-to-end sur `--help` » ≠ « pleinement fonctionnel » ; et **vérifier la donnée dans sa
 vraie représentation avant de conclure** (ma 1ʳᵉ lecture « pas de pointeur » était un artefact de grep). Rien codé (étude
 seule) ; portes inchangées.
+
+### 2026-08-21 — [RECOV][§0 ❌→✅] **Le sweep noreturn-aware est UNSOUND (contre-exemple landing-pad) — reverté ; et un vrai bug général du chain-builder trouvé + corrigé**
+
+Suite directe de l'entrée `0x7475c0` : j'ai implémenté la **voie (2)** proposée (« un `call` vers une fonction prouvée
+noreturn, avant padding, est une frontière » : `is_noreturn_name` + `compute_noreturn` fixpoint + `preceded_by_noreturn_call`).
+Ça **récupérait bien** `0x7475c0` (le mur avançait au mur suivant). **Mais c'est UNSOUND** — prouvé par l'exécution end-to-end,
+pas par les portes seules :
+
+- **Contre-exemple décisif** : `spirv-cross.exe` `.text` `0x5bad8e`/`0x5baddf` = des **landing pads d'exception** (`mov esi,eax;
+  jmp <arrière>` atteints **uniquement** par le runtime d'unwind, jamais par un `call`). Un landing pad est **address-taken**
+  (pointeur dans une table LSDA/EH) **et** suit un `call <noreturn>` (`_Unwind_Resume`/`__cxa_*`) + padding d'alignement —
+  donc **exactement la même signature** qu'une vraie fonction FPO sur-absorbée. « noreturn call + pad ⇒ frontière » les
+  **force-split** ⇒ fonction parente tronquée, entrées qui se chevauchent (`0x5bad8c`/`0x5bad8e` à 2 octets).
+- **Généralisation critique — la voie (1) partage le MÊME défaut** : un base-reloc vers `.text` prouve **address-taken**, pas
+  **début de fonction** ; un landing pad est aussi du code address-taken via un pointeur relocalisé d'une table EH. Donc
+  **ni la voie (1) ni la voie (2)** ne récupèrent `0x7475c0` de façon *sound* : les deux confondent landing pad et début de
+  fonction. Par **§0.4 (non prouvé ⇒ abort, jamais deviné)**, tout le lot noreturn est **reverté**. `0x7475c0` **reste un mur
+  honnête** jusqu'à une **vraie preuve de *début*** (cible d'appel prouvée, ou table de pointeurs ≥3 confirmée = vtable, à
+  distinguer d'une table EH). C'est le **3ᵉ** épisode « heuristique de frontière → miscompile » du projet : la leçon tient.
+
+**MAIS l'investigation a révélé un vrai bug général pré-existant** (présent à HEAD, indépendant du noreturn) : sur le merge DLL
+complet de spirv-cross, ARET **paniquait** dans le structureur (`structure/mod.rs:482`, `code[block_addr]` absent). Cause
+prouvée au désassemblage : `optimize_function` fusionne des chaînes de blocs le long des coutures `mergeable`, mais dans un
+**cycle de fusion tout-continuation** — un self-loop 2 blocs `A<->B` où chacun est l'unique successeur **et** prédécesseur de
+l'autre — **les deux** blocs sont marqués `is_continuation`, donc **aucun** n'est tête de chaîne et **aucun** n'est émis ⇒
+`code` sans entrée pour eux ⇒ panique du structureur sur le header de boucle. (Cas réel : la boucle de cleanup d'exception
+`0x5badc2<->0x5baddf`.)
+
+**Fix général (commit `a0c5ca8`)** : chain-builder en **deux passes** sur un set `covered` — passe 1 depuis les vraies têtes
+(fusion maximale, **sortie identique** pour toute fonction normale), passe 2 amorce une chaîne sur tout bloc encore non couvert
+(les cycles sans tête sont donc quand même émis — correct, la fusion n'est qu'une optimisation) + `debug_assert` de
+post-condition (chaque bloc a une entrée `code`). **Portes** : hash `19acad982194bf07` **inchangé** (4/4), funcdiff **0-div**,
+`lift_libstdcxx`/`lift_stdstring` verts, corpus OS-API 260/264 (les 4 non-verts = `user32_menu2`/`ole_mlang` **DIFF déjà à
+HEAD** = flakes GUI/COM Xvfb + `gdi_uifont` env, **aucune régression**, vérifié en rebuild HEAD stashé), 138 tests unitaires
+verts (dont e2e en profil dev, `debug_assert` actif). **Débloque** le transpile DLL-complet de spirv-cross (écrit l'ELF
+complet) ; le mur runtime suivant = `0x0` (**vrai** appel indirect NULL), un mur honnête pour plus tard.
+
+**Leçon** : (a) une heuristique de frontière qui ne distingue pas « address-taken » de « début de fonction » est unsound —
+les landing pads EH sont le contre-exemple universel ; (b) les portes closure-only (funcdiff) **ne voient pas** un miscompile
+de structuration/boucle — seule l'exécution end-to-end du vrai binaire l'attrape (règle §0 : tout ce qui touche recovery/lift
+passe `lift_libstdcxx` end-to-end **avant** commit) ; (c) chercher le mur sérieusement fait tomber un bug général voisin.

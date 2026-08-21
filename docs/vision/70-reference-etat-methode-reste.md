@@ -258,9 +258,16 @@ relocs mingw multi-module ; double static/runtime des pseudo-relocs données ; c
 **⚠️ « end-to-end » = ce CHEMIN tourne = Wine, pas « pleinement fonctionnel »** : le vrai chemin de spirv-cross (SPIR-V→GLSL)
 va plus loin et bute (sound) sur un **2ᵉ mur de récup mesuré** `0x7475c0` = libgcc `0x6eb675c0`, une **fonction FPO
 address-taken par un pointeur base-relocalisé `.rdata`** que la récup rate car FPO (`looks_like_func_start` KO) **et**
-précédée d'un `call` (pas d'un terminateur ⇒ `preceded_by_terminator` KO). **Classe générale = celle du pointeur FPO libffi
-de gobject-query déférée** ; fix sound = faire confiance au pointeur relocalisé-vers-`.text` (+ garde anti-split) ou sweep
-noreturn-aware (étude doc 71 2026-08-17).
+précédée d'un `call` (pas d'un terminateur ⇒ `preceded_by_terminator` KO). **⚠️ MAJ 2026-08-21 — les DEUX fix proposés sont
+UNSOUND** : « faire confiance au pointeur relocalisé-vers-`.text` » comme « sweep noreturn-aware » confondent **address-taken**
+avec **début de fonction**. Contre-exemple universel = un **landing pad d'exception** (`mov esi,eax; jmp arrière`, atteint
+seulement par l'unwinder) est address-taken (table LSDA) **et** suit un `call <noreturn>`+padding — mêmes témoins qu'une vraie
+fonction absorbée. Le lot noreturn a été **reverté** (§0.4). `0x7475c0` **reste un mur honnête** jusqu'à une preuve de *début*
+(cible d'appel prouvée, ou table de pointeurs ≥3 = vtable ≠ table EH). En creusant ce mur, un **vrai bug général** a été trouvé
+et corrigé (commit `a0c5ca8`) : `optimize_function` **droppait les deux blocs d'un cycle de fusion 2-nœuds** `A<->B` (aucune
+tête de chaîne) ⇒ panique du structureur ; chain-builder **deux passes** + `debug_assert` de couverture, **behavior-preserving**
+(hash inchangé, funcdiff 0-div). spirv-cross transpile désormais **jusqu'au bout** (mur runtime suivant = appel indirect NULL
+`0x0`). Détail doc 71 2026-08-21.
 **Environnement/oracle** : la pile de test (wine, mingw, `gcc -m32`, unicorn, zstd) est **auto-provisionnée** par
 `.claude/hooks/session-start.sh` — réinstallée automatiquement après un reset conteneur nu (fix `libgd3:i386`, 2026-08-17). **Axe OS wide-char COUVERT** (fichier `_w*`, Win32 FS/volumes `*W`, locale/stdio wide, introspection
 process/thread + reliquats `_sopen`/`isleadbyte`/…). **Mesure corpus post-lift (doc 90, 2026-08-15)** : lifter le runtime
@@ -462,11 +469,12 @@ overlapped/IOCP — recoupe la surface subprocess plafonnée). Détail 71/82.
 - **Tables de saut** : bornées par `cmp idx,N;ja` ; doublons préservés (cases
   partagés) ; abs computed-goto ; forme -O0 étagée ; tables de pointeurs
   **NULL-tolérantes** ; **run ≥3× d'une même valeur = switch, pas vtable**.
-- **Re-split** : une fonction absorbée après un appel *noreturn* (pas d'analyse
-  noreturn au balayage) est **forcée** frontière quand une preuve la pointe : table de
+- **Re-split** : une fonction absorbée est **forcée** frontière quand une preuve la pointe : table de
   pointeurs/index, **callback par valeur** (`stack_arg_code_imm`, atexit/qsort) ou
   **slot `call/jmp [slot]`** (`abs_indirect_slot`) — gardé par `looks_like_func_start`.
-  `compute_noreturn` = point-fixe **sound** (jamais deviné noreturn).
+  **⚠️ Un `call` vers une fonction noreturn n'est PAS une preuve de frontière** : le byte après (padding +
+  code) peut être un **landing pad EH** partageant le frame de la fonction, indistinguable d'un vrai début
+  (tenté puis reverté 2026-08-21, doc 71). Frontière = terminateur prouvé (`ret`/`jmp`/`int3`) uniquement.
 - **x87 leaf-thunk** (`is_x87_leaf_thunk`) : décode tout le corps (fld arg → ops FPU
   → ret) → amorce atan2/fmod/trunc atteints par pointeur isolé.
 - **Prologue de réalignement de pile GCC sans frame-pointer** (`lea ecx,[esp+4]; and esp,imm` = `8d 4c 24 04 83
