@@ -638,22 +638,42 @@ pub fn optimize_function(prog: &Program, func: &Function) -> FunctionCode {
                 is_continuation[u] = true;
             }
         }
-        let mut out = Vec::new();
-        for i in 0..n {
-            if is_continuation[i] {
-                continue;
-            }
+        let mut covered = vec![false; n];
+        // Grow a maximal chain from `i`, following mergeable edges while the target
+        // is not yet emitted (this also breaks any cycle: a mergeable edge back to a
+        // covered block just ends the chain). Marks every block it takes as covered.
+        let grow = |i: usize, covered: &mut Vec<bool>| -> Vec<usize> {
             let mut chain = vec![i];
-            let mut visited: HashSet<usize> = [i].into_iter().collect();
+            covered[i] = true;
             let mut cur = i;
             while let Some(u) = mergeable(cur) {
-                if !visited.insert(u) {
-                    break; // cycle guard
+                if covered[u] {
+                    break; // already emitted elsewhere, or the chain looped back
                 }
                 chain.push(u);
+                covered[u] = true;
                 cur = u;
             }
-            out.push(chain);
+            chain
+        };
+        let mut out = Vec::new();
+        // Pass 1: seed from true chain heads (not the mergeable target of any pred),
+        // so straight-line runs merge maximally.
+        for i in 0..n {
+            if !is_continuation[i] && !covered[i] {
+                out.push(grow(i, &mut covered));
+            }
+        }
+        // Pass 2: any block still uncovered lives in an all-continuation merge cycle
+        // — every member is some predecessor's mergeable target, so the cycle has no
+        // head (e.g. a 2-block self-loop A<->B, each the other's sole succ/pred).
+        // Without this such blocks are emitted by NOTHING and the structurer panics
+        // referencing their missing code; seed a chain at an arbitrary member so
+        // every block is still emitted (correct — merging is only an optimisation).
+        for i in 0..n {
+            if !covered[i] {
+                out.push(grow(i, &mut covered));
+            }
         }
         out
     };
@@ -709,6 +729,11 @@ pub fn optimize_function(prog: &Program, func: &Function) -> FunctionCode {
             code.insert(nodes[b], (lines, conds[b].clone()));
         }
     }
+    // Postcondition: every block gets exactly one code entry. The structurer indexes
+    // `code[block_addr]` for every CFG node and panics on a miss, so a dropped block
+    // is never acceptable (this once regressed on an all-continuation merge cycle —
+    // a 2-block A<->B self-loop with no chain head; see the two-pass chain builder).
+    debug_assert_eq!(code.len(), n, "optimize_function dropped a block from the code map");
     code
 }
 
