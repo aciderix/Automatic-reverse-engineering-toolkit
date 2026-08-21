@@ -37,19 +37,30 @@ if [ -n "$branch" ] && [ "$branch" != "HEAD" ]; then
   fi
 fi
 
-# Provision the closed oracle toolchain when it is absent. This remains
-# idempotent: an already prepared cloud image performs only the checks.
+# Provision the closed oracle toolchain when any piece is absent. Idempotent: an
+# already prepared image only runs the checks. The 32-bit i386 multiarch is required
+# by wine (the Win32 oracle) and by `gcc -m32` (the level-1/2 differential benches).
 needs_oracle_toolchain=false
-for executable in wine i686-w64-mingw32-gcc; do
+for executable in wine i686-w64-mingw32-gcc i686-w64-mingw32-g++ zstd; do
   command -v "$executable" >/dev/null 2>&1 || needs_oracle_toolchain=true
 done
 pkg-config --exists unicorn 2>/dev/null || needs_oracle_toolchain=true
 command -v rustup >/dev/null 2>&1 || needs_oracle_toolchain=true
+# gcc-multilib ships no binary of its own — probe `gcc -m32` directly (difftest builds).
+echo 'int main(void){return 0;}' | gcc -m32 -x c - -o /dev/null 2>/dev/null || needs_oracle_toolchain=true
 if [ "$needs_oracle_toolchain" = true ]; then
   sudo dpkg --add-architecture i386 >/dev/null 2>&1 || true
   sudo apt-get update >/dev/null 2>&1 || true
+  # libgd3:i386 MUST be requested explicitly and first: the apt resolver otherwise
+  # refuses it as a transitive dep of wine's libgphoto2:i386 and the whole wine install
+  # aborts with "held broken packages" (observed after a container reset, 2026-08).
   sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-    wine wine32 gcc-mingw-w64-i686 libunicorn-dev rustup >/dev/null 2>&1 || \
+    libgd3:i386 >/dev/null 2>&1 || true
+  sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+    wine wine32:i386 \
+    gcc-mingw-w64-i686 g++-mingw-w64-i686 \
+    gcc-multilib g++-multilib \
+    libunicorn-dev rustup zstd >/dev/null 2>&1 || \
     echo "warning: oracle toolchain provisioning was incomplete" >&2
 fi
 
@@ -104,4 +115,9 @@ fi
 # report if absent rather than failing the session.
 command -v cc >/dev/null 2>&1 || echo "warning: no C compiler (cc) found — recompile/differential benches will not run" >&2
 
-echo "ARET session ready: $(cargo --version), $(cc --version 2>/dev/null | head -1), z3 $(z3 --version 2>/dev/null || echo 'absent'), wine $(wine --version 2>/dev/null || echo 'absent')"
+# Report the full oracle stack so a silently-incomplete reset is visible at a glance:
+# wine (Win32 oracle), mingw (PE fixtures), `gcc -m32` (difftest), unicorn (cpudiff).
+_m32=$(echo 'int main(void){return 0;}' | gcc -m32 -x c - -o /dev/null 2>/dev/null && echo ok || echo ABSENT)
+_mingw=$(command -v i686-w64-mingw32-gcc >/dev/null 2>&1 && echo ok || echo ABSENT)
+_uni=$(pkg-config --exists unicorn 2>/dev/null && echo ok || echo ABSENT)
+echo "ARET session ready: $(cargo --version), $(cc --version 2>/dev/null | head -1), z3 $(z3 --version 2>/dev/null || echo 'absent'), wine $(wine --version 2>/dev/null || echo 'absent'), mingw $_mingw, gcc-m32 $_m32, unicorn $_uni"
