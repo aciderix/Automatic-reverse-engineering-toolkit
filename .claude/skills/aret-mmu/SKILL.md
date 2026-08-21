@@ -16,6 +16,7 @@ Utiliser ce skill dès qu’une tâche porte sur l’état connu d’ARET, une d
 5. Une fois le rituel confirmé, appeler `aret_boot`, `aret_get_resume_brief` ou `aret_restore` seulement lorsqu’un complément ciblé est nécessaire. Examiner le contexte Git injecté avant toute synchronisation.
 6. Appeler `aret_get_front` avant de modifier une orientation active ou une brique référencée par le Front.
 7. Considérer la mémoire SQLite comme la source canonique ; le texte de conversation n’est jamais une preuve de l’état du projet.
+8. Avant une décision durable, consulter le Front et les adresses canoniques nécessaires ; après un fait durable, une décision, une preuve ou une préparation de reprise, enregistrer uniquement l’objet métier approprié. Ne pas remplir SQLite avec des recherches ou sorties provisoires.
 
 ## Lecture et découverte
 
@@ -43,6 +44,14 @@ Utiliser ce skill dès qu’une tâche porte sur l’état connu d’ARET, une d
 6. Après une exécution réelle, consulter `aret_get_pipeline_runs` et `aret_read_pipeline_artifact`. Distinguer un verdict de pipeline d’une preuve admissible `PROVEN`.
 7. Utiliser `aret_get_assets` pour connaître les corpus, PE32, DLL, IAT maps et snapshots disponibles. `aret_register_asset` exige toujours `confirm_import=true` ; aucun chemin hors dépôt/Store n’est accepté.
 8. Les walls et sweeps priorisent le travail par impact mesuré ; ils ne prouvent jamais la correction comportementale. Toute correction doit ensuite passer les oracles appropriés.
+9. Si une capacité ARET existe dans le catalogue MCP, l’utiliser plutôt qu’un équivalent shell direct. Le shell reste autorisé pour explorer, compiler et diagnostiquer, mais sa sortie n’est pas un fait canonique ni une preuve.
+
+## Industrialisation des capacités
+
+1. Garder un script local au stade de prototype tant qu’il est ponctuel, spécifique à une reproduction et sans effet durable sur les décisions ARET.
+2. Industrialiser dans le MCP tout outil qui devient réutilisable ou contribue de manière récurrente à une décision, une validation, une preuve, un corpus, un asset ou une mesure de priorisation.
+3. Avant de déclarer cette capacité officielle, lui fournir un catalogue fermé, des paramètres bornés, une politique adaptée, un artefact ou résultat adressable lorsque nécessaire, des tests réels et une documentation compacte.
+4. Ne jamais créer un outil MCP pour une simple commande de développement générale ; `cargo`, `rg`, `git diff`, GDB et les scripts temporaires restent des moyens de laboratoire tant qu’ils ne satisfont pas le seuil ci-dessus.
 
 ## Preuves et statut PROVEN
 
