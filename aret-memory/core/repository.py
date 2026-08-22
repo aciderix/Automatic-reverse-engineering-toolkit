@@ -851,6 +851,73 @@ class MemoryStore:
             )
         return self.get_resume_dossier()
 
+    def health_report(self) -> dict[str, Any]:
+        """Doctor de cohérence INTERNE de la mémoire vivante (DB-primaire), indépendant
+        des documents et de toute révision Git. Vérifie que la mémoire est saine en
+        elle-même : aucun PROVEN sans preuve admissible, FTS reconstructible, aucune
+        relation orpheline, brique du Front ACTIVE, playbook complet, handoff frais.
+        C'est la porte PERMANENTE (les vérificateurs de migration, eux, sont liés à la
+        révision d'import et ne valent qu'au moment de la migration)."""
+        checks: list[dict[str, Any]] = []
+
+        def add(name: str, ok: bool, detail: str = "") -> None:
+            checks.append({"check": name, "ok": bool(ok), "detail": detail})
+
+        with self._read_connection() as conn:
+            bad_proven = [row["id"] for row in conn.execute(
+                """SELECT k.id FROM knowledge k WHERE k.status='PROVEN' AND NOT EXISTS (
+                     SELECT 1 FROM proof_link pl JOIN proof p ON p.id=pl.proof_id
+                     WHERE pl.knowledge_id=k.id AND p.result='PASS' AND p.admissible=1)"""
+            ).fetchall()]
+            add("proven_requiert_preuve_admissible", not bad_proven,
+                "" if not bad_proven else f"{len(bad_proven)} PROVEN sans preuve admissible : {bad_proven[:5]}")
+
+            knowledge_count = conn.execute("SELECT COUNT(*) FROM knowledge").fetchone()[0]
+            fts_count = conn.execute("SELECT COUNT(*) FROM knowledge_fts").fetchone()[0]
+            add("fts_reconstructible", knowledge_count == fts_count,
+                f"{fts_count} lignes FTS pour {knowledge_count} connaissances")
+
+            def entity_exists(entity_id: str) -> bool:
+                for table in ("knowledge", "component", "function_symbol", "brick"):
+                    if conn.execute(f"SELECT 1 FROM {table} WHERE id=? LIMIT 1", (entity_id,)).fetchone():
+                        return True
+                return False
+
+            orphans: list[tuple[str, str]] = []
+            for row in conn.execute("SELECT id, from_id, to_id FROM relation"):
+                for endpoint in (row["from_id"], row["to_id"]):
+                    if not entity_exists(str(endpoint)):
+                        orphans.append((str(row["id"]), str(endpoint)))
+                        break
+            add("relations_sans_orphelin", not orphans,
+                "" if not orphans else f"{len(orphans)} relation(s) orpheline(s) : {orphans[:5]}")
+
+            front = self.get_front()
+            state = front["state"]
+            brick_id = str(state.get("brick", {}).get("value", "")).strip()
+            if brick_id:
+                brick = conn.execute("SELECT state FROM brick WHERE id=?", (brick_id,)).fetchone()
+                add("front_brick_active", brick is not None and brick["state"] == "ACTIVE",
+                    "" if (brick and brick["state"] == "ACTIVE") else f"brique du Front '{brick_id}' introuvable ou non ACTIVE")
+            else:
+                add("front_brick_active", True, "aucune brique au Front")
+
+        entries = self._load_playbook_entries()
+        domains = {domain for entry in entries for domain in entry["domains"]}
+        add("playbook_cinq_domaines", domains == set(PLAYBOOK_DOMAINS),
+            f"domaines présents : {sorted(domains)}" if domains == set(PLAYBOOK_DOMAINS)
+            else f"domaines manquants : {sorted(set(PLAYBOOK_DOMAINS) - domains)}")
+
+        stored_hash = str(state.get("handoff_front_hash", {}).get("value", "")).strip()
+        if stored_hash:
+            fresh = stored_hash == self._front_resume_hash(state)
+            add("handoff_frais", fresh, "" if fresh else "handoff périmé : le Front a changé depuis sa préparation")
+        else:
+            add("handoff_frais", True, "aucun handoff préparé (état de repos)")
+
+        errors = [f"{c['check']} : {c['detail']}" for c in checks if not c["ok"]]
+        return {"ok": not errors, "checks": checks, "errors": errors}
+
     def get_resume_dossier(self) -> dict[str, Any]:
         """Construit le Resume Dossier V1 et échoue logiquement si son contrat manque ou est périmé."""
         with self._read_connection() as conn:
