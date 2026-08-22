@@ -37,7 +37,7 @@
         ]
       }
     ],
-    "DISABLED_PreToolUse": [
+    "PreToolUse": [
       {
         "hooks": [
           {
@@ -60,7 +60,7 @@
         ]
       }
     ],
-    "DISABLED_Stop": [
+    "Stop": [
       {
         "hooks": [
           {
