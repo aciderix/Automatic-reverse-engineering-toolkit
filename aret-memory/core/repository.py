@@ -39,9 +39,12 @@ DEFAULT_MAX_BYTES = 65536
 HARD_MAX_ITEMS = 100
 HARD_MAX_BYTES = 262144
 
-# Resume Dossier V1 : vue opérationnelle compacte, dérivée exclusivement des
-# primitives V5 knowledge/knowledge_tag/front_state. Aucun document Markdown ni
-# résumé LLM n’est utilisé à la reprise.
+# Resume Dossier : vue opérationnelle compacte. Les LOIS STABLES (playbook, cinq
+# domaines) viennent d'un fichier Markdown AUTORÉ (`config/playbook.md`), chargé
+# directement et jamais ingéré dans SQLite. L'ÉTAT VIVANT (Front, handoff, checkpoint,
+# observations) reste dérivé exclusivement des primitives front_state / pipeline_run /
+# proof. Aucun résumé LLM n'est utilisé à la reprise ; aucune dérive de la mémoire
+# SQLite ne peut venir d'une édition du playbook ou d'un changement de documentation.
 CORE_PLAYBOOK_TAG = "CORE_PLAYBOOK"
 PLAYBOOK_DOMAINS = (
     "PLAYBOOK_FOUNDATION",
@@ -436,6 +439,83 @@ class MemoryStore:
         }
         return sha256_text(canonical_json(included))
 
+    def _playbook_path(self) -> Path:
+        """Résout le fichier de playbook AUTORÉ (source des lois stables du projet).
+
+        Ordre : ARET_PLAYBOOK_PATH explicite, sinon `<repo>/config/playbook.md` à côté
+        du Memory Store. Ce fichier est la config projet-agnostique du MMU ; il n'est
+        JAMAIS ingéré dans SQLite (éditer le playbook ne mute pas la mémoire vivante).
+        """
+        override = os.environ.get("ARET_PLAYBOOK_PATH", "").strip()
+        if override:
+            return Path(override).expanduser()
+        per_store = self.memory_dir.parent / "config" / "playbook.md"
+        if per_store.is_file():
+            return per_store
+        # Défaut empaqueté avec le code (config repo, versionnée). Un autre projet le
+        # remplace via ARET_PLAYBOOK_PATH ou un `config/playbook.md` à côté du store.
+        return Path(__file__).resolve().parents[1] / "config" / "playbook.md"
+
+    def _load_playbook_entries(self) -> list[dict[str, Any]]:
+        """Charge les cinq domaines du playbook DEPUIS le fichier autoré, jamais SQLite.
+
+        Chaque section `## <DOMAIN> — <titre>` (DOMAIN ∈ PLAYBOOK_DOMAINS) devient une
+        entrée déterministe, ancrée par son domaine EXPLICITE — pas par un identifiant
+        séquentiel de migration (qui dérivait quand les documents changeaient). Un
+        fichier absent renvoie une liste vide : le contrat de dossier signalera alors
+        chaque domaine manquant, sans jamais deviner de contenu.
+        """
+        path = self._playbook_path()
+        if not path.is_file():
+            return []
+        text = path.read_text(encoding="utf-8")
+        # Retirer les blocs de commentaire HTML d'en-tête (documentation du fichier).
+        text = re.sub(r"<!--.*?-->", "", text, flags=re.S)
+        entries: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        header = re.compile(r"^##\s+(PLAYBOOK_[A-Z]+)\s*[—:-]\s*(.+?)\s*$")
+        lines = text.splitlines()
+        current: dict[str, Any] | None = None
+        body: list[str] = []
+
+        def flush() -> None:
+            if current is not None:
+                current["content"] = "\n".join(body).strip()
+                current["content_hash"] = sha256_text(current["content"])
+                entries.append(current)
+
+        for line in lines:
+            m = header.match(line)
+            if m:
+                flush()
+                domain, title = m.group(1), m.group(2).strip()
+                current = None
+                body = []
+                if domain in PLAYBOOK_DOMAINS and domain not in seen:
+                    seen.add(domain)
+                    current = {
+                        "id": f"PLAYBOOK-{domain}",
+                        "type": "PLAYBOOK",
+                        "status": "ACTIVE",
+                        "title": title,
+                        "domains": [domain],
+                        "address": f"playbook.md#{domain}",
+                    }
+                continue
+            if line.startswith("## ") or line.startswith("# "):
+                # Un titre hors PLAYBOOK_* clôt la section courante.
+                flush()
+                current = None
+                body = []
+                continue
+            if current is not None:
+                body.append(line)
+        flush()
+        # Ordre canonique = ordre déclaré des domaines (indépendant du fichier).
+        order = {domain: index for index, domain in enumerate(PLAYBOOK_DOMAINS)}
+        entries.sort(key=lambda item: order.get(item["domains"][0], len(order)))
+        return entries
+
     def _resume_playbook_rows(self, conn: sqlite3.Connection) -> list[dict[str, Any]]:
         rows = [dict(row) for row in conn.execute(
             """SELECT k.id,k.type,k.status,k.title,k.content,k.content_hash,k.updated_at,
@@ -463,6 +543,13 @@ class MemoryStore:
         explicite le modèle shared-stack, précédemment réparti dans plusieurs pages.
         """
         self._require_write()
+        # Playbook autoré (fichier config) = source des lois stables. Quand il est
+        # présent, le playbook n'est PLUS dérivé de SQLite : ce bootstrap devient un
+        # no-op idempotent (plus d'IDs séquentiels codés en dur qui dérivaient quand
+        # les documents changeaient). Le chemin legacy ci-dessous ne sert qu'à une base
+        # sans fichier de playbook (rétro-compatibilité).
+        if self._playbook_path().is_file():
+            return {"tagged": [], "tag": CORE_PLAYBOOK_TAG, "already_ready": True, "mode": "file"}
         selections = {
             "CORE-0001": "PLAYBOOK_FOUNDATION",
             "CORE-0005": "PLAYBOOK_METHOD",
@@ -769,9 +856,11 @@ class MemoryStore:
         with self._read_connection() as conn:
             front = self.get_front()
             state = front["state"]
-            playbook = self._resume_playbook_rows(conn)
+            playbook = self._load_playbook_entries()
             present_domains = {domain for item in playbook for domain in item["domains"]}
             errors = [f"Domaine playbook absent : {domain}" for domain in PLAYBOOK_DOMAINS if domain not in present_domains]
+            if not playbook and not self._playbook_path().is_file():
+                errors.insert(0, f"Playbook autoré introuvable : {self._playbook_path()}")
             handoff = {key: str(state.get(key, {}).get("value", "")) for key in HANDOFF_FIELDS}
             missing_handoff = [key for key, value in handoff.items() if not value]
             if missing_handoff:
