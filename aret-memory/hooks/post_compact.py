@@ -15,7 +15,8 @@ def handler(store: Any, payload: dict[str, Any]) -> dict[str, Any]:
     # les cas. Le fail-open silencieux (dossier non construit ⇒ aucune garde) est éliminé.
     context, degraded = resume_context_or_degraded(store)
     dossier_hash = context["resume_dossier"]["contract_hash"]
-    guard = arm(store.memory_dir, payload, reason="PostCompact", resume_contract_hash=dossier_hash)
+    # Dégradé ⇒ armement SOFT (fail-loud, sans blocage dur) ; prêt ⇒ armement HARD.
+    guard = arm(store.memory_dir, payload, reason="PostCompact", resume_contract_hash=dossier_hash, ready=not degraded)
     checkpoint = None
     if store.write_enabled:
         checkpoint = store.record_session_checkpoint(
