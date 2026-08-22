@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# PostToolUse ARET-MMU : lève la garde après un acquittement de reprise réussi.
 set -euo pipefail
-export ARET_MEMORY_DIR="${CLAUDE_PROJECT_DIR:?}/aret-memory/.aret-memory"
-exec python3 "$CLAUDE_PROJECT_DIR/aret-memory/hooks/resume_guard_post_tool.py"
+source "$(dirname "${BASH_SOURCE[0]}")/aret-mmu-env.sh"
+aret_mmu_exec resume_guard_post_tool.py

@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# Stop ARET-MMU : nudge de continuation tant que le rituel n'est pas confirmé.
 set -euo pipefail
-export ARET_MEMORY_DIR="${CLAUDE_PROJECT_DIR:?}/aret-memory/.aret-memory"
-exec python3 "$CLAUDE_PROJECT_DIR/aret-memory/hooks/resume_guard_stop.py"
+source "$(dirname "${BASH_SOURCE[0]}")/aret-mmu-env.sh"
+aret_mmu_exec resume_guard_stop.py
