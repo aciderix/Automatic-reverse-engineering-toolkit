@@ -411,9 +411,173 @@ pub fn gnu_eh_abi_vptrs(prog: &Program) -> (u64, u64, u64) {
     )
 }
 
+/// Read a CIE's FDE-pointer encoding (`'R'` in the augmentation), replicating the
+/// augmentation walk of `gnu_eh_entries` but returning only that one byte. `'P'`
+/// (personality) is skipped by size so a `'R'` after it is found correctly; an
+/// absent/unknown augmentation yields `DW_EH_PE_ABSPTR` (the safe default — an FDE
+/// start that then fails to land in an executable range is dropped by the caller).
+fn cie_fde_encoding(d: &[u8], base: u64, entry_start: usize, entry_end: usize) -> u8 {
+    let mut p = entry_start + 4; // past the CIE id
+    p += 1; // version
+    let aug_start = p;
+    while p < entry_end && d.get(p).copied().unwrap_or(0) != 0 {
+        p += 1;
+    }
+    let aug: Vec<u8> = d.get(aug_start..p).unwrap_or(&[]).to_vec();
+    p += 1; // NUL
+    let _code_align = uleb(d, &mut p);
+    let _data_align = sleb(d, &mut p);
+    let _ra = uleb(d, &mut p);
+    let mut fde_enc = DW_EH_PE_ABSPTR;
+    if aug.first() == Some(&b'z') {
+        let _aug_len = uleb(d, &mut p);
+        for &c in &aug[1..] {
+            match c {
+                b'R' => {
+                    fde_enc = d.get(p).copied().unwrap_or(DW_EH_PE_ABSPTR);
+                    p += 1;
+                }
+                b'P' => {
+                    let penc = d.get(p).copied().unwrap_or(0);
+                    p += 1;
+                    let ppva = base + p as u64;
+                    let mut pp = p;
+                    let _ = read_encoded(d, &mut pp, penc, ppva);
+                    p = pp;
+                }
+                b'L' => {
+                    p += 1; // lsda encoding byte
+                }
+                _ => {}
+            }
+        }
+    }
+    fde_enc
+}
+
+/// Collect every FDE `initial_location` (function START) from one `.eh_frame`
+/// section's bytes, decoding each FDE pointer with its CIE's encoding. Only the
+/// encodings GCC/i386 emit are understood; an FDE whose start cannot be decoded is
+/// skipped (nothing guessed). `base` is the section's (rebased) VA, so pcrel FDE
+/// pointers resolve to rebased starts directly.
+fn collect_fde_starts(d: &[u8], base: u64, out: &mut std::collections::BTreeSet<u64>) {
+    use std::collections::HashMap;
+    let mut cies: HashMap<usize, u8> = HashMap::new();
+    let mut off = 0usize;
+    while off + 4 <= d.len() {
+        let len = u32::from_le_bytes(d[off..off + 4].try_into().unwrap()) as usize;
+        if len == 0 || len == 0xffff_ffff {
+            break; // terminator, or 64-bit length not emitted on i386 -> stop (sound)
+        }
+        let entry_start = off + 4;
+        let entry_end = entry_start + len;
+        if entry_end > d.len() {
+            break;
+        }
+        let id = u32::from_le_bytes(d[entry_start..entry_start + 4].try_into().unwrap());
+        if id == 0 {
+            cies.insert(off, cie_fde_encoding(d, base, entry_start, entry_end));
+        } else {
+            let cie_off = entry_start.wrapping_sub(id as usize);
+            let fde_enc = *cies.get(&cie_off).unwrap_or(&DW_EH_PE_ABSPTR);
+            let mut p = entry_start + 4; // past the CIE pointer
+            let pcva = base + p as u64;
+            if let Some(pc_begin) = read_encoded(d, &mut p, fde_enc, pcva) {
+                if pc_begin != 0 {
+                    out.insert(pc_begin);
+                }
+            }
+        }
+        off = entry_end;
+    }
+}
+
+/// The set of function-START addresses the compiler certified in `.eh_frame`, across
+/// **all** modules merged into `prog` (each `.eh_frame` section is parsed at its
+/// rebased VA, so a pcrel FDE `initial_location` yields the rebased start for free).
+///
+/// This is a **proof of function start**, strictly stronger than a prologue or
+/// terminator heuristic: by the DWARF/Itanium contract an FDE `initial_location` is
+/// the entry of a whole, non-overlapping function range, so it is never interior to
+/// another function's body — and a landing pad (interior to its establisher) never
+/// has its own FDE. Recovery uses this to seed a missed entry or, when the linear
+/// sweep over-absorbed it, to re-split at that proven boundary. Sound degradation: no
+/// `.eh_frame` ⇒ empty; an unsupported encoding or a start outside executable memory
+/// ⇒ that entry is skipped, never guessed.
+pub fn eh_frame_function_starts(prog: &Program) -> std::collections::BTreeSet<u64> {
+    let mut out = std::collections::BTreeSet::new();
+    for sec in prog.sections.iter().filter(|s| s.name == ".eh_frame") {
+        collect_fde_starts(&sec.data, sec.address, &mut out);
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Assemble a minimal but well-formed `.eh_frame`: one CIE (augmentation `zR`,
+    /// FDE pointers `pcrel|sdata4` — exactly what mingw/GCC i386 emit) followed by
+    /// FDEs at the given target VAs, then the 0-length terminator. Returns the bytes
+    /// and the section base VA. Mirrors the on-disk layout the real parser walks.
+    fn synth_eh_frame(base: u64, targets: &[u64]) -> Vec<u8> {
+        fn entry(content: Vec<u8>) -> Vec<u8> {
+            let mut c = content;
+            while c.len() % 4 != 0 {
+                c.push(0); // DW_CFA_nop padding to 4-byte alignment
+            }
+            let mut out = (c.len() as u32).to_le_bytes().to_vec();
+            out.extend_from_slice(&c);
+            out
+        }
+        // CIE content (after the length field): id=0, version=1, aug="zR\0",
+        // code_align=1, data_align=-4, ra=8, aug_len=1, R-enc=pcrel|sdata4.
+        let mut cie = Vec::new();
+        cie.extend_from_slice(&0u32.to_le_bytes());
+        cie.push(1);
+        cie.extend_from_slice(b"zR\0");
+        cie.push(0x01);
+        cie.push(0x7c);
+        cie.push(0x08);
+        cie.push(0x01);
+        cie.push(DW_EH_PE_PCREL | DW_EH_PE_SDATA4);
+        let mut buf = entry(cie);
+        for &target in targets {
+            let fde_off = buf.len();
+            let cie_ptr = (fde_off as u32) + 4; // = (fde_off+4) - 0 (CIE at offset 0)
+            let iloc_va = base + (fde_off + 8) as u64; // initial_location field VA
+            let rel = (target as i64 - iloc_va as i64) as i32;
+            let mut fde = Vec::new();
+            fde.extend_from_slice(&cie_ptr.to_le_bytes());
+            fde.extend_from_slice(&rel.to_le_bytes());
+            fde.extend_from_slice(&0x20u32.to_le_bytes()); // pc_range
+            buf.extend_from_slice(&entry(fde));
+        }
+        buf.extend_from_slice(&0u32.to_le_bytes()); // terminator
+        buf
+    }
+
+    #[test]
+    fn collect_fde_starts_decodes_pcrel_initial_locations() {
+        let base = 0x0040_0000u64;
+        let targets = [0x0040_1100u64, 0x0040_1234u64, 0x0046_75c0u64];
+        let buf = synth_eh_frame(base, &targets);
+        let mut got = std::collections::BTreeSet::new();
+        collect_fde_starts(&buf, base, &mut got);
+        assert_eq!(got, targets.iter().copied().collect());
+    }
+
+    #[test]
+    fn collect_fde_starts_is_empty_on_garbage_and_terminator() {
+        // A lone 0-length terminator yields nothing (sound: no guessed starts).
+        let mut got = std::collections::BTreeSet::new();
+        collect_fde_starts(&0u32.to_le_bytes(), 0x400000, &mut got);
+        assert!(got.is_empty());
+        // Truncated entry (length past the buffer) stops cleanly, no panic.
+        let mut got2 = std::collections::BTreeSet::new();
+        collect_fde_starts(&[0xff, 0xff, 0x00, 0x00, 0x01], 0x400000, &mut got2);
+        assert!(got2.is_empty());
+    }
 
     #[test]
     fn uleb_sleb_roundtrip() {
