@@ -107,6 +107,20 @@ def arm(memory_dir: Path, payload: dict[str, Any], reason: str, resume_contract_
     """
     if len(resume_contract_hash) != 64 or any(char not in "0123456789abcdef" for char in resume_contract_hash):
         raise ValueError("Empreinte Resume Dossier invalide : hash SHA-256 hexadécimal requis")
+    # Reprise "resume" d'une session DÉJÀ acquittée : ce n'est PAS une perte de
+    # contexte. En session web/async, SessionStart se re-déclenche (source=resume)
+    # à CHAQUE tour ; ré-armer remettrait acknowledged_at=None et re-bloquerait
+    # l'agent vivant à chaque échange. On préserve donc l'acquittement (on rafraîchit
+    # seulement l'empreinte/le mode). Seule une vraie perte de contexte —
+    # PostCompact, clear, startup, ou un armement explicite — re-force le rituel.
+    if reason == "resume":
+        existing = load_state(memory_dir, payload)
+        if isinstance(existing, dict) and existing.get("status") == "acknowledged":
+            existing["resume_contract_hash"] = resume_contract_hash
+            existing["reason"] = reason
+            existing["mode"] = "hard" if ready else "soft"
+            _write_state(memory_dir, payload, existing)
+            return existing
     armed_at = utc_now()
     state = {
         "version": 3,

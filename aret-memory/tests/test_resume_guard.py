@@ -210,6 +210,46 @@ def test_env_kill_switch_releases_even_a_hard_barrier(tmp_path, monkeypatch) -> 
     assert decision(memory_dir, {**session, "tool_name": "Bash"}) is not None    # rétabli
 
 
+def test_resume_source_preserves_acknowledgement_without_a_new_ritual(tmp_path: Path) -> None:
+    """Friction #10 : SessionStart se re-déclenche (source=resume) à chaque tour web.
+
+    Une reprise `resume` d'une session DÉJÀ acquittée ne doit PAS re-bloquer l'agent
+    vivant. Seule une vraie perte de contexte (PostCompact/clear/startup) re-force le rituel."""
+    memory_dir = tmp_path / "memory"
+    session = {"session_id": "test-resume-preserve"}
+    arm(memory_dir, session, reason="startup", resume_contract_hash=RESUME_HASH)
+    acknowledge(memory_dir, {
+        **session,
+        "tool_name": "mcp__aret-memory__aret_acknowledge_resume",
+        "tool_input": _recap(),
+        "tool_response": {"structuredContent": {"ok": True}},
+    })
+    assert decision(memory_dir, {**session, "tool_name": "Bash"}) is None
+
+    # Tour suivant : SessionStart re-arme en source=resume, avec une empreinte MÊME différente
+    # (le Front a pu muter). L'acquittement doit être PRÉSERVÉ, pas réinitialisé.
+    preserved = arm(memory_dir, session, reason="resume", resume_contract_hash="c" * 64)
+    assert preserved["status"] == "acknowledged"
+    assert preserved["acknowledged_at"] is not None
+    assert preserved["resume_contract_hash"] == "c" * 64
+    assert decision(memory_dir, {**session, "tool_name": "Bash"}) is None  # PAS re-bloqué
+
+    # Mais une vraie compaction re-force le rituel (acknowledged_at remis à None).
+    rearmed = arm(memory_dir, session, reason="PostCompact", resume_contract_hash="c" * 64)
+    assert rearmed["status"] == "awaiting_recap"
+    assert rearmed["acknowledged_at"] is None
+    assert decision(memory_dir, {**session, "tool_name": "Bash"}) is not None
+
+
+def test_resume_source_does_not_preserve_when_never_acknowledged(tmp_path: Path) -> None:
+    """`resume` ne doit rien préserver si le rituel n'a jamais été acquitté : blocage maintenu."""
+    memory_dir = tmp_path / "memory"
+    session = {"session_id": "test-resume-fresh"}
+    state = arm(memory_dir, session, reason="resume", resume_contract_hash=RESUME_HASH)
+    assert state["status"] == "awaiting_recap"
+    assert decision(memory_dir, {**session, "tool_name": "Bash"}) is not None
+
+
 def test_resume_guard_without_any_identity_is_never_acknowledged_or_released(tmp_path: Path) -> None:
     memory_dir = tmp_path / "memory"
     unscoped: dict[str, str] = {}

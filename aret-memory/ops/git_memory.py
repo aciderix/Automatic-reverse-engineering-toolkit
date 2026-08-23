@@ -177,6 +177,58 @@ def automatic_sync(repository: Path, requested: str | None, operation: str) -> d
     return result
 
 
+def current_branch(repository: Path) -> str | None:
+    """Nom de la branche courante, ou None si HEAD est détachée (pas de branche à pousser)."""
+    name = invoke(repository, "rev-parse", "--abbrev-ref", "HEAD")
+    return None if name in ("", "HEAD") else name
+
+
+def sync_memory_only(repository: Path, requested: str | None, operation: str, remote: str = "origin", do_push: bool = True) -> dict[str, Any]:
+    """Persistance de fin de tour du Memory Store : commit du SEUL `.aret-memory/`, puis push de la branche COURANTE.
+
+    Différences assumées avec `automatic_sync` (qui, lui, refuse s'il existe des changements
+    hors Memory Store) : cette fonction est le point de persistance appelé aux frontières de
+    tour (Stop / PreCompact). Elle commite UNIQUEMENT le pathspec `.aret-memory/` (les autres
+    changements du working tree — code en cours — restent intacts, jamais commités) et pousse
+    la branche courante résolue dynamiquement, car chaque session Claude travaille sur une
+    branche différente. Elle ne lève JAMAIS : un échec Git est rapporté, pas propagé, pour ne
+    jamais bloquer une fin de tour. Sans changement mémoire, aucun commit vide n'est créé ;
+    un push résiduel (commits déjà faits mais non poussés) est tout de même retenté.
+    """
+    result: dict[str, Any] = {"operation": operation, "committed": False, "pushed": False}
+    try:
+        root = repository_root(repository)
+        target = memory_path(root, requested)
+        relative = memory_relative(root, requested)
+        result["wal_checkpoint"] = checkpoint_wal(target)
+        scoped = [item for item in changes(root) if item["path"] == relative or item["path"].startswith(relative + "/")]
+        if scoped:
+            invoke(root, "add", "--", relative)
+            message = f"ARET-MMU memory: {operation} — {datetime.now(UTC).strftime('%Y-%m-%dT%H:%M:%SZ')}"
+            invoke(root, "commit", "-m", message, "--", relative)
+            result["committed"] = True
+            result["message"] = message
+        else:
+            result["reason"] = "Aucun changement .aret-memory/ à committer."
+        result["head"] = invoke(root, "rev-parse", "HEAD")
+        if do_push:
+            branch = current_branch(root)
+            if branch is None:
+                result["push_skipped"] = "HEAD détachée : aucune branche courante à pousser."
+            else:
+                try:
+                    invoke(root, "push", remote, branch)
+                    result["pushed"] = True
+                    result["remote"] = remote
+                    result["branch"] = branch
+                except GitMemoryError as exc:
+                    result["push_error"] = str(exc)
+        return result
+    except (GitMemoryError, OSError) as exc:
+        result["error"] = str(exc)
+        return result
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Git explicite et borné pour ARET-MMU")
     parser.add_argument("--repository", type=Path, default=Path.cwd())
