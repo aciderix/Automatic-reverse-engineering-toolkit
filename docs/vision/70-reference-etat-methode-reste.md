@@ -269,6 +269,13 @@ tête de chaîne) ⇒ panique du structureur ; chain-builder **deux passes** + `
 (hash inchangé, funcdiff 0-div). spirv-cross transpile désormais **jusqu'au bout** (mur runtime suivant = appel indirect NULL
 `0x0`). Détail + **options priorisées pour la suite** (creuser le mur `0x0` [recommandé] · `fnstenv`/`fldenv` · Levier 1
 libs-tierces · noreturn **écarté-unsound**) : doc 71 2026-08-21.
+**✅ MAJ 2026-08-23 — `0x7475c0` RÉSOLU par une preuve de début SOUND et générale (§4.4)** : les **FDE de `.eh_frame`**
+(`initial_location`) donnent l'ensemble des **débuts de fonction certifiés par le compilateur** ; un landing pad, intérieur à
+son établisseur, n'a **jamais** de FDE propre ⇒ le contre-exemple universel est exclu **par construction**, pas par une
+2ᵉ heuristique. Récup : seed d'une entrée ratée, ou re-split à cette frontière prouvée. **Toutes portes vertes** (hash
+`19acad982194bf07` inchangé, funcdiff **0-div** / +505 récupérées bit-identiques dont busybox/sqlite, difftest 272/272,
+`lift_libstdcxx`/`lift_stdstring` end-to-end). spirv-cross : `0x7475c0` **franchi** (17158→18929 fns, partial-asm 721→243),
+avance à un **nouveau mur** (abort 134, à qualifier). Détail doc 71 2026-08-23.
 **Environnement/oracle** : la pile de test (wine, mingw, `gcc -m32`, unicorn, zstd) est **auto-provisionnée** par
 `.claude/hooks/session-start.sh` — réinstallée automatiquement après un reset conteneur nu (fix `libgd3:i386`, 2026-08-17). **Axe OS wide-char COUVERT** (fichier `_w*`, Win32 FS/volumes `*W`, locale/stdio wide, introspection
 process/thread + reliquats `_sopen`/`isleadbyte`/…). **Mesure corpus post-lift (doc 90, 2026-08-15)** : lifter le runtime
@@ -476,6 +483,16 @@ overlapped/IOCP — recoupe la surface subprocess plafonnée). Détail 71/82.
   **⚠️ Un `call` vers une fonction noreturn n'est PAS une preuve de frontière** : le byte après (padding +
   code) peut être un **landing pad EH** partageant le frame de la fonction, indistinguable d'un vrai début
   (tenté puis reverté 2026-08-21, doc 71). Frontière = terminateur prouvé (`ret`/`jmp`/`int3`) uniquement.
+- **✅ Débuts de fonction certifiés par `.eh_frame` (FDE)** (`gnu_eh::eh_frame_function_starts`, 2026-08-23) : chaque FDE
+  DWARF encode l'`initial_location` = **début de fonction émis par le compilateur**. On collecte ces débuts sur **toutes** les
+  sections `.eh_frame` fusionnées (parsées à leur adresse **rebasée** ⇒ pointeurs pcrel rebasés gratuitement) et on les injecte
+  dans la récup : non-décodé ⇒ **seed** ; absorbé par un voisin trop long ⇒ **re-split à cette frontière prouvée** (via le canal
+  `forced` des débuts confirmés). C'est une **preuve de début**, strictement plus forte qu'un prologue/terminateur, et — les
+  plages FDE ne se chevauchant pas — un `initial_location` n'est **jamais intérieur** à une autre fonction ; un **landing pad**
+  (intérieur à son établisseur) n'a **jamais** de FDE ⇒ le contre-exemple universel qui rendait unsound les 2 tentatives
+  précédentes est **exclu par construction** (pas de 2ᵉ heuristique). Dégradation monotone : pas de `.eh_frame` ⇒ vide,
+  encodage non supporté ⇒ FDE ignorée, rien deviné. **Débloque `0x7475c0` de spirv-cross** (fonction FPO libgcc), portes toutes
+  vertes (hash inchangé, funcdiff 0-div, +505 récupérées incl. busybox/sqlite). Réutilise le parseur DWARF de `gnu_eh.rs`.
 - **x87 leaf-thunk** (`is_x87_leaf_thunk`) : décode tout le corps (fld arg → ops FPU
   → ret) → amorce atan2/fmod/trunc atteints par pointeur isolé.
 - **Prologue de réalignement de pile GCC sans frame-pointer** (`lea ecx,[esp+4]; and esp,imm` = `8d 4c 24 04 83

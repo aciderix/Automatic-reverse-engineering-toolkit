@@ -8827,3 +8827,53 @@ passe `lift_libstdcxx` end-to-end **avant** commit) ; (c) chercher le mur série
 - **⛔ ÉCARTÉ — ne pas re-tenter** : la récup **noreturn-aware** *et* « faire confiance au pointeur base-relocalisé `.text` »
   pour récupérer `0x7475c0` — **unsound** (contre-exemple universel = landing pad EH, §0.4, cf. entrée du jour). `0x7475c0`
   reste un mur honnête jusqu'à une **preuve de *début*** (cible d'appel prouvée, ou table de pointeurs ≥3 = vtable ≠ table EH).
+
+### 2026-08-23 — [RECOV][EH_FRAME][§0 ❌→✅] **`0x7475c0` de spirv-cross RÉSOLU : les FDE `.eh_frame` = preuve de début SOUND et générale (le contre-exemple landing-pad exclu par construction)**
+
+Suite directe de l'entrée 2026-08-21 (`0x7475c0` resté mur honnête, les 2 fix proposés unsound). Boucle « piloter un vrai
+binaire → la donnée désigne le mur » reprise **sur build frais** (conteneur neuf, assets MMU vides) : `spirv-cross.exe` MSYS2
+mingw32 **1~1.4.304.1-1** (sha256 `0edb5758…`) + libstdc++-6/libgcc_s_dw2-1/libwinpthread-1, entrée `.spv` frag `void main(){}`
+32 mots fabriquée à la main. Oracle Wine = `#version 450\nvoid main(){}`. ⚠️ build ≠ celui du 2026-08-17 (non préservé) : le
+mur exact peut différer — dit honnêtement.
+
+**Mur mesuré (build courant, chain-builder `a0c5ca8` inclus, noreturn reverté)** : `indirect call to unrecovered function
+0x7475c0`. **Classification tranchée (option (a) de l'entrée 0x0)** : c'est un **TROU DE RÉCUP, pas une divergence amont** — le
+pointeur porte la **bonne** valeur `0x7475c0` (vraie adresse de code), dispatchée au runtime via `aret_call` ; ARET n'a pas
+récupéré de fonction là. Une divergence amont donnerait 0/garbage. (Le « `0x0` » de l'entrée 2026-08-21 n'était atteignable
+qu'avec le sweep noreturn, depuis reverté ; sans lui, `0x7475c0` redevient le mur — cohérent.)
+
+**Découverte (preuve de début SOUND et générale)** : la section **`.eh_frame`** encode via ses **FDE** l'`initial_location` =
+**début de fonction certifié par le compilateur**. Vérifié empiriquement (`objdump --dwarf=frames`) : `0x6eb675c0` (= `0x7475c0`
+rebasé, libgcc) **EST** un début de FDE (`pc=6eb675c0..6eb675dd`, FPO 29 o) ; le landing pad `0x5bad8e` (contre-exemple
+universel du 2026-08-21) **n'est PAS** un début de FDE. 270 FDE dans libgcc, **3964** dans spirv-cross. Les landing pads sont
+**intérieurs** à leur établisseur ⇒ jamais un début de FDE ⇒ le contre-exemple qui a rendu unsound les 2 heuristiques
+précédentes est **exclu par construction**.
+
+**Fix (`src/analysis/gnu_eh.rs` + `src/analysis/mod.rs`, commits `5598725`+`d53851c`)** : `eh_frame_function_starts(prog)`
+collecte les `initial_location` de **toutes** les sections `.eh_frame` fusionnées, parsées à leur adresse **rebasée** (pcrel
+rebasés gratuitement) — réutilise le parseur DWARF existant de `gnu_eh.rs`, sans toucher `gnu_eh_entries`. `analyze()` injecte
+ces débuts à chaque tour du fixpoint : **non-décodé ⇒ seed** (`cands`) ; **absorbé** (dans `global`, pas une entrée) ⇒
+**re-split à cette frontière prouvée** via le canal `forced` existant (« débuts confirmés, pas des devinettes de prologue »).
+Pas gaté par `preceded_by_terminator` (`0x7475c0` y échoue) : la FDE **EST** la preuve, plus forte ; soundness = plages FDE
+non chevauchantes ⇒ un `initial_location` n'est jamais intérieur. **Contraintes de revue adoptées** (ChatGPT) : (1) pas de
+nouvelle sémantique de `forced` — source prouvée dans le canal existant ; (2) l'exclusion landing-pad reste **structurelle**,
+jamais une 2ᵉ heuristique de validité ; (3) **dégradation monotone** — pas de `.eh_frame` ⇒ vide, encodage non supporté ⇒ FDE
+ignorée, `in_exec` gate, rien deviné.
+
+**Portes (toutes vertes)** : hash comportemental transpile **`19acad982194bf07` INCHANGÉ** (4/4, fix additif) ; funcdiff
+**0 divergence**, lift **22672 scorées** (+~505 vs 22167, **incl. busybox/sqlite3** ⇒ général, pas spécifique spirv-cross) ;
+difftest **272/272** ; **`lift_libstdcxx` + `lift_stdstring` end-to-end** bit-identiques Wine (garde anti-miscompile
+obligatoire pour tout changement de récup) ; winediff **261/264** (les 3 non-verts = `ole_mlang`/`user32_menu2` + 1 SKIP,
+**prouvés PRÉ-EXISTANTS** : diffs **byte-identiques** en rebuild PRE-FIX `mod.rs` reverté — ce sont des diffs HLE/environnement,
+`gdi_uifont` repassé vert). +2 tests unitaires `gnu_eh` (décode pcrel multi-FDE ; vide sur terminateur/troncature).
+
+**Effet spirv-cross** : `0x7475c0` **FRANCHI**. Stats 17158→**18929** fonctions récupérées (+1771), partial(asm) 721→**243**,
+ud2 719→198. Le programme va **bien plus loin** puis abort à un **NOUVEAU mur** : `app frag.spv` sort en **134 (SIGABRT)** SANS
+message diagnostique ni sortie GLSL. **Pas une sortie fausse silencieuse** (exit non-nul = échec loud, §0 ok) mais un mur suivant
+**à qualifier séparément** (candidats : le `0x0`, un import non implémenté `Get/SetThreadContext`, une fonction partial-asm sur
+le chemin) — et **l'absence de message au nouvel abort** est elle-même à creuser (instrumenter `ARET_TRACE=1`). Le fix FDE est
+validé **indépendamment** de ce endpoint (portes de non-régression vertes).
+
+**Leçon** : la « preuve de début » réclamée le 2026-08-21 existe et est **générale** — elle vit dans les tables d'unwind que
+tout GCC/mingw émet. Réutiliser une source **prouvée par le compilateur** plutôt qu'une heuristique de frontière est la sortie
+sound du 3ᵉ épisode « heuristique de frontière → miscompile » du projet. (MMU : mesures KN-0002/KN-0003.)
