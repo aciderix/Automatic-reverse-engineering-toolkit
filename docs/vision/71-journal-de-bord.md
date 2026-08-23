@@ -8877,3 +8877,29 @@ validé **indépendamment** de ce endpoint (portes de non-régression vertes).
 **Leçon** : la « preuve de début » réclamée le 2026-08-21 existe et est **générale** — elle vit dans les tables d'unwind que
 tout GCC/mingw émet. Réutiliser une source **prouvée par le compilateur** plutôt qu'une heuristique de frontière est la sortie
 sound du 3ᵉ épisode « heuristique de frontière → miscompile » du projet. (MMU : mesures KN-0002/KN-0003.)
+
+### 2026-08-23 — [LIFT][STRUCTURE][§0.3] **Tail-call conditionnel : polarité de branche INVERSÉE (ordre des successeurs) — le SIGABRT muet de spirv-cross était un miscompile général**
+
+Suite directe de l'entrée FDE : après `0x7475c0` franchi, `app frag.spv` sortait en **134 (SIGABRT) SANS message** — le mur « à qualifier » annoncé. **Mesuré (SS0)** : gdb sur l'abort → `aret_abort` (shim de l'import C `abort()`, pas le filet ARET), chaîne `…→sub_a27500→sub_a26b50→sub_a2b6e5`(thunk abort). `sub_a26b50` = init TLS de **libstdc++** (VA `0xa2xxxx` > 3,2 Mo ⇒ module lifté `libstdc++-6.dll`, pas l'exe).
+
+**Diagnostic (vérité terrain vs C généré)** — désassemblage original :
+```
+0xa26b83:  call [0xa35264]      ; TlsAlloc
+0xa26b89:  mov  [0xa2c024], eax
+0xa26b8e:  cmp  eax, 0xFFFFFFFF  ; == TLS_OUT_OF_INDEXES ?
+0xa26b91:  je   0xa2b6e5         ; OUI (échec) -> abort thunk
+0xa26b97:  mov  [0xa32070], 1    ; NON (index valide) -> continue
+```
+Sémantique correcte : **abort seulement si `TlsAlloc` ÉCHOUE**. Le C transpilé faisait l'**INVERSE** (`if (eax==0xFFFFFFFF) continue; else abort`). `TlsAlloc` réussit au démarrage (index 0) ⇒ branche abort ⇒ SIGABRT. Le CFG était pourtant **correct** (`block [CondJump] -> [0xa2b6e5(taken), 0xa26b97(fall)]`), et le **premier** `je` de la même fonction (cible intra-bloc) était correct : inversion **isolée aux `jcc` dont la cible *taken* est une AUTRE fonction** (tail-call conditionnel).
+
+**Cause racine (`src/ir/build.rs`, bras « conditional tail call ») :** le vecteur `succ` est bâti en filtrant les successeurs **locaux** de `[taken, fall]` ; le `taken` non-local (le thunk) est **éliminé**, il reste `succ=[fall]` ; puis `succ.push(synth)` ⇒ `succ=[fall, synth]` = **[fallthrough, taken]**. Or l'émetteur (`src/emit/structured.rs`, `emit_if`/`emit_loop`) lit `taken=succ[0]`, `fall=succ[1]` et applique `cond` **non-négée** (invariant documenté `[taken, fall]`, cf. `src/structure/mod.rs`). Ordre inversé ⇒ `if (cond) { fallthrough } else { taken }` ⇒ **tout tail-call conditionnel était inversé**. Le `Stmt::Branch{taken, fallthrough}` portait la bonne valeur, mais l'émetteur se fie à l'ordre de `succ`, pas à ces champs.
+
+**Bug PRÉ-EXISTANT** (le bras conditional-tail-call précède le fix FDE ; il cite WinMerge/mfc90u `je sub_867436`). Le fix FDE l'a seulement **exposé** en promouvant le thunk `0xa2b6e5` en début de fonction ⇒ `je 0xa2b6e5` devient inter-fonction. Rare (`jcc other_func`), **non exercé par les démonstrateurs** (d'où hash inchangé).
+
+**Fix général (additif, commit `06c6427`) :** `succ.insert(0, synth)` au lieu de `push` ⇒ `succ=[synth(taken), fall]` = `[taken, fallthrough]`, invariant restauré. Corrige **tous** les tail-calls conditionnels.
+
+**Portes (toutes vertes)** : hash **`19acad982194bf07` INCHANGÉ** (4/4) ; difftest **272/272** ; funcdiff **0-div** (lift 22672, opt 11602) ; winediff **261/264** (3 flakes pré-existants `ole_mlang`/`user32_menu2`) ; **`lift_libstdcxx`/`lift_stdstring`/`lift_stdexcept`/`lift_stddtor`/`lift_stdthrow` e2e VERTS** (garde anti-miscompile obligatoire) ; `m1_transpile` **51/52** (le rouge `stripped_full_crt_via_flirt` échoue **à l'identique au baseline** HEAD `7da114a` — découverte de `main`, sans rapport avec l'émission de branche). **Preuve fonctionnelle** : `frag.spv` **franchit** l'abort TLS.
+
+**Nouveau mur (progrès, non régression)** : `app frag.spv` atteint désormais un **appel indirect à `0x0` (NULL) dans `sub_a27500`** (libstdc++), juste après l'init TLS. Abort **LOUD** (`aret_unmodelled`, exit 134). C'est le **`0x0` honnête anticipé le 2026-08-21** sur le vrai chemin SPIR-V→GLSL — **pas** l'ancien `0x0` du sweep noreturn (reverté). Cible **littéralement NULL** ⇒ penche **divergence amont** (un pointeur/global qui vaut 0 sous ARET mais pas sous Wine), **pas** un trou de récup (qui porterait une adresse valide, comme `0x7475c0`). À trancher au **relay I11**. (MMU : KN-0006.)
+
+**Leçon** : un émetteur qui dérive `taken`/`fall` de l'**ordre** des successeurs impose un invariant `[taken, fall]` que **toute** transformation de CFG (ici l'ajout d'un bloc tail-call synthétique) doit préserver ; la vérité était dans `Stmt::Branch` mais ce n'était pas la source consultée. Un tail-call conditionnel vers un thunk noreturn a transformé une inversion silencieuse en **abort bruyant** (§0 respecté : jamais faux en silence) — mais restait un bug de correction à corriger.

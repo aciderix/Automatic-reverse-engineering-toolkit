@@ -275,7 +275,15 @@ son établisseur, n'a **jamais** de FDE propre ⇒ le contre-exemple universel e
 2ᵉ heuristique. Récup : seed d'une entrée ratée, ou re-split à cette frontière prouvée. **Toutes portes vertes** (hash
 `19acad982194bf07` inchangé, funcdiff **0-div** / +505 récupérées bit-identiques dont busybox/sqlite, difftest 272/272,
 `lift_libstdcxx`/`lift_stdstring` end-to-end). spirv-cross : `0x7475c0` **franchi** (17158→18929 fns, partial-asm 721→243),
-avance à un **nouveau mur** (abort 134, à qualifier). Détail doc 71 2026-08-23.
+avance à un **nouveau mur** (abort 134 muet). **✅ MAJ 2026-08-23 (bis) — ce mur = un miscompile général, corrigé (commit
+`06c6427`, KN-0006)** : un **tail-call conditionnel** (`jcc autre_fonction`) avait sa **polarité inversée** — `src/ir/build.rs`
+construisait `succ=[fallthrough, taken]` alors que l'émetteur lit `succ[0]=taken` et applique `cond` non-négée ⇒ tout
+`jcc other_func` était inversé. Bug **pré-existant** que le fix FDE a **exposé** (thunk abort promu début de fonction). Concret :
+l'init TLS de libstdc++ abortait quand `TlsAlloc` **réussissait** (SIGABRT muet = shim de l'import C `abort()`). Fix additif
+(`succ.insert(0, synth)`), **toutes portes vertes** (hash inchangé, difftest 272/272, funcdiff 0-div, winediff 261/264,
+`lift_libstdcxx`/`stdstring`/`stdexcept`/`stddtor`/`stdthrow` e2e verts). spirv-cross **franchit l'abort TLS** et atteint le
+**`0x0` honnête** anticipé le 2026-08-21 (appel indirect NULL dans `sub_a27500`, libstdc++) — cible littéralement NULL ⇒ penche
+**divergence amont** (pointeur/global = 0 sous ARET, non-0 sous Wine), à trancher au relay I11. Détail doc 71 2026-08-23.
 **Environnement/oracle** : la pile de test (wine, mingw, `gcc -m32`, unicorn, zstd) est **auto-provisionnée** par
 `.claude/hooks/session-start.sh` — réinstallée automatiquement après un reset conteneur nu (fix `libgd3:i386`, 2026-08-17). **Axe OS wide-char COUVERT** (fichier `_w*`, Win32 FS/volumes `*W`, locale/stdio wide, introspection
 process/thread + reliquats `_sopen`/`isleadbyte`/…). **Mesure corpus post-lift (doc 90, 2026-08-15)** : lifter le runtime
