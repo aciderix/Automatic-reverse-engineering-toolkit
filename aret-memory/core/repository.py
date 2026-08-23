@@ -999,9 +999,31 @@ class MemoryStore:
                 errors.append(f"Resume Dossier dépasse {RESUME_DOSSIER_MAX_BYTES} octets")
             if playbook and size_bytes < RESUME_DOSSIER_MIN_BYTES:
                 errors.append(f"Resume Dossier sous le plancher de {RESUME_DOSSIER_MIN_BYTES} octets")
+            # Avertissements de PROVENANCE (non bloquants, hors contract_hash) : distinguer un
+            # Front réellement dérivé du travail d'un Front SEMÉ par un bootstrap/migration et
+            # jamais validé contre les sources. Une mémoire canonique peut être obsolète si la
+            # session précédente ne l'a pas mise à jour ; ce signal remonte l'obsolescence sans
+            # bloquer la reprise. cf. friction #7.
+            warnings: list[str] = []
+            brick_id = str(state.get("brick", {}).get("value", ""))
+            if brick_id:
+                brick_row = conn.execute("SELECT created_by FROM brick WHERE id=?", (brick_id,)).fetchone()
+                if brick_row and "bootstrap" in str(brick_row["created_by"]).lower():
+                    warnings.append(
+                        f"PROVENANCE : la brique active '{brick_id}' a été semée par un bootstrap "
+                        f"({brick_row['created_by']}) et n'a peut-être jamais été validée contre les sources. "
+                        "Vérifier l'état réel (docs/roadmap/git) avant de poursuivre."
+                    )
+            last_action = str(state.get("last_action", {}).get("value", "")).lower()
+            if ("migration" in last_action or "bootstrap" in last_action) and "audit" not in last_action:
+                warnings.append(
+                    "PROVENANCE : la dernière action du Front est une action de migration/bootstrap, "
+                    "pas un vrai dernier geste d'ingénierie. Le Front est peut-être périmé."
+                )
         return {
             "ready": not errors,
             "errors": errors,
+            "warnings": warnings,
             "playbook": {"tag": CORE_PLAYBOOK_TAG, "domains": list(PLAYBOOK_DOMAINS), "entries": playbook},
             "handoff": {
                 **handoff,
@@ -1014,6 +1036,43 @@ class MemoryStore:
             "contract_hash": contract_hash,
             "size_bytes": size_bytes,
             "max_bytes": RESUME_DOSSIER_MAX_BYTES,
+        }
+
+    def resume_status(self) -> dict[str, Any]:
+        """Verdict COMPACT de reprise, en lecture seule : dit si une session fraîche reprendrait NORMALEMENT.
+
+        `degraded=True` ⇒ le dossier de reprise est incomplet (barrière dégradée au prochain
+        démarrage) ; `missing` liste précisément ce qui manque et chaque entrée nomme l'outil qui
+        la répare. `warnings` remonte une provenance suspecte (Front semé par un bootstrap) sans
+        bloquer. Évite d'avoir à rejouer le hook de démarrage pour connaître l'état de continuité."""
+        dossier = self.get_resume_dossier()
+        remedy = {
+            "handoff": "aret_prepare_handoff",
+            "front_hash": "aret_prepare_handoff",
+            "Checkpoint technique": "aret_prepare_handoff (technical_checkpoint_state + les cinq champs)",
+            "V1.3": "aret_prepare_handoff",
+            "next_action": "aret_prepare_handoff",
+            "Playbook": "config/playbook.md (fichier autoré, hors SQLite)",
+            "Domaine playbook": "config/playbook.md",
+            "dépasse": "aret_prepare_handoff (raccourcir les champs)",
+            "périmé": "aret_prepare_handoff (re-préparer après mutation du Front)",
+        }
+
+        def _tool_for(error: str) -> str:
+            for needle, tool in remedy.items():
+                if needle in error:
+                    return tool
+            return "aret_prepare_handoff"
+
+        return {
+            "ready": dossier["ready"],
+            "degraded": not dossier["ready"],
+            "missing": [{"reason": err, "fix_with": _tool_for(err)} for err in dossier["errors"]],
+            "warnings": dossier.get("warnings", []),
+            "contract_hash": dossier["contract_hash"],
+            "size_bytes": dossier["size_bytes"],
+            "max_bytes": dossier["max_bytes"],
+            "front_brick": str(self.get_front()["state"].get("brick", {}).get("value", "")),
         }
 
     def get_resume_brief(self, journal_limit: int = 8, rule_limit: int = 20, audit_limit: int = 12) -> dict[str, Any]:

@@ -231,8 +231,12 @@ def additional_context(result: dict[str, Any]) -> str:
         "# ARET-MMU — DOSSIER DE REPRISE CANONIQUE",
         "Ce dossier est dérivé de SQLite canonique, versionné, borné et contrôlé. Les documents métier historiques ne doivent pas être relus après compaction ; ne faites FIND/READ que pour approfondir une adresse précise nécessaire à la tâche.",
         f"Version du contrat : {dossier.get('contract_hash', '?')} ; préparation : {dossier.get('prepared_at', '?')}.",
-        "\n## 1. PLAYBOOK STABLE — LOIS D’ARET",
     ]
+    warnings = dossier.get("warnings", [])
+    if isinstance(warnings, list) and warnings:
+        lines.append("\n## ⚠️ AVERTISSEMENTS DE PROVENANCE — vérifier avant de poursuivre")
+        lines.extend(f"- {warning}" for warning in warnings)
+    lines.append("\n## 1. PLAYBOOK STABLE — LOIS D’ARET")
     for entry in entries:
         if not isinstance(entry, dict):
             continue

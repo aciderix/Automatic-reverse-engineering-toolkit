@@ -210,6 +210,36 @@ def test_env_kill_switch_releases_even_a_hard_barrier(tmp_path, monkeypatch) -> 
     assert decision(memory_dir, {**session, "tool_name": "Bash"}) is not None    # rétabli
 
 
+def test_resume_status_reports_ready_dossier(tmp_path: Path) -> None:
+    """Friction #6 : verdict compact de reprise en lecture seule, sans rejouer le hook."""
+    store = _populated_store(tmp_path / "memory")
+    status = store.resume_status()
+    assert status["ready"] is True
+    assert status["degraded"] is False
+    assert status["missing"] == []
+    assert status["front_brick"] == "RESUME-01"
+
+
+def test_resume_status_missing_names_the_repair_tool(tmp_path: Path) -> None:
+    store = MemoryStore(tmp_path / "memory", write_enabled=True)
+    store.register_component("CORE", "Core", "", "test")
+    store.register_brick("SEED-01", "Brique", "ACTIVE", "CORE", "", "test", "M1", "x86-pe32", 1)
+    store.update_front({"brick": "SEED-01"}, "test")
+    status = store.resume_status()
+    assert status["degraded"] is True
+    assert status["missing"], "un dossier sans handoff doit lister des manques"
+    assert any(item["fix_with"].startswith("aret_prepare_handoff") for item in status["missing"])
+
+
+def test_resume_status_flags_bootstrap_provenance(tmp_path: Path) -> None:
+    """Friction #7 : un Front dont la brique active a été semée par un bootstrap est signalé."""
+    store = _populated_store(tmp_path / "memory")
+    store.register_brick("BOOT-01", "Semée", "ACTIVE", "CORE", "", "aret-mmu-graph-bootstrap", "M1", "x86-pe32", 1)
+    store.update_front({"brick": "BOOT-01"}, "test")
+    warnings = store.resume_status()["warnings"]
+    assert any("PROVENANCE" in warning and "BOOT-01" in warning for warning in warnings)
+
+
 def test_resume_source_preserves_acknowledgement_without_a_new_ritual(tmp_path: Path) -> None:
     """Friction #10 : SessionStart se re-déclenche (source=resume) à chaque tour web.
 

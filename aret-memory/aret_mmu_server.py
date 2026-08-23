@@ -16,7 +16,11 @@ from evidence.adapters.pipelines import pipeline_catalog, register_asset, run_pi
 from hooks.resume_guard import validate_recap
 from ops.git_memory import GitMemoryError, automatic_sync
 
-SERVER_INSTRUCTIONS = """ARET-MMU fournit une mémoire durable déterministe et une façade de pipelines ARET à liste fermée. Utilisez FIND uniquement pour découvrir des candidats, puis READ ou READ_BATCH sur les adresses explicitement sélectionnées pour récupérer le contenu canonique. Ne déduisez jamais une preuve d’un score de recherche. PROVEN exige une preuve PASS admissible. Consultez d’abord aret_get_pipeline_catalog et utilisez aret_run_pipeline en dry_run ; les pipelines génératifs, réseau et sensibles exigent leurs confirmations explicites. Aucun shell, URL ou push Git arbitraire n’est exposé."""
+SERVER_INSTRUCTIONS = """ARET-MMU fournit une mémoire durable déterministe et une façade de pipelines ARET à liste fermée. Utilisez FIND uniquement pour découvrir des candidats, puis READ ou READ_BATCH sur les adresses explicitement sélectionnées pour récupérer le contenu canonique. Ne déduisez jamais une preuve d’un score de recherche. PROVEN exige une preuve PASS admissible. Consultez d’abord aret_get_pipeline_catalog et utilisez aret_run_pipeline en dry_run ; les pipelines génératifs, réseau et sensibles exigent leurs confirmations explicites. Aucun shell, URL ou push Git arbitraire n’est exposé.
+
+OUTILS ARET PAR LE MCP (obligatoire). Les oracles et pipelines ARET (winediff, cpudiff, funcdiff, difftest, wallsweep, sweeps…) s'exécutent via aret_run_oracle / aret_run_pipeline, JAMAIS par un équivalent shell direct pour une décision durable. Raison : un résultat passé par le MCP est enregistré en SQLite — canonique, adressable (ARET://pipeline/…, ARET://proof/…), horodaté et il SURVIT À LA COMPACTION du contexte ; une sortie shell brute est éphémère et non-canonique (elle disparaît au prochain résumé de contexte). Le shell reste un laboratoire pour explorer/compiler/diagnostiquer, mais sa sortie n'est ni un fait canonique ni une preuve.
+
+INDUSTRIALISER OU NON. Tout outil réutilisable, ou qui contribue de façon récurrente à une décision, une validation, une preuve, un corpus, un asset ou une mesure de priorisation, DOIT être ajouté au catalogue MCP (liste fermée, paramètres bornés, politique, artefact adressable, tests) avant d'être une capacité officielle. À l'inverse, un script ponctuel — spécifique à une seule reproduction, sans effet durable sur les décisions — reste un prototype local et n'a pas à entrer dans le MCP."""
 
 store = MemoryStore()
 mcp = MCPServer(
@@ -79,8 +83,23 @@ def aret_get_resume_brief(journal_limit: int = 8, rule_limit: int = 20, audit_li
 
 @mcp.tool()
 def aret_get_resume_protocol(journal_limit: int = 8, batch_size: int = 20) -> dict[str, Any]:
-    """Compatibilité : retourne les pointeurs documentaires, sans imposer leur relecture après reprise."""
+    """Compatibilité : retourne les pointeurs documentaires, sans imposer leur relecture après reprise.
+
+    Choix entre les vues de reprise : aret_boot = état opérationnel + doctrine ; aret_get_front =
+    Active Front minimal ; aret_get_resume_brief = Front + règles + dernières entrées 71 + audit ;
+    aret_get_resume_status = verdict COMPACT (une session fraîche reprendrait-elle normalement ?)."""
     return _call("get_resume_protocol", journal_limit=journal_limit, batch_size=batch_size)
+
+
+@mcp.tool()
+def aret_get_resume_status() -> dict[str, Any]:
+    """Verdict COMPACT de reprise (lecture seule) : `degraded` + `missing` (chaque manque nomme l'outil qui le répare) + `warnings` de provenance.
+
+    À utiliser pour vérifier la continuité SANS rejouer le hook de démarrage : si `degraded=True`,
+    la barrière serait dégradée au prochain SessionStart et `missing` dit exactement quoi préparer
+    (le plus souvent aret_prepare_handoff). `warnings` signale un Front possiblement semé par un
+    bootstrap et jamais validé."""
+    return _call("resume_status")
 
 
 @mcp.tool()
@@ -211,7 +230,14 @@ def aret_append_knowledge(
     document_source: dict[str, Any] | None = None,
     actor: str = "mcp-agent",
 ) -> dict[str, Any]:
-    """Ajoute une connaissance append-only et auditée, avec provenance documentaire optionnelle et contrôlée."""
+    """Ajoute une connaissance append-only et auditée, avec provenance documentaire optionnelle et contrôlée.
+
+    knowledge_type ∈ {RULE, ARCHITECTURE, DECISION, FORENSIC, OBSERVATION, HYPOTHESIS, STATE,
+    MEASUREMENT, DISCOVERY} (insensible à la casse).
+    document_source, si fourni, EXIGE les sept clés : repository, revision, path, start_line,
+    end_line, section, hash — `path` relatif au dépôt (ni `/` initial ni `..`), 1≤start_line≤end_line.
+    Ne pas fournir un hash inventé : omettre document_source si l'empreinte de section n'est pas connue
+    (les références peuvent alors vivre dans `content`)."""
     return _call(
         "append_knowledge", knowledge_type=knowledge_type, status=status, title=title, content=content,
         component_id=component_id, function_id=function_id, brick_id=brick_id, tags=tags,
@@ -248,7 +274,20 @@ def aret_prepare_handoff(
     relevant_addresses: list[str] | None = None,
     actor: str = "mcp-agent",
 ) -> dict[str, Any]:
-    """Prépare atomiquement le handoff et le checkpoint V1.2 ; NONE interdit tout contenu technique inventé, ACTIVE exige les cinq faits bornés."""
+    """Prépare atomiquement le handoff et le checkpoint technique ; c'est l'outil unique qui répare une reprise dégradée.
+
+    BORNES (octets UTF-8, pas caractères : un accent = 2 octets — viser large) :
+    - work_summary, verified_results, open_risks, deferred_items, next_action : 1000 octets chacun.
+    - Dossier de reprise ASSEMBLÉ (playbook + handoff + adresses) : 12500 octets MAX, 2000 MIN.
+      Si dépassement, RACCOURCIR ces cinq champs (le playbook stable est incompressible).
+    technical_checkpoint_state est un ENUM, pas du texte : "NONE" ou "ACTIVE".
+    - "NONE" : les cinq champs technical_* DOIVENT rester vides (aucun geste technique inventé).
+    - "ACTIVE" : les cinq champs technical_* sont REQUIS et bornés — technical_target≤120,
+      technical_change≤160, execution_state≤130, last_validation≤160, immediate_actions≤180 octets.
+    relevant_addresses : uniquement des adresses de CONNAISSANCE (ARET://knowledge/...) — une adresse
+    de brique est refusée (le Front, lui, accepte une brique dans relevant_N_address).
+    Un seul appel peuple TOUS les champs dérivés du dossier (handoff_front_hash, cutoffs V1.3,
+    handoff_prepared_at) : c'est donc lui qui corrige les manques listés par aret_get_resume_status."""
     return _call(
         "prepare_handoff",
         work_summary=work_summary,
@@ -337,7 +376,10 @@ def aret_register_brick(
     description: str = "", milestone: str | None = None, target_platform: str | None = None,
     priority: int = 3, actor: str = "mcp-agent"
 ) -> dict[str, Any]:
-    """Crée une brique mesurable avec son état, jalon, cible et priorité de roadmap contrôlés."""
+    """Crée une brique mesurable avec son état, jalon, cible et priorité de roadmap contrôlés.
+
+    state ∈ {PLANNED, ACTIVE, BLOCKED, DONE, OBSOLETE}. La clé `brick` du Front doit toujours
+    référencer une brique ACTIVE ; il ne devrait exister qu'UN front de travail ACTIVE à la fois."""
     return _call(
         "register_brick", brick_id=brick_id, title=title, state=state, component_id=component_id,
         description=description, milestone=milestone, target_platform=target_platform, priority=priority, actor=actor,
@@ -349,7 +391,10 @@ def aret_update_brick(
     brick_id: str, state: str | None = None, milestone: str | None = None,
     target_platform: str | None = None, priority: int | None = None, actor: str = "mcp-agent"
 ) -> dict[str, Any]:
-    """Met à jour l’état et le classement d’une brique, avec audit et protection du Front actif."""
+    """Met à jour l’état et le classement d’une brique, avec audit et protection du Front actif.
+
+    state ∈ {PLANNED, ACTIVE, BLOCKED, DONE, OBSOLETE}. Faire passer hors ACTIVE une brique encore
+    référencée par le Front est refusé : réaligner d'abord le Front (aret_update_front)."""
     return _call(
         "update_brick", brick_id=brick_id, state=state, milestone=milestone,
         target_platform=target_platform, priority=priority, actor=actor,
@@ -373,7 +418,10 @@ def aret_run_oracle(
     oracle: str, knowledge_id: str | None = None, promote: bool = False, fixture: str | None = None,
     timeout_seconds: int | None = None, repository_path: str | None = None, actor: str = "mcp-oracle-adapter"
 ) -> dict[str, Any]:
-    """Exécute difftest, winehash, winediff ou funcdiff via une liste fermée, puis enregistre son artefact et sa preuve."""
+    """Exécute difftest, winehash, winediff ou funcdiff via une liste fermée, puis enregistre son artefact et sa preuve.
+
+    PASSER PAR ICI plutôt que par le shell : le verdict et l'artefact deviennent canoniques,
+    adressables (ARET://proof/…) et survivent à la compaction ; une sortie shell brute est éphémère."""
     try:
         repository = _configured_repository_path(repository_path)
         return {"ok": True, "operation": "run_oracle", "result": run_oracle(
@@ -458,7 +506,11 @@ def aret_register_asset(source_path: str, kind: str, confirm_import: bool = Fals
 
 @mcp.tool()
 def aret_sync_memory(operation: str = "MCP_SYNC") -> dict[str, Any]:
-    """Déclenche une synchronisation post-mutation strictement limitée au `.aret-memory/` courant et à sa politique JSON locale."""
+    """Déclenche une synchronisation post-mutation strictement limitée au `.aret-memory/` courant et à sa politique JSON locale (sync_policy.json : auto_commit/auto_push, opt-in).
+
+    Distinct de la persistance AUTOMATIQUE de fin de tour : les hooks Stop/PreCompact
+    (aret-mmu-sync-stop.sh) commitent+poussent déjà le Memory Store sur la branche courante à
+    chaque tour. Cet appel reste utile pour forcer une synchronisation immédiate selon la policy."""
     try:
         result = automatic_sync(store.memory_dir.parent, str(store.memory_dir), operation)
         store.last_sync_status = result
