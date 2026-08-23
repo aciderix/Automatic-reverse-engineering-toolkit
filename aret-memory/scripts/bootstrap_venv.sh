@@ -34,6 +34,28 @@ if usable; then
   exit 0
 fi
 
+# --- Sérialisation anti-concurrence (cause d'une déconnexion MCP au cold-start).
+# Sur un conteneur neuf le venv n'existe pas et DEUX bootstraps se lancent en même
+# temps : le hook SessionStart en arrière-plan ET le launcher MCP en synchrone.
+# Sans verrou, ils exécutent `uv venv`/`pip install` concurremment sur le MÊME
+# dossier -> venv à moitié construit -> le serveur échoue `import mcp` -> le client
+# voit "déconnecté" jusqu'à une reprise propre. `flock` fait attendre le second, qui
+# retrouve alors le venv prêt et sort. Best-effort : si flock manque, on continue
+# (le pire cas redevient l'ancien comportement, jamais pire).
+LOCK="${MMU_DIR}/.venv.bootstrap.lock"
+if command -v flock >/dev/null 2>&1; then
+  exec 9>"$LOCK"
+  if flock -w 120 9; then
+    # Sous le verrou : l'autre bootstrap a pu terminer entre-temps.
+    if usable; then
+      log "venv déjà prêt (construit par un bootstrap concurrent)."
+      exit 0
+    fi
+  else
+    log "verrou de bootstrap non acquis (120 s) — poursuite best-effort."
+  fi
+fi
+
 # --- Chemin FROID : privilégier uv (rapide), sinon repli venv+pip. -----------
 if command -v uv >/dev/null 2>&1; then
   log "création du venv via uv…"
