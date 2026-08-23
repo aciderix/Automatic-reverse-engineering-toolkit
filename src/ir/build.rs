@@ -484,7 +484,16 @@ pub fn build_ir(prog: &Program, func: &Function) -> IrFunction {
                         let target = blk.successors[0];
                         let synth = (order.len() + tail_targets.len()) as u32;
                         tail_targets.push((target, addr));
-                        succ.push(synth);
+                        // Preserve the [taken, fallthrough] successor ORDER that the
+                        // emitter/structurizer rely on (they read succ[0] as the taken
+                        // edge and apply `cond` un-negated). The non-local taken edge was
+                        // dropped by the local-index filter above, leaving succ = [fall];
+                        // the synthetic tail-call block IS the taken edge, so it must come
+                        // FIRST. Appending it (→ [fall, synth]) silently INVERTED every
+                        // conditional tail call — `if (cond) { fallthrough } else { taken }`
+                        // — turning `jcc abort_thunk` into "abort unless the condition
+                        // holds". Insert at front to keep the invariant.
+                        succ.insert(0, synth);
                         stmts.push(Stmt::Branch {
                             cond: cc_to_cond(jcc.raw.condition_code()),
                             taken: BlockId(synth),
