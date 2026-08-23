@@ -13,7 +13,8 @@ Utiliser ce skill dès qu’une tâche porte sur l’état connu d’ARET, une d
 2. Ne pas relire par défaut les documents Markdown 70, 71, 80, 81, 82 ou 90 : leur contenu canonique est déjà ingéré dans SQLite et les extraits utiles sont injectés. Utiliser `aret_read` ou `aret_read_batch` seulement pour approfondir un objet précis justifié par la tâche.
 3. Avant toute analyse, édition, commande, test, génération ou conclusion, produire un récapitulatif rituel couvrant : règles de travail ; état, Front et objectifs ; capacités MCP, analyse et industrialisation ; Git ; limites, preuves et garde-fous ; prochaine action.
 4. Confirmer ce récapitulatif avec `aret_acknowledge_resume`. Tant que cette confirmation n’a pas réussi, `PreToolUse` refuse toute autre opération et `Stop` relance une fois la reprise.
-5. Une fois le rituel confirmé, appeler `aret_boot`, `aret_get_resume_brief` ou `aret_restore` seulement lorsqu’un complément ciblé est nécessaire. Examiner le contexte Git injecté avant toute synchronisation.
+5. Une fois le rituel confirmé, appeler `aret_boot`, `aret_get_resume_brief` ou `aret_restore` seulement lorsqu’un complément ciblé est nécessaire. Examiner le contexte Git injecté avant toute synchronisation. Pour un verdict de continuité compact (une session fraîche reprendrait-elle normalement ? que manque-t-il ?), utiliser `aret_get_resume_status` sans rejouer le hook de démarrage.
+5bis. La barrière ne se ré-arme plus à chaque tour d’une session vivante (`source=resume` préserve un acquittement déjà donné) : ne re-produire le récapitulatif que sur une VRAIE reprise (démarrage, `clear`, compaction). Traiter tout avertissement de PROVENANCE en tête du dossier (Front possiblement semé par un bootstrap et non validé) comme un signal à vérifier contre les sources AVANT de poursuivre.
 6. Appeler `aret_get_front` avant de modifier une orientation active ou une brique référencée par le Front.
 7. Considérer la mémoire SQLite comme la source canonique ; le texte de conversation n’est jamais une preuve de l’état du projet.
 8. Avant une décision durable, consulter le Front et les adresses canoniques nécessaires ; après un fait durable, une décision, une preuve ou une préparation de reprise, enregistrer uniquement l’objet métier approprié. Ne pas remplir SQLite avec des recherches ou sorties provisoires.
@@ -32,7 +33,7 @@ Utiliser ce skill dès qu’une tâche porte sur l’état connu d’ARET, une d
 2. Enregistrer une connaissance ou une décision avec les outils métier dédiés ; ne jamais tenter d’exécuter du SQL arbitraire.
 3. Ne modifier le Front qu’après avoir vérifié les entités citées. La clé `brick` du Front doit toujours référencer une brique ACTIVE.
 4. Préserver l’historique relationnel : remplacer une relation avec l’opération de cycle de vie appropriée au lieu de la supprimer ou de la réécrire implicitement.
-5. Garder les synchronisations Git explicites et bornées à `aret-memory/.aret-memory/`. Ne jamais supposer qu’un push a été exécuté lorsque `auto_push=false`.
+5. La mémoire est désormais persistée AUTOMATIQUEMENT en fin de tour : les hooks `Stop` / `PreCompact` commitent le seul `.aret-memory/` et poussent la branche courante. Il n’est donc plus nécessaire de committer la base à la main. Rester conscient que la persistance passe par Git (même dépôt, MÊME branche) : une mutation n’est durable inter-session qu’une fois poussée, et le push vise la branche de travail courante. `ARET_MMU_SYNC_OFF=1` désarme cette persistance ; `aret_sync_memory` force une synchro selon `sync_policy.json`.
 
 ## Pipelines ARET, corpus et industrialisation
 

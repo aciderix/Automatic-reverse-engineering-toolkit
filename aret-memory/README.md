@@ -36,7 +36,7 @@ Le projet livre un serveur MCP réellement exécutable, des migrations SQLite ve
 | Trackers 82 et 90 | Disponible : 50 sections non chevauchantes avec provenance et contrôle d’intégrité. |
 | Corpus documentaire central | Disponible : 514 objets sourcés, index FTS5 reconstruit et vérifié. |
 | Hooks de cycle de vie Claude Code | Disponible : Resume Dossier V1.2 contractuel injecté à `SessionStart` / `PostCompact`, puis barrière de reprise obligatoire |
-| Synchronisation Git automatique et résolution de conflits | Opt-in, bornée au Memory Store ; `auto_push=false` par défaut |
+| Persistance Git automatique de la mémoire | Active par défaut : les hooks `Stop` / `PreCompact` (`aret-mmu-sync-stop.sh`) commitent le SEUL `.aret-memory/` puis poussent la branche COURANTE à chaque tour ; non-fatal, désarmable par `ARET_MMU_SYNC_OFF=1`. En complément, la synchro post-mutation `automatic_sync` reste opt-in via `sync_policy.json` (`auto_commit`/`auto_push`). |
 
 ## Prérequis et installation
 
