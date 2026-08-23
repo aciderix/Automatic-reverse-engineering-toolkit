@@ -1004,22 +1004,21 @@ class MemoryStore:
             # jamais validé contre les sources. Une mémoire canonique peut être obsolète si la
             # session précédente ne l'a pas mise à jour ; ce signal remonte l'obsolescence sans
             # bloquer la reprise. cf. friction #7.
+            # Signal ROBUSTE : la brique active a-t-elle été créée par un acteur de bootstrap/migration
+            # (et jamais reprise par un acteur de travail) ? On se fie à created_by, pas à une recherche
+            # de mots-clés dans du texte libre (qui produit des faux positifs — p.ex. une note d'audit qui
+            # cite le mot « bootstrap » pour décrire ce qu'elle corrige).
             warnings: list[str] = []
             brick_id = str(state.get("brick", {}).get("value", ""))
             if brick_id:
                 brick_row = conn.execute("SELECT created_by FROM brick WHERE id=?", (brick_id,)).fetchone()
-                if brick_row and "bootstrap" in str(brick_row["created_by"]).lower():
+                created_by = str(brick_row["created_by"]).lower() if brick_row else ""
+                if any(marker in created_by for marker in ("bootstrap", "migrat", "graph-bootstrap")):
                     warnings.append(
-                        f"PROVENANCE : la brique active '{brick_id}' a été semée par un bootstrap "
+                        f"PROVENANCE : la brique active '{brick_id}' a été semée par un bootstrap/migration "
                         f"({brick_row['created_by']}) et n'a peut-être jamais été validée contre les sources. "
                         "Vérifier l'état réel (docs/roadmap/git) avant de poursuivre."
                     )
-            last_action = str(state.get("last_action", {}).get("value", "")).lower()
-            if ("migration" in last_action or "bootstrap" in last_action) and "audit" not in last_action:
-                warnings.append(
-                    "PROVENANCE : la dernière action du Front est une action de migration/bootstrap, "
-                    "pas un vrai dernier geste d'ingénierie. Le Front est peut-être périmé."
-                )
         return {
             "ready": not errors,
             "errors": errors,
