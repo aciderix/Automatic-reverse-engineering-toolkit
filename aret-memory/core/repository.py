@@ -427,17 +427,57 @@ class MemoryStore:
             "restore_contract": "FIND puis READ/READ_BATCH explicites pour les pages froides.",
         }
 
+    @staticmethod
+    def _hash_affecting_key(key: str) -> bool:
+        """Vrai si muter cette clé du Front périme le handoff (elle entre dans le hash de reprise)."""
+        return bool(
+            key in {"subsystem", "brick", "current_wall", "last_action", "next_action", TECHNICAL_CHECKPOINT_STATE_FIELD}
+            or key in HANDOFF_FIELDS
+            or key in TECHNICAL_CHECKPOINT_FIELDS
+            or re.fullmatch(r"relevant_[1-5]_address", key)
+        )
+
     def _front_resume_hash(self, state: dict[str, dict[str, str]]) -> str:
         """Hash des seules clés qui rendent un handoff métier périmé."""
         included = {
             key: str(record.get("value", ""))
             for key, record in state.items()
-            if key in {"subsystem", "brick", "current_wall", "last_action", "next_action", TECHNICAL_CHECKPOINT_STATE_FIELD}
-            or key in HANDOFF_FIELDS
-            or key in TECHNICAL_CHECKPOINT_FIELDS
-            or re.fullmatch(r"relevant_[1-5]_address", key)
+            if self._hash_affecting_key(key)
         }
         return sha256_text(canonical_json(included))
+
+    def _handoff_status_for(
+        self, state: dict[str, dict[str, str]], changed_keys: Sequence[str],
+    ) -> dict[str, Any]:
+        """Verdict COMPACT de fraîcheur du handoff après une mutation du Front.
+
+        Le hash de reprise stocké (`handoff_front_hash`) est comparé au hash courant : s'ils
+        divergent, le handoff est PÉRIMÉ et l'agent DOIT ré-exécuter aret_prepare_handoff, sinon
+        la prochaine reprise sera dégradée. `changed_keys` liste les clés hashées effectivement
+        modifiées par cette mutation (celles qui périment le handoff)."""
+        stored = str(state.get("handoff_front_hash", {}).get("value", ""))
+        changed = list(changed_keys)
+        if not stored:
+            return {
+                "prepared": False, "stale": False, "changed_keys": changed,
+                "message": (
+                    "Aucun handoff préparé pour ce Front. Préparez-en un via aret_prepare_handoff "
+                    "avant de terminer la session, sinon la reprise sera dégradée."
+                ),
+            }
+        current = self._front_resume_hash(state)
+        if stored != current:
+            return {
+                "prepared": True, "stale": True, "changed_keys": changed,
+                "message": (
+                    "Front modifié → handoff PÉRIMÉ. Vous DEVEZ ré-exécuter aret_prepare_handoff "
+                    "pour garder l'avancement à jour (sinon la prochaine reprise sera dégradée)."
+                ),
+            }
+        return {
+            "prepared": True, "stale": False, "changed_keys": changed,
+            "message": "Handoff toujours cohérent avec le Front (aucune clé de reprise modifiée).",
+        }
 
     def _playbook_path(self) -> Path:
         """Résout le fichier de playbook AUTORÉ (source des lois stables du projet).
@@ -624,25 +664,6 @@ class MemoryStore:
         return {"tagged": tagged, "tag": CORE_PLAYBOOK_TAG, "derived_address": derived_address}
 
     @staticmethod
-    def _handoff_value(label: str, value: str, minimum: int = 24) -> str:
-        text = str(value).strip()
-        if len(text) < minimum:
-            raise AretError(f"{label} est trop court pour un handoff fiable")
-        if len(text.encode("utf-8")) > 1_000:
-            raise AretError(f"{label} dépasse la borne de 1000 octets")
-        return text
-
-    @staticmethod
-    def _technical_checkpoint_value(key: str, value: str) -> str:
-        text = str(value).strip()
-        if not text:
-            raise AretError(f"Checkpoint technique incomplet : {key}")
-        maximum = TECHNICAL_CHECKPOINT_MAX_BYTES[key]
-        if len(text.encode("utf-8")) > maximum:
-            raise AretError(f"{key} dépasse la borne de {maximum} octets")
-        return text
-
-    @staticmethod
     def _technical_checkpoint_state(value: str) -> str:
         state = str(value).strip().upper()
         if state not in TECHNICAL_CHECKPOINT_STATES:
@@ -749,6 +770,42 @@ class MemoryStore:
             )
         return {"status": "MACHINE_VERIFIED", "address": address, "result": observed_result}
 
+    @staticmethod
+    def _compact_handoff_diagnostic(dossier: dict[str, Any]) -> dict[str, Any]:
+        """Diagnostic COMPACT d'un handoff écrit mais dont le dossier n'est pas prêt (Fix B).
+
+        Ne rend jamais le playbook stable (déjà injecté au démarrage) : uniquement les erreurs, le
+        budget octets, le dépassement chiffré et la taille par champ, pour corriger en un seul
+        aller-retour. `written=True` : les champs ont bien été persistés, mais la reprise serait
+        dégradée tant que les erreurs listées ne sont pas résolues."""
+        size = int(dossier.get("size_bytes", 0))
+        maximum = int(dossier.get("max_bytes", RESUME_DOSSIER_MAX_BYTES))
+        handoff = dossier.get("handoff", {}) or {}
+        checkpoint = handoff.get("technical_checkpoint", {}) or {}
+        field_bytes: dict[str, int] = {}
+        for key in (*HANDOFF_FIELDS, "next_action"):
+            field_bytes[key] = len(str(handoff.get(key, "")).encode("utf-8"))
+        for key in TECHNICAL_CHECKPOINT_FIELDS:
+            value = str(checkpoint.get(key, ""))
+            if value:
+                field_bytes[key] = len(value.encode("utf-8"))
+        return {
+            "ready": False,
+            "written": True,
+            "errors": list(dossier.get("errors", [])),
+            "warnings": list(dossier.get("warnings", [])),
+            "size_bytes": size,
+            "max_bytes": maximum,
+            "overflow_bytes": max(0, size - maximum),
+            "field_bytes": field_bytes,
+            "contract_hash": dossier.get("contract_hash", ""),
+            "message": (
+                "Handoff ÉCRIT mais dossier de reprise NON prêt. Corrigez les points listés dans "
+                "'errors' (voir 'field_bytes' pour cibler les champs à raccourcir) puis ré-exécutez "
+                "aret_prepare_handoff. La reprise restera dégradée tant que ce n'est pas prêt."
+            ),
+        }
+
     def prepare_handoff(
         self,
         *,
@@ -779,12 +836,29 @@ class MemoryStore:
             addresses.append(parsed.canonical)
         if len(set(addresses)) != len(addresses) or len(addresses) > 5:
             raise AretError("Le handoff accepte entre zéro et cinq adresses chaudes distinctes")
+        # Fix A/C : on collecte TOUTES les violations de bornes (handoff + checkpoint) avant
+        # toute écriture, avec le compte d'octets réel vs borne pour chaque champ, puis on les
+        # rend EN UNE SEULE FOIS. Fini l'échec champ-par-champ qui obligeait à ré-appeler l'outil
+        # une fois par borne dépassée.
+        violations: list[str] = []
+
+        def _bounded_handoff(label: str, raw: str) -> str:
+            text = str(raw).strip()
+            nbytes = len(text.encode("utf-8"))
+            if len(text) < 24:
+                violations.append(
+                    f"{label} : trop court ({len(text)}/24 caractères min) — un handoff fiable exige une phrase complète"
+                )
+            elif nbytes > 1_000:
+                violations.append(f"{label} : {nbytes} octets > borne 1000 — dépasse la borne, à raccourcir")
+            return text
+
         values = {
-            "handoff_work_summary": self._handoff_value("work_summary", work_summary),
-            "handoff_verified_results": self._handoff_value("verified_results", verified_results),
-            "handoff_open_risks": self._handoff_value("open_risks", open_risks),
-            "handoff_deferred_items": self._handoff_value("deferred_items", deferred_items),
-            "next_action": self._handoff_value("next_action", next_action),
+            "handoff_work_summary": _bounded_handoff("work_summary", work_summary),
+            "handoff_verified_results": _bounded_handoff("verified_results", verified_results),
+            "handoff_open_risks": _bounded_handoff("open_risks", open_risks),
+            "handoff_deferred_items": _bounded_handoff("deferred_items", deferred_items),
+            "next_action": _bounded_handoff("next_action", next_action),
         }
         checkpoint_state = self._technical_checkpoint_state(technical_checkpoint_state)
         checkpoint_input = {
@@ -795,10 +869,16 @@ class MemoryStore:
             "handoff_immediate_actions": immediate_actions,
         }
         if checkpoint_state == "ACTIVE":
-            checkpoint = {
-                key: self._technical_checkpoint_value(key, value)
-                for key, value in checkpoint_input.items()
-            }
+            checkpoint: dict[str, str] = {}
+            for key, raw in checkpoint_input.items():
+                text = str(raw).strip()
+                nbytes = len(text.encode("utf-8"))
+                maximum = TECHNICAL_CHECKPOINT_MAX_BYTES[key]
+                if not text:
+                    violations.append(f"Checkpoint technique incomplet : {key} (vide, requis en ACTIVE)")
+                elif nbytes > maximum:
+                    violations.append(f"{key} : {nbytes} octets > borne {maximum} — dépasse la borne, à raccourcir")
+                checkpoint[key] = text
             values.update(checkpoint)
             values[TECHNICAL_CHECKPOINT_STATE_FIELD] = checkpoint_state
             values["last_action"] = (
@@ -808,13 +888,18 @@ class MemoryStore:
         else:
             unexpected = [key for key, value in checkpoint_input.items() if str(value).strip()]
             if unexpected:
-                raise AretError(
+                violations.append(
                     "Checkpoint technique NONE incohérent : les champs doivent être vides ("
                     + ", ".join(unexpected) + ")"
                 )
             values.update({key: "" for key in TECHNICAL_CHECKPOINT_FIELDS})
             values[TECHNICAL_CHECKPOINT_STATE_FIELD] = checkpoint_state
             values["last_action"] = "Aucun checkpoint technique actif lors de la préparation du handoff."
+        if violations:
+            raise AretError(
+                "Handoff refusé — corrigez tous ces points en une seule fois :\n- "
+                + "\n- ".join(violations)
+            )
         with self._transaction() as conn:
             if checkpoint_state == "ACTIVE":
                 self._last_validation_machine_status(conn, checkpoint["handoff_last_validation"])
@@ -849,7 +934,14 @@ class MemoryStore:
                 conn, actor=actor, operation="PREPARE_HANDOFF", entity_type="front", entity_id="current",
                 before=before, after={"front": after, "handoff_hash": handoff_hash, "addresses": addresses},
             )
-        return self.get_resume_dossier()
+        dossier = self.get_resume_dossier()
+        if not dossier.get("ready", False):
+            # Fix B : ne PAS ré-écho le playbook stable complet (~8 KB) quand le dossier assemblé
+            # n'est pas prêt (dépassement de budget, domaine manquant…). On rend un diagnostic
+            # COMPACT et actionnable (tailles par champ, dépassement chiffré) au lieu de brûler des
+            # tokens sur du contenu déjà présent dans le dossier de reprise injecté au démarrage.
+            return self._compact_handoff_diagnostic(dossier)
+        return dossier
 
     def health_report(self) -> dict[str, Any]:
         """Doctor de cohérence INTERNE de la mémoire vivante (DB-primaire), indépendant
@@ -1752,8 +1844,17 @@ class MemoryStore:
                     (key, value, stamp, actor),
                 )
             after = self._front_rows(conn)
+            changed_hash_keys = sorted(
+                key for key in clean
+                if self._hash_affecting_key(key)
+                and str(before.get(key, {}).get("value", "")) != str(after.get(key, {}).get("value", ""))
+            )
             self._audit(conn, actor=actor, operation="UPDATE_FRONT", entity_type="front", entity_id="current", before=before, after=after)
-        return self.get_front()
+        front = self.get_front()
+        # Fix D : signaler explicitement à l'agent quand sa mutation périme le handoff, pour
+        # rendre OBLIGATOIRE et évident le fait de ré-exécuter aret_prepare_handoff.
+        front["handoff_status"] = self._handoff_status_for(front["state"], changed_hash_keys)
+        return front
 
     def replace_front(self, updates: dict[str, str], actor: str) -> dict[str, Any]:
         """Remplace le contexte chaud entier, avec audit avant/après et sans effacer l’historique métier."""

@@ -20,7 +20,9 @@ SERVER_INSTRUCTIONS = """ARET-MMU fournit une mémoire durable déterministe et 
 
 OUTILS ARET PAR LE MCP (obligatoire). Les oracles et pipelines ARET (winediff, cpudiff, funcdiff, difftest, wallsweep, sweeps…) s'exécutent via aret_run_oracle / aret_run_pipeline, JAMAIS par un équivalent shell direct pour une décision durable. Raison : un résultat passé par le MCP est enregistré en SQLite — canonique, adressable (ARET://pipeline/…, ARET://proof/…), horodaté et il SURVIT À LA COMPACTION du contexte ; une sortie shell brute est éphémère et non-canonique (elle disparaît au prochain résumé de contexte). Le shell reste un laboratoire pour explorer/compiler/diagnostiquer, mais sa sortie n'est ni un fait canonique ni une preuve.
 
-INDUSTRIALISER OU NON. Tout outil réutilisable, ou qui contribue de façon récurrente à une décision, une validation, une preuve, un corpus, un asset ou une mesure de priorisation, DOIT être ajouté au catalogue MCP (liste fermée, paramètres bornés, politique, artefact adressable, tests) avant d'être une capacité officielle. À l'inverse, un script ponctuel — spécifique à une seule reproduction, sans effet durable sur les décisions — reste un prototype local et n'a pas à entrer dans le MCP."""
+INDUSTRIALISER OU NON. Tout outil réutilisable, ou qui contribue de façon récurrente à une décision, une validation, une preuve, un corpus, un asset ou une mesure de priorisation, DOIT être ajouté au catalogue MCP (liste fermée, paramètres bornés, politique, artefact adressable, tests) avant d'être une capacité officielle. À l'inverse, un script ponctuel — spécifique à une seule reproduction, sans effet durable sur les décisions — reste un prototype local et n'a pas à entrer dans le MCP.
+
+FRONT & HANDOFF TOUJOURS À JOUR (obligatoire). Le Front est le pointeur de travail vivant : dès qu'il change (subsystem, brique, mur courant, prochaine action, champ de handoff), mettez-le à jour via aret_update_front — garder l'avancement fidèle est primordial. aret_update_front renvoie `handoff_status` : si `stale=true`, votre changement a PÉRIMÉ le handoff et vous DEVEZ ré-exécuter aret_prepare_handoff. Vérifiez la continuité à tout moment via aret_get_resume_status (`degraded=true` ⇒ la prochaine reprise serait dégradée ; chaque manque nomme l'outil qui le répare). En fin de session ou avant compaction, un handoff frais et non périmé est la condition d'une reprise NORMALE."""
 
 store = MemoryStore()
 mcp = MCPServer(
@@ -248,7 +250,13 @@ def aret_append_knowledge(
 
 @mcp.tool()
 def aret_update_front(updates: dict[str, str], actor: str = "mcp-agent") -> dict[str, Any]:
-    """Met à jour une partie bornée de l’Active Front et inscrit un audit event."""
+    """Met à jour une partie bornée de l'Active Front et inscrit un audit event.
+
+    OBLIGATION : le Front DOIT refléter le travail réel à tout instant — dès que le subsystem,
+    la brique, le mur courant, la prochaine action ou un champ de handoff change, mettez-le à jour
+    ici. Le résultat contient `handoff_status` : si `stale=true`, votre changement a PÉRIMÉ le
+    handoff et vous DEVEZ ré-exécuter aret_prepare_handoff (sinon la prochaine reprise sera
+    dégradée). `changed_keys` liste les clés de reprise effectivement modifiées."""
     return _call("update_front", updates=updates, actor=actor)
 
 
@@ -287,7 +295,16 @@ def aret_prepare_handoff(
     relevant_addresses : uniquement des adresses de CONNAISSANCE (ARET://knowledge/...) — une adresse
     de brique est refusée (le Front, lui, accepte une brique dans relevant_N_address).
     Un seul appel peuple TOUS les champs dérivés du dossier (handoff_front_hash, cutoffs V1.3,
-    handoff_prepared_at) : c'est donc lui qui corrige les manques listés par aret_get_resume_status."""
+    handoff_prepared_at) : c'est donc lui qui corrige les manques listés par aret_get_resume_status.
+
+    OBLIGATION : ré-exécutez cet outil dès que le handoff est PÉRIMÉ (aret_update_front renvoie
+    `handoff_status.stale=true`, ou aret_get_resume_status signale « périmé ») — garder l'avancement
+    à jour est primordial pour une reprise fidèle.
+    RÉPONSE : en cas de succès, le dossier complet (`ready=true`) est rendu. En cas d'échec de
+    bornes, TOUTES les violations sont rendues d'un coup (compte d'octets réel vs borne par champ) :
+    corrigez-les en une seule fois. Si le dossier assemblé n'est pas prêt (p.ex. dépassement de
+    budget), un diagnostic COMPACT est rendu (`written=true`, `errors`, `overflow_bytes`,
+    `field_bytes`) SANS ré-écho du playbook — raccourcissez les champs visés puis rappelez l'outil."""
     return _call(
         "prepare_handoff",
         work_summary=work_summary,

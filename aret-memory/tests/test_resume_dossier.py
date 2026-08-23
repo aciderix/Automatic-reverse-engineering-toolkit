@@ -152,6 +152,78 @@ def test_active_technical_checkpoint_is_atomic_hashed_and_updates_last_action(tm
     assert any("périmé" in error for error in stale["errors"])
 
 
+def test_prepare_handoff_reports_all_bound_violations_at_once(tmp_path: Path) -> None:
+    """Fix A/C : toutes les violations de bornes sont rendues d'un coup, avec les octets par champ."""
+    store = _store(tmp_path)
+    with pytest.raises(AretError) as excinfo:
+        store.prepare_handoff(
+            work_summary="court",  # < 24 caractères
+            verified_results="aussi trop court",  # < 24 caractères
+            open_risks="Risques ouverts explicitement décrits pour préserver le comportement fail-closed.",
+            deferred_items="Éléments différés explicitement décrits sans les présenter comme déjà supportés.",
+            next_action="Poursuivre avec une action atomique et vérifiable après la reprise contrôlée.",
+            technical_checkpoint_state="ACTIVE",
+            technical_target="x" * 121,  # > 120 octets
+            technical_change="Changement factuel bref.",
+            execution_state="Aucun processus lancé.",
+            last_validation="Aucune validation nouvelle.",
+            immediate_actions="Préparer une action vérifiable.",
+            relevant_addresses=[],
+            actor="test",
+        )
+    message = str(excinfo.value)
+    # Les trois violations distinctes apparaissent dans le MÊME message.
+    assert "work_summary" in message
+    assert "verified_results" in message
+    assert "handoff_technical_target" in message
+    assert "dépasse la borne" in message  # le compte d'octets réel vs borne
+    # Atomicité préservée : rien n'a été écrit avant la levée.
+    assert "handoff_work_summary" not in store.get_front()["state"]
+
+
+def test_prepare_handoff_returns_compact_diagnostic_when_dossier_overflows(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Fix B : dossier non prêt (dépassement) ⇒ diagnostic COMPACT, pas de ré-écho du playbook."""
+    import core.repository as repo_mod
+
+    store = _store(tmp_path)
+    monkeypatch.setattr(repo_mod, "RESUME_DOSSIER_MAX_BYTES", 100)
+    result = _handoff(store)
+    assert result["ready"] is False
+    assert result["written"] is True
+    assert result["overflow_bytes"] > 0
+    assert result["field_bytes"]  # tailles par champ pour cibler le raccourcissement
+    assert "playbook" not in result  # compact : le playbook stable n'est PAS ré-écho
+    assert any("dépasse" in error for error in result["errors"])
+
+
+def test_update_front_flags_handoff_stale_only_on_hash_affecting_change(tmp_path: Path) -> None:
+    """Fix D : update_front signale handoff périmé quand — et seulement quand — une clé de reprise change."""
+    store = _store(tmp_path)
+    _handoff(store)  # handoff frais : hash stocké == hash courant
+
+    neutral = store.update_front({"note_libre": "annotation hors reprise"}, "test")
+    assert neutral["handoff_status"]["prepared"] is True
+    assert neutral["handoff_status"]["stale"] is False
+
+    changed = store.update_front({"current_wall": "Un nouveau mur périme le handoff."}, "test")
+    status = changed["handoff_status"]
+    assert status["stale"] is True
+    assert "current_wall" in status["changed_keys"]
+    assert "aret_prepare_handoff" in status["message"]
+
+
+def test_update_front_reports_absent_handoff_when_none_prepared(tmp_path: Path) -> None:
+    """Fix D : sans handoff préparé, update_front invite explicitement à en préparer un."""
+    store = _store(tmp_path)  # le fixture ne prépare aucun handoff
+    result = store.update_front({"current_wall": "Un mur sans handoff préparé."}, "test")
+    status = result["handoff_status"]
+    assert status["prepared"] is False
+    assert status["stale"] is False
+    assert "aret_prepare_handoff" in status["message"]
+
+
 def test_technical_checkpoint_rejects_incomplete_none_and_over_budget_values(tmp_path: Path) -> None:
     store = _store(tmp_path)
     common = {
