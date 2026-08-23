@@ -958,6 +958,11 @@ fn global_decode(
             .map(|s| (s.address, s.address + s.data.len() as u64))
             .collect();
         let in_exec = |a: u64| a != 0 && exec.iter().any(|&(lo, hi)| a >= lo && a < hi);
+        // Compiler-certified function starts from `.eh_frame` FDE initial_locations
+        // (static for this program; injected into the candidates each round below).
+        // A PROOF of function start — stronger than any prologue/terminator witness,
+        // and structurally free of landing pads (which never have their own FDE).
+        let eh_starts = gnu_eh::eh_frame_function_starts(prog);
         // Re-scan to a fixpoint (each newly decoded function reveals more
         // pointers), draining candidates in *ascending* address order one at a
         // time: a parent function decoded first then covers its own interior, so
@@ -1254,6 +1259,27 @@ fn global_decode(
                 }
             }
             let mut progressed = jt_progress;
+            // Compiler-certified starts from `.eh_frame` FDEs — a PROOF of function
+            // start (a landing pad, interior to its establisher, never has its own
+            // FDE, so the universal EH counterexample is structurally excluded).
+            // Not yet decoded → seed fresh (no split). Decoded but interior (the
+            // linear sweep over-absorbed it, e.g. by falling through a noreturn
+            // `call` — the `0x7475c0` libgcc FPO case) → re-split at this proven
+            // boundary via the existing `forced` path, which is exactly "confirmed
+            // function starts, not prologue guesses". Gated on `in_exec`, and the
+            // existing `jt_targets` guard covers the only interior address a start
+            // could otherwise collide with. `eh_starts` is empty without `.eh_frame`,
+            // so binaries without GCC unwind tables are unaffected (sound degradation).
+            for &v in &eh_starts {
+                if !in_exec(v) || jt_targets.contains(&v) {
+                    continue;
+                }
+                if !global.contains_key(&v) {
+                    cands.insert(v);
+                } else if !entries.contains(&v) {
+                    forced.insert(v);
+                }
+            }
             for c in cands {
                 // A function drained earlier this pass (lower address) may now
                 // cover `c`, or it may be a jump-table case target — either way
