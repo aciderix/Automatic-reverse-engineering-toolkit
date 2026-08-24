@@ -18,6 +18,8 @@ bench/.cache/*
 !bench/.cache/busybox-w32-FRP-5579-g5749feb35.exe
 !bench/.cache/sqlite3-3400100.exe
 !bench/.cache/winetest.exe
+!bench/.cache/libintl-8.dll
+!bench/.cache/libiconv-2.dll
 tools/__pycache__/
 # Store de test créé hors du module ARET-MMU ; le Store canonique est
 # aret-memory/.aret-memory/ et demeure explicitement versionné.
