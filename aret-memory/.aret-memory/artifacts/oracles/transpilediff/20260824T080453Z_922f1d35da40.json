@@ -1,0 +1,24 @@
+{
+  "format": "aret-oracle-artifact/v1",
+  "oracle": "transpilediff",
+  "kind": "TRANSPILEDIFF",
+  "command": "bash /home/user/Automatic-reverse-engineering-toolkit/bench/difftest_transpile.sh",
+  "result": "PASS",
+  "exit_code": 0,
+  "started_at": "2026-08-24T08:04:45Z",
+  "finished_at": "2026-08-24T08:04:53Z",
+  "environment": {
+    "adapter": "aret-mmu-oracles/1",
+    "oracle": "transpilediff",
+    "repository": "/home/user/Automatic-reverse-engineering-toolkit",
+    "repository_revision": "6c1a6f7de469eca4a08b5e43b1de2ada8ddafb6f",
+    "script": "bench/difftest_transpile.sh",
+    "fixture": "",
+    "timeout_seconds": 1800,
+    "missing_dependencies": [],
+    "timed_out": false,
+    "duration_seconds": 8.23
+  },
+  "stdout": "  -O0: ok (H=19acad982194bf07)\n  -O1: ok (H=19acad982194bf07)\n  -O2: ok (H=19acad982194bf07)\n  -O3: ok (H=19acad982194bf07)\n------------------------------------------\ntranspile-pipeline equivalence: 4/4 opt-levels (58 functions, ref H=19acad982194bf07)\n",
+  "stderr": ""
+}
