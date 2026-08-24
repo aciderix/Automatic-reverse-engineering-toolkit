@@ -751,6 +751,9 @@ pub fn build_ir(prog: &Program, func: &Function) -> IrFunction {
         let entry_imports = block_entry_imports(&blocks, prog, func.entry);
         for (bi, b) in blocks.iter_mut().enumerate() {
             let mut held: HeldImports = entry_imports[bi].clone();
+            // Frame offset from this block's entry esp (the frame base), so the
+            // spill/reload slot tracking keys esp-relative slots consistently.
+            let mut esp_delta: Option<i64> = Some(0);
             let mut out: Vec<Stmt> = Vec::with_capacity(b.stmts.len());
             for mut s in std::mem::take(&mut b.stmts) {
                 // A `call reg` through a register that holds a __stdcall import
@@ -767,7 +770,17 @@ pub fn build_ir(prog: &Program, func: &Function) -> IrFunction {
                     .then(|| stdcall_pop_for_regcall(&s, &held))
                     .flatten();
                 name_calls_in_stmt(&mut s, prog, bits, &held);
-                update_import_regs(&s, prog, &mut held);
+                update_import_regs(&s, prog, &mut held, &mut esp_delta);
+                // Naming already rewrote a recognised `call reg` to a `Named`
+                // target, so `update_import_regs`'s own frame-delta credit for the
+                // pop cannot fire here (it keys off the `Indirect` shape). Apply it
+                // from the pop we computed before naming, so a later spill/reload in
+                // this same block stays keyed to the frame base.
+                if let Some(n) = reg_pop {
+                    if let Some(d) = esp_delta.as_mut() {
+                        *d += n as i64;
+                    }
+                }
                 out.push(s);
                 if let Some(n) = reg_pop {
                     out.push(Stmt::Set {
@@ -2141,21 +2154,196 @@ fn name_calls_in_expr(e: &mut Expr, prog: &Program, bits: u32, held: &HeldImport
     }
 }
 
-/// Update the register→import tracking after statement `s`: record `reg = [iat]`
-/// loads of import slots, and invalidate a register when it is reassigned (or on
-/// an opaque `Asm`, which may clobber anything).
-fn update_import_regs(s: &Stmt, prog: &Program, held: &mut HeldImports) {
+/// Is `e` a (possibly width-masked / cast) read of the stack pointer `esp`?
+fn is_esp_expr(e: &Expr) -> bool {
+    peeled_reg(e) == Some(&Location::Reg(RegId(4)))
+}
+
+/// Is `e` a read of an ARET-internal `Temp` (a lifter/build scratch value)? The
+/// indirect-call pop adjustment (`callee_pop_adjust`) raises esp by such a temp
+/// (`esp += __aret_callee_pop(target)`); recognising it lets the frame tracker
+/// treat that raise as neutral rather than an unprovable esp write.
+fn is_temp_read(e: &Expr) -> bool {
+    match e {
+        Expr::Read(Location::Temp(_)) => true,
+        Expr::Cast { expr, .. } => is_temp_read(expr),
+        Expr::Binary(BinOp::And, a, b) => {
+            matches!(b.as_ref(), Expr::Const(m, _) if {
+                let m = *m as u64;
+                m == 0xff || m == 0xffff || m == 0xffff_ffff || m == u64::MAX
+            }) && is_temp_read(a)
+        }
+        _ => false,
+    }
+}
+
+/// If `e` addresses `[esp ± const]` on the shared machine stack (esp = RegId(4)),
+/// return the signed displacement — used to key an esp-relative spill slot. A
+/// bare `esp` is displacement 0. Peels the 32-bit width mask on the esp read.
+fn esp_rel_disp(e: &Expr) -> Option<i64> {
+    if is_esp_expr(e) {
+        return Some(0);
+    }
+    if let Expr::Binary(op, a, b) = e {
+        match op {
+            BinOp::Add => {
+                if is_esp_expr(a) {
+                    if let Expr::Const(c, _) = b.as_ref() {
+                        return Some(*c as i64);
+                    }
+                }
+                if is_esp_expr(b) {
+                    if let Expr::Const(c, _) = a.as_ref() {
+                        return Some(*c as i64);
+                    }
+                }
+            }
+            BinOp::Sub => {
+                if is_esp_expr(a) {
+                    if let Expr::Const(c, _) = b.as_ref() {
+                        return Some(-(*c as i64));
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+/// If `e` is a load from an esp-relative slot (`reg = [esp ± const]`, the reload
+/// of a spilled pointer), return the slot's displacement. Peels a width mask/cast
+/// wrapping the load.
+fn load_esp_disp(e: &Expr) -> Option<i64> {
+    match e {
+        Expr::Load { addr, .. } => esp_rel_disp(addr),
+        Expr::Cast { expr, .. } => load_esp_disp(expr),
+        Expr::Binary(BinOp::And, a, b) => {
+            if let Expr::Const(m, _) = b.as_ref() {
+                let m = *m as u64;
+                if m == 0xff || m == 0xffff || m == 0xffff_ffff || m == u64::MAX {
+                    return load_esp_disp(a);
+                }
+            }
+            None
+        }
+        _ => None,
+    }
+}
+
+/// Fold an esp definition into the running frame delta. `esp = esp ± const`
+/// shifts the delta exactly; `esp += <injected callee-pop temp>` is neutral (an
+/// import pops nothing, and an internal callee-pop is undone by the compiler's
+/// own `sub esp, N` compensation — either way the accumulate-outgoing-args frame
+/// base is restored). Any other esp definition (a variable/alloca stack pointer)
+/// is unprovable, so the delta becomes `None` and esp-relative slots are dropped.
+fn update_esp_delta(expr: &Expr, esp_delta: &mut Option<i64>) {
+    if let Expr::Binary(op, a, b) = expr {
+        if is_esp_expr(a) {
+            match op {
+                BinOp::Add => {
+                    if let Expr::Const(c, _) = b.as_ref() {
+                        if let Some(d) = esp_delta.as_mut() {
+                            *d += *c as i64;
+                        }
+                        return;
+                    }
+                    if is_temp_read(b) {
+                        return; // injected callee-pop raise — frame-neutral
+                    }
+                }
+                BinOp::Sub => {
+                    if let Expr::Const(c, _) = b.as_ref() {
+                        if let Some(d) = esp_delta.as_mut() {
+                            *d -= *c as i64;
+                        }
+                        return;
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    *esp_delta = None;
+}
+
+/// Drop every esp-relative spill-slot mapping (`Frame` key) from `held`, keeping
+/// the register mappings. Used when esp becomes unprovable, or when a block does
+/// not restore the frame base on exit (so its slots cannot be interpreted at a
+/// successor whose entry esp is the frame base).
+fn drop_frame_slots(held: &mut HeldImports) {
+    held.retain(|k, _| !matches!(k, Location::Frame(_)));
+}
+
+/// Update the register/slot → import tracking after statement `s`, and fold the
+/// statement's esp effect into `esp_delta` (the offset from the block's entry
+/// esp, used to key esp-relative spill slots by a stable frame offset).
+///
+/// Records `reg = [iat]` direct loads of import slots, spills of an
+/// import-holding register to an esp-relative frame slot (`[esp+d] = reg`), and
+/// reloads of such a slot back into a register (`reg = [esp+d]`) — so a
+/// `call reg` through a register that ultimately came from an IAT slot (directly
+/// or via a stack spill, the pthread_once/`TlsGetValue` idiom) is recognised as
+/// an import and gets its `__stdcall` `@N` pop like a direct `call [iat]`. A
+/// register is invalidated when reassigned; an opaque `Asm` clobbers everything.
+fn update_import_regs(
+    s: &Stmt,
+    prog: &Program,
+    held: &mut HeldImports,
+    esp_delta: &mut Option<i64>,
+) {
+    // A recognised register/slot import call pops @N (the held-pop injected by the
+    // caller): fold it into the frame delta so slots stay keyed to the frame base.
+    if let Some(n) = stdcall_pop_for_regcall(s, held) {
+        if let Some(d) = esp_delta.as_mut() {
+            *d += n as i64;
+        }
+    }
     match s {
         Stmt::Set { dst, expr } => {
+            // esp itself is redefined: fold into the frame delta, never a name.
+            if *dst == Location::Reg(RegId(4)) {
+                update_esp_delta(expr, esp_delta);
+                if esp_delta.is_none() {
+                    drop_frame_slots(held);
+                }
+                held.remove(dst);
+                return;
+            }
+            // reg = [abs IAT]: the register now holds the import pointer.
             if let Some(a) = const_load_addr(expr) {
                 if let Some(name) = prog.import_name(a) {
                     held.insert(dst.clone(), sanitize_import(name));
                     return;
                 }
             }
+            // reg = [esp+d]: reload of a spilled import pointer.
+            if let (Some(disp), Some(base)) = (load_esp_disp(expr), *esp_delta) {
+                if let Some(name) = held.get(&Location::Frame(base + disp)).cloned() {
+                    held.insert(dst.clone(), name);
+                    return;
+                }
+            }
             held.remove(dst);
         }
-        Stmt::Asm(_) => held.clear(),
+        // [esp+d] = reg: spill of a register to a frame slot. Records the slot when
+        // the register holds an import; otherwise clears any stale mapping there.
+        Stmt::Store { addr, value, .. } => {
+            if let (Some(disp), Some(base)) = (esp_rel_disp(addr), *esp_delta) {
+                let slot = Location::Frame(base + disp);
+                if let Some(r) = peeled_reg(value) {
+                    if let Some(name) = held.get(r).cloned() {
+                        held.insert(slot, name);
+                        return;
+                    }
+                }
+                held.remove(&slot);
+            }
+        }
+        Stmt::Asm(_) => {
+            held.clear();
+            *esp_delta = None;
+        }
         _ => {}
     }
 }
@@ -2270,8 +2458,15 @@ fn block_entry_imports(blocks: &[Block], prog: &Program, entry: u64) -> Vec<Held
             // for a later round rather than pretending it starts empty.
             let Some(cur_in) = acc else { continue };
             let mut m = cur_in.clone();
+            let mut esp_delta: Option<i64> = Some(0);
             for s in &blocks[i].stmts {
-                update_import_regs(s, prog, &mut m);
+                update_import_regs(s, prog, &mut m, &mut esp_delta);
+            }
+            // A spill slot can only be interpreted at a successor whose entry esp
+            // is the frame base. If this block does not restore the frame base on
+            // exit, drop its esp-relative slots before they propagate.
+            if esp_delta != Some(0) {
+                drop_frame_slots(&mut m);
             }
             if outs[i].as_ref() != Some(&m) {
                 outs[i] = Some(m);

@@ -8921,3 +8921,34 @@ Suite de l'entrée « inversion tail-call » (0x0 atteint après ce fix). **Méc
 **Leçon de méthode (répétée)** : les portes closure/unitaires (difftest, funcdiff, hash) **ne voient pas** cette classe ; seul **winediff** (exécution OS-API réelle) l'attrape — d'où « large ⇒ winediff obligatoire », et **confirmer un fix par winediff AVANT commit** pour tout ce qui touche l'esp/pop des appels.
 
 > **⏩ Précision (même jour, racine FINALE — KN-0010).** Le mécanisme exact : `sub_a27500` = **`pthread_once`**. Motif original `mov eax,[0xa35268] ; call eax ; sub esp,4` — le `sub esp,4` **compense** le pop stdcall de `TlsGetValue` (`ret 4`) sous *accumulate-outgoing-args* (esp reste neutre). Or `src/ir/build.rs` modélise ça ainsi : un import **reconnu** reçoit `esp += @N` (mécanisme `import_call_raw_name` + `stdcall_pop_bytes`), et le `sub esp,N` compensatoire est soit lifté (net 0), soit **droppé** via `prev_unknown_import` (cas @N inconnu). **`import_call_raw_name` ne reconnaît que `call [abs]` (opérande mémoire), PAS `call reg`** (registre chargé d'un slot IAT). Donc le `call eax` de `pthread_once` n'est ni compensé (`+N`) ni droppé → le `sub esp,4` lifté **fait dériver esp de 4** → `[esp+0x1c]` lit un slot nul → `call 0`. Ce n'est donc **pas** un problème de table de pop (pop=0 est correct ; la table pop est le mauvais layer, d'où la régression winediff). **Le vrai fix** : reconnaître un `call reg` dont le registre porte une valeur de slot IAT (data-flow bloc-local, registres **et** spills pile — `pthread_once` a 1 appel direct reg-de-[IAT] + 2 via reload de `[esp+0x1c]`) comme un appel d'import, pour qu'il entre dans le mécanisme existant `+@N` / drop-du-`sub esp`. **Sûr** (ne touche que des appels prouvés vers un import), **winediff obligatoire** avant commit.
+
+### 2026-08-24 — [LIFT][ESP][IAT][§0.3 corriger la classe] **Mur 0x0 spirv-cross RÉSOLU : `call reg`-vers-IAT (registre + spill pile) reconnu comme import — data-flow bloc-local avec normalisation de frame, toutes portes vertes + winediff inchangé**
+
+Implémentation du fix KN-0010 (validé par instrumentation avant code, puis par toutes les portes). **Fichier unique : `src/ir/build.rs` (+202/−7).**
+
+**Vérité terrain (instrumentation du C généré, `sub_a27500` = `pthread_once`).** J'ai patché `chunk_137.c` (fprintf sur les 4 sites d'appel) + relink manuel (`gcc -m32 -no-pie *.o -lm`) pour lire les valeurs runtime — pas une déduction :
+```
+[DBG call1] v15=14636198 v127=a35268 v128=0      # call eax reg-direct : v141=v15, PAS de dérive ✓
+[DBG call2] v141=14636198 v175=a35268            # reload [esp+0x1c] : v175 correct (sentinel), MAIS...
+[DBG callEBP] v17=86fb40                          # call ebp (once-callback) : esp-neutre (pop 0)
+[DBG call3] v223=146360c0 v229=0                  # v223 = v15-4 (DÉRIVE -4) → [v223+0x1c] lit 0 → call 0
+```
+**Raffinement de la racine** : l'appel 1 (`mov eax,[0xa35268]; call eax`) est **déjà** reconnu par le mécanisme *held-import* existant (`mov reg,[IAT]` → `held[reg]=import`) → `+@N` appliqué → net 0. Les appels 2&3 rechargent le pointeur depuis le **spill pile** `[esp+0x1c]` (`mov eax,[esp+0x1c]; call eax`) : ce `call reg` n'est **pas** reconnu → pas de `+@N` → le `sub esp,4` compensatoire lifté n'est **pas** annulé → **esp dérive de −4** par appel non compensé. La dérive s'**accumule** : après l'appel 2 non compensé, esp=v15−4, donc le reload de l'appel 3 lit `[esp−4+0x1c]=[esp+0x18]` = slot nul → `call 0` → abort. `__aret_callee_pop(sentinel)=0` est **correct** (les imports ne dépilent rien à ce layer) : le `+@N` manquant doit venir du chemin *held* stdcall-pop, exactement ce que l'extension apporte.
+
+**Fix (extension du mécanisme held-import existant aux spills pile).** `HeldImports` (`HashMap<Location,String>`) portait déjà `reg → import` ; on lui ajoute les slots pile via `Location::Frame(offset)` (inutilisé en mode transpile, `FRAMES_OFF` actif ⇒ aucun `Frame` émis par le lifter → zéro collision). `update_import_regs` gagne :
+- `[esp+d] = reg` (held) → `held[Frame(base+d)] = import` (spill) ;
+- `reg = [esp+d]` où `Frame(base+d)` est held → `held[reg] = import` (reload) ;
+- suivi d'un **delta esp** (`Option<i64>`, offset depuis l'esp d'entrée de bloc) pour normaliser les slots au **frame de base** : `esp = esp ± const` décale le delta ; `esp += <temp callee-pop injecté>` est neutre (un import ne dépile rien ; un callee-pop interne est annulé par le `sub esp` compensatoire) ; un appel import **reconnu** crédite `+@N` (miroir du held-pop injecté) ; tout autre write esp ⇒ delta `None` ⇒ slots pile largués (sûr).
+
+Cross-bloc : le data-flow MUST existant (`block_entry_imports`, méet par intersection) porte aussi les clés `Frame` ; chaque bloc part à delta 0 (frame de base) et **largue ses slots pile en sortie s'il ne restaure pas le frame de base** (`esp_delta != Some(0)`) — un slot ne traverse un bord que si l'esp d'entrée du successeur est le frame de base (invariant *accumulate-outgoing-args*, prouvé par le suivi delta, jamais supposé → §0.4). Le fixpoint converge : reconnaître l'appel 2 rend son bloc esp-neutre → l'appel 3 est reconnu à son tour.
+
+**Sûr et additif** : ne touche ni `call [abs]` (chemin `import_call_raw_name` inchangé) ni `call reg` reg-direct (déjà géré) ni un `call reg` interne (pas de mapping held) ; n'**ajoute** de la reconnaissance que là où il n'y en avait aucune.
+
+**Portes (toutes vertes, aret reconstruit propre 52 s).**
+- hash transpile **`19acad982194bf07` INCHANGÉ** (4/4) — preuve que le changement est **strictement additif** sur le corpus (aucun binaire du corpus n'a l'idiome spill-reload).
+- difftest **272/272** ; funcdiff **0 divergence** (lift 22672 / opt 11602).
+- **winediff 261/264 — INCHANGÉ vs baseline** (la SEULE porte qui avait attrapé la régression table-pop 261→167 ; ici zéro régression).
+- m1_transpile **51/52** (seul rouge = `stripped_full_crt_via_flirt` pré-existant ; `win32_native_kernel32_layer` + `win32_system_info_and_sync`, que la tentative « mécanisme parallèle » avait régressés par double-pop, sont **VERTS**).
+- **Preuve fonctionnelle** : `app frag.spv` (auto-lift) **exit 0** et rend la sortie GLSL **exactement identique à l'oracle** (`#version 450 / void main(){}`). Le mur 0x0 est **franchi**.
+
+**Leçon** : le double-pop (mécanisme parallèle) et la table-pop globale échouaient parce qu'ils touchaient des appels **déjà correctement dépilés** ; le bon layer était le **mécanisme held-import existant**, étendu aux spills — un seul `+@N`, appliqué là où il manquait. Le suivi de frame (delta esp + largage en sortie de bloc non équilibrée) rend la reconnaissance des slots pile **sûre** sans supposer *accumulate-outgoing-args*. (MMU : KN-0010 → PROUVÉE.)

@@ -282,15 +282,20 @@ construisait `succ=[fallthrough, taken]` alors que l'émetteur lit `succ[0]=take
 l'init TLS de libstdc++ abortait quand `TlsAlloc` **réussissait** (SIGABRT muet = shim de l'import C `abort()`). Fix additif
 (`succ.insert(0, synth)`), **toutes portes vertes** (hash inchangé, difftest 272/272, funcdiff 0-div, winediff 261/264,
 `lift_libstdcxx`/`stdstring`/`stdexcept`/`stddtor`/`stdthrow` e2e verts). spirv-cross **franchit l'abort TLS** et atteint le
-**`0x0` honnête** anticipé le 2026-08-21 (appel indirect NULL dans `sub_a27500`, libstdc++). **⏳ MAJ 2026-08-23 (ter) — mur
-`0x0` = dérive esp de 4 o (mécanisme confirmé, fix à concevoir ; KN-0008/0009)** : gdb à `chunk_137.c:7473` — l'esp threadé
-dépend de `__aret_callee_pop([0xa35268])` où `[0xa35268]` = **sentinel IAT de TlsGetValue** (`ret 4`) ; `__aret_callee_pop`
-rend **0** (les VA IAT ne sont ni dans `aret_poptab` ni `aret_delay_pop`) ⇒ esp 4 bas ⇒ `[esp+0x1c]` lit un slot nul ⇒ `call 0`.
-Forcer le pop à 4 fait tomber le mur (mécanisme prouvé). **MAIS** le fix général naïf (ajouter les VA IAT/host à `aret_poptab`)
-**régresse winediff 261→167** (`lstrcat` corrompu, 22 GDI crashent) — car le pop d'un sentinel IAT est **contextuel** : `call [IAT]`
-(mémoire-indirect) veut pop 0, `call reg` (registre-indirect chargé de `[IAT]`) veut pop N, **même VA** ⇒ table clé-par-VA
-impossible. Fix reverté. **Vrai fix** = discriminer au site d'appel (`callee_pop_adjust`) mémoire-indirect vs registre-indirect.
-Détail doc 71 2026-08-23.
+**`0x0` honnête** anticipé le 2026-08-21 (appel indirect NULL dans `sub_a27500`=`pthread_once`). **✅ RÉSOLU 2026-08-24
+(KN-0010 PROUVÉE)** : le mur `0x0` était une **dérive esp de −4** — un `call reg` dont le registre porte un pointeur de slot
+IAT rechargé depuis un **spill pile** (`mov eax,[esp+0x1c]; call eax`) n'était **pas** reconnu comme import → le `sub esp,4`
+compensatoire lifté n'était pas annulé (`+@N`) → dérive accumulée → un reload ultérieur `[esp+0x1c]` lit un slot nul → `call 0`.
+Instrumentation runtime (fprintf sur les 4 sites de `sub_a27500` + relink) : l'appel reg-**direct** marchait déjà (held-import),
+seuls les 2 appels via **reload de spill** dérivaient. **Fix** (`src/ir/build.rs`, +202/−7) : extension du mécanisme *held-import*
+existant aux **spills pile** — suivi bloc-local `mov [esp+d],reg` (spill) → `mov reg,[esp+d]` (reload) → `call reg`, slots clés
+par `Location::Frame(offset)` normalisés au frame de base via un **delta esp** (`Option<i64>` : `esp±const` décale, callee-pop
+injecté neutre, import reconnu crédite `+@N`, tout autre write esp ⇒ `None` ⇒ slots largués), propagé cross-bloc par le data-flow
+MUST existant (`block_entry_imports`) avec largage des slots en sortie de bloc non équilibrée (sûr, jamais supposé). **Additif**
+(hash `19acad982194bf07` INCHANGÉ) : ne touche ni `call [abs]` ni reg-direct ni `call reg` interne. **Portes toutes vertes** :
+difftest 272/272, funcdiff 0-div, **winediff 261/264 INCHANGÉ** (seule porte ayant attrapé la régression table-pop), m1_transpile
+51/52 (win32 e2e verts). **Preuve** : `app frag.spv` exit 0, sortie GLSL = oracle. **La table-pop globale (reverté) et le
+mécanisme parallèle (double-pop) étaient le mauvais layer** ; le bon = étendre le held-import. Détail doc 71 2026-08-24.
 **Environnement/oracle** : la pile de test (wine, mingw, `gcc -m32`, unicorn, zstd) est **auto-provisionnée** par
 `.claude/hooks/session-start.sh` — réinstallée automatiquement après un reset conteneur nu (fix `libgd3:i386`, 2026-08-17). **Axe OS wide-char COUVERT** (fichier `_w*`, Win32 FS/volumes `*W`, locale/stdio wide, introspection
 process/thread + reliquats `_sopen`/`isleadbyte`/…). **Mesure corpus post-lift (doc 90, 2026-08-15)** : lifter le runtime
