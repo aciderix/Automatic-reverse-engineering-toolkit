@@ -16,6 +16,7 @@
 #include <ctype.h>
 #include <errno.h>
 #include <time.h>
+#include <utime.h>
 #include <dirent.h>
 #include <fnmatch.h>
 #ifndef __wasm__
@@ -1082,6 +1083,35 @@ uint32_t aret_chmod(uint32_t esp) {
     char path[1024];
     translate_path((const char *)(uintptr_t)arg(esp, 0), path, sizeof path);
     return (uint32_t)chmod(path, (int)arg(esp, 1));
+}
+
+/* _utime/_utime32(path, struct __utimbuf32*): set a file's access & modification
+ * times. The MSVC6/32-bit-time_t guest struct is two 32-bit time_t (actime@0,
+ * modtime@4); a NULL pointer means "now", exactly as msvcrt. Returns 0 / -1.
+ * _utime64 is identical with 64-bit fields (the modern MinGW default). Path is
+ * guest->host translated like every other file op. */
+uint32_t aret_utime32(uint32_t esp) {
+    char path[1024];
+    translate_path((const char *)(uintptr_t)arg(esp, 0), path, sizeof path);
+    uint32_t p = arg(esp, 1);
+    if (!p) return (uint32_t)utime(path, NULL);
+    const int32_t *t = (const int32_t *)(uintptr_t)p;
+    struct utimbuf ub;
+    ub.actime = (time_t)t[0];
+    ub.modtime = (time_t)t[1];
+    return (uint32_t)utime(path, &ub);
+}
+uint32_t aret_utime(uint32_t esp) { return aret_utime32(esp); }
+uint32_t aret_utime64(uint32_t esp) {
+    char path[1024];
+    translate_path((const char *)(uintptr_t)arg(esp, 0), path, sizeof path);
+    uint32_t p = arg(esp, 1);
+    if (!p) return (uint32_t)utime(path, NULL);
+    const int64_t *t = (const int64_t *)(uintptr_t)p;
+    struct utimbuf ub;
+    ub.actime = (time_t)t[0];
+    ub.modtime = (time_t)t[1];
+    return (uint32_t)utime(path, &ub);
 }
 
 /* freopen(path, mode, stream): reopen `stream` on `path`. A null/synthetic _iob
