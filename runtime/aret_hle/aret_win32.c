@@ -3314,6 +3314,15 @@ uint32_t aret_GetConsoleCP(uint32_t esp) {
     return (isatty(0) || isatty(1) || isatty(2)) ? 437u : 0u;
 }
 uint32_t aret_GetConsoleOutputCP(uint32_t esp) { return aret_GetConsoleCP(esp); }
+/* SetConsoleOutputCP/SetConsoleCP: ARET emits console bytes raw (no code-page
+ * transcoding), so the requested CP never changes the emitted byte stream. Mirror
+ * the console model of GetConsoleCP: with a console present, accept a nonzero CP
+ * and report success; with none (redirected to a pipe/file, as under the
+ * differential harness) fail, exactly as Windows/Wine which require a console. */
+uint32_t aret_SetConsoleOutputCP(uint32_t esp) {
+    if (!(isatty(0) || isatty(1) || isatty(2))) return 0u;
+    return WU(0) ? 1u : 0u;
+}
 /* WriteConsoleW writes only to a real console; on a redirected handle it fails
  * (the caller then falls back to WriteFile) — match that so output isn't doubled. */
 uint32_t aret_WriteConsoleW(uint32_t esp) {

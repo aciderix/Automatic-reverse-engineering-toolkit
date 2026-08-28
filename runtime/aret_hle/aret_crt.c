@@ -807,6 +807,20 @@ CTYPE1(isgraph, isgraph)
 CTYPE1(isxdigit, isxdigit)
 #undef CTYPE1
 
+/* msvcrt string case-fold in place, returning the same buffer. _strlwr/_strupr
+ * are locale-sensitive on Windows; in the C locale (the transpiled default) they
+ * fold ASCII A-Z / a-z, exactly what tolower/toupper give. `str*` and `_str*`
+ * both sanitize to these (leading underscore stripped). */
+uint32_t aret_strlwr(uint32_t esp) { char *s = AS(0); if (s) for (char *p = s; *p; p++) *p = (char)tolower((unsigned char)*p); return RP(s); }
+uint32_t aret_strupr(uint32_t esp) { char *s = AS(0); if (s) for (char *p = s; *p; p++) *p = (char)toupper((unsigned char)*p); return RP(s); }
+
+/* msvcrt _umask sets the file-creation permission mask and returns the previous
+ * one. ARET's file shims create through the host, so applying the host umask is
+ * the consistent behavior (Set-then-restore round-trips, Set returns the old
+ * mask). msvcrt's _S_IWRITE (0x80) / _S_IREAD (0x100) mask bits coincide with the
+ * POSIX owner bits S_IWUSR (0200) / S_IRUSR (0400), so the value maps straight. */
+uint32_t aret_umask(uint32_t esp) { return (uint32_t)umask((mode_t)AU(0)); }
+
 /* ------------------------------------------------------------------ */
 /* <stdlib.h> — qsort / bsearch (callback into transpiled code)       */
 /* ------------------------------------------------------------------ */
