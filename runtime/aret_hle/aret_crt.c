@@ -1556,6 +1556,37 @@ uint32_t aret_system(uint32_t esp) {
     return st < 0 ? (uint32_t)-1 : (uint32_t)((st >> 8) & 0xff);
 }
 
+/* _wsystem(cmd): the wide sibling of system(). ARET has no cmd.exe, so command
+ * OUTPUT follows the host shell, but the returned EXIT CODE matches (both cmd and
+ * sh return N for `exit N`). Narrow the 16-bit guest wide string to bytes (command
+ * text is ASCII) then reuse the system() exit-code extraction. NULL -> non-zero. */
+uint32_t aret_wsystem(uint32_t esp) {
+    const uint16_t *w = (const uint16_t *)(uintptr_t)a32(esp, 0);
+    if (!w) return 1;
+    char buf[8192];
+    size_t i = 0;
+    for (; w[i] && i < sizeof buf - 1; i++) buf[i] = (char)(w[i] & 0xff);
+    buf[i] = 0;
+    int st = system(buf);
+    return st < 0 ? (uint32_t)-1 : (uint32_t)((st >> 8) & 0xff);
+}
+
+/* _putenv_s(name, value) -> errno_t. Sets name=value in the environment; an EMPTY
+ * value REMOVES the variable, exactly as msvcrt. NULL name/value -> EINVAL(22).
+ * Maps onto host setenv/unsetenv (the environment is shared with getenv/_putenv). */
+uint32_t aret_putenv_s(uint32_t esp) {
+    const char *name = ACS(0), *val = ACS(1);
+    if (!name || !val) { errno = 22; return 22u; }
+    if (val[0] == '\0') { unsetenv(name); return 0u; }
+    return setenv(name, val, 1) == 0 ? 0u : (uint32_t)errno;
+}
+
+/* _getch/_getche deliberately NOT shimmed: on Windows they read from the console
+ * (CONIN$), ignoring stdin redirection — a semantics ARET has no console to honor.
+ * Mapping them to stdin diverges from the Windows oracle (verified: Wine returns
+ * console garbage on a redirected handle), so leave the weak stub's loud abort
+ * rather than return bytes that no real console produced (§0). */
+
 /* tmpnam([s]): a unique temporary name. msvcrt returns a bare name (used under
  * the temp dir); a monotonic counter suffices and is path-translated on open. */
 uint32_t aret_tmpnam(uint32_t esp) {
