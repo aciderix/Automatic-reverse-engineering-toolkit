@@ -871,6 +871,35 @@ uint32_t aret_wcscat(uint32_t esp) {
     while ((*d++ = *s++)) {}
     return (uint32_t)(uintptr_t)r;
 }
+/* wcstombs(dst, src, count): 16-bit wide -> multibyte. ARET's CRT locale is always
+ * "C" (aret_setlocale is a reporting no-op), so this MODELS the msvcrt "C" locale,
+ * MEASURED bit-for-bit against Wine (winecorpus b1proof/wm.c):
+ *   - a wchar < 0x100 maps to its low byte (ASCII and Latin-1 alike);
+ *   - a wchar >= 0x100 is inconvertible -> return (size_t)-1 (EILSEQ), having
+ *     written the bytes up to (not including) it — msvcrt does not NUL-terminate then;
+ *   - dst == NULL measures: the byte count for the whole string (count ignored);
+ *   - the NUL is written only if it fits within `count` (return == count => no NUL).
+ * A program that set a non-C locale would get CP_ACP on Windows, but ARET's
+ * setlocale is unmodeled (always "C"), so C-locale semantics are the consistent
+ * and oracle-correct choice here; the wider locale gap is tracked separately. */
+uint32_t aret_wcstombs(uint32_t esp) {
+    char *dst = (char *)(uintptr_t)a32(esp, 0);
+    const uint16_t *src = (const uint16_t *)(uintptr_t)a32(esp, 1);
+    size_t count = (size_t)a32(esp, 2);
+    if (!src) { errno = EINVAL; return (uint32_t)-1; }
+    size_t i = 0;
+    if (!dst) {                                   /* measure the whole string */
+        for (; src[i]; i++)
+            if (src[i] > 0xff) { errno = EILSEQ; return (uint32_t)-1; }
+        return (uint32_t)i;
+    }
+    for (; i < count && src[i]; i++) {
+        if (src[i] > 0xff) { errno = EILSEQ; return (uint32_t)-1; }
+        dst[i] = (char)src[i];
+    }
+    if (i < count) dst[i] = 0;                     /* NUL-terminate only if room */
+    return (uint32_t)i;
+}
 /* wcscat_s(dest, destsz, src) -> errno_t. Annex K / MSVC secure append, with the
  * exact msvcrt behaviour MEASURED against Wine (7 cases, `winecorpus/crt_wcscat_s.c`):
  *   - destsz == 0 or dest == NULL      -> EINVAL(22), destination left UNTOUCHED;
