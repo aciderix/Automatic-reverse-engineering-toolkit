@@ -162,6 +162,13 @@ fn inline_frame_helper(
 /// `esp` with a general register. The alignment the `_16`/`_8` variants add is
 /// dropped (the buffer is then exactly the requested size, still sound).
 fn is_stack_alloc_helper(prog: &Program, disasm: &Disassembler, entry: u64) -> bool {
+    is_xchg_stack_probe(prog, disasm, entry) || is_movesp_stack_probe(prog, disasm, entry)
+}
+
+/// The mingw/`xchg`-based stack-probe: detected by the unmistakable `xchg esp, eax`
+/// (the helper swaps the computed target into `esp`), found by a bounded scan that
+/// follows the tail `jmp` the aligned entry variants use to reach the worker.
+fn is_xchg_stack_probe(prog: &Program, disasm: &Disassembler, entry: u64) -> bool {
     use iced_x86::{Mnemonic, Register};
     let mut addr = entry;
     for _ in 0..48 {
@@ -184,6 +191,75 @@ fn is_stack_alloc_helper(prog: &Program, disasm: &Disassembler, entry: u64) -> b
             Flow::Fallthrough | Flow::CondJump => addr = insn.next_addr(),
             _ => return false,
         }
+    }
+    false
+}
+
+/// The MSVC6 `_chkstk` variant that swaps `esp` via `mov esp, <reg>` (not `xchg`)
+/// and returns via a register-indirect `jmp <reg>` (the register holds the return
+/// address it loaded off the machine stack). ARET's by-value shared-stack model
+/// never populates that return-address slot, so if the body runs, the `jmp reg`
+/// return is lifted as an indirect call to `reg` = 0 (or a stale return address) —
+/// an `aret_call(0)` abort mid-startup (comm/cp/cat/od/md5sum/... UnxUtils). We
+/// recognise it here so the call site models it as `esp -= eax` like the `xchg`
+/// variant, never executing the body.
+///
+/// Detection is keyed on the *combination* that only a stack probe exhibits — the
+/// 4 KiB guard-page step (`cmp`/`sub <gpreg>, 0x1000`), the esp swap into a
+/// general register (never `ebp`, so a `mov esp, ebp` epilogue can't match), and a
+/// register-indirect return — scanned in address order (not by control flow, so
+/// the guard-page *loop* doesn't trap the scan) after following a leading aligned
+/// `jmp worker` thunk. All three are required, so normal code never matches.
+fn is_movesp_stack_probe(prog: &Program, disasm: &Disassembler, entry: u64) -> bool {
+    use iced_x86::{Mnemonic, OpKind, Register};
+    let mut addr = entry;
+    // Aligned-entry variant: follow a leading `jmp worker` once, then scan the
+    // worker linearly.
+    if let Some(first) = disasm.decode_at(prog, addr) {
+        if first.flow == Flow::Jump {
+            match first.target {
+                Some(t) => addr = t,
+                None => return false,
+            }
+        }
+    } else {
+        return false;
+    }
+    let mut saw_probe = false;
+    let mut saw_swap = false;
+    for _ in 0..48 {
+        let Some(insn) = disasm.decode_at(prog, addr) else { return false };
+        let r = &insn.raw;
+        // 4 KiB guard-page probe: `cmp`/`sub <gpreg>, 0x1000`.
+        if matches!(r.mnemonic(), Mnemonic::Cmp | Mnemonic::Sub)
+            && r.op0_kind() == OpKind::Register
+            && matches!(
+                r.op1_kind(),
+                OpKind::Immediate8 | OpKind::Immediate8to16 | OpKind::Immediate8to32
+                    | OpKind::Immediate16 | OpKind::Immediate32
+            )
+            && r.immediate(1) == 0x1000
+        {
+            saw_probe = true;
+        }
+        // esp swap into a general register (the probed target pointer), never ebp.
+        if r.mnemonic() == Mnemonic::Mov
+            && r.op0_register() == Register::ESP
+            && matches!(
+                r.op1_register(),
+                Register::EAX | Register::ECX | Register::EDX | Register::EBX
+            )
+        {
+            saw_swap = true;
+        }
+        // A register-indirect `jmp reg` (or a plain `ret`) closes the routine: the
+        // signature holds only if we saw both the guard probe and the esp swap.
+        if (insn.flow == Flow::Indirect && r.op0_kind() == OpKind::Register)
+            || insn.flow == Flow::Return
+        {
+            return saw_probe && saw_swap;
+        }
+        addr = insn.next_addr(); // linear (address order) — survives the probe loop
     }
     false
 }
