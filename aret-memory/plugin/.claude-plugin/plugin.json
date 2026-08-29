@@ -1,0 +1,16 @@
+{
+  "name": "aret-mmu",
+  "displayName": "ARET-MMU",
+  "version": "0.1.0",
+  "description": "Memoire durable deterministe (SQLite) + facade d'oracles/pipelines ARET a liste fermee, barriere de reprise et synchronisation Git. Cable en un geste le serveur MCP aret-memory et ses hooks (remplace les etapes manuelles d'INSTALL.md). Suppose le paquet vendored sous <racine-du-projet>/aret-memory/.",
+  "author": { "name": "ARET" },
+  "keywords": ["aret", "memory", "mcp", "reverse-engineering", "oracle", "provenance"],
+  "hooks": "./hooks/hooks.json",
+  "mcpServers": {
+    "aret-memory": {
+      "command": "${CLAUDE_PROJECT_DIR}/aret-memory/scripts/launch_aret_mcp.sh",
+      "args": ["--memory-dir", "${CLAUDE_PROJECT_DIR}/aret-memory/.aret-memory"],
+      "env": { "ARET_WRITE_ENABLED": "true" }
+    }
+  }
+}
