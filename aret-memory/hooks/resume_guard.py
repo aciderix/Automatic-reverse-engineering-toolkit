@@ -13,6 +13,7 @@ import hashlib
 import json
 import os
 import sys
+import time
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -34,16 +35,83 @@ RITUAL_FIELDS: tuple[tuple[str, str, int], ...] = (
 
 _TRUTHY = {"1", "true", "yes", "on"}
 
+# Fenêtre de fraîcheur du marqueur de vivacité du serveur MCP. Au-delà, on considère
+# le canal d'acquittement (aret_acknowledge_resume) injoignable et la barrière NE
+# hard-bloque PAS — anti-deadlock. Généreux pour éviter un faux « serveur mort »
+# sous charge ; le serveur rafraîchit le marqueur par heartbeat (~20 s).
+MCP_LIVENESS_MAX_AGE_S = 90.0
 
-def barrier_disabled() -> bool:
-    """Kill-switch d'exploitation : une voie de sortie TOUJOURS disponible.
 
-    Une barrière ne doit jamais pouvoir s'armer sans issue. Même en mode dur,
-    si l'acquittement MCP est inatteignable (serveur non connecté), l'opérateur
-    doit pouvoir lever la garde sans éditer de code : `ARET_MMU_BARRIER_OFF=1`.
+def _runtime_root(memory_dir: Path) -> Path:
+    return memory_dir / "runtime"
+
+
+def barrier_off_sentinel(memory_dir: Path | None) -> Path | None:
+    """Fichier sentinelle du kill-switch, à la RACINE de runtime/ pour être trouvable."""
+    if memory_dir is None:
+        return None
+    return _runtime_root(memory_dir) / "BARRIER_OFF"
+
+
+def barrier_disabled(memory_dir: Path | None = None) -> bool:
+    """Kill-switch d'exploitation : DEUX voies de sortie, toujours disponibles.
+
+    Une barrière ne doit jamais pouvoir s'armer sans issue. Même en mode dur, si
+    l'acquittement MCP est inatteignable (serveur non connecté), on doit pouvoir
+    lever la garde sans éditer de code :
+      1. `ARET_MMU_BARRIER_OFF=1` — mais l'env d'un hook est FIGÉ au démarrage de la
+         session : inatteignable en cours de route (leçon du deadlock vécu).
+      2. `runtime/BARRIER_OFF` — un fichier que l'opérateur OU l'agent peut créer
+         À TOUT MOMENT ; c'est la vraie voie de sortie en cours de session.
     Vaut pour PreToolUse comme pour Stop.
     """
-    return os.environ.get("ARET_MMU_BARRIER_OFF", "").strip().lower() in _TRUTHY
+    if os.environ.get("ARET_MMU_BARRIER_OFF", "").strip().lower() in _TRUTHY:
+        return True
+    sentinel = barrier_off_sentinel(memory_dir)
+    if sentinel is not None:
+        try:
+            if sentinel.exists():
+                return True
+        except OSError:
+            pass
+    return False
+
+
+def mcp_ready_marker(memory_dir: Path) -> Path:
+    return _runtime_root(memory_dir) / "mcp_ready"
+
+
+def touch_mcp_ready(memory_dir: Path) -> None:
+    """Écrit/rafraîchit le marqueur de vivacité — appelé par le serveur MCP (au
+    démarrage puis en heartbeat). Sa présence FRAÎCHE prouve que la porte de sortie
+    (aret_acknowledge_resume) est réellement atteignable."""
+    root = _runtime_root(memory_dir)
+    root.mkdir(parents=True, exist_ok=True)
+    tmp = root / "mcp_ready.tmp"
+    tmp.write_text(utc_now() + "\n", encoding="utf-8")
+    tmp.replace(root / "mcp_ready")
+
+
+def mcp_channel_alive(memory_dir: Path, now: float | None = None) -> bool:
+    """Le canal d'acquittement (serveur MCP) est-il PROUVÉ vivant ?
+
+    Marqueur `runtime/mcp_ready` absent ou périmé (> MCP_LIVENESS_MAX_AGE_S) ⇒ on ne
+    peut PAS garantir que aret_acknowledge_resume est atteignable ⇒ la barrière ne
+    doit pas hard-bloquer (sinon deadlock, exactement le cas vécu)."""
+    marker = mcp_ready_marker(memory_dir)
+    try:
+        age = (time.time() if now is None else now) - marker.stat().st_mtime
+    except OSError:
+        return False
+    return age <= MCP_LIVENESS_MAX_AGE_S
+
+
+def _is_schema_load_tool(payload: dict[str, Any]) -> bool:
+    """ToolSearch charge le SCHÉMA d'un outil différé — dont la porte de sortie
+    (aret_acknowledge_resume) elle-même quand les ~44 outils MCP sont « deferred ».
+    Le bloquer rendait l'acquittement impossible (chicken-and-egg vécu). Charger un
+    schéma n'est pas agir : les VRAIS appels d'outils restent refusés."""
+    return str(payload.get("tool_name", "")) == "ToolSearch"
 
 
 def utc_now() -> str:
@@ -217,7 +285,7 @@ def ritual_prompt(resume_contract_hash: str) -> str:
 
 
 def decision(memory_dir: Path, payload: dict[str, Any]) -> dict[str, Any] | None:
-    if barrier_disabled():
+    if barrier_disabled(memory_dir):
         return None
     state = load_state(memory_dir, payload)
     if state is None:
@@ -227,6 +295,19 @@ def decision(memory_dir: Path, payload: dict[str, Any]) -> dict[str, Any] | None
         # (SessionStart/PostCompact) et le nudge Stop reste actif ; on n'impose
         # PAS de blocage dur sans voie de sortie fiable — c'est ce qui a deadlocké.
         return None
+    if state.get("acknowledged_at"):
+        return None
+    if is_resume_acknowledgement(payload):
+        return None
+    # Charger le schéma de la porte de sortie ne doit JAMAIS être bloqué par la
+    # barrière elle-même (sinon on ne peut pas appeler aret_acknowledge_resume).
+    if _is_schema_load_tool(payload):
+        return None
+    # SONDE DE DISPONIBILITÉ (correctif n°1) : ne hard-bloquer QUE si la porte de
+    # sortie (serveur MCP → aret_acknowledge_resume) est PROUVÉE joignable. Serveur
+    # non connecté ⇒ aucun blocage dur : la barrière ne s'arme jamais sans issue.
+    if not mcp_channel_alive(memory_dir):
+        return None
     if session_identity(payload) is None:
         return {
             "hookSpecificOutput": {
@@ -235,10 +316,6 @@ def decision(memory_dir: Path, payload: dict[str, Any]) -> dict[str, Any] | None
                 "permissionDecisionReason": "BARRIÈRE DE REPRISE ARET-MMU : identité de session absente ; reprise refusée fail-closed.",
             }
         }
-    if state.get("acknowledged_at"):
-        return None
-    if is_resume_acknowledgement(payload):
-        return None
     return {
         "hookSpecificOutput": {
             "hookEventName": "PreToolUse",
@@ -256,7 +333,7 @@ def stop_feedback(memory_dir: Path, payload: dict[str, Any]) -> dict[str, Any] |
     borné à une seule passe (stop_hook_active) — il avertit sans jamais bloquer.
     Le kill-switch d'exploitation le désarme aussi.
     """
-    if barrier_disabled():
+    if barrier_disabled(memory_dir):
         return None
     state = load_state(memory_dir, payload)
     if state is None or state.get("acknowledged_at") or payload.get("stop_hook_active") is True:

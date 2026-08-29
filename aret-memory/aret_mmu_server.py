@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import argparse
 import os
+import threading
+import time
 from typing import Any
 
 from mcp.server import MCPServer
@@ -13,7 +15,7 @@ from pathlib import Path
 from core.repository import AretError, MemoryStore
 from evidence.adapters.oracles import run_oracle
 from evidence.adapters.pipelines import pipeline_catalog, register_asset, run_pipeline, toolchain_status
-from hooks.resume_guard import validate_recap
+from hooks.resume_guard import touch_mcp_ready, validate_recap
 from ops.git_memory import GitMemoryError, automatic_sync
 
 SERVER_INSTRUCTIONS = """ARET-MMU fournit une mémoire durable déterministe et une façade de pipelines ARET à liste fermée. Utilisez FIND uniquement pour découvrir des candidats, puis READ ou READ_BATCH sur les adresses explicitement sélectionnées pour récupérer le contenu canonique. Ne déduisez jamais une preuve d’un score de recherche. PROVEN exige une preuve PASS admissible. Consultez d’abord aret_get_pipeline_catalog et utilisez aret_run_pipeline en dry_run ; les pipelines génératifs, réseau et sensibles exigent leurs confirmations explicites. Aucun shell, URL ou push Git arbitraire n’est exposé.
@@ -593,10 +595,34 @@ def main() -> None:
     if args.write_enabled:
         os.environ["ARET_WRITE_ENABLED"] = "true"
     store = MemoryStore()
+    _start_liveness_heartbeat(store.memory_dir)
     if args.streamable_http:
         mcp.run("streamable-http", host=args.host, port=args.port, streamable_http_path="/mcp")
     else:
         mcp.run("stdio")
+
+
+def _start_liveness_heartbeat(memory_dir: Path) -> None:
+    """Marqueur de vivacité pour la barrière de reprise (hooks/resume_guard).
+
+    Écrit `runtime/mcp_ready` au démarrage puis le rafraîchit toutes les ~20 s via un
+    thread démon. Sa présence FRAÎCHE prouve à la barrière PreToolUse que la porte de
+    sortie (aret_acknowledge_resume) est réellement atteignable — sans quoi la barrière
+    ne hard-bloque pas (anti-deadlock). Best-effort : jamais fatal, n'écrit rien sur
+    stdout (réservé au flux MCP stdio)."""
+    def _beat() -> None:
+        while True:
+            try:
+                touch_mcp_ready(memory_dir)
+            except Exception:  # noqa: BLE001 — le heartbeat ne doit jamais tuer le serveur
+                pass
+            time.sleep(20)
+
+    try:
+        touch_mcp_ready(memory_dir)
+    except Exception:  # noqa: BLE001
+        pass
+    threading.Thread(target=_beat, name="aret-mmu-liveness", daemon=True).start()
 
 
 if __name__ == "__main__":

@@ -1,9 +1,22 @@
 from __future__ import annotations
 
+import os
+import time
 from pathlib import Path
 
 from core.repository import MemoryStore
-from hooks.resume_guard import acknowledge, arm, decision, state_path, stop_feedback, validate_recap
+from hooks.resume_guard import (
+    MCP_LIVENESS_MAX_AGE_S,
+    acknowledge,
+    arm,
+    barrier_off_sentinel,
+    decision,
+    mcp_ready_marker,
+    state_path,
+    stop_feedback,
+    touch_mcp_ready,
+    validate_recap,
+)
 
 
 RESUME_HASH = "a" * 64
@@ -83,6 +96,7 @@ def test_resume_guard_blocks_until_a_complete_ritual_recap_is_acknowledged(tmp_p
     session = {"session_id": "test-resume"}
     armed = arm(memory_dir, session, reason="SessionStart", resume_contract_hash=RESUME_HASH)
     assert armed["status"] == "awaiting_recap"
+    touch_mcp_ready(memory_dir)  # serveur MCP joignable ⇒ la porte de sortie existe ⇒ hard-block
 
     blocked = decision(memory_dir, {**session, "tool_name": "Bash", "tool_input": {"command": "true"}})
     assert blocked is not None
@@ -140,6 +154,7 @@ def test_resume_guard_scopes_distinct_sessions_and_fallback_identities(tmp_path:
     )
     states = [arm(memory_dir, session, reason="SessionStart", resume_contract_hash=RESUME_HASH) for session in sessions]
     assert all(state["status"] == "awaiting_recap" for state in states)
+    touch_mcp_ready(memory_dir)  # serveur joignable ⇒ hard-block effectif
 
     # Les quatre évènements utilisent des clés distinctes : aucun acquittement ne peut traverser leur scope.
     state_files = {state_path(memory_dir, session) for session in sessions}
@@ -176,6 +191,7 @@ def test_ready_barrier_is_hard_and_blocks_until_acknowledged(tmp_path: Path) -> 
     session = {"session_id": "test-ready"}
     armed = arm(memory_dir, session, reason="SessionStart", resume_contract_hash=RESUME_HASH, ready=True)
     assert armed["mode"] == "hard"
+    touch_mcp_ready(memory_dir)  # serveur joignable ⇒ hard-block effectif
 
     blocked = decision(memory_dir, {**session, "tool_name": "Bash", "tool_input": {"command": "true"}})
     assert blocked is not None
@@ -198,6 +214,7 @@ def test_env_kill_switch_releases_even_a_hard_barrier(tmp_path, monkeypatch) -> 
     memory_dir = tmp_path / "memory"
     session = {"session_id": "test-killswitch"}
     arm(memory_dir, session, reason="SessionStart", resume_contract_hash=RESUME_HASH, ready=True)
+    touch_mcp_ready(memory_dir)  # serveur joignable ⇒ hard-block (que le kill-switch doit lever)
 
     monkeypatch.delenv("ARET_MMU_BARRIER_OFF", raising=False)
     assert decision(memory_dir, {**session, "tool_name": "Bash"}) is not None  # dur : bloque
@@ -248,6 +265,7 @@ def test_resume_source_preserves_acknowledgement_without_a_new_ritual(tmp_path: 
     memory_dir = tmp_path / "memory"
     session = {"session_id": "test-resume-preserve"}
     arm(memory_dir, session, reason="startup", resume_contract_hash=RESUME_HASH)
+    touch_mcp_ready(memory_dir)  # serveur joignable tout le long (PostCompact final doit hard-bloquer)
     acknowledge(memory_dir, {
         **session,
         "tool_name": "mcp__aret-memory__aret_acknowledge_resume",
@@ -277,6 +295,7 @@ def test_resume_source_does_not_preserve_when_never_acknowledged(tmp_path: Path)
     session = {"session_id": "test-resume-fresh"}
     state = arm(memory_dir, session, reason="resume", resume_contract_hash=RESUME_HASH)
     assert state["status"] == "awaiting_recap"
+    touch_mcp_ready(memory_dir)  # serveur joignable ⇒ hard-block effectif
     assert decision(memory_dir, {**session, "tool_name": "Bash"}) is not None
 
 
@@ -284,6 +303,7 @@ def test_resume_guard_without_any_identity_is_never_acknowledged_or_released(tmp
     memory_dir = tmp_path / "memory"
     unscoped: dict[str, str] = {}
     arm(memory_dir, unscoped, reason="SessionStart", resume_contract_hash=RESUME_HASH)
+    touch_mcp_ready(memory_dir)  # serveur joignable ⇒ le fail-closed sans identité s'applique
 
     completed = acknowledge(memory_dir, {
         "tool_name": "mcp__aret-memory__aret_acknowledge_resume",
@@ -298,3 +318,59 @@ def test_resume_guard_without_any_identity_is_never_acknowledged_or_released(tmp
     assert blocked is not None
     assert blocked["hookSpecificOutput"]["permissionDecision"] == "deny"
     assert "identité de session absente" in blocked["hookSpecificOutput"]["permissionDecisionReason"]
+
+
+def test_barrier_is_soft_when_the_mcp_channel_is_unreachable(tmp_path: Path) -> None:
+    """Correctif n°1 (anti-deadlock) : la barrière ne hard-bloque JAMAIS tant que la
+    porte de sortie (serveur MCP -> aret_acknowledge_resume) n'est pas prouvée vivante.
+    C'est le coeur du deadlock vécu : dossier prêt (mode dur) + serveur non connecté."""
+    memory_dir = tmp_path / "memory"
+    session = {"session_id": "test-unreachable"}
+    armed = arm(memory_dir, session, reason="SessionStart", resume_contract_hash=RESUME_HASH, ready=True)
+    assert armed["mode"] == "hard"
+
+    # Aucun marqueur de vivacité (serveur jamais connecté) => PAS de blocage dur.
+    assert decision(memory_dir, {**session, "tool_name": "Bash"}) is None
+
+    # Marqueur PÉRIMÉ (serveur mort en cours de route) => toujours pas de blocage dur.
+    touch_mcp_ready(memory_dir)
+    marker = mcp_ready_marker(memory_dir)
+    old = time.time() - (MCP_LIVENESS_MAX_AGE_S + 30)
+    os.utime(marker, (old, old))
+    assert decision(memory_dir, {**session, "tool_name": "Bash"}) is None
+
+    # Marqueur FRAIS (serveur vivant) => la barrière hard-bloque comme prévu.
+    touch_mcp_ready(memory_dir)
+    assert decision(memory_dir, {**session, "tool_name": "Bash"}) is not None
+
+
+def test_toolsearch_schema_load_is_never_blocked(tmp_path: Path) -> None:
+    """Correctif n°3 : charger le schéma d'un outil différé (ToolSearch) — dont la
+    porte de sortie elle-même — ne doit jamais être bloqué, sinon chicken-and-egg."""
+    memory_dir = tmp_path / "memory"
+    session = {"session_id": "test-toolsearch"}
+    arm(memory_dir, session, reason="SessionStart", resume_contract_hash=RESUME_HASH, ready=True)
+    touch_mcp_ready(memory_dir)
+    # Un vrai appel d'outil reste bloqué…
+    assert decision(memory_dir, {**session, "tool_name": "Bash"}) is not None
+    # …mais ToolSearch (chargement de schéma) passe toujours.
+    assert decision(memory_dir, {**session, "tool_name": "ToolSearch"}) is None
+
+
+def test_file_sentinel_kill_switch_releases_a_hard_barrier(tmp_path: Path) -> None:
+    """Correctif n°2 : voie de sortie atteignable EN COURS de session — un fichier
+    sentinelle runtime/BARRIER_OFF (l'env var, elle, est figée au démarrage du hook)."""
+    memory_dir = tmp_path / "memory"
+    session = {"session_id": "test-sentinel"}
+    arm(memory_dir, session, reason="SessionStart", resume_contract_hash=RESUME_HASH, ready=True)
+    touch_mcp_ready(memory_dir)
+    assert decision(memory_dir, {**session, "tool_name": "Bash"}) is not None  # dur
+
+    sentinel = barrier_off_sentinel(memory_dir)
+    sentinel.parent.mkdir(parents=True, exist_ok=True)
+    sentinel.write_text("off\n", encoding="utf-8")
+    assert decision(memory_dir, {**session, "tool_name": "Bash"}) is None  # levé (PreToolUse)
+    assert stop_feedback(memory_dir, session) is None                      # levé (Stop)
+
+    sentinel.unlink()
+    assert decision(memory_dir, {**session, "tool_name": "Bash"}) is not None  # rétabli
