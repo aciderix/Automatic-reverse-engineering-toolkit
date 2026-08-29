@@ -1,0 +1,24 @@
+# winediff baseline — divergences CONNUES et DOCUMENTÉES vs l'oracle Wine.
+#
+# But : faire de winediff un gate de NON-RÉGRESSION fiable (une preuve admissible),
+# sans jamais rendre un faux verdict. Un fixture listé ici ne « passe » pas : il est
+# classé comme non-mesuré et DOCUMENTÉ. Tout non-pass ABSENT de ce fichier reste un
+# FAIL — donc une régression (nouveau bug OU nouvelle perte de couverture) est toujours
+# attrapée. Chaque entrée doit porter une cause racine honnête.
+#
+# Format (un fixture par ligne) :  CATEGORIE  nom  # raison
+# Catégories :
+#   UNMODELLED       ARET aborte proprement (§0) sur un chemin non modélisé. N'est
+#                    HONORÉ que si la sortie ARET est un PRÉFIXE EXACT de l'oracle puis
+#                    arrêt bruyant (unmodelled/aborting). Une mauvaise-réponse-puis-abort
+#                    reste un FAIL. C'est le comportement GARANTI-CORRECT de §0
+#                    (« fonctionnel, OU arrêt qui dit où »), pas un échec — mais on le
+#                    suit ici pour qu'une NOUVELLE perte de couverture soit visible.
+#   ORACLE_DIVERGENCE  ARET répond, mais l'oracle Wine diverge de Windows réel. ARET
+#                    encode la valeur Windows documentée. À arbitrer par l'ORACLE WINDOWS
+#                    (GH Actions windows-latest) ; documenté ici en attendant.
+#
+# Lignes vides et commentaires (#) ignorés.
+
+UNMODELLED        ole_mlang       # mlang.dll liftée : IMultiLanguage::GetNumberOfCodePageInfo non modélisée (dépend de EnumSystemLocalesEx/GetFontUnicodeRanges/GetTextCharset/LocaleNameToLCID/EnumResourceNamesW non implémentés). ARET aborte §0 après un préfixe exact ; refuse de deviner.
+ORACLE_DIVERGENCE user32_menu2    # SM_CXMENUCHECK/SM_CYMENUCHECK : ARET=13 (défaut Windows documenté, cf. runtime/aret_hle/aret_win32.c:6802 « measured vs Wine » et le commentaire du fixture « default 13x13 ») ; ce build Wine renvoie 11. Le reste de la sortie est byte-identique. ARET plus fidèle à Windows que l'oracle Wine.
