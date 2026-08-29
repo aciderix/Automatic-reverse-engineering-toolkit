@@ -11459,8 +11459,11 @@ static const char *u32_locale_str(uint32_t t) {
     static const char *wd[] = {"Monday","Tuesday","Wednesday","Thursday","Friday","Saturday","Sunday"};
     switch (t & 0xFFFF) {
         case 0x0001: return "0409";       /* ILANGUAGE */
+        case 0x000C: return ",";          /* SLIST (measured vs Wine, en-US) */
+        case 0x000D: return "1";          /* IMEASURE (1 = US/imperial, measured) */
         case 0x000E: return ".";          /* SDECIMAL */
         case 0x000F: return ",";          /* STHOUSAND */
+        case 0x1004: return "1252";       /* IDEFAULTANSICODEPAGE (measured vs Wine) */
         case 0x001D: return "/";          /* SDATE */
         case 0x001E: return ":";          /* STIME */
         case 0x001F: return "M/d/yyyy";   /* SSHORTDATE */
@@ -11487,6 +11490,23 @@ uint32_t aret_GetLocaleInfoW(uint32_t esp) {
     if (cch == 0) return (uint32_t)(len + 1);
     if (!buf || cch < len + 1) return 0;
     for (int i = 0; i < len; i++) buf[i] = (uint16_t)(unsigned char)s[i];
+    buf[len] = 0; return (uint32_t)(len + 1);
+}
+/* GetLocaleInfoA: the ANSI sibling of GetLocaleInfoW, sharing the same locale data
+ * (u32_locale_str). MEASURED vs Wine (b1proof/gli.c): a string is copied as ANSI
+ * bytes + NUL, returning char-count incl. NUL; cch==0 measures; LOCALE_RETURN_NUMBER
+ * writes a DWORD and returns 4 (bytes — the ANSI count, vs 2 WCHARs for the W form). */
+uint32_t aret_GetLocaleInfoA(uint32_t esp) {
+    uint32_t lctype = WU(1); char *buf = (char *)WP(2); int cch = WI(3);
+    const char *s = u32_locale_str(lctype);
+    if (lctype & 0x20000000u /* LOCALE_RETURN_NUMBER */) {
+        if (buf && cch >= 4) { uint32_t v = (uint32_t)strtoul(s, NULL, 10); *(uint32_t *)buf = v; }
+        return 4;
+    }
+    int len = 0; while (s[len]) len++;
+    if (cch == 0) return (uint32_t)(len + 1);
+    if (!buf || cch < len + 1) return 0;
+    for (int i = 0; i < len; i++) buf[i] = s[i];
     buf[len] = 0; return (uint32_t)(len + 1);
 }
 uint32_t aret_LoadMenuA(uint32_t esp)     { (void)esp; return 0; }    /* no menu resource loaded (sound) */
