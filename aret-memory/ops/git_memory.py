@@ -65,12 +65,37 @@ def checkpoint_wal(memory_dir: Path) -> dict[str, int | bool | str]:
 
 
 def changes(repository: Path) -> list[dict[str, str]]:
-    raw = invoke(repository, "status", "--porcelain=v1", "--untracked-files=all")
+    # NUL-délimité (-z) et lecture SANS strip : un `git status --porcelain` a une
+    # colonne de statut de 2 caractères où l'un peut être une espace (` M path` =
+    # modifié-worktree). invoke() strippe la sortie entière, ce qui mange l'espace
+    # de tête de la 1re ligne → décalage d'un caractère sur le chemin → un fichier
+    # du Memory Store est vu « hors périmètre » et le commit mémoire est refusé EN
+    # SILENCE. -z supprime aussi le quoting des chemins non-ASCII (déterminisme).
+    completed = subprocess.run(
+        ["git", "-C", str(repository), "status", "--porcelain=v1", "-z", "--untracked-files=all"],
+        check=False, text=True, capture_output=True,
+    )
+    if completed.returncode != 0:
+        raise GitMemoryError((completed.stderr or completed.stdout).strip() or "git status a échoué")
+    fields = completed.stdout.split("\0")
     output: list[dict[str, str]] = []
-    for line in raw.splitlines():
-        if len(line) < 4:
+    i = 0
+    while i < len(fields):
+        entry = fields[i]
+        if len(entry) < 4:  # dernier champ vide, ou ligne trop courte pour {XY espace chemin}
+            i += 1
             continue
-        output.append({"index": line[0], "worktree": line[1], "path": line[3:]})
+        index, worktree = entry[0], entry[1]
+        path = entry[3:]
+        # Un renommage/copie (R/C) consomme un champ NUL supplémentaire (ancien chemin).
+        i += 2 if index in ("R", "C") or worktree in ("R", "C") else 1
+        # Annexes SQLite transitoires (-wal/-shm/-journal) : jamais du contenu mémoire à
+        # persister. Le vrai dépôt les gitignore, mais le tool ne doit pas en DÉPENDRE — sinon
+        # un dépôt sans ce .gitignore committerait du WAL et croirait à tort qu'il y a une
+        # mutation mémoire à chaque tour. On les exclut à la source des décisions.
+        if path.endswith((".sqlite-wal", ".sqlite-shm", ".sqlite-journal")):
+            continue
+        output.append({"index": index, "worktree": worktree, "path": path})
     return output
 
 

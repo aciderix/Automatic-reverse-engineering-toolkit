@@ -5,7 +5,7 @@ import subprocess
 from pathlib import Path
 
 from core.repository import MemoryStore
-from ops.git_memory import current_branch, status, sync_memory_only
+from ops.git_memory import changes, current_branch, status, sync_memory_only
 
 
 def git(repository: Path, *args: str) -> str:
@@ -73,6 +73,43 @@ def test_autosync_refuses_when_changes_exist_outside_memory_store(tmp_path: Path
     assert store.last_sync_status["refused"] is True
     assert "hors du Memory Store" in store.last_sync_status["reason"]
     assert "outside.txt" in git(repository, "status", "--porcelain")
+
+
+def test_changes_parses_tracked_modified_first_line_without_dropping_char(tmp_path: Path) -> None:
+    """Régression : un fichier SUIVI puis modifié apparaît ` M path` en porcelain (espace de
+    statut en tête). Une lecture qui strippe la sortie entière mange cette espace et décale le
+    chemin d'un caractère → le fichier est vu « hors Memory Store » et le commit mémoire est
+    refusé EN SILENCE. Les anciens tests ne couvraient que le cas `.sqlite` NEUF (`?? path`,
+    pas d'espace de tête). Ici on suit puis modifie le fichier alphabétiquement premier."""
+    repository = make_repository(tmp_path)
+    tracked = repository / "aaa_first.txt"  # trie avant tout, donc 1re ligne du porcelain
+    tracked.write_text("v1\n", encoding="utf-8")
+    git(repository, "add", "aaa_first.txt")
+    git(repository, "commit", "-m", "add aaa_first")
+    tracked.write_text("v2\n", encoding="utf-8")  # => ` M aaa_first.txt` (espace de statut en tête)
+
+    parsed = {item["path"]: item for item in changes(repository)}
+    assert "aaa_first.txt" in parsed  # PAS "aa_first.txt" (1er caractère perdu = symptôme du bug)
+    assert parsed["aaa_first.txt"]["worktree"] == "M"
+
+
+def test_sync_memory_only_persists_when_sqlite_already_tracked(tmp_path: Path) -> None:
+    """Régression bout-en-bout : une fois la base SUIVIE (état permanent après le 1er tour),
+    une nouvelle mutation doit encore être committée. Le parsing cassé la refusait en silence,
+    laissant la mémoire périmée — précisément la faille que la persistance de fin de tour ferme."""
+    repository, remote = make_repository_with_remote(tmp_path)
+    memory_dir = repository / "aret-memory" / ".aret-memory"
+    store = MemoryStore(memory_dir, write_enabled=True)
+    store.register_component("CORE", "Core", "", "test")
+    first = sync_memory_only(repository, str(memory_dir), "STOP")  # base désormais SUIVIE
+    assert first["committed"] is True
+
+    store.register_component("NEXT", "Next", "", "test")  # .sqlite passe à ` M` (suivi+modifié)
+    second = sync_memory_only(repository, str(memory_dir), "STOP")
+
+    assert second["committed"] is True  # avant le correctif : refusé en silence (committed False)
+    changed = git(repository, "show", "--name-only", "--format=")
+    assert "aret-memory/.aret-memory/aret_memory.sqlite" in changed
 
 
 def make_repository_with_remote(tmp_path: Path) -> tuple[Path, Path]:
