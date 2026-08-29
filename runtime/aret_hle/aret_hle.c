@@ -658,6 +658,29 @@ uint32_t aret_fprintf(uint32_t esp) {
     return (uint32_t)o;
 }
 
+/* fwprintf/vfwprintf(stream, fmt, ...): the wide siblings of fprintf. Format with
+ * the wide formatter (aret_wvformat), narrow each wchar to its low byte (C locale,
+ * as putwc does) and write to the byte stream. Return the number of wide chars
+ * written, as C fwprintf does. */
+size_t aret_wvformat(uint16_t *out, size_t cap, const uint16_t *fmt, const uint32_t *a);
+static uint32_t aret_fwprintf_impl(uint32_t file, const uint16_t *fmt, const uint32_t *a) {
+    uint16_t wtmp[8192];
+    size_t n = aret_wvformat(wtmp, 8192, fmt, a);
+    char out[8192];
+    size_t w = n < sizeof out ? n : sizeof out;
+    for (size_t i = 0; i < w; i++) out[i] = (char)(wtmp[i] & 0xff);
+    stdio_write(file, out, w);
+    return (uint32_t)n;
+}
+uint32_t aret_fwprintf(uint32_t esp) {
+    return aret_fwprintf_impl(arg(esp, 0), (const uint16_t *)(uintptr_t)arg(esp, 1),
+                              &((const uint32_t *)(uintptr_t)esp)[2]);
+}
+uint32_t aret_vfwprintf(uint32_t esp) {
+    return aret_fwprintf_impl(arg(esp, 0), (const uint16_t *)(uintptr_t)arg(esp, 1),
+                              (const uint32_t *)(uintptr_t)arg(esp, 2));
+}
+
 uint32_t aret_fputc(uint32_t esp) {
     char c = (char)arg(esp, 0);
     stdio_write(arg(esp, 1), &c, 1);
