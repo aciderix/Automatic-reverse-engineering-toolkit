@@ -3508,7 +3508,11 @@ static const uint8_t *aret_find_versioninfo(void) {
 uint32_t aret_GetFileVersionInfoSizeA(uint32_t esp) {
     if (arg(esp, 1)) *(uint32_t *)(uintptr_t)arg(esp, 1) = 0; /* lpdwHandle */
     const uint8_t *vi = aret_find_versioninfo();
-    return vi ? vi_w(vi, 0) : 0;
+    /* GetFileVersionInfoSize returns the size GetFileVersionInfo needs, which is NOT
+     * the raw VS_VERSION_INFO wLength: MEASURED bit-for-bit vs Wine on two resources
+     * (wLen 324->652, 620->1244), the value is 2*wLength + 4 (room for the wrapper +
+     * a UTF-16 copy). Both A and W return this same buffer size. */
+    return vi ? (uint32_t)(2 * vi_w(vi, 0) + 4) : 0;
 }
 /* The ANSI GetFileVersionInfoA returns a buffer whose StringFileInfo *string
  * values* are ANSI (the W variant keeps them UTF-16). Narrow each in place: the
@@ -3548,14 +3552,29 @@ uint32_t aret_GetFileVersionInfoA(uint32_t esp) {
     vi_narrow_strings((uint8_t *)data);
     return 1;
 }
+/* GetFileVersionInfoSizeW/GetFileVersionInfoW: the wide siblings. The size query is
+ * filename-independent (the version info comes from the loaded module), so it is the
+ * A path verbatim. The W fetch copies the block but does NOT narrow the string values
+ * — VerQueryValueW then hands back genuine UTF-16 text, matching Windows. */
+uint32_t aret_GetFileVersionInfoSizeW(uint32_t esp) { return aret_GetFileVersionInfoSizeA(esp); }
+uint32_t aret_GetFileVersionInfoW(uint32_t esp) {
+    const uint8_t *vi = aret_find_versioninfo();
+    void *data = (void *)(uintptr_t)arg(esp, 3);
+    uint32_t len = arg(esp, 2);
+    if (!vi || !data) return 0;
+    uint32_t n = vi_w(vi, 0);
+    if (n > len) n = len;
+    memcpy(data, vi, n);          /* keep UTF-16 string values (no vi_narrow_strings) */
+    return 1;
+}
 /* VerQueryValueA(block, "\Sub\Block", &buf, &len): navigate the tree. "\" -> the
  * VS_FIXEDFILEINFO; "\StringFileInfo\<lang>\<key>" / "\VarFileInfo\Translation"
  * -> the leaf value. Buffer/len are returned as for the real API. */
-uint32_t aret_VerQueryValueA(uint32_t esp) {
-    const uint8_t *root = (const uint8_t *)(uintptr_t)arg(esp, 0);
-    const char *sub = (const char *)(uintptr_t)arg(esp, 1);
-    uint32_t *pbuf = (uint32_t *)(uintptr_t)arg(esp, 2);
-    uint32_t *plen = (uint32_t *)(uintptr_t)arg(esp, 3);
+/* Shared navigator for VerQueryValue A and W: the version tree's keys are always
+ * UTF-16 in the resource (vi_child matches an ANSI component against them), so both
+ * variants walk it identically — only the SUBBLOCK's char width and the returned
+ * value's char width differ (handled by the callers). */
+static uint32_t ver_query_core(const uint8_t *root, const char *sub, uint32_t *pbuf, uint32_t *plen) {
     if (!root || !sub || !pbuf || !plen) return 0;
     const uint8_t *node = root;
     if (sub[0] == '\\' && sub[1] == 0) {
@@ -3579,6 +3598,25 @@ uint32_t aret_VerQueryValueA(uint32_t esp) {
     *pbuf = (uint32_t)(uintptr_t)(node + vi_value_off(node));
     *plen = vi_w(node, 2);
     return 1;
+}
+uint32_t aret_VerQueryValueA(uint32_t esp) {
+    return ver_query_core((const uint8_t *)(uintptr_t)arg(esp, 0),
+                          (const char *)(uintptr_t)arg(esp, 1),
+                          (uint32_t *)(uintptr_t)arg(esp, 2),
+                          (uint32_t *)(uintptr_t)arg(esp, 3));
+}
+/* VerQueryValueW: the subblock path is UTF-16 (narrow it — paths are ASCII); the
+ * value it points at is the block's own UTF-16 (GetFileVersionInfoW keeps values
+ * wide), and the returned length is wValueLength (WCHARs), same tree field as A. */
+uint32_t aret_VerQueryValueW(uint32_t esp) {
+    const uint16_t *wsub = (const uint16_t *)(uintptr_t)arg(esp, 1);
+    char sub[256];
+    int i = 0;
+    if (wsub) for (; wsub[i] && i < (int)sizeof sub - 1; i++) sub[i] = (char)(wsub[i] & 0xff);
+    sub[i] = 0;
+    return ver_query_core((const uint8_t *)(uintptr_t)arg(esp, 0), sub,
+                          (uint32_t *)(uintptr_t)arg(esp, 2),
+                          (uint32_t *)(uintptr_t)arg(esp, 3));
 }
 uint32_t aret_IsDBCSLeadByteEx(uint32_t esp) { (void)esp; return 0; }
 /* IsDBCSLeadByte(byte): true iff `byte` starts a double-byte char in the ANSI code
