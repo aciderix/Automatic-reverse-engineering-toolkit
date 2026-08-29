@@ -1060,12 +1060,11 @@ overlapped/IOCP — recoupe la surface subprocess plafonnée). Détail 71/82.
 > **borné** de problèmes **profonds**, chacun ≈ une session dédiée de forensics.
 > On passe de « largeur de shims » à « profondeur lifter ». Fini, mais plus lent.
 
-> **⏩ État courant (2026-08-28) — détail complet dans le [`71`](71-journal-de-bord.md) §3.**
-> - **FAIT récemment** : mur 0x0 spirv-cross (KN-0011), `_chkstk` MSVC6 indirect-call (KN-0016) ; **carte Phase-B** du vrai déficit de shims système (KN-0017) ; **6 vagues de shims HLE additifs B1–B2f, toutes PROUVÉES byte-identique Wine** — `_strlwr`/`_strupr`/`_umask`/`SetConsoleOutputCP`, `_putenv_s`/`_wsystem`, `_utime`×3, `wcstombs`, `GetLocaleInfoA`(+3 LCTYPE), version.dll W×3 (+fix général taille `2·wLen+4`), `fwprintf`/`vfwprintf`. Portes constamment vertes (hash `19acad982194bf07` inchangé, difftest 272/272, funcdiff 0-div, winediff 262/264).
-> - **Déféré §0** (environnement-dépendant, non byte-matchable, reste en abort) : `_getch` (console CONIN$), `_ftime` (horloge/TZ), `GetFinalPathNameByHandleA` (drive `Z:`/chemin du préfixe Wine).
-> - **PROCHAINE ÉTAPE = Phase A (SSE2)** : conversions **packed** double/single non modélisées — `cvtps2pd`/`cvtpd2ps`/`cvttpd2dq`/`cvtpd2dq`/`cvttps2dq`/`cvtps2dq` (`fisttp` déjà géré). Modif du **lifter** (triple : `emit/mod.rs` C + `cpudiff.rs` Rust miroir + `lift.rs`), **cpudiff obligatoire** (unicorn présent), cas limites `0x80000000`/MXCSR. Voir 71 §3 (entrée diagnostic SSE2).
-> - **Après A** : `ws2_32` (axe réseau distinct), 2 SIGSEGV runtime (§0) UnxUtils --help, packaging ARET-MMU en plugin.
-> - **Backlog MMU** : B2d/B2e/B2f à graver (KN + preuves difftest) au retour du serveur `aret-memory` (tombé CONNECT_TIMEOUT) ; B1/B2a/B2b/B2c déjà en MMU (KN-0018→0021, P-0009→P-0012).
+> **⏩ État courant (2026-08-29) — détail complet dans le [`71`](71-journal-de-bord.md) §3.**
+> - **Robustesse MCP FAITE** (KN-0025/0026) : Phase 1 anti-deadlock barrière (sonde de vivacité `runtime/mcp_ready`, kill-switch fichier `runtime/BARRIER_OFF`, exemption ToolSearch — effet au prochain démarrage de session) ; Phase 2 confort API (tags string→liste, enum status) ; Phase 3 mesure réfutant venv=goulot (uv→~5 s). Le timeout 30 s est NON-FATAL. 96/96 pytest.
+> - **Phase A (SSE2) FAITE** (commit 4d6002c) : 6 conversions packed liftées (cvtps2pd/cvtpd2ps/cvttpd2dq/cvtpd2dq/cvttps2dq/cvtps2dq). **cpudiff 6/6** (vs Unicorn, entrées aléatoires) + hash inchangé + difftest 272/272 + funcdiff 0-div + winediff 262/264 + e2e byte-identique Wine. Backlog : gravure MMU (KN + preuve cpudiff) au retour du serveur.
+> - **Reste** : ws2_32 (réseau), 2 SIGSEGV runtime (§0), plugin ARET-MMU (optionnel), setlocale("")+CP_ACP.
+> - _(Historique B1–B2f + KN-0011/0016/0017 : voir 71 §3.)_
 
 ### §5.0 — STRATÉGIE BÉTON « zéro-abort 32-bit » (objectif : couvrir tout vrai binaire 32-bit, sans y passer des années)
 **But** : plus aucun abort sur le **vrai logiciel compilé** (pas en le silençant — en le couvrant parfaitement). Le
