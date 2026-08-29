@@ -276,9 +276,14 @@ class MemoryStore:
             )
 
     @staticmethod
-    def _normalise_tags(tags: Sequence[str] | None) -> list[str]:
+    def _normalise_tags(tags: Sequence[str] | str | None) -> list[str]:
         if not tags:
             return []
+        # Confort MCP : un agent passe parfois une chaîne "a,b c" au lieu d'une liste
+        # ["a","b","c"]. On la coerce (séparateurs virgule/espace) plutôt que d'itérer
+        # ses caractères un à un. Une liste reste traitée telle quelle.
+        if isinstance(tags, str):
+            tags = [part for part in re.split(r"[,\s]+", tags) if part]
         output: set[str] = set()
         for raw in tags:
             tag = str(raw).strip().upper().replace(" ", "_")
@@ -1644,7 +1649,8 @@ class MemoryStore:
             status = "OBSERVED" if knowledge_type == "OBSERVATION" else "HYPOTHESIS" if knowledge_type == "HYPOTHESIS" else "ACTIVE"
         status = status.upper()
         if status not in KNOWLEDGE_STATUSES or status in {"SUPERSEDED", "OBSOLETE"}:
-            raise AretError(f"Statut initial non autorisé : {status}")
+            allowed = ", ".join(sorted(KNOWLEDGE_STATUSES - {"SUPERSEDED", "OBSOLETE"}))
+            raise AretError(f"Statut initial non autorisé : {status}. Valeurs admises : {allowed}")
         if component_id:
             component_id = self._validate_identifier(component_id, "Identifiant de composant")
         tags = self._normalise_tags(tags)

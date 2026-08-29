@@ -227,7 +227,7 @@ def aret_append_knowledge(
     component_id: str | None = None,
     function_id: str | None = None,
     brick_id: str | None = None,
-    tags: list[str] | None = None,
+    tags: list[str] | str | None = None,
     proof_ids: list[str] | None = None,
     supersedes_id: str | None = None,
     effective_at: str | None = None,
