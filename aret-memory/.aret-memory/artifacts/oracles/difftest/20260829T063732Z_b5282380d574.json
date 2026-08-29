@@ -1,0 +1,24 @@
+{
+  "format": "aret-oracle-artifact/v1",
+  "oracle": "difftest",
+  "kind": "DIFFTEST",
+  "command": "bash /home/user/Automatic-reverse-engineering-toolkit/bench/difftest.sh",
+  "result": "PASS",
+  "exit_code": 0,
+  "started_at": "2026-08-29T06:36:57Z",
+  "finished_at": "2026-08-29T06:37:32Z",
+  "environment": {
+    "adapter": "aret-mmu-oracles/1",
+    "oracle": "difftest",
+    "repository": "/home/user/Automatic-reverse-engineering-toolkit",
+    "repository_revision": "8bdd7d71f7ea168d167abf54a145a324248fd251",
+    "script": "bench/difftest.sh",
+    "fixture": "",
+    "timeout_seconds": 600,
+    "missing_dependencies": [],
+    "timed_out": false,
+    "duration_seconds": 35.439
+  },
+  "stdout": "  -O0: 68/68\n  -O1: 68/68\n  -O2: 68/68\n  -O3: 68/68\n------------------------------------------\nincomplete (unmodelled instructions, not tested): 0\ndifferential equivalence: 272/272 functions\n",
+  "stderr": ""
+}
