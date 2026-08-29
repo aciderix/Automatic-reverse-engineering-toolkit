@@ -198,6 +198,42 @@ def test_prepare_handoff_returns_compact_diagnostic_when_dossier_overflows(
     assert any("dépasse" in error for error in result["errors"])
 
 
+def test_compact_diagnostic_two_pass_budget_is_proportional_and_fits() -> None:
+    """TWO-PASS : au dépassement, un budget PAR CHAMP est rendu pour corriger en un coup."""
+    dossier = {
+        "size_bytes": 1000, "max_bytes": 700, "errors": ["dépasse 700"], "warnings": [],
+        "handoff": {
+            "handoff_work_summary": "x" * 300, "handoff_verified_results": "y" * 300,
+            "handoff_open_risks": "", "handoff_deferred_items": "", "next_action": "z" * 100,
+            "technical_checkpoint": {},
+        },
+        "contract_hash": "h",
+    }
+    d = MemoryStore._compact_handoff_diagnostic(dossier)
+    assert d["ready"] is False and d["written"] is True
+    assert d["overflow_bytes"] == 300
+    assert d["fixed_overhead_bytes"] == 300              # 1000 - (300+300+100)
+    assert d["available_bytes_for_fields"] == 400        # 700 - 300
+    assert d["structural_overflow"] is False
+    assert d["budget"]                                   # budget par champ non vide
+    # Trimmer chaque champ à son budget fait tenir : la somme des budgets ≤ le disponible.
+    assert sum(d["budget"].values()) <= d["available_bytes_for_fields"]
+    assert d["budget"]["handoff_work_summary"] < 300    # cible plus petite que l'actuel
+
+
+def test_compact_diagnostic_flags_structural_overflow() -> None:
+    """Si le surcoût fixe dépasse déjà la borne, aucun trim de champ ne peut aider : signalé."""
+    dossier = {
+        "size_bytes": 1000, "max_bytes": 50,
+        "errors": ["dépasse"], "warnings": [],
+        "handoff": {"work_summary": "x" * 100, "next_action": "z" * 100, "technical_checkpoint": {}},
+        "contract_hash": "h",
+    }
+    d = MemoryStore._compact_handoff_diagnostic(dossier)
+    assert d["structural_overflow"] is True
+    assert d["budget"] == {}
+
+
 def test_update_front_flags_handoff_stale_only_on_hash_affecting_change(tmp_path: Path) -> None:
     """Fix D : update_front signale handoff périmé quand — et seulement quand — une clé de reprise change."""
     store = _store(tmp_path)

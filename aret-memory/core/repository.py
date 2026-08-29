@@ -794,6 +794,32 @@ class MemoryStore:
             value = str(checkpoint.get(key, ""))
             if value:
                 field_bytes[key] = len(value.encode("utf-8"))
+        # TWO-PASS : au 1er refus de borne, rendre un BUDGET PAR CHAMP concret pour corriger
+        # en UN seul aller-retour, au lieu de tâtonner. Le surcoût fixe (playbook stable +
+        # structure) est incompressible : on le déduit, puis on répartit ce qui reste entre
+        # les champs proportionnellement à leur taille actuelle. Trimmer chaque champ à son
+        # budget fait tenir le dossier du premier coup.
+        overflow = max(0, size - maximum)
+        total_field_bytes = sum(field_bytes.values())
+        fixed_overhead = max(0, size - total_field_bytes)  # playbook + structure, incompressible
+        available_for_fields = maximum - fixed_overhead
+        budget: dict[str, int] = {}
+        structural = available_for_fields <= 0
+        if overflow > 0 and not structural and total_field_bytes > available_for_fields:
+            for key, value in field_bytes.items():
+                budget[key] = (value * available_for_fields) // total_field_bytes if total_field_bytes else 0
+        if structural:
+            budget_message = (
+                f"DÉPASSEMENT STRUCTUREL : le surcoût fixe (playbook + structure, {fixed_overhead} o) "
+                f"atteint déjà la borne {maximum} o. Raccourcir les champs ne suffira pas."
+            )
+        elif budget:
+            budget_message = (
+                f"Trimmez chaque champ À SON budget ci-dessous ('budget', octets UTF-8 ; un accent=2 o) "
+                f"puis ré-exécutez : le dossier tiendra du premier coup. Total à retirer : {overflow} o."
+            )
+        else:
+            budget_message = "Corrigez les 'errors' (les champs tiennent déjà dans la borne)."
         return {
             "ready": False,
             "written": True,
@@ -801,13 +827,16 @@ class MemoryStore:
             "warnings": list(dossier.get("warnings", [])),
             "size_bytes": size,
             "max_bytes": maximum,
-            "overflow_bytes": max(0, size - maximum),
+            "overflow_bytes": overflow,
+            "fixed_overhead_bytes": fixed_overhead,
+            "available_bytes_for_fields": max(0, available_for_fields),
             "field_bytes": field_bytes,
+            "budget": budget,
+            "structural_overflow": structural,
             "contract_hash": dossier.get("contract_hash", ""),
             "message": (
-                "Handoff ÉCRIT mais dossier de reprise NON prêt. Corrigez les points listés dans "
-                "'errors' (voir 'field_bytes' pour cibler les champs à raccourcir) puis ré-exécutez "
-                "aret_prepare_handoff. La reprise restera dégradée tant que ce n'est pas prêt."
+                "Handoff ÉCRIT mais dossier de reprise NON prêt. " + budget_message
+                + " Puis ré-exécutez aret_prepare_handoff. La reprise reste dégradée tant que ce n'est pas prêt."
             ),
         }
 
