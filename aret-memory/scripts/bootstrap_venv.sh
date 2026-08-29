@@ -25,7 +25,12 @@ PY="${VENV_DIR}/bin/python"
 # Contrainte de version alignée sur aret-memory/pyproject.toml (dépendance `mcp`).
 MCP_SPEC="${ARET_MMU_MCP_SPEC:-mcp>=2.0,<3.0}"
 
-log() { printf 'ARET-MMU bootstrap: %s\n' "$*" >&2; }
+# Chronométrage : chaque log porte le temps écoulé depuis le début du bootstrap, pour
+# MESURER (et non deviner) où passent les secondes d'un cold-start lent — le timeout de
+# connexion MCP (30 s) se joue ici. `ARET_MMU_BOOTSTRAP_QUIET=1` réduit au strict minimum.
+_BOOT_T0="$(date +%s.%N 2>/dev/null || echo 0)"
+_elapsed() { awk -v a="$_BOOT_T0" -v b="$(date +%s.%N 2>/dev/null || echo 0)" 'BEGIN{printf "%.2f", b-a}'; }
+log() { printf 'ARET-MMU bootstrap [+%ss]: %s\n' "$(_elapsed)" "$*" >&2; }
 
 usable() { [ -x "$PY" ] && "$PY" -c 'import mcp' >/dev/null 2>&1; }
 
@@ -56,16 +61,20 @@ if command -v flock >/dev/null 2>&1; then
   fi
 fi
 
-# --- Chemin FROID : privilégier uv (rapide), sinon repli venv+pip. -----------
+# --- Chemin FROID : privilégier uv (rapide ~3-5 s), sinon repli venv+pip. -----
+# MESURE (2026-08-29) : avec uv, cold-start ≈ uv venv 0,1 s + install mcp ~2,9 s +
+# import 1,8 s ≈ 5 s — bien sous le timeout MCP de 30 s. Le venv n'est PAS le goulot
+# quand uv est présent. Le risque de timeout vient du REPLI pip ci-dessous (~17 s) sur
+# un conteneur SANS uv : dans ce cas, provisionner uv dans le setup de l'environnement.
 if command -v uv >/dev/null 2>&1; then
-  log "création du venv via uv…"
+  log "chemin rapide : création du venv via uv ($(uv --version 2>/dev/null || echo uv))…"
   if uv venv "$VENV_DIR" >&2 2>&1; then
     UV_NO_PROGRESS=1 uv pip install --python "$PY" "$MCP_SPEC" >&2 2>&1 || true
   fi
 fi
 
 if ! usable; then
-  log "repli venv + pip…"
+  log "AVERTISSEMENT : uv indisponible ou en échec — REPLI pip LENT (~17 s), risque de dépasser le timeout MCP 30 s ; provisionnez uv dans l'environnement pour l'éviter."
   "${PYTHON_BOOTSTRAP:-python3}" -m venv "$VENV_DIR" >&2 2>&1 || true
   if [ -x "$PY" ]; then
     "$PY" -m pip install --disable-pip-version-check "$MCP_SPEC" >&2 2>&1 || true
