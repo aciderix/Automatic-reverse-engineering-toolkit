@@ -13,7 +13,7 @@ from mcp.server import MCPServer
 from pathlib import Path
 
 from core.repository import AretError, MemoryStore
-from evidence.adapters.oracles import run_oracle
+from evidence.adapters.oracles import ORACLES, run_oracle
 from evidence.adapters.pipelines import pipeline_catalog, register_asset, run_pipeline, toolchain_status
 from hooks.resume_guard import touch_mcp_ready, validate_recap
 from ops.git_memory import GitMemoryError, automatic_sync
@@ -435,22 +435,73 @@ def aret_invalidate_proof(proof_id: str, reason: str, actor: str = "mcp-auditor"
 @mcp.tool()
 def aret_run_oracle(
     oracle: str, knowledge_id: str | None = None, promote: bool = False, fixture: str | None = None,
-    timeout_seconds: int | None = None, repository_path: str | None = None, actor: str = "mcp-oracle-adapter"
+    timeout_seconds: int | None = None, repository_path: str | None = None, actor: str = "mcp-oracle-adapter",
+    async_mode: bool = False,
 ) -> dict[str, Any]:
     """Exécute un oracle de la liste fermée (difftest, transpilediff, stdcall_audit, winediff,
     winehash, ehdiff, gnuehdiff, funcdiff, cpudiff), puis enregistre son artefact et sa preuve.
 
     PASSER PAR ICI plutôt que par le shell : le verdict et l'artefact deviennent canoniques,
-    adressables (ARET://proof/…) et survivent à la compaction ; une sortie shell brute est éphémère."""
+    adressables (ARET://proof/…) et survivent à la compaction ; une sortie shell brute est éphémère.
+
+    async_mode=True : les oracles lourds (winediff, difftest, cpudiff) dépassent le timeout
+    transport MCP de 60s. En mode async, le serveur lance l'oracle dans un thread de fond,
+    enregistre un suivi DURABLE (table oracle_run) et rend IMMÉDIATEMENT un run_id. On interroge
+    ensuite aret_get_oracle_run(run_id) jusqu'au statut DONE/ERROR ; la preuve reste aussi
+    visible via aret_get_proofs(knowledge_id). C'est le mode recommandé pour tout oracle >60s."""
     try:
         repository = _configured_repository_path(repository_path)
-        return {"ok": True, "operation": "run_oracle", "result": run_oracle(
-            store, repository, oracle, knowledge_id, promote, fixture, timeout_seconds, actor,
-        )}
+        name = str(oracle).strip().lower()
+        if name not in ORACLES:
+            raise AretError("Oracle inconnu : choisir parmi " + ", ".join(sorted(ORACLES)))
+        if promote and not knowledge_id:
+            raise AretError("promotion demandée sans knowledge_id")
+        if not async_mode:
+            return {"ok": True, "operation": "run_oracle", "result": run_oracle(
+                store, repository, oracle, knowledge_id, promote, fixture, timeout_seconds, actor,
+            )}
+        run = store.start_oracle_run(oracle=name, knowledge_id=knowledge_id, promote=promote, actor=actor)
+        run_id = run["id"]
+
+        def _worker() -> None:
+            try:
+                res = run_oracle(store, repository, name, knowledge_id, promote, fixture, timeout_seconds, actor)
+                execution = res.get("execution", {})
+                store.complete_oracle_run(
+                    run_id, status="DONE", result=execution.get("result"),
+                    proof_id=(res.get("proof") or {}).get("id"), exit_code=execution.get("exit_code"), actor=actor,
+                )
+            except Exception as exc:  # noqa: BLE001 — un échec de fond ne doit jamais tuer le serveur
+                try:
+                    store.complete_oracle_run(run_id, status="ERROR", error=str(exc), actor=actor)
+                except Exception:
+                    pass
+
+        threading.Thread(target=_worker, name=f"aret-oracle-{run_id}", daemon=True).start()
+        return {"ok": True, "operation": "run_oracle", "result": {
+            "status": "STARTED", "async": True, "run_id": run_id, "oracle": name, "knowledge_id": knowledge_id,
+            "poll": f"aret_get_oracle_run('{run_id}') jusqu'à status=DONE/ERROR",
+            "note": "Oracle lancé en fond (dépasse le timeout MCP 60s). Le proof apparaîtra aussi dans aret_get_proofs(knowledge_id).",
+        }}
     except AretError as exc:
         return {"ok": False, "operation": "run_oracle", "error": {"code": type(exc).__name__, "message": str(exc)}}
     except Exception as exc:
         return {"ok": False, "operation": "run_oracle", "error": {"code": "INTERNAL_ERROR", "message": str(exc)}}
+
+
+@mcp.tool()
+def aret_get_oracle_run(run_id: str) -> dict[str, Any]:
+    """Interroge une exécution d'oracle asynchrone (lancée par aret_run_oracle async_mode=True).
+
+    Rend son état durable : status RUNNING → DONE (avec result + proof_id) ou ERROR (avec error).
+    À interroger périodiquement après un lancement async ; le suivi survit à la compaction et au
+    redémarrage serveur."""
+    try:
+        return {"ok": True, "operation": "get_oracle_run", "result": store.get_oracle_run(run_id)}
+    except AretError as exc:
+        return {"ok": False, "operation": "get_oracle_run", "error": {"code": type(exc).__name__, "message": str(exc)}}
+    except Exception as exc:
+        return {"ok": False, "operation": "get_oracle_run", "error": {"code": "INTERNAL_ERROR", "message": str(exc)}}
 
 
 @mcp.tool()

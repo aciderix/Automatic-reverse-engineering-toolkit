@@ -2232,6 +2232,65 @@ class MemoryStore:
             row["address"] = make_address("pipeline", row["id"])
         return {"pipeline_name": pipeline_name, "runs": rows}
 
+    # --- Exécutions d'oracles asynchrones (friction timeout MCP 60s) ------------------
+    def start_oracle_run(self, *, oracle: str, knowledge_id: str | None, promote: bool, actor: str) -> dict[str, Any]:
+        """Ouvre un suivi DURABLE d'exécution d'oracle asynchrone (statut RUNNING)."""
+        self._require_write()
+        name = str(oracle).strip().lower()
+        if not re.fullmatch(r"[a-z][a-z0-9_]{1,63}", name):
+            raise AretError("Nom d'oracle invalide")
+        kid = str(knowledge_id).strip() if knowledge_id else None
+        now = utc_now()
+        with self._transaction() as conn:
+            run_id = self._new_id(conn, "oracle_run", "OR")
+            row = {
+                "id": run_id, "oracle": name, "knowledge_id": kid, "promote": 1 if promote else 0,
+                "status": "RUNNING", "result": None, "proof_id": None, "exit_code": None, "error": None,
+                "started_at": now, "finished_at": None, "created_at": now, "created_by": actor,
+            }
+            conn.execute(
+                """INSERT INTO oracle_run(id,oracle,knowledge_id,promote,status,result,proof_id,exit_code,error,
+                   started_at,finished_at,created_at,created_by)
+                   VALUES(:id,:oracle,:knowledge_id,:promote,:status,:result,:proof_id,:exit_code,:error,
+                   :started_at,:finished_at,:created_at,:created_by)""",
+                row,
+            )
+            self._audit(conn, actor=actor, operation="START_ORACLE_RUN", entity_type="oracle_run", entity_id=run_id, after=row)
+        return {"id": run_id, "oracle": name, "knowledge_id": kid, "promote": bool(promote), "status": "RUNNING", "started_at": now}
+
+    def complete_oracle_run(self, run_id: str, *, status: str, result: str | None = None, proof_id: str | None = None,
+                            exit_code: int | None = None, error: str | None = None, actor: str = "mcp-oracle-adapter") -> None:
+        """Clôt un suivi d'oracle asynchrone (DONE|ERROR). Idempotent : un run déjà clos n'est pas réécrit."""
+        self._require_write()
+        if status not in {"DONE", "ERROR"}:
+            raise AretError("Statut de clôture d'oracle invalide")
+        trimmed_error = str(error)[:2000] if error else None
+        with self._transaction() as conn:
+            existing = conn.execute("SELECT status FROM oracle_run WHERE id=?", (run_id,)).fetchone()
+            if existing is None:
+                raise AretError(f"Exécution d'oracle inconnue : {run_id}")
+            if existing["status"] != "RUNNING":
+                return
+            conn.execute(
+                "UPDATE oracle_run SET status=?, result=?, proof_id=?, exit_code=?, error=?, finished_at=? WHERE id=?",
+                (status, result, proof_id, exit_code, trimmed_error, utc_now(), run_id),
+            )
+            self._audit(conn, actor=actor, operation="COMPLETE_ORACLE_RUN", entity_type="oracle_run", entity_id=run_id,
+                        after={"status": status, "result": result, "proof_id": proof_id, "exit_code": exit_code})
+
+    def get_oracle_run(self, run_id: str) -> dict[str, Any]:
+        """Retourne l'état durable d'un suivi d'exécution d'oracle asynchrone (RUNNING|DONE|ERROR)."""
+        rid = str(run_id).strip()
+        if not re.fullmatch(r"OR-\d{4,}", rid):
+            raise AretError("Identifiant d'exécution d'oracle invalide")
+        with self._read_connection() as conn:
+            row = conn.execute("SELECT * FROM oracle_run WHERE id=?", (rid,)).fetchone()
+        if row is None:
+            raise AretError(f"Exécution d'oracle inconnue : {rid}")
+        out = dict(row)
+        out["promote"] = bool(out["promote"])
+        return out
+
     def read_pipeline_artifact(self, pipeline_run_id: str, max_bytes: int = DEFAULT_MAX_BYTES) -> dict[str, Any]:
         """Lit l’artefact hashé d’un pipeline après vérification d’intégrité et borne de taille."""
         if max_bytes < 1 or max_bytes > HARD_MAX_BYTES:
