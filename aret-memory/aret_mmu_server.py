@@ -437,7 +437,8 @@ def aret_run_oracle(
     oracle: str, knowledge_id: str | None = None, promote: bool = False, fixture: str | None = None,
     timeout_seconds: int | None = None, repository_path: str | None = None, actor: str = "mcp-oracle-adapter"
 ) -> dict[str, Any]:
-    """Exécute difftest, winehash, winediff ou funcdiff via une liste fermée, puis enregistre son artefact et sa preuve.
+    """Exécute un oracle de la liste fermée (difftest, transpilediff, stdcall_audit, winediff,
+    winehash, ehdiff, gnuehdiff, funcdiff, cpudiff), puis enregistre son artefact et sa preuve.
 
     PASSER PAR ICI plutôt que par le shell : le verdict et l'artefact deviennent canoniques,
     adressables (ARET://proof/…) et survivent à la compaction ; une sortie shell brute est éphémère."""

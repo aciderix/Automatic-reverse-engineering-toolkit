@@ -148,7 +148,7 @@ def run_oracle(
     store._require_write()
     name = oracle_name.strip().lower()
     if name not in ORACLES:
-        raise AretError("Oracle inconnu : choisir difftest, winehash, winediff ou funcdiff")
+        raise AretError("Oracle inconnu : choisir parmi " + ", ".join(sorted(ORACLES)))
     spec = ORACLES[name]
     fixture = safe_fixture(fixture)
     if fixture and not spec.accepts_fixture:
