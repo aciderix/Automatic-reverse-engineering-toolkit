@@ -6771,8 +6771,11 @@ static uint32_t u32_spi(uint32_t esp, int wide) {
 uint32_t aret_SystemParametersInfoA(uint32_t esp) { return u32_spi(esp, 0); }
 uint32_t aret_SystemParametersInfoW(uint32_t esp) { return u32_spi(esp, 1); }
 
-uint32_t aret_GetSystemMetrics(uint32_t esp) {
-    switch (WI(0)) {
+/* Pure metric table (single source of truth): both aret_GetSystemMetrics and
+ * aret_GetMenuCheckMarkDimensions read it, so the two can never disagree — the exact
+ * bug that had SM_CXMENUCHECK=11 here while GetMenuCheckMarkDimensions returned 13. */
+static uint32_t u32_sysmetric(int idx) {
+    switch (idx) {
     case 0:  case 78: return U32_SCREEN_W;  /* SM_CXSCREEN / SM_CXVIRTUALSCREEN */
     case 1:  case 79: return U32_SCREEN_H;  /* SM_CYSCREEN / SM_CYVIRTUALSCREEN */
     case 16: return U32_SCREEN_W;           /* SM_CXFULLSCREEN (approx) */
@@ -6799,10 +6802,19 @@ uint32_t aret_GetSystemMetrics(uint32_t esp) {
     case 68: case 69: return 4;  /* SM_CXDRAG / SM_CYDRAG — drag threshold, fixed 4px
                                   * (measured vs Wine; surfaced by the relay diff on
                                   * WinMerge as returning 0 where Windows returns 4). */
-    case 71: case 72: return 13; /* SM_CXMENUCHECK / SM_CYMENUCHECK (measured vs Wine) */
+    case 71: case 72: return 11; /* SM_CXMENUCHECK / SM_CYMENUCHECK — Wine-calibrated like
+                                  * every metric here (these menu dimensions are DPI/theme
+                                  * dependent, so no universal constant exists; ARET mirrors
+                                  * the winediff oracle). The old 13 was a stray guess that
+                                  * matched NEITHER Wine (11) nor real Windows. Proven by the
+                                  * winoracle probe win32_menucheckdisputed on windows-latest:
+                                  * real Windows returns 15, Wine returns 11, exactly as its
+                                  * siblings SM_CYMENU (Wine 19 / Win 20) and SM_CXMENUSIZE
+                                  * (Wine 18 / Win 19) also mirror Wine, not Windows. */
     default: return 0;
     }
 }
+uint32_t aret_GetSystemMetrics(uint32_t esp) { return u32_sysmetric(WI(0)); }
 
 /* ================================================================== */
 /* Dialogs — DLGTEMPLATE parse -> controls + modal pump (display-free) */
@@ -9482,17 +9494,27 @@ static uint32_t u32_ml_qi(uint32_t esp) {
     return 0x80004002u;                                /* E_NOINTERFACE */
 }
 static uint32_t u32_ml_addref(uint32_t esp)  { (void)esp; return ++g_mlang_refs; }
-static uint32_t u32_ml_release(uint32_t esp) { (void)esp; return g_mlang_refs > 1 ? --g_mlang_refs : 1; }
+/* Returns the true decremented count, reaching 0 on the final Release exactly like Wine
+ * (the object is a static singleton so nothing is freed, but the COUNT must match). Each
+ * CoCreateInstance resets the count to 1, so a later activation starts sound. */
+static uint32_t u32_ml_release(uint32_t esp) { (void)esp; return g_mlang_refs ? --g_mlang_refs : 0; }
 /* Instrument-first stubs: each names itself and aborts, so the first method WinMerge
  * calls is identified by a single rebuild instead of guessed. */
 #define ML_STUB(name) static uint32_t u32_ml_##name(uint32_t esp) { (void)esp; \
     aret_unmodelled("IMultiLanguage::" #name); return 0x80004001u; }
-/* GetNumberOfCodePageInfo: left instrument-first. Wine's runtime total_cp (73) does not
- * match a naive source count of mlang_data (74) — a value it derives at load time that a
- * static extraction does not reproduce. Rather than ship a count that diverges from the
- * oracle (§0), we do not model it until the discrepancy is understood. (The oracle caught
- * this — the point of verifying.) */
-ML_STUB(GetNumberOfCodePageInfo)
+/* GetNumberOfCodePageInfo: returns Wine's runtime total_cp. ARET's table is extracted from
+ * Wine as one row per code page, so its length IS that count (73) — proven == Wine in the
+ * lab (n=73). The stale #define ARET_MLANG_TOTAL_CP (74) was a naive source count, never the
+ * runtime value; the table itself is authoritative. Real Windows returns 43 and different
+ * descriptions (winoracle probe win32_mlangdisputed), but ARET's mlang is a Wine-faithful
+ * model by construction and mirrors the winediff oracle, exactly like the Wine-calibrated
+ * GetSystemMetrics table. No guess: the number is sizeof(the embedded table). */
+static uint32_t u32_ml_GetNumberOfCodePageInfo(uint32_t esp) {
+    uint32_t *pn = (uint32_t *)(uintptr_t)WU(1);
+    if (!pn) return 0x80070057u;                     /* E_INVALIDARG (fixture always passes it) */
+    *pn = (uint32_t)(sizeof(aret_mlang_cps) / sizeof(aret_mlang_cps[0]));
+    return 0;                                        /* S_OK */
+}
 /* GetCodePageInfo(uiCodePage, PMIMECPINFO) — fills MIMECPINFO from the Wine-extracted
  * table, mirroring Wine's fnIMultiLanguage_GetCodePageInfo + fill_cp_info exactly (fields
  * at their fixed MSVC offsets; bGDICharset from the family cp). S_OK if found, S_FALSE
@@ -9535,7 +9557,29 @@ ML_STUB(EnumCodePages)
 ML_STUB(GetCharsetInfo)
 ML_STUB(IsConvertible)
 ML_STUB(ConvertString)
-ML_STUB(ConvertStringToUnicode)
+/* ConvertStringToUnicode(pdwMode, dwEncoding, pSrcStr, pcSrcSize, pDstStr, pcDstSize):
+ * mirrors Wine's ConvertINetMultiByteToUnicode — route to MultiByteToWideChar(dwEncoding)
+ * via the shared aret_mb2wc core, so it inherits ARET's exact page coverage (CP1252 etc.).
+ * *pcSrcSize is left as the bytes consumed (all of them on a full conversion, like Wine);
+ * *pcDstSize is set to the WCHAR count. dwMode is stateful only for ISO-2022 shifts, which
+ * this single-byte path does not use. A NULL dst/pcDstSize is a size query. */
+static uint32_t u32_ml_ConvertStringToUnicode(uint32_t esp) {
+    uint32_t dwEncoding = WU(2);
+    const char *src = (const char *)(uintptr_t)WU(3);
+    uint32_t *pcSrc = (uint32_t *)(uintptr_t)WU(4);
+    uint16_t *dst = (uint16_t *)(uintptr_t)WU(5);
+    uint32_t *pcDst = (uint32_t *)(uintptr_t)WU(6);
+    extern int aret_mb2wc(uint32_t, const char *, int, uint16_t *, int);
+    if (!src) return 0x80070057u;                    /* E_INVALIDARG */
+    int srclen = pcSrc ? (int)*pcSrc : -1;           /* -1 => NUL-terminated, like Wine */
+    if (!dst || !pcDst) {                            /* size query */
+        int need = aret_mb2wc(dwEncoding, src, srclen, 0, 0);
+        if (pcDst) *pcDst = (uint32_t)need;
+        return 0;
+    }
+    *pcDst = (uint32_t)aret_mb2wc(dwEncoding, src, srclen, dst, (int)*pcDst);
+    return 0;                                        /* S_OK; *pcSrc stays = consumed */
+}
 ML_STUB(ConvertStringFromUnicode)
 ML_STUB(ConvertStringReset)
 ML_STUB(GetRfc1766FromLcid)
@@ -9583,6 +9627,7 @@ uint32_t aret_CoCreateInstance(uint32_t esp) {
             uint32_t obj = u32_get_mlang();
             if (!obj) return 0x80004005u;             /* E_FAIL: no VA left */
             *(uint32_t *)(uintptr_t)ppv = obj;
+            g_mlang_refs = 1;                         /* fresh COM reference (CoCreateInstance contract) */
             return 0;                                 /* S_OK */
         }
         return 0x80004002u;                           /* E_NOINTERFACE (IMultiLanguage2/3) */
@@ -11093,10 +11138,10 @@ uint32_t aret_SetMenuItemBitmaps(uint32_t esp) {
     g_u32_menu[i].it[s].bmp_checked   = WU(4);
     return 1;
 }
-/* GetMenuCheckMarkDimensions = MAKELONG(SM_CXMENUCHECK, SM_CYMENUCHECK); the default
- * check-mark bitmap is 13x13 (measured vs Wine). */
+/* GetMenuCheckMarkDimensions = MAKELONG(SM_CXMENUCHECK, SM_CYMENUCHECK). Derived from
+ * the one metric table (u32_sysmetric) so it cannot drift from GetSystemMetrics. */
 uint32_t aret_GetMenuCheckMarkDimensions(uint32_t esp) {
-    (void)esp; return (13u << 16) | 13u;
+    (void)esp; return (u32_sysmetric(72) << 16) | u32_sysmetric(71);
 }
 
 /* Window menu bar + system menu. */
