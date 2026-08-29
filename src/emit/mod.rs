@@ -202,6 +202,15 @@ pub(crate) const FLOAT_HELPERS: &str = concat!(
     "static inline uint64_t __ps_max(uint64_t a,uint64_t b){uint32_t l=__fp_g32(a)>__fp_g32(b)?(uint32_t)a:(uint32_t)b,h=__fp_g32(a>>32)>__fp_g32(b>>32)?(uint32_t)(a>>32):(uint32_t)(b>>32);return (uint64_t)l|((uint64_t)h<<32);}\n",
     "static inline uint64_t __ps_sqrt(uint64_t a){uint32_t l=(uint32_t)__fp_f32(__builtin_sqrtf(__fp_g32(a))),h=(uint32_t)__fp_f32(__builtin_sqrtf(__fp_g32(a>>32)));return (uint64_t)l|((uint64_t)h<<32);}\n",
     "static inline uint64_t __ps_cvtdq(uint64_t a){uint32_t l=(uint32_t)__fp_f32((float)(int32_t)(uint32_t)a),h=(uint32_t)__fp_f32((float)(int32_t)(uint32_t)(a>>32));return (uint64_t)l|((uint64_t)h<<32);}\n",
+    // Packed float/double conversions (SSE2). A 64-bit half holds two floats or one
+    // double. `(int32_t)(double)` lowers to x86 cvttsd2si (indefinite 0x80000000 on
+    // overflow/NaN); the non-`t` variants round via __builtin_rint[f] (default MXCSR
+    // nearest-even) before the same cast. Mirrored bit-for-bit in cpudiff.rs.
+    "static inline uint64_t __cvt_pd2ps(uint64_t a,uint64_t b){uint32_t l=(uint32_t)__fp_f32((float)__fp_g64(a)),h=(uint32_t)__fp_f32((float)__fp_g64(b));return (uint64_t)l|((uint64_t)h<<32);}\n",
+    "static inline uint64_t __cvtt_pd2dq(uint64_t a,uint64_t b){uint32_t l=(uint32_t)(int32_t)__fp_g64(a),h=(uint32_t)(int32_t)__fp_g64(b);return (uint64_t)l|((uint64_t)h<<32);}\n",
+    "static inline uint64_t __cvt_pd2dq(uint64_t a,uint64_t b){uint32_t l=(uint32_t)(int32_t)__builtin_rint(__fp_g64(a)),h=(uint32_t)(int32_t)__builtin_rint(__fp_g64(b));return (uint64_t)l|((uint64_t)h<<32);}\n",
+    "static inline uint64_t __cvtt_ps2dq(uint64_t a){uint32_t l=(uint32_t)(int32_t)__fp_g32(a),h=(uint32_t)(int32_t)__fp_g32(a>>32);return (uint64_t)l|((uint64_t)h<<32);}\n",
+    "static inline uint64_t __cvt_ps2dq(uint64_t a){uint32_t l=(uint32_t)(int32_t)__builtin_rintf(__fp_g32(a)),h=(uint32_t)(int32_t)__builtin_rintf(__fp_g32(a>>32));return (uint64_t)l|((uint64_t)h<<32);}\n",
     "static inline uint32_t __ps_cmp1(float x,float y,int p){int r;switch(p&7){case 0:r=x==y;break;case 1:r=x<y;break;case 2:r=x<=y;break;case 3:r=(x!=x||y!=y);break;case 4:r=!(x==y);break;case 5:r=!(x<y);break;case 6:r=!(x<=y);break;default:r=!(x!=x||y!=y);}return r?0xffffffffu:0u;}\n",
     "static inline uint64_t __ps_cmp(uint64_t a,uint64_t b,uint64_t p){uint32_t l=__ps_cmp1(__fp_g32(a),__fp_g32(b),(int)p),h=__ps_cmp1(__fp_g32(a>>32),__fp_g32(b>>32),(int)p);return (uint64_t)l|((uint64_t)h<<32);}\n",
     "static inline uint64_t __ps_movmsk(uint64_t lo,uint64_t hi){return ((lo>>31)&1)|(((lo>>63)&1)<<1)|(((hi>>31)&1)<<2)|(((hi>>63)&1)<<3);}\n",

@@ -104,6 +104,7 @@ fn is_scalar_float(ins: &Instruction) -> bool {
             | Cmpps | Andps | Orps | Andnps | Shufps | Movmskps | Unpcklps | Unpckhps
             | Psllq | Pinsrw | Pinsrd | Cvtdq2pd
             | Pshufb | Andpd | Orpd | Andnpd
+            | Cvtps2pd | Cvtpd2ps | Cvttpd2dq | Cvtpd2dq | Cvttps2dq | Cvtps2dq
     )
 }
 
@@ -1598,6 +1599,32 @@ pub fn lift(insn: &Insn, bits: u32) -> Vec<Stmt> {
         Mnemonic::Cvtdq2ps => {
             let (lo, hi) = some_or_asm!(read_xmm128(ins, 1));
             some_or_asm!(write_xmm128(ins, fcall("__ps_cvtdq", vec![lo]), fcall("__ps_cvtdq", vec![hi])))
+        }
+        // Packed float<->double / float,double->int conversions (SSE2). A 64-bit half
+        // holds two floats or one double; `*dq` results clear the high 64 bits.
+        // cvtps2pd: the LOW two floats of the source widen to two doubles (128-bit dst).
+        Mnemonic::Cvtps2pd => {
+            let (slo, _) = some_or_asm!(read_xmm128(ins, 1));
+            let hi = bin(BinOp::Shr, slo.clone(), konst(32));
+            some_or_asm!(write_xmm128(ins, fcall("__fp_32_64", vec![slo]), fcall("__fp_32_64", vec![hi])))
+        }
+        // cvtpd2ps: two doubles -> two floats in the low 64 bits; high 64 cleared.
+        Mnemonic::Cvtpd2ps => {
+            let (lo, hi) = some_or_asm!(read_xmm128(ins, 1));
+            some_or_asm!(write_xmm128(ins, fcall("__cvt_pd2ps", vec![lo, hi]), konst(0)))
+        }
+        // cvttpd2dq / cvtpd2dq: two doubles -> two int32 in the low 64 (high cleared);
+        // `t` truncates, the other rounds to nearest-even (default MXCSR).
+        Mnemonic::Cvttpd2dq | Mnemonic::Cvtpd2dq => {
+            let (lo, hi) = some_or_asm!(read_xmm128(ins, 1));
+            let h = if ins.mnemonic() == Mnemonic::Cvttpd2dq { "__cvtt_pd2dq" } else { "__cvt_pd2dq" };
+            some_or_asm!(write_xmm128(ins, fcall(h, vec![lo, hi]), konst(0)))
+        }
+        // cvttps2dq / cvtps2dq: four floats -> four int32 (full 128), per 64-bit half.
+        Mnemonic::Cvttps2dq | Mnemonic::Cvtps2dq => {
+            let (lo, hi) = some_or_asm!(read_xmm128(ins, 1));
+            let h = if ins.mnemonic() == Mnemonic::Cvttps2dq { "__cvtt_ps2dq" } else { "__cvt_ps2dq" };
+            some_or_asm!(write_xmm128(ins, fcall(h, vec![lo]), fcall(h, vec![hi])))
         }
         // cmpps with the imm8 predicate (`cmpltps`/`cmpleps`/`cmpeqps`… aliases).
         Mnemonic::Cmpps => {

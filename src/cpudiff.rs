@@ -1123,6 +1123,34 @@ fn helper_call(name: &str, a: &[u64]) -> Option<u64> {
                     | (((a[1] >> 63) & 1) << 3),
             );
         }
+        // Packed float/double conversions (SSE2). A 64-bit half holds two floats or
+        // one double. Truncation reuses cvtt_i32 (x86 #IA indefinite on overflow/NaN);
+        // the non-`t` variants round to nearest-even (default MXCSR) via cvtr_i32.
+        "__cvt_pd2ps" => {
+            let l = (f64::from_bits(a[0]) as f32).to_bits();
+            let h = (f64::from_bits(a[1]) as f32).to_bits();
+            return Some(l as u64 | (h as u64) << 32);
+        }
+        "__cvtt_pd2dq" => {
+            let l = cvtt_i32(f64::from_bits(a[0])) as u32;
+            let h = cvtt_i32(f64::from_bits(a[1])) as u32;
+            return Some(l as u64 | (h as u64) << 32);
+        }
+        "__cvt_pd2dq" => {
+            let l = cvtr_i32(f64::from_bits(a[0])) as u32;
+            let h = cvtr_i32(f64::from_bits(a[1])) as u32;
+            return Some(l as u64 | (h as u64) << 32);
+        }
+        "__cvtt_ps2dq" => {
+            let l = cvtt_i32(f32::from_bits(a[0] as u32) as f64) as u32;
+            let h = cvtt_i32(f32::from_bits((a[0] >> 32) as u32) as f64) as u32;
+            return Some(l as u64 | (h as u64) << 32);
+        }
+        "__cvt_ps2dq" => {
+            let l = cvtr_i32(f32::from_bits(a[0] as u32) as f64) as u32;
+            let h = cvtr_i32(f32::from_bits((a[0] >> 32) as u32) as f64) as u32;
+            return Some(l as u64 | (h as u64) << 32);
+        }
         _ => {}
     }
     let g64 = f64::from_bits;
@@ -1184,6 +1212,20 @@ fn cvtt_i64(d: f64) -> u64 {
         i64::MIN as u64
     } else {
         (t as i64) as u64
+    }
+}
+
+/// x86 `cvtsd2si`/`cvtps2dq`/`cvtpd2dq` to 32-bit: round to nearest-even (the
+/// default MXCSR rounding), and on a rounded value out of the int32 range (or NaN)
+/// return the integer indefinite 0x80000000 — matching the C helper's
+/// `(int32_t)__builtin_rint(...)` (rint follows the current rounding mode; the
+/// out-of-range `(int32_t)` then lowers to `cvttsd2si` = indefinite on x86).
+fn cvtr_i32(d: f64) -> u64 {
+    let r = d.round_ties_even();
+    if d.is_nan() || r > i32::MAX as f64 || r < i32::MIN as f64 {
+        (i32::MIN as i64) as u64
+    } else {
+        (r as i32 as i64) as u64
     }
 }
 
@@ -1712,6 +1754,13 @@ fn corpus() -> Vec<Vec<u8>> {
         vec![0xf3, 0x0f, 0x2c, 0xc1], // cvttss2si eax, xmm1
         vec![0xf2, 0x0f, 0x5a, 0xc1], // cvtsd2ss xmm0, xmm1
         vec![0xf3, 0x0f, 0x5a, 0xc1], // cvtss2sd xmm0, xmm1
+        // packed float/double conversions (SSE2): whole 128-bit lanes compared
+        vec![0x0f, 0x5a, 0xc1],       // cvtps2pd  xmm0, xmm1
+        vec![0x66, 0x0f, 0x5a, 0xc1], // cvtpd2ps  xmm0, xmm1
+        vec![0x66, 0x0f, 0xe6, 0xc1], // cvttpd2dq xmm0, xmm1
+        vec![0xf2, 0x0f, 0xe6, 0xc1], // cvtpd2dq  xmm0, xmm1
+        vec![0xf3, 0x0f, 0x5b, 0xc1], // cvttps2dq xmm0, xmm1
+        vec![0x66, 0x0f, 0x5b, 0xc1], // cvtps2dq  xmm0, xmm1
         // ordered/unordered compares -> EFLAGS (CF/ZF/PF, SF=OF=0)
         vec![0x66, 0x0f, 0x2f, 0xc1], // comisd  xmm0, xmm1
         vec![0x66, 0x0f, 0x2e, 0xc1], // ucomisd xmm0, xmm1
