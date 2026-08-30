@@ -238,6 +238,15 @@ itéré au placement des φ, seedé aléatoirement par processus) et **aucune po
 sert désormais de **détecteur** : un warm build qui ne réutilise pas ~tout signale un non-déterminisme.
 
 ### État régression (référence — doit rester vert)
+> **🔄 MAJ 2026-08-29 (autoritative — supersede les chiffres/murs datés ci-dessous)** : **winediff 264/264** (PLEIN
+> VERT, 0 rouge — les 2 anciens rouges `user32_menu2` et `ole_mlang` CORRIGÉS ce jour, cf. 71 [WINEDIFF][WINORACLE] +
+> KN-0029/P-0017 ; `WINEDIFF_BASELINE` supprimé). difftest **272/272**, hash `19acad982194bf07` inchangé. **Phase A
+> (SSE2) et B (shims CRT/kernel32/version) TERMINÉES+PROUVÉES** (KN-0027, KN-0018→0024). Le narratif spirv-cross plus bas
+> (`0x0`, `0x7475c0`) est **HISTORIQUE et RÉSOLU** (0x0 le 08-24, `0x7475c0` = FDE `.eh_frame` le 08-23, `_chkstk` le
+> 08-28). **Front réel = reprise ARET post-A** : prochaine cible **2 SIGSEGV UnxUtils --help** (§0), puis **ws2_32**
+> (réseau), **setlocale("")+CP_ACP** ; déférés §0-env `_getch`/`_ftime`/`GetFinalPathNameByHandleA`. MCP industrialisé
+> (async oracle + handoff two-pass + plugin, KN-0030) ; cpudiff vérifié end-to-end via MCP (KN-0031/P-0018, 193 s).
+
 difftest **272/272** · transpile-diff **4/4** (H=`19acad982194bf07`) · winediff
 **234/236** (2 rouges connus, orthogonaux au code : `gdi_uifont` **environnemental** fontconfig i386 ; `ole_mlang`
 **flake** oracle Wine-COM sous Xvfb concurrent — passe seul) · **heavy-form 5 preuves** (`proof.sh`/`proof_native.sh` rtlstr,
