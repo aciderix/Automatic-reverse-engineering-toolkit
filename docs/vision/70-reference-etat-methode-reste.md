@@ -1229,7 +1229,11 @@ agrégats, jointures, index, CTE, window, IN) :
 sur le build mingw pour re-mesurer la surface (FTS/RTREE non balayés → abort sound
 s'ils butent).
 
-### P1bis — ⚠️ **Trou de soundness connu : `setlocale` accepte tout et rend `"C"`** (trouvé 2026-07-26, non corrigé)
+### P1bis — ✅ **RÉSOLU 2026-08-30 (KN-0035) : `setlocale("")`+CP_ACP modélisé, reste abort bruyant** (trouvé 2026-07-26)
+> ✅ **Fix livré (KN-0035, brique HLE-SETLOCALE-CPACP p1).** `aret_setlocale` (`aret_hle.c`) ne rend plus `"C"` en silence : il modèle une **whitelist mesurée-exacte** {`NULL`-requête, `"C"`, `""`/`".1252"`/nom canonique 1252 pour `LC_ALL`|`LC_CTYPE`} → `(cp, nom)`, et **aborte bruyamment** (`aret_unmodelled`) sur toute autre chaîne/catégorie (expansions `"German"`→`"German_Germany.1252"`, codepages 932/936/65001, forme composite) — plus jamais un nom deviné. Un état `aret_crt_ctype_cp` (0=C, 1252=CP_ACP) est consulté par `wcstombs`/`wctomb`. **Asymétrie msvcrt MESURÉE 2× vs Wine** (le genre de chose que §0 interdit de deviner) : après `setlocale("")`, **`wcstombs` = STRICT** (U+20AC→0x80, U+0152→0x8C, U+2018→0x91 ; U+0100/U+2212 → EILSEQ) mais **`wctomb` = BEST-FIT** (U+0100→'A', U+2212→'-', U+4E00→-1). `cp==0` inchangé → zéro régression. Sonde dédiée `bench/winecorpus/crt_setlocale_acp.c`. Gates : winediff **265/265**, difftest 272/272, hash transpile 19acad982194bf07 inchangé. **Borne** : noms de locale à expansion et codepages non-1252 → abort (prochain incrément si un vrai binaire les exige) ; `mbstowcs` non shimmé (import → `aret_unimpl` abort, §0-sûr). Cf. 71 (2026-08-30 [HLE]).
+
+**Historique (le trou, avant correction) :**
+### ~~P1bis — ⚠️ Trou de soundness : `setlocale` accepte tout et rend `"C"`~~ (trouvé 2026-07-26)
 `aret_setlocale` (`aret_hle.c`) renvoie **`"C"` quelle que soit la locale demandée**, au lieu de rendre **NULL** (= échec) pour celles
 qu'on ne modélise pas. Un programme qui fait `setlocale(LC_ALL, "French")` croit donc avoir changé de locale alors qu'on reste en C ⇒ tout
 ce qui en dépend (**collation** `_wcsicoll`/`wcscoll`, formats de nombres/dates, casse non-ASCII) diverge **en silence** — exactement le

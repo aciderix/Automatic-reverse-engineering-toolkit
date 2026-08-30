@@ -871,33 +871,43 @@ uint32_t aret_wcscat(uint32_t esp) {
     while ((*d++ = *s++)) {}
     return (uint32_t)(uintptr_t)r;
 }
-/* wcstombs(dst, src, count): 16-bit wide -> multibyte. ARET's CRT locale is always
- * "C" (aret_setlocale is a reporting no-op), so this MODELS the msvcrt "C" locale,
- * MEASURED bit-for-bit against Wine (winecorpus b1proof/wm.c):
- *   - a wchar < 0x100 maps to its low byte (ASCII and Latin-1 alike);
- *   - a wchar >= 0x100 is inconvertible -> return (size_t)-1 (EILSEQ), having
- *     written the bytes up to (not including) it — msvcrt does not NUL-terminate then;
+/* Current LC_CTYPE code page modelled by aret_setlocale (doc 70 §5, P1bis): 0 = the
+ * startup "C" locale (Latin-1 low byte, EILSEQ on wchar>0xFF); 1252 = CP_ACP, selected
+ * by setlocale(LC_ALL,"") / setlocale(LC_CTYPE,""). Consulted by wcstombs (STRICT) and
+ * wctomb (BEST-FIT) below — the two differ, MEASURED against Wine msvcrt. */
+unsigned aret_crt_ctype_cp = 0;
+extern int aret_cp1252_strict_byte(uint16_t wc);   /* wcstombs path: strict, -1 if unmappable */
+extern int aret_cp1252_bestfit_byte(uint16_t wc);  /* wctomb path: best-fit, -1 if none */
+/* wcstombs(dst, src, count): 16-bit wide -> multibyte, per the CURRENT CRT locale
+ * (aret_crt_ctype_cp). MEASURED bit-for-bit against Wine msvcrt:
+ *   - "C" locale (cp 0): a wchar < 0x100 maps to its low byte; >= 0x100 -> EILSEQ;
+ *   - CP_ACP (cp 1252, after setlocale("")): STRICT CP1252 — only true code points map
+ *     (U+20AC->0x80, U+0152->0x8C…); best-fit-only points (U+0100, U+2212) -> EILSEQ;
+ *   - on the first inconvertible char: return (size_t)-1, having written the bytes up to
+ *     (not including) it — msvcrt does not NUL-terminate then (measured, both locales);
  *   - dst == NULL measures: the byte count for the whole string (count ignored);
- *   - the NUL is written only if it fits within `count` (return == count => no NUL).
- * A program that set a non-C locale would get CP_ACP on Windows, but ARET's
- * setlocale is unmodeled (always "C"), so C-locale semantics are the consistent
- * and oracle-correct choice here; the wider locale gap is tracked separately. */
+ *   - the NUL is written only if it fits within `count` (return == count => no NUL). */
 uint32_t aret_wcstombs(uint32_t esp) {
     char *dst = (char *)(uintptr_t)a32(esp, 0);
     const uint16_t *src = (const uint16_t *)(uintptr_t)a32(esp, 1);
     size_t count = (size_t)a32(esp, 2);
     if (!src) { errno = EINVAL; return (uint32_t)-1; }
+    unsigned cp = aret_crt_ctype_cp;               /* 0 = C locale, 1252 = CP_ACP */
     size_t i = 0;
-    if (!dst) {                                   /* measure the whole string */
-        for (; src[i]; i++)
-            if (src[i] > 0xff) { errno = EILSEQ; return (uint32_t)-1; }
+    if (!dst) {                                    /* measure the whole string */
+        for (; src[i]; i++) {
+            int ok = (cp == 1252) ? (aret_cp1252_strict_byte(src[i]) >= 0) : (src[i] <= 0xff);
+            if (!ok) { errno = EILSEQ; return (uint32_t)-1; }
+        }
         return (uint32_t)i;
     }
     for (; i < count && src[i]; i++) {
-        if (src[i] > 0xff) { errno = EILSEQ; return (uint32_t)-1; }
-        dst[i] = (char)src[i];
+        int b = (cp == 1252) ? aret_cp1252_strict_byte(src[i])
+                             : (src[i] <= 0xff ? (int)src[i] : -1);
+        if (b < 0) { errno = EILSEQ; return (uint32_t)-1; }
+        dst[i] = (char)b;
     }
-    if (i < count) dst[i] = 0;                     /* NUL-terminate only if room */
+    if (i < count) dst[i] = 0;                      /* NUL-terminate only if room */
     return (uint32_t)i;
 }
 /* wcscat_s(dest, destsz, src) -> errno_t. Annex K / MSVC secure append, with the
@@ -1509,11 +1519,20 @@ uint32_t aret_finite(uint32_t esp) {
 uint32_t aret_kbhit(uint32_t esp) { (void)esp; return 0; }
 /* _getdrive(): current drive number (1=A:). We present C: (3), the modelled root. */
 uint32_t aret_getdrive(uint32_t esp) { (void)esp; return 3; }
-/* wctomb(char* s, wchar_t wc): C-locale single-byte encode. s==NULL -> 0 (no
- * state-dependent encoding). wc<256 fits one byte; above the C locale cannot encode -> -1. */
+/* wctomb(char* s, wchar_t wc): single-byte encode per the current CRT locale
+ * (aret_crt_ctype_cp). s==NULL -> 0 (no state-dependent encoding). MEASURED vs Wine:
+ *   - "C" locale: wc<256 -> its low byte; above -> -1;
+ *   - CP_ACP (after setlocale("")): BEST-FIT CP1252 — U+0100->'A', U+2212->'-', true
+ *     points map directly (U+20AC->0x80); only when even best-fit has nothing (U+4E00)
+ *     -> -1. NOTE the asymmetry with wcstombs, which is STRICT (measured). */
 uint32_t aret_wctomb(uint32_t esp) {
     char *s = AS(0); uint32_t wc = AU(1);
     if (!s) return 0;
+    if (aret_crt_ctype_cp == 1252) {
+        int b = aret_cp1252_bestfit_byte((uint16_t)wc);
+        if (b < 0) return (uint32_t)-1;
+        s[0] = (char)b; return 1;
+    }
     if (wc < 256) { s[0] = (char)wc; return 1; }
     return (uint32_t)-1;
 }

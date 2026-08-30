@@ -10023,6 +10023,27 @@ int aret_cp1252_from_wc(char *dst, const uint16_t *src, int n) {
     }
     return used;
 }
+/* ---- CRT locale converters (msvcrt setlocale("")+CP_ACP, doc 70 §5 P1bis). The CRT
+ * wcstombs / wctomb do NOT share a single reverse: MEASURED against Wine msvcrt under
+ * setlocale(""), wcstombs is STRICT while wctomb is BEST-FIT. Both are exposed here as
+ * per-char helpers so aret_crt.c can branch its C-locale bodies on the current code page.
+ *
+ * STRICT (wcstombs): the exact inverse of u32_ansi_cp — only code points CP1252 truly
+ * encodes map; U+00E9->0xE9, U+20AC->0x80, U+0152->0x8C, U+2018->0x91; U+0100 and U+2212
+ * (which the WideCharToMultiByte BEST-FIT would map to 'A'/'-') return -1 here. This is
+ * why it cannot reuse aret_cp1252_rev_byte (that table is the best-fit sweep). */
+int aret_cp1252_strict_byte(uint16_t wc) {
+    if (wc <= 0x7F) return (int)wc;
+    if (wc >= 0xA0 && wc <= 0xFF) return (int)wc;
+    for (int b = 0x80; b <= 0x9F; b++)
+        if ((uint16_t)u32_ansi_cp((unsigned char)b) == wc) return b;
+    return -1;
+}
+/* BEST-FIT (wctomb): MEASURED that msvcrt wctomb under setlocale("") best-fits
+ * (U+0100->'A'=0x41, U+2212->'-'=0x2D) yet returns -1 when even best-fit has nothing
+ * (U+4E00). That is exactly the raw best-fit table lookup with NO '?' substitution,
+ * i.e. aret_cp1252_rev_byte itself. */
+int aret_cp1252_bestfit_byte(uint16_t wc) { return aret_cp1252_rev_byte(wc); }
 /* Same, for the OEM code page (CP437, GetOEMCP()=437) — measured tables (tools/gen_cp437.py).
  * The single source of truth for MultiByteToWideChar/WideCharToMultiByte(CP_OEMCP) and the
  * ntdll Rtl*Oem* floor. Bit-identical Wine incl. best-fit + default char. */

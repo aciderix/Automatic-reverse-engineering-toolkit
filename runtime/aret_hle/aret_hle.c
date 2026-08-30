@@ -3914,7 +3914,42 @@ void aret_register_atexit(uint32_t va) {
     if (aret_atexit_n < ARET_ATEXIT_MAX) aret_atexit_fns[aret_atexit_n++] = va;
 }
 uint32_t aret_atexit(uint32_t esp) { aret_register_atexit(arg(esp, 0)); return 0; }
-uint32_t aret_setlocale(uint32_t esp) { (void)esp; return (uint32_t)(uintptr_t)"C"; }
+/* setlocale(category, locale) — msvcrt. MEASURED against Wine (doc 70 §5, P1bis). Models
+ * the LC_CTYPE code page that the CRT converters (wcstombs/wctomb, aret_crt.c) consult.
+ * WHITELIST of inputs whose FULL result is measured byte-exact under LC_ALL=C (winediff env):
+ *   - locale==NULL (query)                 -> current LC_CTYPE locale name ("C" at startup);
+ *   - "C"                                  -> C locale (cp 0), returns "C";
+ *   - "" / ".1252" / "English_United States.1252" for LC_ALL or LC_CTYPE
+ *                                          -> CP_ACP=1252, returns "English_United States.1252".
+ * A non-CTYPE category with "C" returns "C" without touching the ctype cp (harmless query-like
+ * set). EVERYTHING ELSE — named locales msvcrt would EXPAND ("German"->"German_Germany.1252",
+ * "fr_FR"->"French_France.1252"), other code pages (932/936/65001), the composite return form,
+ * a non-CTYPE category with a real locale — is NOT modelled: returning a guessed name or the
+ * wrong cp would be a silent false, so ABORT LOUDLY naming the request (§0). The previous shim
+ * silently returned "C" for every input — the latent silent false this replaces. */
+uint32_t aret_setlocale(uint32_t esp) {
+    int category = (int)arg(esp, 0);
+    const char *locale = (const char *)(uintptr_t)arg(esp, 1);
+    extern unsigned aret_crt_ctype_cp;
+    static char cur[64] = "C";                       /* current LC_CTYPE locale name */
+    if (!locale) return (uint32_t)(uintptr_t)cur;    /* query */
+    int affects_ctype = (category == 0 /*LC_ALL*/ || category == 2 /*LC_CTYPE*/);
+    if (!strcmp(locale, "C")) {
+        if (affects_ctype) { aret_crt_ctype_cp = 0; strcpy(cur, "C"); return (uint32_t)(uintptr_t)cur; }
+        return (uint32_t)(uintptr_t)"C";
+    }
+    int is_acp = (locale[0] == 0)                    /* "" */
+              || !strcmp(locale, ".1252")
+              || !strcmp(locale, "English_United States.1252");
+    if (is_acp && affects_ctype) {
+        aret_crt_ctype_cp = 1252;
+        strcpy(cur, "English_United States.1252");
+        return (uint32_t)(uintptr_t)cur;
+    }
+    aret_unmodelled("setlocale: only \"C\"/\"\"/\".1252\" for LC_ALL|LC_CTYPE are modelled; "
+                    "a guessed locale name or code page would be a silent false (doc 70 §5 P1bis)");
+    return 0;
+}
 uint32_t aret_abort(uint32_t esp) { (void)esp; abort(); return 0; }
 /* _assert(expr, file, line) — msvcrt assertion-failure reporter. MEASURED vs Wine:
  * writes "Assertion failed: <expr>, file <file>, line <line>\n" to stderr, then
