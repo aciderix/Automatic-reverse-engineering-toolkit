@@ -187,6 +187,36 @@ uint64_t aret_ldiv(uint32_t esp) {
     return (uint32_t)(num / den) | ((uint64_t)(uint32_t)(num % den) << 32);
 }
 
+/* libgcc 64-bit soft-arithmetic helpers (__divdi3 & co). On 32-bit x86 the compiler
+ * emits a call to these for every 64-bit int divide/modulo; a PE that links libgcc
+ * dynamically (libgcc_s_dw2-1.dll — e.g. lifted libglib) imports them, so they need a
+ * shim or they abort. Pure deterministic integer math, so the shim IS the definition:
+ * standard libgcc cdecl ABI — each 64-bit argument is two 32-bit stack words (low
+ * first), the result returns in edx:eax (uint64_t here; see import_returns_u64).
+ * __divmoddi4/__udivmoddi4 additionally store the remainder through a pointer arg.
+ * Division by zero / INT64_MIN÷-1 trap on the host exactly as the original idiv would
+ * (a loud fault, never a silent wrong value). */
+static int64_t  a_s64(uint32_t esp, int i) { return (int64_t)((uint64_t)AU(i) | ((uint64_t)AU(i + 1) << 32)); }
+static uint64_t a_u64(uint32_t esp, int i) { return (uint64_t)AU(i) | ((uint64_t)AU(i + 1) << 32); }
+uint64_t aret_divdi3(uint32_t esp)  { return (uint64_t)(a_s64(esp, 0) / a_s64(esp, 2)); }
+uint64_t aret_moddi3(uint32_t esp)  { return (uint64_t)(a_s64(esp, 0) % a_s64(esp, 2)); }
+uint64_t aret_udivdi3(uint32_t esp) { return a_u64(esp, 0) / a_u64(esp, 2); }
+uint64_t aret_umoddi3(uint32_t esp) { return a_u64(esp, 0) % a_u64(esp, 2); }
+uint64_t aret_divmoddi4(uint32_t esp) {
+    int64_t a = a_s64(esp, 0), b = a_s64(esp, 2);
+    int64_t *rem = (int64_t *)(uintptr_t)AU(4);
+    int64_t q = a / b;
+    if (rem) *rem = a - q * b;                    /* == a % b, matching libgcc */
+    return (uint64_t)q;
+}
+uint64_t aret_udivmoddi4(uint32_t esp) {
+    uint64_t a = a_u64(esp, 0), b = a_u64(esp, 2);
+    uint64_t *rem = (uint64_t *)(uintptr_t)AU(4);
+    uint64_t q = a / b;
+    if (rem) *rem = a - q * b;
+    return q;
+}
+
 /* <stdlib.h> Windows path helpers. _splitpath breaks a path into drive ("C:"),
  * directory (through the last separator), filename and extension (with dot); any
  * output buffer may be NULL. _makepath is its inverse; _fullpath resolves to an

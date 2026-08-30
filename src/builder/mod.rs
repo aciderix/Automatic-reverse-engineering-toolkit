@@ -468,6 +468,10 @@ fn import_returns_u64(sym: &str) -> bool {
             | "aret_strtoi64" | "aret_strtoui64" | "aret_atoi64" | "aret_wtoi64"
             | "aret_lseeki64" | "aret_telli64" | "aret_ftelli64" | "aret_filelengthi64"
             | "aret_GetTickCount64" | "aret_VerSetConditionMask"
+            // libgcc 64-bit soft-arith helpers: quotient (and __*divmoddi4 remainder
+            // via a pointer) returned in edx:eax. See aret_crt.c aret_divdi3 & co.
+            | "aret_divdi3" | "aret_udivdi3" | "aret_moddi3" | "aret_umoddi3"
+            | "aret_divmoddi4" | "aret_udivmoddi4"
     )
 }
 
