@@ -9042,3 +9042,12 @@ Commit c0fa66a — MMU : KN-0032 **PROVEN** (P-0019 difftest admissible, via are
 - **flex/recode** : **mur de PERFORMANCE**, pas §0. Le **transpile** (pas le runtime) dépasse 2 min sur flex.exe (146 Ko) / recode.exe (1 Mo). Échantillonnage gdb du process ARET (phases différentes : `ir::lift`, `ssa::rewrite_reads` récursif, `opt::dce::for_each_use::walk` récursif, `drop_glue::<Expr>` récursif) → ARET **progresse** mais est **super-linéaire** sur une **fonction géante** (yylex/recodeur à énorme switch). Transpile correct mais lent → **« borner puis pivoter »**. Chantier perf séparé : dérécursiver/mémoïser ssa/opt/dce pour fonctions géantes.
 - **stego** : divergence d'**exit-code** mineure (ARET 0 vs Wine 2 sur `--help`, **aucune** diff de sortie — stego ne supporte pas --help). Argv/propagation retour de `main` ? Faible priorité.
 - **Async oracle validé en prod** : `aret_run_oracle(async_mode=True)` (livré KN-0030) → `run_id` immédiat, `aret_get_oracle_run` → DONE/PASS/proof. Résout la friction timeout 60 s pour de vrai.
+
+### 2026-08-30 — [ROADMAP][DÉCISION] **Ordre de chantier validé : setlocale("")+CP_ACP → ws2_32 → perf** — KN-0034
+Décision utilisateur (endossant une reco ChatGPT), après le fix ls (KN-0032) et le sweep UnxUtils borné (KN-0033).
+1. **HLE-SETLOCALE-CPACP** (MAINTENANT) — `setlocale("")`+CP_ACP. Bien borné, lié à wcstombs/mbstowcs, preuve fonctionnelle rapide, faible coût/risque.
+2. **HLE-WS2_32** (ensuite) — axe réseau (Winsock).
+3. **PERF-SSA-OPT-DCE** (chantier DÉDIÉ, séparé) — dérécursiver/mémoïser ssa/opt/dce pour fonctions géantes ; NE PAS mélanger aux corrections de compat.
+- **flex/recode restent HORS §0** tant qu'aucune divergence de CORRECTION n'apparaît (murs de perf, pas des faux silencieux).
+- **Après setlocale** : MESURE WALL méga-corpus (`bench/wallsweep.sh`) pour cadrer le prochain front.
+- Briques MMU créées avec priorités ; Front repointé sur HLE-SETLOCALE-CPACP ; RECOV-REALBIN-DRIVE → DONE (a livré le fix ls).
