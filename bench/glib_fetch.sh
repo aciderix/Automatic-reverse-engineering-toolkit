@@ -23,7 +23,8 @@ WANT="libglib-2.0-0.dll libgobject-2.0-0.dll libgcc_s_dw2-1.dll libintl-8.dll \
 
 have_all() {
   local f; for f in $WANT; do [ -f "$out/$f" ] || return 1; done
-  [ -f "$dev/include/glib-2.0/glib.h" ] && [ -f "$dev/lib/libglib-2.0.dll.a" ]
+  [ -f "$dev/include/glib-2.0/glib.h" ] && [ -f "$dev/lib/libglib-2.0.dll.a" ] \
+    && [ -f "$dev/include/libintl.h" ] && [ -f "$dev/lib/libintl.dll.a" ]
 }
 if have_all; then echo "== GLib runtime already present in $out =="; ls "$out"; exit 0; fi
 
@@ -50,10 +51,11 @@ fetch() {
     case " $WANT " in *" $b "*) [ -f "$out/$b" ] || cp "$f" "$out/$b" ;; esac
   done
   if [ -n "$want_dev" ]; then
-    cp -r "$tmp"/mingw32/include/. "$dev/include/" 2>/dev/null
+    cp -r "$tmp"/mingw32/include/. "$dev/include/" 2>/dev/null      # glib.h, libintl.h, …
     mkdir -p "$dev/lib"
     cp -r "$tmp"/mingw32/lib/glib-2.0 "$dev/lib/" 2>/dev/null       # glibconfig.h
     cp "$tmp"/mingw32/lib/libg{lib,object,io,module,thread}-2.0.dll.a "$dev/lib/" 2>/dev/null
+    cp "$tmp"/mingw32/lib/libintl.dll.a "$dev/lib/" 2>/dev/null     # for the libintl lift gate
   fi
   rm -rf "$tmp/mingw32"
   echo "  ok $prefix ($pk)"
@@ -61,7 +63,8 @@ fetch() {
 
 echo "== fetching GLib runtime + dev from MSYS2 mingw32 =="
 fetch glib2 dev
-for p in gcc-libs gettext libiconv pcre2 libwinpthread libffi; do fetch "$p"; done
+fetch gettext dev
+for p in gcc-libs libiconv pcre2 libwinpthread libffi; do fetch "$p"; done
 
 miss=""
 for f in $WANT; do [ -f "$out/$f" ] || miss="$miss $f"; done

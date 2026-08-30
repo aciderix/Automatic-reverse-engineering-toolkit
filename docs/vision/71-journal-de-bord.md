@@ -9099,3 +9099,11 @@ Front LIFT-ZLIB. Méthode = **lifter** zlib1.dll (byte-exact ; un shim vers la z
 - **Provisioning** : `bench/zlib_fetch.sh` (DLL + dev → `bench/.cache/zlib`, gitignoré).
 - **Preuves** : `zlib_roundtrip` PASS 1/1 ; full winediff **270/270** propre (aucune régression) ; cache absent → SKIP vert. Preuve canonique MCP → KN-0043. Hash/difftest inchangés.
 - **Suite (KN-0042)** : __emutls_get_address, libintl-printf, cairo, GTK, HDF5.
+
+### 2026-08-30 — [LIFT][LIBINTL][§0 positionnel] **libintl printf family = LIFTER libintl-8.dll (pas un shim) — prouvé winediff** — KN-0044
+Front choisi utilisateur (libintl-printf, mur post-GLib). **§2 reproduire a recadré le chantier.**
+- **Découverte §0 décisive** : gettext fournit sa famille printf **précisément** pour les args **positionnels `%n$`** (l'ordre change selon la langue — sa raison d'être). Or `aret_printf`/`aret_snprintf` (via `aret_vformat`, formateur maison) ne modélisent PAS `%n$` → un shim `libintl_snprintf→aret_snprintf` serait un **faux silencieux** sur le cas d'usage même. Mesuré : `"pos %2$s before %1$s","AAA","BBB"` doit donner `"pos BBB before AAA"`.
+- **Solution = LIFTER libintl-8.dll** (comme GLib/zlib) : le vrai code gettext (qui gère `%n$`) tourne. **Aucune modif runtime/Rust** (libintl importe l'arith libgcc déjà shimmée + libiconv). Quand libintl est lifté, le code override les shims `aret_libintl_*` (mode non-lifté conservé).
+- **Infra** : `glib_fetch.sh` étendu (dev gettext : libintl.h + libintl.dll.a). Fixture `libintl_printf` (.withlocaldll libintl-8.dll, .winelibs libiconv/libgcc_s/libwinpthread, .wineoverride, .needpath) exerçant snprintf/vsnprintf/vasprintf/**vfprintf** + positionnel.
+- **Preuves** : `libintl_printf` PASS 1/1 (positionnel byte-identique Wine) ; full winediff **271/271** propre (aucune régression) ; cache absent → SKIP vert. Preuve canonique MCP → KN-0044. Hash/difftest inchangés.
+- **Suite (KN-0042)** : __emutls_get_address (29), cairo (~27), GTK, HDF5.
