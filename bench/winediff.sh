@@ -52,6 +52,11 @@ for d in /usr/lib/gcc/i686-w64-mingw32/*-win32 /usr/lib/gcc/i686-w64-mingw32/*-p
          /usr/lib/gcc/i686-w64-mingw32/* /usr/i686-w64-mingw32/bin /usr/i686-w64-mingw32/lib; do
   [ -d "$d" ] && MINGW_DLL_DIRS+=("$d")
 done
+# Non-toolchain runtime DLLs a fixture may need (e.g. the GLib/GObject stack) are not
+# shipped with mingw; a fetch script (bench/glib_fetch.sh) drops them into bench/.cache
+# so `.withlocaldll` (lift) and `.winelibs` (Wine-only deps) can resolve them. Absent =
+# the fixture SKIPs (ephemeral-container friendly), never a false FAIL.
+for d in "$DIR/.cache" "$DIR/.cache/glib"; do [ -d "$d" ] && MINGW_DLL_DIRS+=("$d"); done
 
 # Program output of `aret --mode transpile --run` is delimited by a marker, each
 # line prefixed "  | ".
@@ -87,6 +92,10 @@ run_one() {
   # Optional per-program compile flags (winecorpus/NAME.cflags, whitespace-separated)
   # — e.g. -mstackrealign to exercise the GCC stack-realignment prologue.
   local xcflags=""; [ -f "$CORPUS/$name.cflags" ] && xcflags="$(cat "$CORPUS/$name.cflags")"
+  # NAME.ldadd: extra link inputs placed AFTER the source object (where GNU ld resolves
+  # them), e.g. an import lib for a non-toolchain DLL like libglib-2.0.dll.a. Unlike
+  # .cflags (which precedes $src and so cannot satisfy the archive left-to-right rule).
+  local xldadd=""; [ -f "$CORPUS/$name.ldadd" ] && xldadd="$(cat "$CORPUS/$name.ldadd")"
   # Optional per-program import def (winecorpus/NAME.def): built into an import lib
   # with dlltool and linked *first*, so a fixture can force an import that the named
   # system libs would otherwise provide by name — e.g. an import BY ORDINAL (comctl32
@@ -161,6 +170,23 @@ run_one() {
     done < "$CORPUS/$name.withlocaldll"
     [ -n "$miss" ] && { echo "SKIP  $name ($miss not in mingw runtime dirs)"; return 2; }
   fi
+  # Optional Wine-only dependency DLLs (winecorpus/NAME.winelibs): one basename per line,
+  # copied beside the exe so the Wine ORACLE can load a lifted DLL's own transitive deps
+  # (e.g. libglib pulls libintl/libpcre2/libgcc_s). Unlike .withlocaldll these are NOT
+  # passed to ARET — ARET routes their imports to its HLE shims (or aborts loudly if a
+  # path reaches an unmodelled one), so this asserts the shims match the real deps while
+  # the lifted DLL runs. Resolved from the mingw runtime dirs + bench/.cache; SKIP if any
+  # is absent (ephemeral-container friendly).
+  if [ -f "$CORPUS/$name.winelibs" ]; then
+    miss=""
+    while IFS= read -r dll || [ -n "$dll" ]; do
+      [ -z "$dll" ] && continue
+      local found=""
+      for d in "${MINGW_DLL_DIRS[@]}"; do [ -f "$d/$dll" ] && found="$d/$dll" && break; done
+      if [ -n "$found" ]; then cp -f "$found" "$WD/$dll"; else miss="$dll"; fi
+    done < "$CORPUS/$name.winelibs"
+    [ -n "$miss" ] && { echo "SKIP  $name ($miss not in runtime dirs / bench/.cache)"; return 2; }
+  fi
   # Optional shim-vs-redist validation (winecorpus/NAME.winedll): DLL basenames to copy
   # into $WD so the Wine ORACLE loads the real redist DLL, while ARET routes its imports
   # to HLE shims — NOT lifted (no --with-dll). Unlike .withlocaldll (which lifts), this
@@ -186,7 +212,7 @@ run_one() {
   # Link the common Win32 libs a guard might reference (version info, OLE/COM,
   # BSTR, common controls). Harmless for programs that use none — the imports are
   # demand-loaded.
-  if ! "$CC" -O1 -w $xcflags "$src" $imp_lib $res_obj -lversion -lole32 -loleaut32 -luuid -luser32 -lgdi32 -lcomctl32 -lwinspool -llz32 -lshlwapi -lshell32 -lbcrypt -lntdll -lws2_32 -o "$WD/$name.exe" 2>"$WD/err"; then
+  if ! "$CC" -O1 -w $xcflags "$src" $xldadd $imp_lib $res_obj -lversion -lole32 -loleaut32 -luuid -luser32 -lgdi32 -lcomctl32 -lwinspool -llz32 -lshlwapi -lshell32 -lbcrypt -lntdll -lws2_32 -o "$WD/$name.exe" 2>"$WD/err"; then
     echo "FAIL  $name (PE build: $(head -1 "$WD/err"))"; return 1
   fi
   # Optional per-program arguments: one per line in winecorpus/NAME.args. Passed
@@ -336,13 +362,19 @@ done
 [ "${#gui[@]}" -gt 0 ] && printf '%s\0' "${gui[@]}" | xargs -0 -P 1 -I{} bash "$0" --one {}
 
 # Replay in the original order: the log is then byte-identical to a serial run.
-pass=0; total=0
+pass=0; total=0; skipped=0
 for n in "${names[@]}"; do
-  total=$((total+1))
   [ -f "$TMP/log/$n.out" ] && cat "$TMP/log/$n.out"
-  [ "$(cat "$TMP/log/$n.rc" 2>/dev/null || echo 1)" = "0" ] && pass=$((pass+1))
+  rc="$(cat "$TMP/log/$n.rc" 2>/dev/null || echo 1)"
+  # rc 2 = SKIP (a dep this environment lacks, e.g. an unfetched runtime DLL): not
+  # testable here, so it counts as neither pass nor total — never as a failure. A gate
+  # that goes red merely because an optional DLL was not fetched would teach us to
+  # ignore red, which the corpus notes above are at pains to avoid.
+  if [ "$rc" = "2" ]; then skipped=$((skipped+1)); continue; fi
+  total=$((total+1))
+  [ "$rc" = "0" ] && pass=$((pass+1))
 done
 
 echo "------------------------------------------"
-echo "OS-API (Wine) equivalence: $pass/$total programs"
+echo "OS-API (Wine) equivalence: $pass/$total programs$([ "$skipped" -gt 0 ] && echo " ($skipped skipped)")"
 [ "$pass" -eq "$total" ]
