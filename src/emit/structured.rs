@@ -420,9 +420,22 @@ impl Structurer {
                 // before the table, so the default is unreachable — route to case 0.
                 self.line(depth, &format!("switch ({}) {{", expr_c(&value)));
                 let succ = self.succ[i].clone();
+                // Une table de saut à CIBLES RÉPÉTÉES (plusieurs entrées vers la même adresse,
+                // cas d'un switch keyé par VA) produit plusieurs fois la même clé de `case` —
+                // or un `case` dupliqué est du C invalide (« duplicate case value »), ce qui
+                // faisait échouer le recompile (ex. UnxUtils ls.exe). On émet chaque clé UNE
+                // fois. Garde §0 : si une même clé désignait deux labels différents, c'est une
+                // incohérence réelle qu'on ne collapse pas en silence (assert).
+                let mut seen: std::collections::HashMap<i128, String> = std::collections::HashMap::new();
                 for (k, &t) in succ.iter().enumerate() {
                     let key = cases.get(k).map(|(v, _)| *v).unwrap_or(k as i128);
-                    self.line(depth + 1, &format!("case {}: goto {};", key, label(self.nodes[t])));
+                    let lbl = label(self.nodes[t]);
+                    if let Some(prev) = seen.get(&key) {
+                        assert_eq!(prev, &lbl, "switch: clé {} désigne deux labels ({} vs {})", key, prev, lbl);
+                        continue;
+                    }
+                    seen.insert(key, lbl.clone());
+                    self.line(depth + 1, &format!("case {}: goto {};", key, lbl));
                 }
                 if let Some(&t0) = succ.first() {
                     self.line(depth + 1, &format!("default: goto {};", label(self.nodes[t0])));
@@ -530,9 +543,18 @@ impl Structurer {
             Stmt::Switch { value, cases, .. } => {
                 self.line(depth + 1, &format!("switch ({}) {{", expr_c(&value)));
                 let succ = self.succ[header].clone();
+                // Cf. bloc Switch plus haut : dédup des clés de `case` (cibles répétées ⇒
+                // « duplicate case value » sinon), garde §0 sur un conflit clé→label.
+                let mut seen: std::collections::HashMap<i128, String> = std::collections::HashMap::new();
                 for (k, &t) in succ.iter().enumerate() {
                     let key = cases.get(k).map(|(v, _)| *v).unwrap_or(k as i128);
-                    self.line(depth + 2, &format!("case {}: goto {};", key, label(self.nodes[t])));
+                    let lbl = label(self.nodes[t]);
+                    if let Some(prev) = seen.get(&key) {
+                        assert_eq!(prev, &lbl, "switch: clé {} désigne deux labels ({} vs {})", key, prev, lbl);
+                        continue;
+                    }
+                    seen.insert(key, lbl.clone());
+                    self.line(depth + 2, &format!("case {}: goto {};", key, lbl));
                 }
                 if let Some(&t0) = succ.first() {
                     self.line(depth + 2, &format!("default: goto {};", label(self.nodes[t0])));
