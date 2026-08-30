@@ -1176,7 +1176,13 @@ pub fn lift(insn: &Insn, bits: u32) -> Vec<Stmt> {
         // The shared-stack model runs one fiber at a time, so PAUSE is likewise a no-op.
         // Sound to drop (Unicorn treats them the same). Measured on ninja (`prefetcht0`).
         | Mnemonic::Prefetcht0 | Mnemonic::Prefetcht1 | Mnemonic::Prefetcht2
-        | Mnemonic::Prefetchnta | Mnemonic::Prefetchw | Mnemonic::Pause => vec![Stmt::Nop],
+        | Mnemonic::Prefetchnta | Mnemonic::Prefetchw | Mnemonic::Pause
+        // Memory fences (MFENCE/LFENCE/SFENCE) order memory operations only as seen by
+        // OTHER observers (threads, DMA). ARET runs one fiber at a time on a coherent
+        // host CPU, so a single stream of execution never observes any reordering the
+        // fence would prevent — a no-op, exactly like PAUSE. (Unicorn treats them the
+        // same; measured on cairo/pixman, which use MFENCE.)
+        | Mnemonic::Mfence | Mnemonic::Lfence | Mnemonic::Sfence => vec![Stmt::Nop],
         // Direction flag: `cld` clears DF (forward), `std` sets it (backward). The
         // string-op lifting reads DF to pick the element-advance sign, so both are
         // real writes now (not no-ops). DF reads 0 at entry (SSA init) = the ABI's
