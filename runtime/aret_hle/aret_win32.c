@@ -6294,6 +6294,53 @@ uint32_t aret_GetUserNameW(uint32_t esp) {
     return 1;
 }
 
+/* GetComputerNameA/W(buf, nSize) -> BOOL (kernel32). Reached by e.g. GLib's
+ * g_get_host_name (lifted libglib). Like GetUserName, the NAME comes from the same
+ * source Wine reads — the host — so the two engines agree and the fixture compares it
+ * directly: MEASURED, Wine derives the computer name from the host hostname, UPPERCASED
+ * and cut at the first '.' to the NetBIOS max of 15 chars (host "vm" -> "VM"). We do the
+ * same; if the host has no name at all we abort rather than invent one.
+ *
+ * The SIZE contract DIFFERS from GetUserName and was MEASURED (winecorpus/win32_compname.c):
+ * on SUCCESS *nSize is the length WITHOUT the NUL; a buffer too small to hold name+NUL
+ * fails with ERROR_BUFFER_OVERFLOW (111), sets *nSize to the required count INCLUDING the
+ * NUL, and leaves the buffer UNTOUCHED; a request of exactly length+1 succeeds. Chars for
+ * both A and W (the name is ASCII). */
+static int u32_computer_name(char out[16]) {
+    char h[256] = {0};
+    if (gethostname(h, sizeof h - 1) != 0 || !h[0])
+        aret_unmodelled("GetComputerName: the host provides no name (gethostname failed)");
+    int n = 0;
+    for (int i = 0; h[i] && h[i] != '.' && n < 15; i++) {
+        char c = h[i];
+        out[n++] = (c >= 'a' && c <= 'z') ? (char)(c - 32) : c;   /* uppercase, NetBIOS */
+    }
+    out[n] = 0;
+    if (n == 0) aret_unmodelled("GetComputerName: host name empty after normalisation");
+    return n;
+}
+uint32_t aret_GetComputerNameA(uint32_t esp) {
+    char *buf = (char *)(uintptr_t)WU(0);
+    uint32_t *nSize = (uint32_t *)(uintptr_t)WU(1);
+    char name[16]; int len = u32_computer_name(name);
+    if (!nSize) return 0;
+    if (!buf || *nSize < (uint32_t)len + 1) { *nSize = (uint32_t)len + 1; g_last_error = 111; return 0; }
+    memcpy(buf, name, (size_t)len + 1);
+    *nSize = (uint32_t)len;
+    return 1;
+}
+uint32_t aret_GetComputerNameW(uint32_t esp) {
+    uint16_t *buf = (uint16_t *)(uintptr_t)WU(0);
+    uint32_t *nSize = (uint32_t *)(uintptr_t)WU(1);
+    char name[16]; int len = u32_computer_name(name);
+    if (!nSize) return 0;
+    if (!buf || *nSize < (uint32_t)len + 1) { *nSize = (uint32_t)len + 1; g_last_error = 111; return 0; }
+    for (int i = 0; i < len; i++) buf[i] = (uint16_t)(unsigned char)name[i];
+    buf[len] = 0;
+    *nSize = (uint32_t)len;
+    return 1;
+}
+
 /* ExitWindowsEx(uFlags, dwReason) -> BOOL. We never log the user off / shut the
  * host down (sound: a transpiled app must not affect the real session); report
  * success so the app proceeds to its own teardown. Not oracle-compared (a real

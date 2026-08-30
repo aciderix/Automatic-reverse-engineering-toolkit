@@ -42,6 +42,21 @@ int main(void) {
     printf("strup=%s\n", up);
     g_free(up);
 
+    /* g_get_host_name -> GetComputerNameW on the lifted libglib: the value is
+     * machine-dependent (host-derived, same source as Wine), so assert only that the
+     * path returns a non-empty name — GetComputerName's exact value/contract is proven
+     * byte-for-byte separately by win32_compname. */
+    const char *host = g_get_host_name();
+    printf("host_present=%d\n", host && *host ? 1 : 0);
+
+    /* g_date_time_format: a fixed UTC instant -> deterministic string (GLib formats it
+     * from its own tables, so this is byte-stable across engines). */
+    GDateTime *dt = g_date_time_new_utc(2024, 1, 15, 13, 45, 30);
+    char *ds = g_date_time_format(dt, "%Y-%m-%d %H:%M:%S");
+    printf("datetime=%s\n", ds);
+    g_free(ds);
+    g_date_time_unref(dt);
+
     printf("done\n");
     return 0;
 }
