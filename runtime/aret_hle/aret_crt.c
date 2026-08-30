@@ -217,6 +217,46 @@ uint64_t aret_udivmoddi4(uint32_t esp) {
     return q;
 }
 
+/* libgcc emulated-TLS runtime: __emutls_get_address(obj) returns the address of a
+ * `__thread` variable's storage, allocating and initialising it on first access. A PE
+ * that links libgcc dynamically (libgcc_s_dw2-1.dll) and uses `__thread` imports it
+ * (mingw i686 has no native TLS -> emutls). MEASURED struct layout (libgcc emutls.c,
+ * i386): struct __emutls_object { word size; word align; union{uintptr_t index; void*} loc;
+ * void *templ; } — 16 bytes. First call for an object assigns it a 1-based index from a
+ * global counter (written back into `loc`) and allocates `size` bytes aligned to `align`,
+ * initialised from `templ` by memcpy or zero-filled when templ==0; later calls return the
+ * same block. ARET is cooperative single-thread per fiber, and the architecture is
+ * strictly single-thread until CreateThread (doc 80) — so ONE block table models the
+ * current thread exactly; a genuinely multi-threaded program using `__thread` would need
+ * per-fiber tables, tracked as a bounded gap rather than papered over. */
+#define ARET_EMUTLS_MAX 8192
+static uint32_t aret_emutls_blocks[ARET_EMUTLS_MAX];   /* index-1 -> guest block address */
+static uint32_t aret_emutls_next = 1;                  /* next 1-based index to hand out */
+uint32_t aret_emutls_get_address(uint32_t esp) {
+    uint32_t *obj = (uint32_t *)(uintptr_t)a32(esp, 0);
+    if (!obj) { errno = EINVAL; return 0; }
+    uint32_t size = obj[0], align = obj[1], index = obj[2], templ = obj[3];
+    if (index == 0) {
+        if (aret_emutls_next >= ARET_EMUTLS_MAX)
+            aret_unmodelled("__emutls_get_address: too many __thread objects (raise ARET_EMUTLS_MAX)");
+        index = aret_emutls_next++;
+        obj[2] = index;                                /* libgcc caches the index in loc */
+    }
+    if (aret_emutls_blocks[index - 1] == 0) {
+        size_t al = align ? (size_t)align : 1;
+        if (al < sizeof(void *)) al = sizeof(void *);
+        size_t p2 = sizeof(void *);
+        while (p2 < al) p2 <<= 1;                       /* posix_memalign needs a power of 2 */
+        void *p = 0;
+        if (posix_memalign(&p, p2, size ? size : 1) != 0 || !p)
+            aret_unmodelled("__emutls_get_address: allocation failed");
+        if (templ) memcpy(p, (const void *)(uintptr_t)templ, size);
+        else memset(p, 0, size);
+        aret_emutls_blocks[index - 1] = (uint32_t)(uintptr_t)p;
+    }
+    return aret_emutls_blocks[index - 1];
+}
+
 /* <stdlib.h> Windows path helpers. _splitpath breaks a path into drive ("C:"),
  * directory (through the last separator), filename and extension (with dot); any
  * output buffer may be NULL. _makepath is its inverse; _fullpath resolves to an

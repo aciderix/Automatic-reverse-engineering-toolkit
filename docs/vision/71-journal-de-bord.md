@@ -9107,3 +9107,11 @@ Front choisi utilisateur (libintl-printf, mur post-GLib). **§2 reproduire a rec
 - **Infra** : `glib_fetch.sh` étendu (dev gettext : libintl.h + libintl.dll.a). Fixture `libintl_printf` (.withlocaldll libintl-8.dll, .winelibs libiconv/libgcc_s/libwinpthread, .wineoverride, .needpath) exerçant snprintf/vsnprintf/vasprintf/**vfprintf** + positionnel.
 - **Preuves** : `libintl_printf` PASS 1/1 (positionnel byte-identique Wine) ; full winediff **271/271** propre (aucune régression) ; cache absent → SKIP vert. Preuve canonique MCP → KN-0044. Hash/difftest inchangés.
 - **Suite (KN-0042)** : __emutls_get_address (29), cairo (~27), GTK, HDF5.
+
+### 2026-08-30 — [HLE][EMUTLS][§0 cause générale] **`__emutls_get_address` shimmé (TLS émulé libgcc) — prouvé winediff (`crt_emutls`)** — KN-0045
+Front post-libintl (KN-0042). §2 reproduire. **Cause générale** : mingw i686 n'a pas de TLS natif → toute variable `__thread` passe par le TLS émulé libgcc ; un PE liant libgcc dynamiquement importe `__emutls_get_address` → sans shim, abort.
+- **Reproduit** : fixture `__thread` (-shared-libgcc) ; Wine `a=116 b=1122334455667789 s=hi!` ; ARET abortait.
+- **Struct mesurée** (libgcc emutls.c, i386) : `{word size; word align; union loc; void* templ}` = 16 o. `__emutls_get_address(obj)` : loc==0 → assigne un index (compteur global, réécrit dans loc) ; alloue `size` aligné `align`, init depuis `templ` (memcpy) ou zéro ; accès suivants → même bloc.
+- **Fix additif** (hash inchangé) : `aret_crt.c` `aret_emutls_get_address` + table globale + `posix_memalign`. **Borne §0** : ARET mono-thread coopératif (playbook : strictement mono-thread sans CreateThread) → une table = le thread courant, exact. Multi-thread réel avec `__thread` = gap borné documenté (tables par-fiber, à traiter avec le sous-système fibers si un binaire l'exige).
+- **Preuves** : gate `crt_emutls` (init + zéro-init + alignement double + persistance) **PASS 1/1** ; full winediff **272/272** propre ; difftest 272/272, hash 4/4. Preuve canonique MCP → KN-0045. libgcc_s toolchain auto-contenu → gate sans provisioning.
+- **Suite (KN-0042)** : cairo (~27), GTK (~24), HDF5 (~21).
