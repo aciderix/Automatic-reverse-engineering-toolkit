@@ -52,11 +52,14 @@ for d in /usr/lib/gcc/i686-w64-mingw32/*-win32 /usr/lib/gcc/i686-w64-mingw32/*-p
          /usr/lib/gcc/i686-w64-mingw32/* /usr/i686-w64-mingw32/bin /usr/i686-w64-mingw32/lib; do
   [ -d "$d" ] && MINGW_DLL_DIRS+=("$d")
 done
-# Non-toolchain runtime DLLs a fixture may need (e.g. the GLib/GObject stack) are not
-# shipped with mingw; a fetch script (bench/glib_fetch.sh) drops them into bench/.cache
-# so `.withlocaldll` (lift) and `.winelibs` (Wine-only deps) can resolve them. Absent =
-# the fixture SKIPs (ephemeral-container friendly), never a false FAIL.
-for d in "$DIR/.cache" "$DIR/.cache/glib"; do [ -d "$d" ] && MINGW_DLL_DIRS+=("$d"); done
+# Non-toolchain runtime DLLs a fixture may need are fetched into bench/.cache (by
+# bench/glib_fetch.sh / bench/zlib_fetch.sh). The toolchain is searched FIRST so a
+# fixture that wants the toolchain's own runtime (libgcc_s, libstdc++, libintl) keeps
+# getting it; the cache only fills what the toolchain lacks. A .withlocaldll DLL is
+# copied to $WD and used by BOTH ARET (it lifts it) and the Wine oracle (a
+# .wineoverride makes Wine load that same native file), so whichever version resolves,
+# the two engines agree. Absent = the fixture SKIPs, never a false FAIL.
+for d in "$DIR/.cache" "$DIR/.cache/glib" "$DIR/.cache/zlib"; do [ -d "$d" ] && MINGW_DLL_DIRS+=("$d"); done
 
 # Program output of `aret --mode transpile --run` is delimited by a marker, each
 # line prefixed "  | ".
@@ -72,6 +75,17 @@ norm() { tr -d '\r'; }   # ignore CRLF-vs-LF line-ending differences
 # ---------------------------------------------------------------------------
 run_one() {
   local name="$1" WD="$2"
+  # NAME.needpath: paths (one per line, relative to the repo root) that must exist for the
+  # fixture to build — e.g. a fetched dev header/import lib under bench/.cache. When a DLL
+  # the fixture lifts ALSO ships in the toolchain (zlib1), .withlocaldll won't SKIP on a
+  # missing fetch, so this makes the fixture SKIP cleanly instead of failing the compile.
+  if [ -f "$CORPUS/$name.needpath" ]; then
+    local _np
+    while IFS= read -r _np || [ -n "$_np" ]; do
+      [ -z "$_np" ] && continue
+      [ -e "$_np" ] || { echo "SKIP  $name ($_np absent — run the fetch script)"; return 2; }
+    done < "$CORPUS/$name.needpath"
+  fi
   # C fixture by default; a C++ fixture (NAME.cpp) is compiled with g++ (for lifting the
   # GNU C++ runtime libstdc++-6.dll, the measured #1 corpus gap). SKIP if g++ is absent.
   local src="$CORPUS/$name.c" CC="$MINGW"
@@ -96,6 +110,13 @@ run_one() {
   # them), e.g. an import lib for a non-toolchain DLL like libglib-2.0.dll.a. Unlike
   # .cflags (which precedes $src and so cannot satisfy the archive left-to-right rule).
   local xldadd=""; [ -f "$CORPUS/$name.ldadd" ] && xldadd="$(cat "$CORPUS/$name.ldadd")"
+  # NAME.wineoverride: a WINEDLLOVERRIDES value applied to the Wine ORACLE only (never to
+  # ARET). Needed when a .withlocaldll DLL is ALSO a Wine builtin (e.g. zlib1): "zlib1=n"
+  # forces Wine to load the SAME native PE ARET lifts instead of its own builtin, so the
+  # two are compared like-for-like. One whitespace-free assignment string.
+  # `env` prefix (not a bare VAR=val string: an assignment that arrives via expansion is
+  # treated by bash as a command name, not an assignment, so it must go through `env`).
+  local wdo=(); [ -f "$CORPUS/$name.wineoverride" ] && wdo=(env "WINEDLLOVERRIDES=$(cat "$CORPUS/$name.wineoverride")")
   # Optional per-program import def (winecorpus/NAME.def): built into an import lib
   # with dlltool and linked *first*, so a fixture can force an import that the named
   # system libs would otherwise provide by name — e.g. an import BY ORDINAL (comctl32
@@ -251,7 +272,7 @@ run_one() {
   fi
   # Oracle: real PE under Wine. Run from the fixture dir so any files land there.
   local oracle got
-  oracle="$(cd "$WD" && "${disp[@]}" wine "$WD/$name.exe" "${pargs[@]}" <"$infile" 2>/dev/null | norm)"
+  oracle="$(cd "$WD" && "${wdo[@]}" "${disp[@]}" wine "$WD/$name.exe" "${pargs[@]}" <"$infile" 2>/dev/null | norm)"
   # ARET: transpile + run the same PE natively (args after `--`).
   rm -rf "$WD/out"
   got="$(cd "$WD" && "${disp[@]}" "$ARET" "$WD/$name.exe" "${withdll[@]}" --mode transpile --out-dir "$WD/out" --run -- "${pargs[@]}" <"$infile" 2>"$WD/aerr" \
