@@ -95,6 +95,7 @@ fn is_scalar_float(ins: &Instruction) -> bool {
             | Pcmpeqb | Pcmpgtb | Pcmpeqw | Pmovmskb | Pshuflw | Pshufhw
             | Paddw | Paddq | Pcmpgtw | Pmuludq | Psrlq | Psubusw
             | Paddb | Psubb | Psubw | Psubq | Pmullw
+            | Pminub | Pmaxub | Pminsw | Pmaxsw
             | Pslld | Psrld | Psrad | Psllw | Psrlw | Psraw
             | Packuswb | Packssdw | Punpcklbw | Punpckhbw | Pextrw
             | Punpcklwd | Punpckhwd | Punpckldq | Punpckhdq | Punpcklqdq | Punpckhqdq
@@ -1428,6 +1429,19 @@ pub fn lift(insn: &Insn, bits: u32) -> Vec<Stmt> {
             let (alo, ahi) = some_or_asm!(read_xmm128(ins, 0));
             let (blo, bhi) = some_or_asm!(read_xmm128(ins, 1));
             some_or_asm!(write_xmm128(ins, bin(BinOp::Sub, alo, blo), bin(BinOp::Sub, ahi, bhi)))
+        }
+        // Packed integer min/max, per 64-bit half: unsigned bytes (pminub/pmaxub,
+        // 8 lanes) and signed words (pminsw/pmaxsw, 4 lanes).
+        Mnemonic::Pminub | Mnemonic::Pmaxub | Mnemonic::Pminsw | Mnemonic::Pmaxsw => {
+            let (alo, ahi) = some_or_asm!(read_xmm128(ins, 0));
+            let (blo, bhi) = some_or_asm!(read_xmm128(ins, 1));
+            let h = match ins.mnemonic() {
+                Mnemonic::Pminub => "__pi_minub",
+                Mnemonic::Pmaxub => "__pi_maxub",
+                Mnemonic::Pminsw => "__pi_minsw",
+                _ => "__pi_maxsw",
+            };
+            some_or_asm!(write_xmm128(ins, fcall(h, vec![alo, blo]), fcall(h, vec![ahi, bhi])))
         }
         // Packed lane shifts by a scalar count (immediate or the low 64 bits of an
         // XMM/mem operand). Same count for every lane; the helper handles count>=width.

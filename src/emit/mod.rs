@@ -172,6 +172,12 @@ pub(crate) const FLOAT_HELPERS: &str = concat!(
     "static inline uint64_t __pi_sub8(uint64_t a,uint64_t b){uint64_t r=0;for(int i=0;i<64;i+=8)r|=(uint64_t)(uint8_t)((a>>i)-(b>>i))<<i;return r;}\n",
     "static inline uint64_t __pi_sub16(uint64_t a,uint64_t b){uint64_t r=0;for(int i=0;i<64;i+=16)r|=(uint64_t)(uint16_t)((a>>i)-(b>>i))<<i;return r;}\n",
     "static inline uint64_t __pi_mullw(uint64_t a,uint64_t b){uint64_t r=0;for(int i=0;i<64;i+=16)r|=(uint64_t)(uint16_t)((uint16_t)(a>>i)*(uint16_t)(b>>i))<<i;return r;}\n",
+    // Packed integer min/max per lane: unsigned bytes (pminub/pmaxub) and signed words
+    // (pminsw/pmaxsw).
+    "static inline uint64_t __pi_minub(uint64_t a,uint64_t b){uint64_t r=0;for(int i=0;i<64;i+=8){uint8_t x=(uint8_t)(a>>i),y=(uint8_t)(b>>i);r|=(uint64_t)(x<y?x:y)<<i;}return r;}\n",
+    "static inline uint64_t __pi_maxub(uint64_t a,uint64_t b){uint64_t r=0;for(int i=0;i<64;i+=8){uint8_t x=(uint8_t)(a>>i),y=(uint8_t)(b>>i);r|=(uint64_t)(x>y?x:y)<<i;}return r;}\n",
+    "static inline uint64_t __pi_minsw(uint64_t a,uint64_t b){uint64_t r=0;for(int i=0;i<64;i+=16){int16_t x=(int16_t)(uint16_t)(a>>i),y=(int16_t)(uint16_t)(b>>i);r|=(uint64_t)(uint16_t)(x<y?x:y)<<i;}return r;}\n",
+    "static inline uint64_t __pi_maxsw(uint64_t a,uint64_t b){uint64_t r=0;for(int i=0;i<64;i+=16){int16_t x=(int16_t)(uint16_t)(a>>i),y=(int16_t)(uint16_t)(b>>i);r|=(uint64_t)(uint16_t)(x>y?x:y)<<i;}return r;}\n",
     // Packed lane shifts by a scalar count (same count for every lane; count>=width -> 0,
     // arithmetic saturates the count to width-1). 32-bit and 16-bit lanes.
     "static inline uint64_t __pi_sll32(uint64_t a,uint64_t c){if(c>31)return 0;uint32_t l=(uint32_t)a<<c,h=(uint32_t)(a>>32)<<c;return (uint64_t)l|((uint64_t)h<<32);}\n",

@@ -971,6 +971,26 @@ fn helper_call(name: &str, a: &[u64]) -> Option<u64> {
             }
             return Some(r);
         }
+        // Packed integer min/max: unsigned bytes (pminub/pmaxub) and signed words
+        // (pminsw/pmaxsw), one lane at a time within the 64-bit half.
+        "__pi_minub" | "__pi_maxub" => {
+            let mut r = 0u64;
+            for i in (0..64).step_by(8) {
+                let (x, y) = ((a[0] >> i) as u8, (a[1] >> i) as u8);
+                let m = if name == "__pi_minub" { x.min(y) } else { x.max(y) };
+                r |= (m as u64) << i;
+            }
+            return Some(r);
+        }
+        "__pi_minsw" | "__pi_maxsw" => {
+            let mut r = 0u64;
+            for i in (0..64).step_by(16) {
+                let (x, y) = ((a[0] >> i) as u16 as i16, (a[1] >> i) as u16 as i16);
+                let m = if name == "__pi_minsw" { x.min(y) } else { x.max(y) };
+                r |= (m as u16 as u64) << i;
+            }
+            return Some(r);
+        }
         "__pi_shufw" => {
             let (x, imm) = (a[0], a[1]);
             let mut r = 0u64;
@@ -1793,6 +1813,10 @@ fn corpus() -> Vec<Vec<u8>> {
         vec![0x66, 0x0f, 0x66, 0xc1], // pcmpgtd   xmm0, xmm1
         vec![0x66, 0x0f, 0x65, 0xc1], // pcmpgtw   xmm0, xmm1
         vec![0x66, 0x0f, 0xd9, 0xc1], // psubusw   xmm0, xmm1
+        vec![0x66, 0x0f, 0xda, 0xc1], // pminub    xmm0, xmm1
+        vec![0x66, 0x0f, 0xde, 0xc1], // pmaxub    xmm0, xmm1
+        vec![0x66, 0x0f, 0xea, 0xc1], // pminsw    xmm0, xmm1
+        vec![0x66, 0x0f, 0xee, 0xc1], // pmaxsw    xmm0, xmm1
         vec![0x66, 0x0f, 0xf4, 0xc1], // pmuludq   xmm0, xmm1
         vec![0x66, 0x0f, 0xdb, 0xc1], // pand      xmm0, xmm1
         vec![0x66, 0x0f, 0xdf, 0xc1], // pandn     xmm0, xmm1
