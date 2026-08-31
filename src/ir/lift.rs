@@ -99,7 +99,7 @@ fn is_scalar_float(ins: &Instruction) -> bool {
             | Packuswb | Packssdw | Punpcklbw | Punpckhbw | Pextrw
             | Punpcklwd | Punpckhwd | Punpckldq | Punpckhdq | Punpcklqdq | Punpckhqdq
             | Movhlps | Movlhps | Movhps | Movhpd | Movlps | Movlpd | Shufpd
-            | Unpcklpd | Unpckhpd | Addpd | Subpd | Mulpd | Divpd
+            | Unpcklpd | Unpckhpd | Addpd | Subpd | Mulpd | Divpd | Cmppd
             | Addps | Subps | Mulps | Divps | Minps | Maxps | Sqrtps | Cvtdq2ps
             | Cmpps | Andps | Orps | Andnps | Shufps | Movmskps | Unpcklps | Unpckhps
             | Psllq | Pinsrw | Pinsrd | Cvtdq2pd
@@ -1641,6 +1641,18 @@ pub fn lift(insn: &Insn, bits: u32) -> Vec<Stmt> {
                 ins,
                 fcall("__ps_cmp", vec![alo, blo, p.clone()]),
                 fcall("__ps_cmp", vec![ahi, bhi, p])
+            ))
+        }
+        // cmppd: packed double compare — one f64 lane per 64-bit half, same imm8
+        // predicate table as cmpps; each lane yields an all-ones/all-zeros 64-bit mask.
+        Mnemonic::Cmppd => {
+            let (alo, ahi) = some_or_asm!(read_xmm128(ins, 0));
+            let (blo, bhi) = some_or_asm!(read_xmm128(ins, 1));
+            let p = konst(ins.immediate(2) as i128);
+            some_or_asm!(write_xmm128(
+                ins,
+                fcall("__pd_cmp", vec![alo, blo, p.clone()]),
+                fcall("__pd_cmp", vec![ahi, bhi, p])
             ))
         }
         // Bitwise packed-float logic: operate on the raw 128-bit halves.

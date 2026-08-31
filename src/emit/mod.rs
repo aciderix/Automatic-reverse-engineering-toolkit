@@ -213,6 +213,9 @@ pub(crate) const FLOAT_HELPERS: &str = concat!(
     "static inline uint64_t __cvt_ps2dq(uint64_t a){uint32_t l=(uint32_t)(int32_t)__builtin_rintf(__fp_g32(a)),h=(uint32_t)(int32_t)__builtin_rintf(__fp_g32(a>>32));return (uint64_t)l|((uint64_t)h<<32);}\n",
     "static inline uint32_t __ps_cmp1(float x,float y,int p){int r;switch(p&7){case 0:r=x==y;break;case 1:r=x<y;break;case 2:r=x<=y;break;case 3:r=(x!=x||y!=y);break;case 4:r=!(x==y);break;case 5:r=!(x<y);break;case 6:r=!(x<=y);break;default:r=!(x!=x||y!=y);}return r?0xffffffffu:0u;}\n",
     "static inline uint64_t __ps_cmp(uint64_t a,uint64_t b,uint64_t p){uint32_t l=__ps_cmp1(__fp_g32(a),__fp_g32(b),(int)p),h=__ps_cmp1(__fp_g32(a>>32),__fp_g32(b>>32),(int)p);return (uint64_t)l|((uint64_t)h<<32);}\n",
+    // Packed double compare: one f64 lane per 64-bit half, same predicate table as
+    // __ps_cmp1; result is an all-ones / all-zeros 64-bit mask.
+    "static inline uint64_t __pd_cmp(uint64_t a,uint64_t b,uint64_t p){double x=__fp_g64(a),y=__fp_g64(b);int r;switch(p&7){case 0:r=x==y;break;case 1:r=x<y;break;case 2:r=x<=y;break;case 3:r=(x!=x||y!=y);break;case 4:r=!(x==y);break;case 5:r=!(x<y);break;case 6:r=!(x<=y);break;default:r=!(x!=x||y!=y);}return r?0xffffffffffffffffull:0ull;}\n",
     "static inline uint64_t __ps_movmsk(uint64_t lo,uint64_t hi){return ((lo>>31)&1)|(((lo>>63)&1)<<1)|(((hi>>31)&1)<<2)|(((hi>>63)&1)<<3);}\n",
     // Wide integer (64-bit 1-operand mul/div via 128-bit), byte swap, bit scan.
     // `__int128` only exists on 64-bit targets; on -m32 (where the transpiler's

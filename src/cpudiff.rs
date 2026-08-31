@@ -857,6 +857,23 @@ fn ps_cmp1(a: u32, b: u32, p: u64) -> u32 {
     if r { 0xffff_ffff } else { 0 }
 }
 
+/// One `cmppd` lane (one f64): same predicate table as `ps_cmp1`, mirroring the C
+/// `__pd_cmp` helper → an all-ones or all-zeros 64-bit mask.
+fn pd_cmp1(a: u64, b: u64, p: u64) -> u64 {
+    let (x, y) = (f64::from_bits(a), f64::from_bits(b));
+    let r = match p & 7 {
+        0 => x == y,
+        1 => x < y,
+        2 => x <= y,
+        3 => x.is_nan() || y.is_nan(),
+        4 => x != y,
+        5 => !(x < y),
+        6 => !(x <= y),
+        _ => !(x.is_nan() || y.is_nan()),
+    };
+    if r { 0xffff_ffff_ffff_ffff } else { 0 }
+}
+
 fn helper_call(name: &str, a: &[u64]) -> Option<u64> {
     // 32-bit integer-division helpers (the lifter routes div/idiv through these
     // so the C reproduces #DE). Return None on any fault state — zero divisor,
@@ -1115,6 +1132,7 @@ fn helper_call(name: &str, a: &[u64]) -> Option<u64> {
             let h = ps_cmp1((a[0] >> 32) as u32, (a[1] >> 32) as u32, a[2]);
             return Some(l as u64 | (h as u64) << 32);
         }
+        "__pd_cmp" => return Some(pd_cmp1(a[0], a[1], a[2])),
         "__ps_movmsk" => {
             return Some(
                 ((a[0] >> 31) & 1)
@@ -1860,6 +1878,12 @@ fn corpus() -> Vec<Vec<u8>> {
         vec![0x66, 0x0f, 0x55, 0xc1],       // andnpd    xmm0, xmm1
         vec![0x66, 0x0f, 0x56, 0xc1],       // orpd      xmm0, xmm1
         vec![0x66, 0x0f, 0x57, 0xc1],       // xorpd     xmm0, xmm1
+        // cmppd (66 0F C2 /r ib): packed double compare, one f64 lane per 64-bit half.
+        // Cover eq/lt/le/unord to exercise ordered and NaN-unordered predicate paths.
+        vec![0x66, 0x0f, 0xc2, 0xc1, 0x00], // cmpeqpd   xmm0, xmm1
+        vec![0x66, 0x0f, 0xc2, 0xc1, 0x01], // cmpltpd   xmm0, xmm1
+        vec![0x66, 0x0f, 0xc2, 0xc1, 0x02], // cmplepd   xmm0, xmm1
+        vec![0x66, 0x0f, 0xc2, 0xc1, 0x03], // cmpunordpd xmm0, xmm1
         // pshufb (SSSE3): byte shuffle by a control mask (high bit -> 0, else index 0..15)
         vec![0x66, 0x0f, 0x38, 0x00, 0xc1], // pshufb    xmm0, xmm1
         // ---- stack / frame family (the esp-touching hotspot) --------------
