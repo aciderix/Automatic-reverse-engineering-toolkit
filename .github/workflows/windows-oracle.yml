@@ -48,7 +48,9 @@ jobs:
           if errorlevel 1 exit /b 1
           mkdir out
           for %%f in (bench\winoracle\*.c) do call :probe "%%~nf"
-          goto :eof
+          rem Measurement, not a gate: one probe that fails to build/run is reported and
+          rem must not leak its errorlevel out as the step's exit code.
+          exit /b 0
           :probe
           set p=%~1
           echo ================ %p% ================
@@ -68,7 +70,15 @@ jobs:
           rem would measure the TOOLCHAIN rather than the API. Skips are REPORTED: a
           rem silently shrinking set would look like a shrinking set of problems.
           for %%f in (bench\winecorpus\*.c) do call :one "%%~nf"
-          goto :eof
+          rem This is a MEASUREMENT, not a gate (see header): a fixture that cannot be
+          rem built on the MSVC runner — it needs an MSYS2 dev package (e.g. zlib.h) or a
+          rem mingw-only import lib — is reported BUILD-FAIL and the set moves on. Force
+          rem success so the LAST fixture's compiler errorlevel does not leak out as the
+          rem step's exit code (that is what turned this non-gate red). Every OK hash and
+          rem BUILD-FAIL line stays in the log and the published artifact; a real
+          rem Windows-vs-ARET divergence surfaces as a DIFFERING hash in the offline diff
+          rem against bench/winoracle/wine_hashes.sh, never as a green/red job status.
+          exit /b 0
           :one
           set n=%~1
           echo %n%| findstr /e ".dll" >nul && goto :eof
