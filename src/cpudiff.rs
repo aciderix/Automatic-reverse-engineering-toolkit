@@ -907,6 +907,58 @@ fn helper_call(name: &str, a: &[u64]) -> Option<u64> {
             }
             return Some((if name == "__ix_idiv32" { q } else { n % dd }) as u64);
         }
+        // 16-bit: dx:ax / r/m16. Trap (None) on zero divisor or a quotient that
+        // does not fit 16 bits — mirrors __ix_*16 exactly, where Unicorn #DEs.
+        "__ix_udiv16" | "__ix_umod16" => {
+            let d = (a[1] & 0xffff) as u32;
+            if d == 0 {
+                return None;
+            }
+            let n = (a[0] & 0xffff_ffff) as u32;
+            if n / d > 0xffff {
+                return None;
+            }
+            return Some((if name == "__ix_udiv16" { n / d } else { n % d }) as u64);
+        }
+        "__ix_idiv16" | "__ix_imod16" => {
+            let dd = a[1] as u16 as i16 as i32;
+            let nn = a[0] as u32 as i32;
+            if dd == 0 || (dd == -1 && nn == i32::MIN) {
+                return None;
+            }
+            let q = nn / dd;
+            if q > 32767 || q < -32768 {
+                return None;
+            }
+            let v = if name == "__ix_idiv16" { q } else { nn % dd };
+            return Some(v as i16 as u16 as u64);
+        }
+        // 8-bit: ax / r/m8. Trap on zero divisor or a quotient that does not fit
+        // 8 bits.
+        "__ix_udiv8" | "__ix_umod8" => {
+            let d = (a[1] & 0xff) as u32;
+            if d == 0 {
+                return None;
+            }
+            let n = (a[0] & 0xffff) as u32;
+            if n / d > 0xff {
+                return None;
+            }
+            return Some((if name == "__ix_udiv8" { n / d } else { n % d }) as u64);
+        }
+        "__ix_idiv8" | "__ix_imod8" => {
+            let dd = a[1] as u8 as i8 as i32;
+            if dd == 0 {
+                return None;
+            }
+            let nn = a[0] as u16 as i16 as i32;
+            let q = nn / dd;
+            if q > 127 || q < -128 {
+                return None;
+            }
+            let v = if name == "__ix_idiv8" { q } else { nn % dd };
+            return Some(v as i8 as u8 as u64);
+        }
         // Parity flag: PF = 1 iff the low byte has an even number of set bits.
         "__ix_pf" => return Some(((a[0] & 0xff).count_ones() % 2 == 0) as u64),
 
@@ -1695,6 +1747,11 @@ fn corpus() -> Vec<Vec<u8>> {
         vec![0x6b, 0xc1, 0x07], // imul eax, ecx, 7
         vec![0xf7, 0xe1], // mul ecx   (edx:eax = eax*ecx)
         vec![0xf7, 0xe9], // imul ecx
+        // 8-bit (ax = al*r/m8) and 16-bit (dx:ax = ax*r/m16) mul/imul
+        vec![0xf6, 0xe1], // mul  cl   (ax = al*cl)
+        vec![0xf6, 0xe9], // imul cl
+        vec![0x66, 0xf7, 0xe1], // mul  cx   (dx:ax = ax*cx)
+        vec![0x66, 0xf7, 0xe9], // imul cx
         // rotates (set CF/OF)
         vec![0xd3, 0xc0], // rol eax, cl
         vec![0xd3, 0xc8], // ror eax, cl
@@ -1774,6 +1831,13 @@ fn corpus() -> Vec<Vec<u8>> {
         vec![0xf7, 0xf9], // idiv ecx
         vec![0xf7, 0xf3], // div  ebx
         vec![0xf7, 0xfb], // idiv ebx
+        // 8-bit (ax / r/m8 -> al,ah) and 16-bit (dx:ax / r/m16 -> ax,dx) div/idiv.
+        // Most random seeds overflow the narrow quotient (a #DE the harness skips,
+        // matching the __ix_*8/16 trap); the non-trapping seeds validate the value.
+        vec![0xf6, 0xf1], // div  cl
+        vec![0xf6, 0xf9], // idiv cl
+        vec![0x66, 0xf7, 0xf1], // div  cx
+        vec![0x66, 0xf7, 0xf9], // idiv cx
         // ---- SSE scalar float (xmm0/xmm1, the __fp_* helper path) ----
         // double arithmetic (low 64 result, high 64 preserved)
         vec![0xf2, 0x0f, 0x58, 0xc1], // addsd xmm0, xmm1

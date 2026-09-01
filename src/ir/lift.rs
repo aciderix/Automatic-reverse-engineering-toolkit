@@ -1998,6 +1998,91 @@ pub fn lift(insn: &Insn, bits: u32) -> Vec<Stmt> {
                     Stmt::Set { dst: rdx, expr: Expr::Read(t_hi) },
                 ];
             }
+            // 16-bit form: dx:ax <op> r/m16. Mirrors the 32-bit path with 16-bit
+            // lanes — mul/imul give dx:ax (hi:lo), div/idiv give ax=quotient,
+            // dx=remainder, both trapping #DE via the __ix_*16 helpers.
+            if w == 16 {
+                let src = some_or_asm!(op_value(ins, 0));
+                let rax = Location::Reg(RegId(0));
+                let rdx = Location::Reg(RegId(2));
+                let m16 = || konst(mask(16));
+                let ax = bin(BinOp::And, Expr::Read(rax.clone()), m16());
+                let dx = bin(BinOp::And, Expr::Read(rdx.clone()), m16());
+                let s16 = bin(BinOp::And, src, m16());
+                let t_lo = Location::Temp((insn.address as u32).wrapping_mul(2));
+                let t_hi = Location::Temp((insn.address as u32).wrapping_mul(2).wrapping_add(1));
+                let (lo_expr, hi_expr) = match ins.mnemonic() {
+                    Mnemonic::Mul => {
+                        let praw = bin(BinOp::And, bin(BinOp::Mul, ax, s16), konst(mask(32)));
+                        (
+                            bin(BinOp::And, praw.clone(), m16()),
+                            bin(BinOp::And, bin(BinOp::Shr, praw, konst(16)), m16()),
+                        )
+                    }
+                    Mnemonic::Imul => {
+                        let a = Expr::Unary(UnOp::SignExtend, Box::new(ax));
+                        let b = Expr::Unary(UnOp::SignExtend, Box::new(s16));
+                        let praw = bin(BinOp::And, bin(BinOp::Mul, a, b), konst(mask(32)));
+                        (
+                            bin(BinOp::And, praw.clone(), m16()),
+                            bin(BinOp::And, bin(BinOp::Shr, praw, konst(16)), m16()),
+                        )
+                    }
+                    Mnemonic::Div => {
+                        let d = bin(BinOp::Or, bin(BinOp::Shl, dx, konst(16)), ax);
+                        (
+                            fcall("__ix_udiv16", vec![d.clone(), s16.clone()]),
+                            fcall("__ix_umod16", vec![d, s16]),
+                        )
+                    }
+                    _ => {
+                        let d = bin(BinOp::Or, bin(BinOp::Shl, dx, konst(16)), ax);
+                        (
+                            fcall("__ix_idiv16", vec![d.clone(), s16.clone()]),
+                            fcall("__ix_imod16", vec![d, s16]),
+                        )
+                    }
+                };
+                return vec![
+                    Stmt::Set { dst: t_lo.clone(), expr: lo_expr },
+                    Stmt::Set { dst: t_hi.clone(), expr: hi_expr },
+                    Stmt::Set { dst: rax.clone(), expr: combine_write(&rax, 16, Expr::Read(t_lo), bits) },
+                    Stmt::Set { dst: rdx.clone(), expr: combine_write(&rdx, 16, Expr::Read(t_hi), bits) },
+                ];
+            }
+            // 8-bit form: ax <op> r/m8. mul/imul -> ax (16-bit product); div/idiv ->
+            // al=quotient, ah=remainder, i.e. ax = (rem<<8)|quot. Only eax is touched
+            // (edx is not involved), so everything writes ax in one Set.
+            if w == 8 {
+                let src = some_or_asm!(op_value(ins, 0));
+                let rax = Location::Reg(RegId(0));
+                let m8 = || konst(mask(8));
+                let al = bin(BinOp::And, Expr::Read(rax.clone()), m8());
+                let ax = bin(BinOp::And, Expr::Read(rax.clone()), konst(mask(16)));
+                let s8 = bin(BinOp::And, src, m8());
+                let ax_val = match ins.mnemonic() {
+                    Mnemonic::Mul => bin(BinOp::And, bin(BinOp::Mul, al, s8), konst(mask(16))),
+                    Mnemonic::Imul => {
+                        let a = Expr::Unary(UnOp::SignExtend, Box::new(al));
+                        let b = Expr::Unary(UnOp::SignExtend, Box::new(s8));
+                        bin(BinOp::And, bin(BinOp::Mul, a, b), konst(mask(16)))
+                    }
+                    Mnemonic::Div => {
+                        let q = bin(BinOp::And, fcall("__ix_udiv8", vec![ax.clone(), s8.clone()]), m8());
+                        let r = bin(BinOp::And, fcall("__ix_umod8", vec![ax, s8]), m8());
+                        bin(BinOp::Or, bin(BinOp::Shl, r, konst(8)), q)
+                    }
+                    _ => {
+                        let q = bin(BinOp::And, fcall("__ix_idiv8", vec![ax.clone(), s8.clone()]), m8());
+                        let r = bin(BinOp::And, fcall("__ix_imod8", vec![ax, s8]), m8());
+                        bin(BinOp::Or, bin(BinOp::Shl, r, konst(8)), q)
+                    }
+                };
+                return vec![Stmt::Set {
+                    dst: rax.clone(),
+                    expr: combine_write(&rax, 16, ax_val, bits),
+                }];
+            }
             if w != 32 {
                 return asm();
             }

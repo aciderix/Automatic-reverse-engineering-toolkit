@@ -238,6 +238,18 @@ pub(crate) const FLOAT_HELPERS: &str = concat!(
     "static inline uint32_t __ix_umod32(uint64_t n,uint32_t d){ if(!d)__ix_diverr(); if(n/d>0xffffffffull)__ix_diverr(); return (uint32_t)(n%d); }\n",
     "static inline int32_t __ix_idiv32(uint64_t n,uint32_t d){ if(!d)__ix_diverr(); int32_t dd=(int32_t)d; if(dd==-1&&n==0x8000000000000000ull)__ix_diverr(); int64_t q=(int64_t)n/dd; if(q>2147483647ll||q<-2147483648ll)__ix_diverr(); return (int32_t)q; }\n",
     "static inline int32_t __ix_imod32(uint64_t n,uint32_t d){ if(!d)__ix_diverr(); int32_t dd=(int32_t)d; if(dd==-1&&n==0x8000000000000000ull)__ix_diverr(); int64_t q=(int64_t)n/dd; if(q>2147483647ll||q<-2147483648ll)__ix_diverr(); return (int32_t)((int64_t)n%dd); }\n",
+    // 16-bit forms: dx:ax / r/m16 -> ax quotient, dx remainder. `n` is the 32-bit
+    // dividend, `d` the 16-bit divisor (raw bits; signed forms reinterpret them).
+    "static inline uint16_t __ix_udiv16(uint32_t n,uint32_t d){ uint16_t dd=(uint16_t)d; if(!dd)__ix_diverr(); uint32_t q=n/dd; if(q>0xffffu)__ix_diverr(); return (uint16_t)q; }\n",
+    "static inline uint16_t __ix_umod16(uint32_t n,uint32_t d){ uint16_t dd=(uint16_t)d; if(!dd)__ix_diverr(); if(n/dd>0xffffu)__ix_diverr(); return (uint16_t)(n%dd); }\n",
+    "static inline uint16_t __ix_idiv16(uint32_t n,uint32_t d){ int16_t dd=(int16_t)d; if(!dd)__ix_diverr(); int32_t nn=(int32_t)n; if(dd==-1&&nn==(-2147483647-1))__ix_diverr(); int32_t q=nn/dd; if(q>32767||q<-32768)__ix_diverr(); return (uint16_t)(int16_t)q; }\n",
+    "static inline uint16_t __ix_imod16(uint32_t n,uint32_t d){ int16_t dd=(int16_t)d; if(!dd)__ix_diverr(); int32_t nn=(int32_t)n; if(dd==-1&&nn==(-2147483647-1))__ix_diverr(); int32_t q=nn/dd; if(q>32767||q<-32768)__ix_diverr(); return (uint16_t)(int16_t)(nn%dd); }\n",
+    // 8-bit forms: ax / r/m8 -> al quotient, ah remainder. `n` is the 16-bit
+    // dividend, `d` the 8-bit divisor.
+    "static inline uint8_t __ix_udiv8(uint32_t n,uint32_t d){ uint8_t dd=(uint8_t)d; if(!dd)__ix_diverr(); uint16_t nn=(uint16_t)n; uint32_t q=(uint32_t)nn/dd; if(q>0xffu)__ix_diverr(); return (uint8_t)q; }\n",
+    "static inline uint8_t __ix_umod8(uint32_t n,uint32_t d){ uint8_t dd=(uint8_t)d; if(!dd)__ix_diverr(); uint16_t nn=(uint16_t)n; if((uint32_t)nn/dd>0xffu)__ix_diverr(); return (uint8_t)(nn%dd); }\n",
+    "static inline uint8_t __ix_idiv8(uint32_t n,uint32_t d){ int8_t dd=(int8_t)d; if(!dd)__ix_diverr(); int32_t nn=(int32_t)(int16_t)n; int32_t q=nn/dd; if(q>127||q<-128)__ix_diverr(); return (uint8_t)(int8_t)q; }\n",
+    "static inline uint8_t __ix_imod8(uint32_t n,uint32_t d){ int8_t dd=(int8_t)d; if(!dd)__ix_diverr(); int32_t nn=(int32_t)(int16_t)n; int32_t q=nn/dd; if(q>127||q<-128)__ix_diverr(); return (uint8_t)(int8_t)(nn%dd); }\n",
     "#if defined(__SIZEOF_INT128__)\n",
     "typedef unsigned __int128 __u128;typedef __int128 __i128;\n",
     "static inline uint64_t __ix_mul64hi(uint64_t a,uint64_t b){return (uint64_t)(((__u128)a*b)>>64);}\n",
