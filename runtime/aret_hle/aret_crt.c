@@ -100,6 +100,21 @@ uint32_t aret_strspn(uint32_t esp)  { return (uint32_t)strspn(ACS(0), ACS(1)); }
 uint32_t aret_strcspn(uint32_t esp) { return (uint32_t)strcspn(ACS(0), ACS(1)); }
 uint32_t aret_strpbrk(uint32_t esp) { return RP(strpbrk(ACS(0), ACS(1))); }
 uint32_t aret_strtok(uint32_t esp)  { return RP(strtok(AS(0), ACS(1))); }
+/* char *strtok_s(char *str, const char *delim, char **context): the MS
+ * bounds-checked strtok — semantically POSIX strtok_r (explicit context instead
+ * of a hidden static). The guest `context` is a 32-bit slot holding the saved
+ * position; a guest address is a host pointer in ARET's 1:1 low-4G map, so
+ * round-trip it through a host saveptr (host pointers past 4G never arise for a
+ * position inside a guest string). */
+uint32_t aret_strtok_s(uint32_t esp) {
+    char *str = AS(0);
+    const char *delim = ACS(1);
+    uint32_t *ctx = (uint32_t *)AP(2);
+    char *save = (ctx && *ctx) ? (char *)(uintptr_t)*ctx : NULL;
+    char *tok = strtok_r(str, delim, &save);
+    if (ctx) *ctx = (uint32_t)(uintptr_t)save;
+    return RP(tok);
+}
 /* strdup and _strdup both sanitize to aret_strdup (leading _ stripped). */
 uint32_t aret_strdup(uint32_t esp)  { return RP(strdup(ACS(0))); }
 uint32_t aret_strcoll(uint32_t esp) { return (uint32_t)(int32_t)strcoll(ACS(0), ACS(1)); }
