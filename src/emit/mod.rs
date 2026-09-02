@@ -167,6 +167,16 @@ pub(crate) const FLOAT_HELPERS: &str = concat!(
     "static inline uint32_t __pi_mskb(uint64_t lo,uint64_t hi){uint32_t m=0;for(int i=0;i<8;i++){m|=((uint32_t)((lo>>(i*8+7))&1))<<i;m|=((uint32_t)((hi>>(i*8+7))&1))<<(i+8);}return m;}\n",
     "static inline uint64_t __pi_muludq(uint64_t a,uint64_t b){return (uint64_t)(uint32_t)a*(uint32_t)b;}\n",
     "static inline uint64_t __pi_subus16(uint64_t a,uint64_t b){uint64_t r=0;for(int i=0;i<64;i+=16){uint16_t x=(uint16_t)(a>>i),y=(uint16_t)(b>>i);r|=(uint64_t)(uint16_t)(x>y?x-y:0)<<i;}return r;}\n",
+    // Unsigned saturating add: byte lanes (paddusb) and word lanes (paddusw) clamp
+    // the sum to the lane max instead of wrapping (SSE2/MMX pixel blending — pixman).
+    "static inline uint64_t __pi_addus8(uint64_t a,uint64_t b){uint64_t r=0;for(int i=0;i<64;i+=8){unsigned x=(uint8_t)(a>>i),y=(uint8_t)(b>>i),s=x+y;r|=(uint64_t)(uint8_t)(s>255u?255u:s)<<i;}return r;}\n",
+    "static inline uint64_t __pi_addus16(uint64_t a,uint64_t b){uint64_t r=0;for(int i=0;i<64;i+=16){unsigned x=(uint16_t)(a>>i),y=(uint16_t)(b>>i),s=x+y;r|=(uint64_t)(uint16_t)(s>65535u?65535u:s)<<i;}return r;}\n",
+    // High 16 bits of the unsigned 16x16 product per word lane (pmulhuw).
+    "static inline uint64_t __pi_mulhuw(uint64_t a,uint64_t b){uint64_t r=0;for(int i=0;i<64;i+=16){unsigned x=(uint16_t)(a>>i),y=(uint16_t)(b>>i);r|=(uint64_t)(uint16_t)((x*y)>>16)<<i;}return r;}\n",
+    // pmaddwd: signed 16x16 products of adjacent word pairs summed into each 32-bit
+    // lane (accumulate in int64 to avoid C signed-overflow UB; the result wraps mod 2^32
+    // exactly like the hardware).
+    "static inline uint64_t __pi_maddwd(uint64_t a,uint64_t b){uint64_t r=0;for(int k=0;k<2;k++){int i=k*32;int64_t p0=(int64_t)(int16_t)(a>>i)*(int16_t)(b>>i);int64_t p1=(int64_t)(int16_t)(a>>(i+16))*(int16_t)(b>>(i+16));r|=(uint64_t)(uint32_t)(int32_t)(p0+p1)<<i;}return r;}\n",
     // Byte/word lane add & sub (wrap per lane), word multiply-low (SSE2 pixel/vectorized code).
     "static inline uint64_t __pi_add8(uint64_t a,uint64_t b){uint64_t r=0;for(int i=0;i<64;i+=8)r|=(uint64_t)(uint8_t)((a>>i)+(b>>i))<<i;return r;}\n",
     "static inline uint64_t __pi_sub8(uint64_t a,uint64_t b){uint64_t r=0;for(int i=0;i<64;i+=8)r|=(uint64_t)(uint8_t)((a>>i)-(b>>i))<<i;return r;}\n",

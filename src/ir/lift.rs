@@ -94,6 +94,7 @@ fn is_scalar_float(ins: &Instruction) -> bool {
             | Pand | Pandn | Por | Pcmpeqd | Pcmpgtd | Pshufd
             | Pcmpeqb | Pcmpgtb | Pcmpeqw | Pmovmskb | Pshuflw | Pshufhw
             | Paddw | Paddq | Pcmpgtw | Pmuludq | Psrlq | Psubusw
+            | Paddusb | Paddusw | Pmulhuw | Pmaddwd
             | Paddb | Psubb | Psubw | Psubq | Pmullw
             | Pminub | Pmaxub | Pminsw | Pmaxsw
             | Pslld | Psrld | Psrad | Psllw | Psrlw | Psraw
@@ -1403,6 +1404,21 @@ pub fn lift(insn: &Insn, bits: u32) -> Vec<Stmt> {
                 fcall("__pi_subus16", vec![alo, blo]),
                 fcall("__pi_subus16", vec![ahi, bhi])
             ))
+        }
+        // Unsigned saturating add (paddusb/paddusw), high-unsigned-word multiply
+        // (pmulhuw) and word-pair multiply-add (pmaddwd): one helper per 64-bit half.
+        // Sound on i386 — xmm is never an argument register, so an xmm value live
+        // across a call is spilled to memory by the compiler (no cross-call hazard).
+        Mnemonic::Paddusb | Mnemonic::Paddusw | Mnemonic::Pmulhuw | Mnemonic::Pmaddwd => {
+            let (alo, ahi) = some_or_asm!(read_xmm128(ins, 0));
+            let (blo, bhi) = some_or_asm!(read_xmm128(ins, 1));
+            let h = match ins.mnemonic() {
+                Mnemonic::Paddusb => "__pi_addus8",
+                Mnemonic::Paddusw => "__pi_addus16",
+                Mnemonic::Pmulhuw => "__pi_mulhuw",
+                _ => "__pi_maddwd",
+            };
+            some_or_asm!(write_xmm128(ins, fcall(h, vec![alo, blo]), fcall(h, vec![ahi, bhi])))
         }
         Mnemonic::Pmuludq => {
             let (dlo, dhi) = some_or_asm!(read_xmm128(ins, 0));
