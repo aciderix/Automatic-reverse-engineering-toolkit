@@ -23,6 +23,7 @@ Bornes : ce playbook doit tenir dans le cap du dossier de reprise (≤ 12 500 oc
 2. **Tout ce qui n'est pas sûr reste `Asm`/`__asm__` → abort** au runtime (statement *et* expression).
 3. **Jamais de rustine par binaire.** On corrige la cause **générale** (une classe entière).
 4. **Rien de prouvé = rien de deviné.** Mode d'arrondi x87, profondeur de pile, noreturn, cible d'appel indirect : non prouvé ⇒ fallback sûr **ou abort**, jamais une hypothèse optimiste.
+5. **L'incapacité aussi se prouve — un mur ouvre une enquête, il ne la clôt pas.** Un `abort` est l'état sûr du produit *pendant* l'enquête, jamais un verdict d'abandon : « ARET ne modélise pas X » relève de §0.4 comme un résultat (une borne pessimiste non investiguée est une devinette). Avant d'écrire « borné », trancher : le résultat affecte-t-il la **sortie observable** (remonter le caller) ? le **substrat host** en donne-t-il un modèle *sound* ? la donnée est-elle **gardable/mesurable** ? — puis modéliser (cause générale, preuve admissible) OU borner en consignant la raison. Jamais inventer une sémantique, affaiblir un oracle ni masquer un signal pour « réussir ». **Abort si besoin ; investiguer ; implémenter après preuve.**
 
 **Garantie atteignable** : « fonctionnel, OU arrêt qui dit où — jamais faux en silence ». Le trio « tout binaire + 100 % fonctionnel + 100 % natif » est prouvé impossible (indécidabilité) ; le vrai logiciel compilé, lui, est pleinement atteignable.
 
@@ -64,7 +65,7 @@ Bornes : ce playbook doit tenir dans le cap du dossier de reprise (≤ 12 500 oc
 - **Tout changement touchant recovery/lift passe `lift_libstdcxx` END-TO-END avant commit.** funcdiff est **closure-only** : il ne voit **pas** un miscompile de structuration/boucle. Seule l'exécution end-to-end du vrai binaire l'attrape. (Leçon ré-apprise 3 fois.)
 - **Toute recovery ajoutée est risquée** (une fausse entrée tronque une vraie fonction → miscompile) ⇒ régression **complète** + gating byte-identique sur les binaires non concernés.
 - **Tout changement de parallélisme se valide sur ≥3 exécutions complètes** (un défaut de concurrence est intermittent).
-- **Avant de croire un rouge winediff, le relancer seul** (l'ORACLE Wine peut être vide sous charge ; qualifier la **nature** d'un rouge avant d'en tirer une cause).
+- **Qualifier un rouge d'oracle AVANT d'en tirer une cause** (build/link, disque/`/tmp`, concurrence, GUI, oracle indispo, harness, fixture, ou vraie divergence) ; le relancer seul si pertinent, sans masquer le signal. **Symétrie §0.5** : démontrer l'environnemental avant de classer « régression », et l'inverse avant de classer « environnemental ». Un job de **mesure n'est pas une porte** : le rendre non-bloquant est permis, mais **déverdir un job ne déverdit jamais la vérité** (PASS/FAIL/SKIP restent distincts, le signal reste produit).
 
 ## PLAYBOOK_TOOLING — Outils + leçons chèrement acquises (techniques)
 
