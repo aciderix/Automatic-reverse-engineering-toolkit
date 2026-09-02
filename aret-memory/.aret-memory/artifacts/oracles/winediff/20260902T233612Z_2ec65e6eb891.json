@@ -1,0 +1,24 @@
+{
+  "format": "aret-oracle-artifact/v1",
+  "oracle": "winediff",
+  "kind": "WINEDIFF",
+  "command": "bash /home/user/Automatic-reverse-engineering-toolkit/bench/winediff.sh sse2_satmul",
+  "result": "PASS",
+  "exit_code": 0,
+  "started_at": "2026-09-02T23:36:03Z",
+  "finished_at": "2026-09-02T23:36:12Z",
+  "environment": {
+    "adapter": "aret-mmu-oracles/1",
+    "oracle": "winediff",
+    "repository": "/home/user/Automatic-reverse-engineering-toolkit",
+    "repository_revision": "48239d2d707f2514aa3a0f0943b2ebbad2362fa9",
+    "script": "bench/winediff.sh",
+    "fixture": "sse2_satmul",
+    "timeout_seconds": 3600,
+    "missing_dependencies": [],
+    "timed_out": false,
+    "duration_seconds": 9.454
+  },
+  "stdout": "  ok    sse2_satmul\n------------------------------------------\nOS-API (Wine) equivalence: 1/1 programs\n",
+  "stderr": ""
+}
