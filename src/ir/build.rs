@@ -1563,12 +1563,19 @@ fn x87_depth_pass(
             let proven = rounding_mode_active(&flat, pos[&insn.address], &joins);
             let is_frndint = ins.mnemonic() == Mnemonic::Frndint;
             let is_fist = matches!(ins.mnemonic(), Mnemonic::Fist | Mnemonic::Fistp);
-            // `frndint` computes a value under the active mode: an unprovable mode
-            // must NOT default to nearest (that ships a silent-wrong ceil/floor) —
-            // bail the whole function so it falls to the runtime x87 stack (which
-            // tracks the control word) or a sound inline-asm decompile.
-            if is_frndint && proven.is_none() {
-                x87dbg(func.entry, insn.address, "frndint with unprovable rounding mode");
+            // `frndint` computes a value under the active mode. In the transpile
+            // product the rounding mode is a *runtime* property: a caller's
+            // `fesetround`/`_controlfp` sets __x87rt_rc with no local `fldcw`, so a
+            // bare `frndint` (which `rounding_mode_active` would call "provably
+            // nearest") is NOT provably nearest — assuming nearest ships a
+            // silent-wrong ceil/floor after a cross-function mode change. Route it
+            // to the runtime x87 model, which honours __x87rt_rc. (Any function with
+            // a local `fldcw` already bailed to runtime, so a static-path `frndint`
+            // is always bare.) In decompile mode there is no runtime state, so keep
+            // the locally-proven mode and bail only when a local `fldcw` makes it
+            // unprovable.
+            if is_frndint && (crate::emit::shared_stack() || proven.is_none()) {
+                x87dbg(func.entry, insn.address, "frndint mode is a runtime property");
                 return Err(X87Bail);
             }
             if is_fist && proven != Some(crate::ir::lift::RoundMode::Trunc) {
