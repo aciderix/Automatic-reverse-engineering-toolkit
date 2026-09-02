@@ -1,0 +1,24 @@
+{
+  "format": "aret-oracle-artifact/v1",
+  "oracle": "difftest",
+  "kind": "DIFFTEST",
+  "command": "bash /home/user/Automatic-reverse-engineering-toolkit/bench/difftest.sh",
+  "result": "PASS",
+  "exit_code": 0,
+  "started_at": "2026-09-02T11:40:02Z",
+  "finished_at": "2026-09-02T11:40:42Z",
+  "environment": {
+    "adapter": "aret-mmu-oracles/1",
+    "oracle": "difftest",
+    "repository": "/home/user/Automatic-reverse-engineering-toolkit",
+    "repository_revision": "5666094b3037cdf0e6c1f59edae3d3a0a491ddd9",
+    "script": "bench/difftest.sh",
+    "fixture": "",
+    "timeout_seconds": 1800,
+    "missing_dependencies": [],
+    "timed_out": false,
+    "duration_seconds": 40.245
+  },
+  "stdout": "INCOMPLETE  x87arith -O0 (unmodelled instructions)\nINCOMPLETE  x87div -O0 (unmodelled instructions)\n  -O0: 66/66\nINCOMPLETE  x87arith -O1 (unmodelled instructions)\nINCOMPLETE  x87div -O1 (unmodelled instructions)\n  -O1: 66/66\nINCOMPLETE  x87arith -O2 (unmodelled instructions)\nINCOMPLETE  x87div -O2 (unmodelled instructions)\n  -O2: 66/66\nINCOMPLETE  x87arith -O3 (unmodelled instructions)\nINCOMPLETE  x87div -O3 (unmodelled instructions)\n  -O3: 66/66\n------------------------------------------\nincomplete (unmodelled instructions, not tested): 8\ndifferential equivalence: 264/264 functions\n",
+  "stderr": ""
+}

@@ -2996,7 +2996,14 @@ pub(crate) fn x87_delta(ins: &Instruction) -> Option<i32> {
         // them (a plain delta can't express that), but they are *modelled* here so
         // a CRT-startup `fninit` does not bail the whole function to asm.
         Finit | Fninit => 0,
-        Fldcw | Fnstcw | Fstcw | Fnclex | Fclex | Fnop | Wait => 0,
+        Fnclex | Fclex | Fnop | Wait => 0,
+        // `fldcw`/`fnstcw`/`fstcw` touch the LIVE x87 control word (rounding mode).
+        // The static path cannot carry the rounding mode across a call boundary
+        // (fesetround/_controlfp set it for a *caller*), so a function using them
+        // must fall to the runtime model, where the mode lives in the __x87rt_rc
+        // global that fldcw/fnstcw read and write. Returning None bails the whole
+        // function to lift_x87_runtime. (Local `(int)x` casts using x87 fldcw also
+        // route there — the runtime fist honours __x87rt_rc, so still exact.)
         _ => return None,
     })
 }
@@ -3169,6 +3176,26 @@ fn x87_rt_try(insn: &Insn) -> Option<Vec<Stmt>> {
         Fnstcw | Fstcw => {
             let (addr, _) = mem_addr(ins)?;
             vec![rt("__x87rt_stcw", vec![addr])]
+        }
+        // fnstenv/fldenv — save/restore the FPU environment (control + status). The
+        // C99 <fenv.h> primitives (feholdexcept/feupdateenv/fegetenv/fesetenv, which
+        // mingw compiles to these) round-trip the whole 28-byte image; the helpers
+        // model the live fields (rounding via __x87rt_rc, condition/flag bits via
+        // __x87rt_sw) and treat FIP/FDP as opaque. A segment override is outside the
+        // modelled form → bail to a sound asm/abort.
+        Fnstenv | Fstenv => {
+            if ins.segment_prefix() != Register::None {
+                return None;
+            }
+            let (addr, _) = mem_addr(ins)?;
+            vec![rt("__x87rt_stenv", vec![addr])]
+        }
+        Fldenv => {
+            if ins.segment_prefix() != Register::None {
+                return None;
+            }
+            let (addr, _) = mem_addr(ins)?;
+            vec![rt("__x87rt_ldenv", vec![addr])]
         }
 
         // comparisons setting EFLAGS (fcomi family).

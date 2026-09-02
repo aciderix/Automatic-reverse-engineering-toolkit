@@ -1,0 +1,24 @@
+{
+  "format": "aret-oracle-artifact/v1",
+  "oracle": "stdcall_audit",
+  "kind": "STDCALL_AUDIT",
+  "command": "bash /home/user/Automatic-reverse-engineering-toolkit/bench/stdcall_audit.sh",
+  "result": "PASS",
+  "exit_code": 0,
+  "started_at": "2026-09-02T11:47:41Z",
+  "finished_at": "2026-09-02T11:47:44Z",
+  "environment": {
+    "adapter": "aret-mmu-oracles/1",
+    "oracle": "stdcall_audit",
+    "repository": "/home/user/Automatic-reverse-engineering-toolkit",
+    "repository_revision": "5666094b3037cdf0e6c1f59edae3d3a0a491ddd9",
+    "script": "bench/stdcall_audit.sh",
+    "fixture": "",
+    "timeout_seconds": 1800,
+    "missing_dependencies": [],
+    "timed_out": false,
+    "duration_seconds": 3.33
+  },
+  "stdout": "shims implemented            : 1355\nproven __stdcall (ground truth): 872\nmissing @N in stdcall_pops   : 0\n------------------------------------------\nstdcall-pop audit: PASS\n",
+  "stderr": ""
+}

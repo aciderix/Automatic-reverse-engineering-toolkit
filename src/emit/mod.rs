@@ -470,6 +470,21 @@ pub(crate) const FLOAT_HELPERS: &str = concat!(
     "static inline uint64_t __x87rt_tst(void){__x87rt_setsw(*__x87rt_at(0),0.0L);return 0;}\n",
     "static inline uint64_t __x87rt_fxam(void){long double x=*__x87rt_at(0);unsigned short s=0;if(__builtin_signbitl(x))s|=(1u<<9);if(__builtin_isnan(x))s|=(1u<<8);else if(__builtin_isinf(x))s|=(1u<<10)|(1u<<8);else if(x==0.0L)s|=(1u<<14);else if(__builtin_isnormal(x))s|=(1u<<10);else s|=(1u<<14)|(1u<<10);__x87rt_sw=s;return 0;}\n",
     "static inline uint64_t __x87rt_getsw(void){return __x87rt_sw;}\n",
+    // fnstenv/fldenv — save/restore the 28-byte protected-mode FPU environment.
+    // ARET treats an fenv_t as opaque (C99 only defines whole-image round-trips via
+    // fegetenv/fesetenv/feholdexcept/feupdateenv): the semantically live fields are
+    // the control word (rounding, from __x87rt_rc) and the status word (condition
+    // codes + any explicitly-set exception bits, in __x87rt_sw). FTW/FIP/FDP/opcode
+    // are not gardable under ARET (guest FP ops run as host helper calls, so there
+    // is no guest instruction pointer to report) and are written as an inert clean
+    // image. Consistent with ARET's FP model (no persistent maskable-exception
+    // state): a flag SET explicitly via `fnstenv; or bit,status; fldenv` round-trips
+    // through __x87rt_sw and is readable by a later fnstsw/fetestexcept, but a flag
+    // a real FP op would have raised is not tracked (same as _statusfp). Now that
+    // fldcw/fnstcw route to the runtime model too, the rounding mode saved/restored
+    // here is the live __x87rt_rc, so cross-function fesetround/fegetenv is exact.
+    "static inline uint64_t __x87rt_stenv(uint64_t a){unsigned char* p=(unsigned char*)(uintptr_t)a;for(int i=0;i<28;i++)p[i]=0;*(uint16_t*)(p+0)=(uint16_t)(0x037F|(__x87rt_rc<<10));*(uint16_t*)(p+4)=__x87rt_sw;*(uint16_t*)(p+8)=0xFFFF;return 0;}\n",
+    "static inline uint64_t __x87rt_ldenv(uint64_t a){const unsigned char* p=(const unsigned char*)(uintptr_t)a;uint16_t cw=*(const uint16_t*)(p+0);__x87rt_rc=(cw>>10)&3;__x87rt_sw=*(const uint16_t*)(p+4);return 0;}\n",
     "static inline uint64_t __x87rt_lt(int i){return *__x87rt_at(0)<*__x87rt_at(i);}\n",
     "static inline uint64_t __x87rt_eq(int i){return *__x87rt_at(0)==*__x87rt_at(i);}\n",
     "static inline uint64_t __x87rt_un(int i){long double a=*__x87rt_at(0),b=*__x87rt_at(i);return a!=a||b!=b;}\n",
