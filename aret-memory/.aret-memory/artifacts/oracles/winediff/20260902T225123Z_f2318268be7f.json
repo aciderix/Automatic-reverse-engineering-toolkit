@@ -1,0 +1,24 @@
+{
+  "format": "aret-oracle-artifact/v1",
+  "oracle": "winediff",
+  "kind": "WINEDIFF",
+  "command": "bash /home/user/Automatic-reverse-engineering-toolkit/bench/winediff.sh tls_native",
+  "result": "PASS",
+  "exit_code": 0,
+  "started_at": "2026-09-02T22:51:14Z",
+  "finished_at": "2026-09-02T22:51:23Z",
+  "environment": {
+    "adapter": "aret-mmu-oracles/1",
+    "oracle": "winediff",
+    "repository": "/home/user/Automatic-reverse-engineering-toolkit",
+    "repository_revision": "47369602fd2d01f86d7802d5b17091a82873102b",
+    "script": "bench/winediff.sh",
+    "fixture": "tls_native",
+    "timeout_seconds": 3600,
+    "missing_dependencies": [],
+    "timed_out": false,
+    "duration_seconds": 9.802
+  },
+  "stdout": "  ok    tls_native\n------------------------------------------\nOS-API (Wine) equivalence: 1/1 programs\n",
+  "stderr": ""
+}
