@@ -1,0 +1,25 @@
+{
+  "format": "aret-pipeline-artifact/v1",
+  "pipeline": "measure_walls",
+  "kind": "CORPUS_WALLS",
+  "policy": "READ_ONLY",
+  "command": [
+    "bash",
+    "/home/user/Automatic-reverse-engineering-toolkit/bench/wallsweep.sh",
+    "/home/user/Automatic-reverse-engineering-toolkit"
+  ],
+  "parameters": {},
+  "result": "PASS",
+  "exit_code": 0,
+  "started_at": "2026-09-02T14:56:24Z",
+  "finished_at": "2026-09-02T14:56:25Z",
+  "environment": {
+    "repository": "/home/user/Automatic-reverse-engineering-toolkit",
+    "revision": "b2cc35fcfd6785532c880d72b48014bdfb80a0c3",
+    "missing_dependencies": [],
+    "timed_out": false,
+    "duration_seconds": 0.373
+  },
+  "stdout": "analyzed 0 PE(s) (7 non-PE skipped; 4-way, 120s + 3500000KB/bin caps)\n\n=== CORPUS WALL SWEEP — 0 binaries (0 fully clean / 0 with gaps) ===\n\nTOP UNMODELLED INSTRUCTIONS (lift gaps) — ranked by #binaries blocked:\n  bins   sites  mnemonic\n  (none)\n\nTOP UNIMPLEMENTED IMPORTS (HLE gaps) — ranked by #binaries:\n  bins  import\n  (none)\n",
+  "stderr": ""
+}
