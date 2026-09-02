@@ -459,7 +459,13 @@ pub(crate) const FLOAT_HELPERS: &str = concat!(
     // (computed) fp-returning calls the static analysis cannot classify.
     "static inline uint64_t __x87rt_precall(void){__aret_x87_ret_valid=0;return 0;}\n",
     "static inline uint64_t __x87rt_postcall(void){if(__aret_x87_ret_valid){__x87rt_psh(__aret_x87_ret);__aret_x87_ret_valid=0;}return 0;}\n",
-    "static inline uint64_t __x87rt_retstore(void){if(__x87rt_p>0)__aret_x87_ret=__x87rt_s[--__x87rt_p];return 0;}\n",
+    // Publish a runtime-mode fp-returning function's result to the fp-return
+    // channel at its `ret`, mirroring the static `__x87_retstore`: pop st(0) off the
+    // runtime stack into __aret_x87_ret AND set the valid flag, so a static caller
+    // reads it via __x87_retload and a runtime caller re-pushes it via __x87rt_postcall
+    // (which gates on the flag). Without this a runtime-mode fp callee left the value
+    // only on the shared __x87rt_s, so static callers read a stale channel (0.0).
+    "static inline uint64_t __x87rt_retstore(void){if(__x87rt_p>0){__aret_x87_ret=__x87rt_s[--__x87rt_p];__aret_x87_ret_valid=1;}return 0;}\n",
     "static inline uint64_t __x87rt_free(void){if(__x87rt_p>0)__x87rt_p--;return 0;}\n",
     // ---- increment 2: comparisons, status word, transcendentals ----
     "extern unsigned short __x87rt_sw;\n",

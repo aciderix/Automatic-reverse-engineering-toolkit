@@ -662,7 +662,12 @@ pub fn build_ir(prog: &Program, func: &Function) -> IrFunction {
                 // An fp-returning function leaves st(0) (slot 0, since the terminal
                 // x87 depth is 1) in the fp return channel for its caller.
                 if self_returns_fp {
-                    if let Some(slot) = crate::ir::lift::x87_slot(0) {
+                    if x87_rt {
+                        // Runtime-model function: st(0) lives on the runtime stack
+                        // (__x87rt_s), not a static SSA slot (which was never written).
+                        // Publish it from there to the fp-return channel.
+                        stmts.push(crate::ir::lift::x87rt_stmt("__x87rt_retstore"));
+                    } else if let Some(slot) = crate::ir::lift::x87_slot(0) {
                         stmts.push(crate::ir::lift::x87_ret_store(Expr::Read(slot)));
                     }
                 }
