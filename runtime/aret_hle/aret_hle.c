@@ -4080,9 +4080,20 @@ static int aret_teb_ready = 0;
  * StackLimit = lowest. Zero until set (a lone-shim/test context with no entry) →
  * aret_teb_init falls back to a permissive placeholder range. */
 static uint32_t aret_stack_base_va = 0, aret_stack_limit_va = 0;
+static void aret_teb_init(void);
 void __aret_set_stack_bounds(uint32_t base, uint32_t limit) {
     aret_stack_base_va = base;
     aret_stack_limit_va = limit;
+}
+/* Publish the process's ThreadLocalStoragePointer into the synthetic TEB (fs:[0x2c]).
+ * aret_main.c calls this once, after building the static-TLS block array, before any
+ * lifted code runs. Guest code reading a native __thread variable (`mov eax,fs:[0x2c];
+ * mov eax,[eax+_tls_index*4]; mov ..,[eax+off]`) then finds a real block array instead
+ * of the null default. Idempotent w.r.t. TEB init (teb_init runs once, then this
+ * overrides slot 0x2c). */
+void __aret_set_tls_pointer(uint32_t p) {
+    aret_teb_init();
+    ((uint32_t *)aret_teb)[0x2C / 4] = p;
 }
 static void aret_teb_init(void) {
     if (aret_teb_ready) return;

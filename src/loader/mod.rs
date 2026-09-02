@@ -198,6 +198,28 @@ pub struct Program {
     /// `dll_inits`. The Windows loader runs these on process/thread attach; glib
     /// registers one at startup and warns if it never ran. Empty unless DLLs merged.
     pub tls_inits: Vec<(u64, u64)>,
+    /// Static (implicit) TLS data blocks to materialise before the app entry — one
+    /// per module (primary or merged DLL) that carries a PE `.tls` directory. The
+    /// Windows loader, for each such module, assigns a slot index, allocates a
+    /// per-thread block, copies the `.tls` template into it, writes the slot into
+    /// `*AddressOfIndex` (the module's `_tls_index`), and stores the block pointer
+    /// at `ThreadLocalStoragePointer[slot]` (`fs:[0x2c]`). ARET emulates a single
+    /// guest thread, so one block per module suffices. Without this, guest code that
+    /// reads a `__thread` variable natively (`mov eax,fs:[0x2c]; mov eax,[eax+idx*4];
+    /// mov ..,[eax+off]`) dereferences a null TLS pointer. All VAs are already
+    /// rebased to the merged image. Empty when no module has native TLS data.
+    pub tls_blocks: Vec<TlsBlock>,
+}
+
+/// One module's static-TLS descriptor (rebased). `index_va` is where the module's
+/// `_tls_index` lives (the slot number is written there); `[raw_start, raw_end)` is
+/// the initialised template in the mapped image; `zero_fill` bytes of zero follow it.
+#[derive(Clone, Copy, Debug)]
+pub struct TlsBlock {
+    pub index_va: u64,
+    pub raw_start: u64,
+    pub raw_end: u64,
+    pub zero_fill: u64,
 }
 
 /// A resolved static relocation: the branch/data target address (when the symbol
@@ -318,7 +340,7 @@ impl Program {
         let base_relocs = parse_pe_base_relocs(data);
         let tls_dir_va = parse_pe_tls_dir_rva(data).map(|rva| image_base + rva as u64).unwrap_or(0);
 
-        Ok(Program {
+        let mut prog = Program {
             format: format!("{:?}", obj.format()),
             bitness,
             entry: obj.entry(),
@@ -335,7 +357,13 @@ impl Program {
             base_relocs,
             tls_dir_va,
             tls_inits: Vec::new(),
-        })
+            tls_blocks: Vec::new(),
+        };
+        // A standalone module's own native-TLS block sits at its own base (delta 0).
+        // For the multi-module lift the primary keeps this; each merged DLL's block is
+        // rebased and appended in `load_with_modules`.
+        prog.tls_blocks = prog.read_tls_data().into_iter().collect();
+        Ok(prog)
     }
 
     /// PE TLS callbacks read from the loaded image at this module's own base:
@@ -366,6 +394,28 @@ impl Program {
             }
         }
         out
+    }
+
+    /// This module's static-TLS descriptor, read from IMAGE_TLS_DIRECTORY32 at the
+    /// module's own base BEFORE rebasing (the raw-data / index VAs are absolute at
+    /// this base). Layout: StartAddressOfRawData(0), EndAddressOfRawData(4),
+    /// AddressOfIndex(8), AddressOfCallBacks(12), SizeOfZeroFill(16). Returns None
+    /// when there is no TLS directory, no `_tls_index` slot, or an empty template
+    /// (a zero-length block with no zero-fill has nothing to publish). The caller
+    /// rebases the VAs by the module's load delta.
+    pub fn read_tls_data(&self) -> Option<TlsBlock> {
+        if self.tls_dir_va == 0 {
+            return None;
+        }
+        let raw_start = self.read_u32(self.tls_dir_va)? as u64;
+        let raw_end = self.read_u32(self.tls_dir_va + 4)? as u64;
+        let index_va = self.read_u32(self.tls_dir_va + 8)? as u64;
+        let zero_fill = self.read_u32(self.tls_dir_va + 16)? as u64;
+        // No index slot to write, or an empty block: nothing to set up.
+        if index_va == 0 || (raw_end <= raw_start && zero_fill == 0) {
+            return None;
+        }
+        Some(TlsBlock { index_va, raw_start, raw_end, zero_fill })
     }
 
     /// Resolved branch target of a relocation lying within the instruction at
@@ -779,6 +829,10 @@ pub struct LoadedModule {
     /// The module's PE TLS callbacks, rebased to the merged image. Run at process
     /// attach (`cb(hinstance, DLL_PROCESS_ATTACH, 0)`) before the app entry.
     pub tls_callbacks: Vec<u64>,
+    /// The module's static-TLS block descriptor, rebased to the merged image, if it
+    /// carries native `.tls` data. Materialised (block allocated + template copied +
+    /// `_tls_index`/`fs:[0x2c]` published) before the app entry.
+    pub tls_data: Option<TlsBlock>,
 }
 
 /// Normalize a DLL name for matching: lowercase, drop a trailing `.dll`. So
@@ -949,6 +1003,14 @@ pub fn merge_modules(
         // shifted to the merged image — same pattern as ctors.
         let tls_callbacks: Vec<u64> =
             dll.read_tls_callbacks().into_iter().map(|va| (va as i64 + delta) as u64).collect();
+        // Static-TLS block descriptor, read at the DLL's own base (index/raw VAs are
+        // absolute there), then shifted to the merged image — same pattern as ctors.
+        let tls_data: Option<TlsBlock> = dll.read_tls_data().map(|b| TlsBlock {
+            index_va: (b.index_va as i64 + delta) as u64,
+            raw_start: (b.raw_start as i64 + delta) as u64,
+            raw_end: (b.raw_end as i64 + delta) as u64,
+            zero_fill: b.zero_fill,
+        });
 
         apply_base_relocations(&mut dll.sections, &dll.base_relocs, delta)?;
         for s in &mut dll.sections {
@@ -1013,6 +1075,17 @@ pub fn merge_modules(
             let s = (slot as i64 + delta) as u64;
             primary.pe_imports.entry(s).or_insert(imp);
         }
+        if std::env::var_os("ARET_DUMP_MODULES").is_some() {
+            let hi = dll
+                .sections
+                .iter()
+                .map(|s| s.address + s.data.len() as u64)
+                .max()
+                .unwrap_or(new_base);
+            eprintln!(
+                "module {name} base=0x{new_base:x} end=0x{hi:x} entry=0x{init_entry:x}"
+            );
+        }
         primary.sections.append(&mut dll.sections);
         loaded.push(LoadedModule {
             name,
@@ -1021,6 +1094,7 @@ pub fn merge_modules(
             hinstance: new_base,
             ctors,
             tls_callbacks,
+            tls_data,
         });
     }
     Ok(loaded)
@@ -1059,6 +1133,18 @@ pub fn load_with_modules(primary_data: &[u8], dlls: &[(String, Vec<u8>)]) -> Res
     primary.tls_inits = modules
         .iter()
         .flat_map(|m| m.tls_callbacks.iter().map(move |&cb| (cb, m.hinstance)))
+        .collect();
+    // Static-TLS blocks to materialise before the app entry: each merged DLL's block
+    // (rebased) first, then the primary's own (populated at load with delta 0). The
+    // builder assigns each block its slot index (its position here) and writes it into
+    // the module's `_tls_index`, so ordering is free — but keeping DLLs first mirrors
+    // the load order used for callbacks/ctors. Only grows the set when a module has
+    // native `.tls` data, so a TLS-free transpile is unaffected (hash unchanged).
+    let exe_tls_blocks = std::mem::take(&mut primary.tls_blocks);
+    primary.tls_blocks = modules
+        .iter()
+        .filter_map(|m| m.tls_data)
+        .chain(exe_tls_blocks)
         .collect();
     // C++ global constructors to run at startup (the builder emits calls): each lifted
     // DLL's ctors first, in load order (libstdc++'s build std::cout/cin/cerr), then the
@@ -1849,6 +1935,7 @@ mod tests {
             ],
             ctors: Vec::new(),
             tls_callbacks: Vec::new(),
+            tls_data: None,
         };
         let imp = |dll: &str, name: Option<&str>, ord: Option<u32>| PeImport {
             dll: dll.into(),
@@ -1884,6 +1971,7 @@ mod tests {
             exports: parse_pe_exports(&gdi),
             ctors: Vec::new(),
             tls_callbacks: Vec::new(),
+            tls_data: None,
         };
         let resolved = resolve_module_imports(&app_imports, std::slice::from_ref(&gdi_mod));
         assert!(!resolved.is_empty(), "comctl32 imports from gdi32 should resolve");

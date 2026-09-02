@@ -1447,6 +1447,49 @@ pub fn transpile(
              sub_{cb:x}((uint64_t)(uintptr_t)top, 0x{base:x}u, 1u, 0, 0); }}\n"
         ));
     }
+    // Static (implicit) TLS: materialise each module's `.tls` block before any lifted
+    // code runs, exactly as the Windows loader does. For block `i` we reserve a fixed
+    // .bss buffer (its size is known at lift time), copy the template from the mapped
+    // image, publish the block pointer at `tls_ptr[i]`, write the slot index `i` into
+    // the module's `_tls_index` (`index_va`), and finally point `fs:[0x2c]`
+    // (ThreadLocalStoragePointer) at `tls_ptr[]`. Guest code reading a native `__thread`
+    // (`mov eax,fs:[0x2c]; mov eax,[eax+idx*4]; mov ..,[eax+off]`) then hits a real block
+    // instead of dereferencing null. The .bss buffers sit at low 32-bit addresses in the
+    // -no-pie image (guest-addressable). Empty (no emission) when no module has native
+    // TLS data, so a TLS-free transpile is byte-identical (hash unchanged). Single guest
+    // thread ⇒ one block per module (the TEB itself is a single static image).
+    let mut tls_data_decls = String::new();
+    let mut tls_data_setup = String::new();
+    if !prog.tls_blocks.is_empty() {
+        let n = prog.tls_blocks.len();
+        // memcpy is only referenced on the TLS path — pull in <string.h> here so a
+        // TLS-free transpile's aret_main.c stays byte-identical (hash unchanged).
+        tls_data_decls.push_str("         #include <string.h>\n");
+        tls_data_decls.push_str("         void __aret_set_tls_pointer(uint32_t p);\n");
+        tls_data_decls.push_str(&format!("         static uint32_t aret_tls_ptr[{n}];\n"));
+        tls_data_setup.push_str("    { /* static-TLS blocks (Windows implicit TLS) */\n");
+        for (i, b) in prog.tls_blocks.iter().enumerate() {
+            let raw_len = b.raw_end.saturating_sub(b.raw_start);
+            let size = raw_len + b.zero_fill;
+            // Guard: a zero-sized block would make a 0-length array; skip publishing it
+            // but still zero its index so a stray read lands in slot 0's (unused) block.
+            let buf = format!("aret_tls_blk_{i}");
+            tls_data_decls.push_str(&format!("         static uint8_t {buf}[{}];\n", size.max(1)));
+            tls_data_setup.push_str(&format!(
+                "        memcpy({buf}, (const void *)(uintptr_t)0x{:x}u, {raw_len}u);\n",
+                b.raw_start
+            ));
+            tls_data_setup.push_str(&format!(
+                "        *(uint32_t *)(uintptr_t)0x{:x}u = {i}u;\n",
+                b.index_va
+            ));
+            tls_data_setup.push_str(&format!(
+                "        aret_tls_ptr[{i}] = (uint32_t)(uintptr_t){buf};\n"
+            ));
+        }
+        tls_data_setup.push_str("        __aret_set_tls_pointer((uint32_t)(uintptr_t)aret_tls_ptr);\n");
+        tls_data_setup.push_str("    }\n");
+    }
     let main_c = format!(
         "#include <stdint.h>\n\n\
          /* One shared machine stack for all transpiled functions (UBT M3). */\n\
@@ -1463,6 +1506,7 @@ pub fn transpile(
          {dll_init_decls}\
          {ctor_decls}\
          {tls_init_decls}\
+         {tls_data_decls}\
          int main(int argc, char **argv) {{\n\
          \x20   aret_real_argc = argc; aret_real_argv = argv;\n\
          {map_call}    uint8_t *top = aret_stack + sizeof(aret_stack) - 64;\n\
@@ -1471,6 +1515,7 @@ pub fn transpile(
          \x20      them and dereferences near the top hits real memory, not a fake VA. */\n\
          \x20   __aret_set_stack_bounds((uint32_t)(uintptr_t)(aret_stack + sizeof(aret_stack)),\n\
          \x20                           (uint32_t)(uintptr_t)aret_stack);\n\
+         {tls_data_setup}\
          {tls_init_calls}\
          {dll_init_calls}\
          {ctor_calls}\
