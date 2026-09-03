@@ -814,6 +814,62 @@ uint32_t aret_GetFullPathNameA(uint32_t esp) {
     }
     return len;
 }
+static void u32_a2w(const char *s, uint16_t *d, int cap);  /* defined below */
+/* Reverse of translate_path: map a resolved host path back to the guest Windows path
+ * it came from, by finding the "/drive_<letter>/" segment the loader inserts
+ * ("<prefix>/drive_c/dir/file" -> "C:\\dir\\file"). Returns 1 on success, 0 when the
+ * path is not under a modelled DOS drive (a raw Unix path Wine would surface via its
+ * own Z: mapping — outside ARET's guest view, so the caller fails loudly). */
+static int u32_host_to_win(const char *host, char *out, size_t cap) {
+    const char *d = strstr(host, "/drive_");
+    if (!d) return 0;
+    char dl = d[7];
+    if (!(((dl >= 'a' && dl <= 'z') || (dl >= 'A' && dl <= 'Z')) && d[8] == '/')) return 0;
+    if (dl >= 'a') dl -= 32;
+    if (cap < 3) return 0;
+    size_t o = 0;
+    out[o++] = dl; out[o++] = ':';
+    for (const char *p = d + 8; *p && o < cap - 1; p++) out[o++] = (*p == '/') ? '\\' : *p;
+    out[o] = 0;
+    return 1;
+}
+
+/* GetFinalPathNameByHandleA(hFile, buf, cch, flags): the file's normalized final path.
+ * A HANDLE is an fd here, so the host path comes from /proc/self/fd; reverse-translate
+ * it to the guest Windows path and return the VOLUME_NAME_DOS "\\?\C:\..." form
+ * (dwFlags 0 = VOLUME_NAME_DOS | FILE_NAME_NORMALIZED, the default). Return = length
+ * excluding the NUL when it fits, else the required length — matching the Wine oracle
+ * (verified: Wine returns the length, not length+1, when the buffer is too small). Any
+ * other flag, or an fd with no filesystem path / outside a DOS drive, is not modelled:
+ * fail loudly rather than invent a path (§0). */
+uint32_t aret_GetFinalPathNameByHandleA(uint32_t esp) {
+    int fd = (int)WU(0); char *buf = WS(1); uint32_t cch = WU(2), flags = WU(3);
+    if (flags != 0) { aret_partial("GetFinalPathNameByHandle: only VOLUME_NAME_DOS (flags==0) modelled"); return 0; }
+    char lp[64], host[1024], win[1024], full[1040];
+    snprintf(lp, sizeof lp, "/proc/self/fd/%d", fd);
+    ssize_t n = readlink(lp, host, sizeof host - 1);
+    if (n <= 0) { g_last_error = 6u /* ERROR_INVALID_HANDLE */; return 0; }
+    host[n] = 0;
+    if (!u32_host_to_win(host, win, sizeof win)) { aret_partial("GetFinalPathNameByHandle: fd path not under a modelled DOS drive"); return 0; }
+    uint32_t len = (uint32_t)snprintf(full, sizeof full, "\\\\?\\%s", win);
+    if (!buf || cch <= len) return len;
+    memcpy(buf, full, len + 1);
+    return len;
+}
+uint32_t aret_GetFinalPathNameByHandleW(uint32_t esp) {
+    int fd = (int)WU(0); uint16_t *buf = (uint16_t *)(uintptr_t)WU(1); uint32_t cch = WU(2), flags = WU(3);
+    if (flags != 0) { aret_partial("GetFinalPathNameByHandle: only VOLUME_NAME_DOS (flags==0) modelled"); return 0; }
+    char lp[64], host[1024], win[1024], full[1040];
+    snprintf(lp, sizeof lp, "/proc/self/fd/%d", fd);
+    ssize_t n = readlink(lp, host, sizeof host - 1);
+    if (n <= 0) { g_last_error = 6u; return 0; }
+    host[n] = 0;
+    if (!u32_host_to_win(host, win, sizeof win)) { aret_partial("GetFinalPathNameByHandle: fd path not under a modelled DOS drive"); return 0; }
+    uint32_t len = (uint32_t)snprintf(full, sizeof full, "\\\\?\\%s", win);
+    if (!buf || cch <= len) return len;
+    u32_a2w(full, buf, (int)cch);
+    return len;
+}
 uint32_t aret_GetCurrentDirectoryA(uint32_t esp) {
     uint32_t size = WU(0); char *buf = WS(1);
     char tmp[4096];
