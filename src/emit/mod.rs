@@ -24,6 +24,51 @@ pub(crate) fn destruct_ssa(func: &mut IrFunction) {
     let mut next_id = func.blocks.iter().map(|b| b.id).max().unwrap_or(0) + 1;
     let mut new_blocks: Vec<Block> = Vec::new();
 
+    // Diagnostic (ARET_SSA_STATS): measure the φ-lowering blow-up per function without
+    // changing behaviour — copies emitted = Σ(φ per block × preds), plus how many are
+    // pure self-copies (arg==dst) or redundant φs (all args identical), the two classes
+    // a copy-propagation / redundant-φ pass could remove.
+    let stats = std::env::var_os("ARET_SSA_STATS").is_some();
+    let (mut n_phi, mut n_copies, mut n_self, mut n_redundant, mut n_blk_phi) = (0usize, 0usize, 0usize, 0usize, 0usize);
+    // Extra provenance counters (ChatGPT step 4): how many φ dsts are DEAD (never
+    // used → a DCE/pruning gap), and how many φ args are themselves φ-defined
+    // (chained φ webs → coalescing target). Built once from a use scan.
+    let (mut n_dead_phi, mut n_phi_of_phi_arg, mut max_uses) = (0usize, 0usize, 0u32);
+    let mut n_trivial = 0usize;
+    let mut use_ct: std::collections::HashMap<u32, u32> = std::collections::HashMap::new();
+    let mut phi_dsts: BTreeSet<u32> = BTreeSet::new();
+    if stats {
+        fn walk(e: &Expr, f: &mut impl FnMut(u32)) {
+            match e {
+                Expr::Use(v) => f(v.0),
+                Expr::Phi(args) => for v in args { f(v.0) },
+                Expr::Load { addr, .. } => walk(addr, f),
+                Expr::Unary(_, x) | Expr::Cast { expr: x, .. } => walk(x, f),
+                Expr::Binary(_, a, b) => { walk(a, f); walk(b, f); }
+                Expr::Call { target, args, .. } => {
+                    if let CallTarget::Indirect(x) = target { walk(x, f); }
+                    for a in args { walk(a, f); }
+                }
+                Expr::Select { cond, then_, else_ } => { walk(cond, f); walk(then_, f); walk(else_, f); }
+                _ => {}
+            }
+        }
+        for b in &func.blocks {
+            for st in &b.stmts {
+                if let Stmt::Assign { dst, expr: Expr::Phi(_) } = st { phi_dsts.insert(dst.0); }
+                let mut bump = |v: u32| { *use_ct.entry(v).or_insert(0) += 1; };
+                match st {
+                    Stmt::Set { expr, .. } | Stmt::Assign { expr, .. } | Stmt::CallStmt(expr) => walk(expr, &mut bump),
+                    Stmt::Store { addr, value, .. } => { walk(addr, &mut bump); walk(value, &mut bump); }
+                    Stmt::Branch { cond, .. } => walk(cond, &mut bump),
+                    Stmt::Switch { value, .. } => walk(value, &mut bump),
+                    Stmt::Return(Some(e)) => walk(e, &mut bump),
+                    _ => {}
+                }
+            }
+        }
+    }
+
     for s in 0..n {
         let phis: Vec<(ValueId, Vec<ValueId>)> = func.blocks[s]
             .stmts
@@ -38,6 +83,39 @@ pub(crate) fn destruct_ssa(func: &mut IrFunction) {
         }
         let preds = func.blocks[s].pred.clone();
         let s_id = func.blocks[s].id;
+        if stats {
+            n_blk_phi += 1;
+            n_phi += phis.len();
+            n_copies += phis.len() * preds.len();
+            for (dst, args) in &phis {
+                for a in args {
+                    if a == dst {
+                        n_self += 1;
+                    }
+                    if phi_dsts.contains(&a.0) {
+                        n_phi_of_phi_arg += 1;
+                    }
+                }
+                if args.iter().all(|a| a == &args[0]) {
+                    n_redundant += 1;
+                }
+                // Standard removable φ (Cytron/Aycock–Horspool "simple" rule): after
+                // dropping self-references, if the distinct args collapse to ≤1 value
+                // the φ is x=φ(x,…,y,…,x) → x=y (or dead), i.e. coalescible.
+                let distinct: BTreeSet<u32> =
+                    args.iter().filter(|a| a.0 != dst.0).map(|a| a.0).collect();
+                if distinct.len() <= 1 {
+                    n_trivial += 1;
+                }
+                let u = use_ct.get(&dst.0).copied().unwrap_or(0);
+                if u == 0 {
+                    n_dead_phi += 1;
+                }
+                if u > max_uses {
+                    max_uses = u;
+                }
+            }
+        }
         for (i, &p) in preds.iter().enumerate() {
             let mid = next_id;
             next_id += 1;
@@ -72,6 +150,12 @@ pub(crate) fn destruct_ssa(func: &mut IrFunction) {
             .retain(|st| !matches!(st, Stmt::Assign { expr: Expr::Phi(_), .. }));
     }
     func.blocks.extend(new_blocks);
+    if stats && n_phi > 0 {
+        eprintln!(
+            "SSA_STATS fn@0x{:x}: blocks={} blocks_with_phi={} phis={} copies_emitted={} self_copies={} redundant_phis={} trivial_phis={} dead_phis={} phi_of_phi_args={} max_dst_uses={}",
+            func.entry, n, n_blk_phi, n_phi, n_copies, n_self, n_redundant, n_trivial, n_dead_phi, n_phi_of_phi_arg, max_uses
+        );
+    }
 }
 
 fn redirect_terminator(last: Option<&mut Stmt>, from: u32, to: u32) {

@@ -1438,20 +1438,72 @@ fn resolve_jump_table(prog: &Program, global: &BTreeMap<u64, Insn>, insn: &Insn)
 /// the indirect jump: returns `N+1` (the entry count) if found. Matches the index
 /// register family (`cmp edx,N` guards `jmp [edx*4+t]`); a `ja` (unsigned above)
 /// means indices `> N` are out of range, so the table has `N+1` slots.
+///
+/// Also handles the MSVC memory-index idiom, where the guard compares the index
+/// *in memory* and the jump register is just a reload of it:
+///   `cmp [ecx+0x40], N ; ja default ; mov eax, [ecx+0x40] ; jmp [eax*4+table]`.
+/// Here `cmp eax, N` never appears — the register `eax` is only a copy of the
+/// bounded memory slot `[ecx+0x40]`, so we must accept the `cmp` on that same
+/// memory operand. Missing this let the table over-read past its real end into a
+/// neighbouring switch's entries (both executable), merging hundreds of unrelated
+/// functions into one giant CFG.
 fn jump_index_bound(global: &BTreeMap<u64, Insn>, jmp: &Insn, idx: iced_x86::Register) -> Option<u64> {
     use iced_x86::{Mnemonic, OpKind};
+    let is_imm = |k: OpKind| matches!(k, OpKind::Immediate8 | OpKind::Immediate8to16
+        | OpKind::Immediate8to32 | OpKind::Immediate16 | OpKind::Immediate32);
+    // If the index register's reaching definition is a load `mov idx, [M]`, `M` is
+    // the true index location a `cmp [M], N` may bound. Captured on the first write
+    // to `idx` we meet scanning back (its reaching def); a non-load def leaves it None.
+    let mut mem_src: Option<iced_x86::Instruction> = None;
+    let mut idx_def_seen = false;
     for (_, ins) in global.range(..jmp.address).rev().take(8) {
         let r = &ins.raw;
+        // Direct form: cmp idx, N.
         if r.mnemonic() == Mnemonic::Cmp
             && r.op0_kind() == OpKind::Register
             && r.op0_register().full_register() == idx
-            && matches!(r.op1_kind(), OpKind::Immediate8 | OpKind::Immediate8to16
-                | OpKind::Immediate8to32 | OpKind::Immediate16 | OpKind::Immediate32)
+            && is_imm(r.op1_kind())
         {
             return Some(r.immediate(1).wrapping_add(1));
         }
+        // Reaching def of idx: capture [M] if it is a load, then stop capturing.
+        if !idx_def_seen
+            && r.op0_kind() == OpKind::Register
+            && r.op0_register().full_register() == idx
+        {
+            idx_def_seen = true;
+            if r.mnemonic() == Mnemonic::Mov && r.op1_kind() == OpKind::Memory {
+                mem_src = Some(*r);
+            }
+        }
+        // Memory form: cmp [M], N on the same operand idx was loaded from.
+        if let Some(m) = &mem_src {
+            if r.mnemonic() == Mnemonic::Cmp
+                && r.op0_kind() == OpKind::Memory
+                && is_imm(r.op1_kind())
+                && same_mem_operand(r, m)
+            {
+                return Some(r.immediate(1).wrapping_add(1));
+            }
+        }
     }
     None
+}
+
+/// Whether two instructions address the identical memory operand (same base,
+/// index, scale, displacement and segment) — used to tie a `cmp [M], N` bound to
+/// the `mov idx, [M]` reload that feeds a jump table.
+fn same_mem_operand(a: &iced_x86::Instruction, b: &iced_x86::Instruction) -> bool {
+    if a.is_ip_rel_memory_operand() || b.is_ip_rel_memory_operand() {
+        return a.is_ip_rel_memory_operand()
+            && b.is_ip_rel_memory_operand()
+            && a.ip_rel_memory_address() == b.ip_rel_memory_address();
+    }
+    a.memory_base() == b.memory_base()
+        && a.memory_index() == b.memory_index()
+        && a.memory_index_scale() == b.memory_index_scale()
+        && a.memory_displacement64() == b.memory_displacement64()
+        && a.memory_segment() == b.memory_segment()
 }
 
 /// Read a pointer-sized table of absolute code addresses at `table`, in index

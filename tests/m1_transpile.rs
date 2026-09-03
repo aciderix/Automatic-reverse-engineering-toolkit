@@ -985,6 +985,33 @@ fn adjacent_jump_tables_are_bounded() {
 }
 
 #[test]
+fn adjacent_jump_tables_are_bounded_memory_index() {
+    if !has_m32() {
+        eprintln!("skipping memory-index jump-table-bound test: `cc -m32` unavailable");
+        return;
+    }
+    // Same over-read hazard as `adjacent_jump_tables_are_bounded`, but the switch
+    // selector lives in MEMORY: `cmp [reg+off], N; ja; mov eax,[reg+off]; jmp
+    // [eax*4+table]`. The bound is on the memory operand, and `eax` is only a reload
+    // of it, so a bound-finder that matches only `cmp <register>, N` misses it and
+    // opA's table over-reads into opB's (adjacent in .rdata). This is exactly what
+    // made libLerc's sub_456340 absorb ~400 spurious targets (878k phi nodes, a
+    // 283 MB translation unit). The bound must be recovered from the memory compare.
+    let c = transpile_to_c("two_switch_mem.exe");
+    let op_a = c
+        .split("uint64_t sub_")
+        .find(|f| f.starts_with("401510("))
+        .expect("opA (sub_401510) not found in recovered output");
+    let cases = op_a.matches("case ").count();
+    assert!(
+        cases <= 8,
+        "opA's memory-indexed jump table over-read into opB's: {cases} cases recovered (real switch has 8)"
+    );
+    let out = transpile_and_run("two_switch_mem.exe");
+    assert!(out.contains("t=1973"), "two-switch (memory index) result wrong:\n{out}");
+}
+
+#[test]
 fn signed_compare_of_memory_operand() {
     if !has_m32() {
         eprintln!("skipping signed-compare test: `cc -m32` unavailable");
