@@ -373,6 +373,18 @@ pub fn build_ir(prog: &Program, func: &Function) -> IrFunction {
                 Expr::Const(ip as i128, Ty::int(32)),
                 Expr::Read(Location::Reg(RegId(4))), // esp — the runtime keeps its max = the frame base
                 Expr::Read(Location::Reg(RegId(5))), // ebp — the frame pointer (constant post-prologue)
+                // Callee-saved registers live at this call site. A catch continuation / cleanup
+                // landing pad runs as a SEPARATE lifted function against the establisher's frame;
+                // memory-resident locals reach it via the shared stack (raw_frames), but a local
+                // the compiler kept in a callee-saved register (e.g. a loop counter in ebx) would
+                // otherwise arrive as 0 — the resume passes ebx/esi/edi=0 — corrupting the resumed
+                // code (an infinite loop when the counter is ebx). Recording them here (they equal
+                // the establisher's live callee-saved values at the throwing call) lets the resume
+                // restore them. eax/ecx/edx are NOT recorded: the EH ABI hands the pad the exception
+                // object in eax and the selector in edx, and ecx is caller-saved (dead across the call).
+                Expr::Read(Location::Reg(RegId(3))), // ebx
+                Expr::Read(Location::Reg(RegId(6))), // esi
+                Expr::Read(Location::Reg(RegId(7))), // edi
             ],
             ret: Ty::int(32),
         })

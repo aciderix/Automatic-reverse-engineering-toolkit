@@ -4905,11 +4905,16 @@ struct aret_gnu_frame {
     uint32_t pc;       /* active call-site PC (set before each call) */
     uint32_t ebp;      /* the frame pointer (constant post-prologue): locals live at [ebp+K] */
     uint32_t esp;      /* the frame base = max esp seen at a call: outgoing args at [esp+K] */
+    uint32_t ebx, esi, edi; /* callee-saved regs live at the active call: a resumed landing pad /
+                            * catch continuation reads locals the compiler kept in a callee-saved
+                            * register (e.g. a loop counter in ebx) through these — otherwise it
+                            * would resume with them 0 and corrupt the resumed code. */
     uint32_t pc_start; /* the function's entry VA (diagnostic) */
 };
 static struct aret_gnu_frame g_gnu_eh[256];
 static int g_gnu_eh_n = 0;
 static uint32_t g_gnu_run_lp, g_gnu_run_obj, g_gnu_run_sel, g_gnu_run_ebp, g_gnu_run_esp;
+static uint32_t g_gnu_run_ebx, g_gnu_run_esi, g_gnu_run_edi; /* callee-saved regs for the resume */
 static uint32_t g_gnu_exc_obj = 0, g_gnu_exc_tinfo = 0;   /* the in-flight thrown object being
                                        * dispatched (allocation base) + its type_info */
 static uint32_t g_gnu_cur_dtor = 0;   /* the in-flight exception's dtor (the dtor arg of __cxa_throw) */
@@ -4927,18 +4932,22 @@ void aret_gnu_eh_push(uint32_t key, uint32_t pc_start) {
     if (g_gnu_eh_n >= 256) aret_unmodelled("GNU EH: establish-frame stack overflow");
     struct aret_gnu_frame *f = &g_gnu_eh[g_gnu_eh_n++];
     f->key = key; f->pc = 0; f->ebp = 0; f->esp = 0; f->pc_start = pc_start;
+    f->ebx = 0; f->esi = 0; f->edi = 0;
 }
 /* Called before each call in an EH function: `sp`/`bp` are its esp/ebp there. A landing pad
  * (a lifted continuation) reads the function's locals via BOTH the frame pointer `ebp`
  * ([ebp+K]) and the frame base ([esp+K], the post-prologue esp after any GCC `and esp,-16`),
  * so it must run with the same two. `ebp` is constant post-prologue; esp only falls across a
  * function (args), so the max esp at any call is the frame base. */
-void aret_gnu_eh_setpc(uint32_t pc, uint32_t sp, uint32_t bp) {
+void aret_gnu_eh_setpc(uint32_t pc, uint32_t sp, uint32_t bp, uint32_t bx, uint32_t si, uint32_t di) {
     if (g_gnu_eh_n > 0) {
         struct aret_gnu_frame *f = &g_gnu_eh[g_gnu_eh_n - 1];
         f->pc = pc;
         f->ebp = bp;
         if (sp > f->esp) f->esp = sp;
+        /* Last-write (the throwing call is the most recent setpc): the callee-saved regs
+         * the establisher held at that call are the ones live when its landing pad resumes. */
+        f->ebx = bx; f->esi = si; f->edi = di;
     }
 }
 void aret_gnu_eh_pop(void) {
@@ -4957,7 +4966,11 @@ uint64_t aret_gnu_eh_run(uint32_t esp) {
      * below it) and ebp = the frame pointer (regular locals at [ebp+K]); a pad may use
      * either or both. */
     uint32_t base = g_gnu_run_esp ? g_gnu_run_esp : g_gnu_run_ebp;
-    return aret_call(g_gnu_run_lp, base, g_gnu_run_obj, 0, g_gnu_run_sel, g_gnu_run_ebp, 0, 0, 0);
+    /* Pass the establisher's callee-saved regs (esi/edi/ebx) so a landing pad that reads a
+     * register-resident local (loop counter, cached `this`) resumes with the right value;
+     * eax=obj and edx=selector are the EH ABI, ecx is caller-saved (dead) -> 0. */
+    return aret_call(g_gnu_run_lp, base, g_gnu_run_obj, 0, g_gnu_run_sel, g_gnu_run_ebp,
+                     g_gnu_run_esi, g_gnu_run_edi, g_gnu_run_ebx);
 }
 
 /* __cxa_allocate_exception(size) -> object buffer. Closed model: we own allocate/throw/
@@ -5051,6 +5064,7 @@ static void aret_gnu_dispatch(void) {
          * caught reference must point at the caught base within the thrown object. */
         g_gnu_run_lp = lp; g_gnu_run_obj = (uint32_t)((int32_t)obj + adjust); g_gnu_run_sel = (uint32_t)sel;
         g_gnu_run_ebp = f->ebp; g_gnu_run_esp = f->esp;
+        g_gnu_run_ebx = f->ebx; g_gnu_run_esi = f->esi; g_gnu_run_edi = f->edi;
         g_gnu_eh_n = i + 1;   /* aret_gnu_eh_run pops this frame; inner ones are discarded */
         aret_longjmp_do(f->key, 1);   /* -> establisher setjmp -> aret_gnu_eh_run */
         /* not reached */

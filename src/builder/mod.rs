@@ -447,7 +447,7 @@ fn gnu_eh_decls() -> &'static str {
      #include <setjmp.h>\n\
      jmp_buf *aret_jmpbuf_for(uint32_t key);\n\
      void aret_gnu_eh_push(uint32_t key, uint32_t pc_start);\n\
-     void aret_gnu_eh_setpc(uint32_t pc, uint32_t esp, uint32_t ebp);\n\
+     void aret_gnu_eh_setpc(uint32_t pc, uint32_t esp, uint32_t ebp, uint32_t ebx, uint32_t esi, uint32_t edi);\n\
      void aret_gnu_eh_pop(void);\n\
      uint64_t aret_gnu_eh_run(uint32_t esp);\n\
      #define aret_gnu_eh_setjmp(key) ((uint32_t)setjmp(*aret_jmpbuf_for((uint32_t)(key))))\n\n"
