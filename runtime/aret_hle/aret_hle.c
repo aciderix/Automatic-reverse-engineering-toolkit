@@ -3355,6 +3355,59 @@ void aret_longjmp_do(uint32_t key, int val) {
 /* kernel32 process/module/sync (best-effort) */
 uint32_t aret_GetModuleHandleA(uint32_t esp) { (void)esp; return 0x00400000u; }
 uint32_t aret_GetModuleHandleW(uint32_t esp) { (void)esp; return 0x00400000u; }
+
+/* ---- Dynamic module loading of LIFTED DLLs (the plugin ecosystem) -----------
+ * A plugin host (gdk-pixbuf loaders, GTK/GIO/pango modules, a COM inproc server
+ * probed by name) does LoadLibrary(path)+GetProcAddress(h,"symbol")+call. When the
+ * named DLL was lifted alongside the app (--auto-lift/--with-dll), its exports are
+ * real recovered functions in `aret_lifted_exports[]`; we hand LoadLibrary a
+ * PER-MODULE handle and let GetProcAddress resolve that module's export to its VA,
+ * which `aret_call` dispatches like any indirect call. A module NOT lifted (kernel32
+ * & friends, backed by HLE shims) keeps the flat 0x10000000 handle and the by-name
+ * shim path — unchanged. Ordinal lookups are still not modelled (sound 0). */
+#define ARET_MOD_BASE 0x30000000u
+#define ARET_MOD_MAX  128
+static char g_loaded_mod[ARET_MOD_MAX][64];
+static int  g_loaded_mod_n = 0;
+/* basename, lowercased, trailing ".dll" stripped — the same normalization the loader
+ * uses to match an import against a lifted module. */
+static void aret_norm_dll(const char *name, char *out, size_t cap) {
+    const char *b = name;
+    for (const char *p = name; *p; p++) if (*p == '/' || *p == '\\') b = p + 1;
+    size_t o = 0;
+    for (; b[o] && o + 1 < cap; o++) {
+        char c = b[o];
+        out[o] = (c >= 'A' && c <= 'Z') ? (char)(c + 32) : c;
+    }
+    out[o] = 0;
+    if (o >= 4 && !strcmp(out + o - 4, ".dll")) out[o - 4] = 0;
+}
+static int aret_is_lifted_module(const char *norm) {
+    const char *dll, *fn; uint32_t va; char nd[64];
+    for (int k = 0; aret_lifted_export_iter(k, &dll, &fn, &va); k++) {
+        aret_norm_dll(dll, nd, sizeof nd);
+        if (!strcmp(nd, norm)) return 1;
+    }
+    return 0;
+}
+/* Shared by every LoadLibrary variant. Returns a per-module handle for a lifted DLL,
+ * else the flat HLE handle (never NULL — the CRT delay-load glue treats NULL as a
+ * disk-search trigger that then faults on a synthesized path). */
+uint32_t aret_loadlibrary_by_name(const char *name) {
+    if (name && *name) {
+        char norm[64];
+        aret_norm_dll(name, norm, sizeof norm);
+        if (aret_is_lifted_module(norm)) {
+            for (int i = 0; i < g_loaded_mod_n; i++)
+                if (!strcmp(g_loaded_mod[i], norm)) return ARET_MOD_BASE + (uint32_t)i;
+            if (g_loaded_mod_n < ARET_MOD_MAX) {
+                snprintf(g_loaded_mod[g_loaded_mod_n], 64, "%s", norm);
+                return ARET_MOD_BASE + (uint32_t)g_loaded_mod_n++;
+            }
+        }
+    }
+    return 0x10000000u;
+}
 /* GetProcAddress(hModule, lpProcName): resolve a named API to a CALLABLE address, like
  * Wine (which hands back a real pointer for every API it implements) — previously a flat
  * NULL, which made a program that GetProcAddress-probes an API it then calls fail (glib's
@@ -3365,17 +3418,40 @@ uint32_t aret_GetModuleHandleW(uint32_t esp) { (void)esp; return 0x00400000u; }
  * fake pointer. The module handle is ignored: a Win32 API name identifies its behaviour
  * (same rule as the delay-load resolver). Ordinal lookups (name high word 0) -> not modelled. */
 uint32_t aret_GetProcAddress(uint32_t esp) {
+    uint32_t hmod = arg(esp, 0);
     uint32_t name = arg(esp, 1);
     if (name == 0 || (name >> 16) == 0) return 0;   /* NULL or ordinal -> not found (sound) */
-    return aret_shim_synth_va((const char *)(uintptr_t)name);
+    const char *fn = (const char *)(uintptr_t)name;
+    /* A per-module handle resolves within THAT lifted DLL (so two loaders that both
+     * export the same ABI symbol, e.g. gdk-pixbuf's `fill_vtable`, resolve to the
+     * right one). An unknown name in the module -> 0, GetProcAddress's own "absent". */
+    if (hmod >= ARET_MOD_BASE && (int)(hmod - ARET_MOD_BASE) < g_loaded_mod_n) {
+        const char *mod = g_loaded_mod[hmod - ARET_MOD_BASE];
+        const char *dll, *efn; uint32_t va; char nd[64];
+        for (int k = 0; aret_lifted_export_iter(k, &dll, &efn, &va); k++) {
+            aret_norm_dll(dll, nd, sizeof nd);
+            if (!strcmp(nd, mod) && !strcmp(efn, fn)) return va;
+        }
+        return 0;
+    }
+    /* HLE-backed module (flat handle): a Win32 API name identifies its behaviour. */
+    return aret_shim_synth_va(fn);
 }
-uint32_t aret_LoadLibraryA(uint32_t esp) { (void)esp; return 0x10000000u; }
+uint32_t aret_LoadLibraryA(uint32_t esp) {
+    return aret_loadlibrary_by_name((const char *)(uintptr_t)arg(esp, 0));
+}
 /* LoadLibraryExA(name, hFile, flags): like LoadLibraryA, return a non-NULL fake
  * handle. The msvcrt delay-load glue probes for kernel32.dll/etc.; a NULL here
  * makes it fall back to a disk search that builds a path from a NULL name and
  * crashes. The actual symbols are already intercepted as imports/shims. */
-uint32_t aret_LoadLibraryExA(uint32_t esp) { (void)esp; return 0x10000000u; }
-uint32_t aret_LoadLibraryExW(uint32_t esp) { (void)esp; return 0x10000000u; }
+uint32_t aret_LoadLibraryExA(uint32_t esp) {
+    return aret_loadlibrary_by_name((const char *)(uintptr_t)arg(esp, 0));
+}
+uint32_t aret_LoadLibraryExW(uint32_t esp) {
+    char name[1024];
+    aret_w2n((const uint16_t *)(uintptr_t)arg(esp, 0), name, sizeof name);
+    return aret_loadlibrary_by_name(name);
+}
 uint32_t aret_FreeLibrary(uint32_t esp) { (void)esp; return 1; }
 /* The process top-level unhandled-exception filter (SetUnhandledExceptionFilter
  * installs it, UnhandledExceptionFilter runs it). Stateful: the setter returns the

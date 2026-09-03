@@ -2129,8 +2129,13 @@ uint32_t aret_MulDiv(uint32_t esp) {
 uint32_t aret_GetUserDefaultLangID(uint32_t esp)       { (void)esp; return 0x0409; }
 uint32_t aret_GetSystemDefaultLangID(uint32_t esp)     { (void)esp; return 0x0409; }
 uint32_t aret_GetSystemDefaultUILanguage(uint32_t esp) { (void)esp; return 0x0409; }
-/* LoadLibraryW — same non-NULL pseudo-module handle as LoadLibraryA. */
-uint32_t aret_LoadLibraryW(uint32_t esp) { (void)esp; return 0x10000000u; }
+/* LoadLibraryW — widen the name and route through the shared resolver so a lifted
+ * DLL gets a per-module handle (GetProcAddress then reaches its exports by name). */
+uint32_t aret_LoadLibraryW(uint32_t esp) {
+    char name[1024];
+    u32_w2n((const uint16_t *)(uintptr_t)WU(0), name, sizeof name);
+    return aret_loadlibrary_by_name(name);
+}
 /* SleepEx(ms, alertable) -> 0 (no APC/IO completion modelled). Yields like Sleep. */
 uint32_t aret_SleepEx(uint32_t esp) {
     uint32_t ms = WU(0);

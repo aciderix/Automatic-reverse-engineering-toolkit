@@ -115,6 +115,10 @@ uint32_t aret_shim_synth_va(const char *fn);
  * `DllGetClassObject`. Empty (lookup -> 0) when no DLL was merged in. */
 int aret_lifted_export_iter(int i, const char **dll, const char **fn, uint32_t *va);
 uint32_t aret_lifted_export(const char *dll, const char *fn);
+/* LoadLibrary of a lifted DLL -> per-module handle (else flat 0x10000000). Shared by
+ * every LoadLibrary{A,W}/LoadLibraryEx variant so GetProcAddress can resolve that
+ * module's lifted exports by name (the dynamic-plugin path). */
+uint32_t aret_loadlibrary_by_name(const char *name);
 
 /* No-op shim (returns 0) for recognized startup-glue functions (mingw/MSVC
  * global ctor/dtor runners, EH-frame registration, pseudo-relocator) we bind
