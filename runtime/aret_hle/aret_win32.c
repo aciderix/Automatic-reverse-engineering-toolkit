@@ -2644,6 +2644,20 @@ static void u32_sched_loop(void) {
 #endif
             int blocked = 0;
             for (int i = 0; i < g_nfiber; i++) if (g_fiber[i].state == FST_BLOCKED) blocked = 1;
+            if (blocked && getenv("ARET_FIBER_DEBUG")) {
+                fprintf(stderr, "[FIBER] deadlock dump: g_nfiber=%d g_cur=%d\n", g_nfiber, g_cur);
+                for (int i = 0; i < g_nfiber; i++) {
+                    struct u32_fiber *f = &g_fiber[i];
+                    fprintf(stderr,
+                        "[FIBER] #%d state=%d start=%#x param=%#x is_pool=%d wait_n=%d wait_all=%d "
+                        "wait_cs=%#x wait_srw=%#x srw_excl=%d wait_cv=%#x has_timeout=%d",
+                        i, f->state, f->start, f->param, f->is_pool, f->wait_n, f->wait_all,
+                        f->wait_cs, f->wait_srw, f->wait_srw_excl, f->wait_cv, f->has_timeout);
+                    for (int k = 0; k < f->wait_n && k < 8; k++)
+                        fprintf(stderr, " wait_h[%d]=%#x", k, f->wait_h[k]);
+                    fprintf(stderr, "\n");
+                }
+            }
             if (blocked) aret_unmodelled("fiber scheduler: deadlock (all live threads blocked, no timeout pending)");
             return;   /* nothing runnable and nothing blocked → every fiber is DONE */
         }
