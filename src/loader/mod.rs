@@ -833,6 +833,11 @@ pub struct LoadedModule {
     /// carries native `.tls` data. Materialised (block allocated + template copied +
     /// `_tls_index`/`fs:[0x2c]` published) before the app entry.
     pub tls_data: Option<TlsBlock>,
+    /// Normalized names (`norm_dll`) of the DLLs this module imports from. Used to
+    /// order initializers in **dependency order** (a module's DllMain/ctors run only
+    /// after those of every module it imports), matching the Windows loader — see
+    /// `dependency_init_order`. Only the subset also present in the loaded set matters.
+    pub imports: Vec<String>,
 }
 
 /// Normalize a DLL name for matching: lowercase, drop a trailing `.dll`. So
@@ -1063,6 +1068,16 @@ pub fn merge_modules(
             let a = (addr as i64 + delta) as u64;
             primary.symbols.entry(a).or_insert(KnownSymbol { address: a, ..sym });
         }
+        // Capture which DLLs this module imports from (normalized) BEFORE the
+        // pe_imports are drained below — needed to order initializers in dependency
+        // order (glib's DllMain before gio's, which calls into glib).
+        let imported: Vec<String> = {
+            let mut v: Vec<String> =
+                dll.pe_imports.values().map(|imp| norm_dll(&imp.dll)).collect();
+            v.sort();
+            v.dedup();
+            v
+        };
         // Fold the module's OWN imports (shifted) so its calls into other DLLs
         // (comctl32 → gdi32/user32/kernel32) stay shim-bound — or get routed too
         // if that DLL is also loaded (resolve_module_imports sees pe_imports).
@@ -1095,9 +1110,59 @@ pub fn merge_modules(
             ctors,
             tls_callbacks,
             tls_data,
+            imports: imported,
         });
     }
     Ok(loaded)
+}
+
+/// Order module indices so a module's initializers run only AFTER those of every
+/// module it imports (dependency order), matching the Windows loader — which
+/// initializes a DLL only once all DLLs it depends on are initialized. Without
+/// this, a dependent's `DllMain` (e.g. gio) can run before its dependency's (glib)
+/// and read still-uninitialized globals (glib's quark table is NULL → a
+/// `g_return_if_fail` fires → the warning path re-enters and self-deadlocks).
+///
+/// Deterministic and stable: among modules whose dependencies are all satisfied,
+/// the original (load) order is preserved. Self-imports are ignored; a dependency
+/// cycle (should not occur among well-formed DLLs) is broken by emitting the first
+/// still-pending module, so the function always returns a full permutation.
+fn dependency_init_order(modules: &[LoadedModule]) -> Vec<usize> {
+    let n = modules.len();
+    let idx_by_name: std::collections::HashMap<String, usize> =
+        modules.iter().enumerate().map(|(i, m)| (norm_dll(&m.name), i)).collect();
+    let deps: Vec<Vec<usize>> = modules
+        .iter()
+        .enumerate()
+        .map(|(i, m)| {
+            m.imports
+                .iter()
+                .filter_map(|d| idx_by_name.get(d).copied())
+                .filter(|&j| j != i)
+                .collect()
+        })
+        .collect();
+    let mut emitted = vec![false; n];
+    let mut order = Vec::with_capacity(n);
+    while order.len() < n {
+        let mut progressed = false;
+        for i in 0..n {
+            if !emitted[i] && deps[i].iter().all(|&j| emitted[j]) {
+                emitted[i] = true;
+                order.push(i);
+                progressed = true;
+            }
+        }
+        if !progressed {
+            // Dependency cycle: break it deterministically by emitting the first
+            // still-pending module (order among a cycle is arbitrary but stable).
+            if let Some(i) = (0..n).find(|&i| !emitted[i]) {
+                emitted[i] = true;
+                order.push(i);
+            }
+        }
+    }
+    order
 }
 
 /// Assemble a multi-module program (doc 80 §1.2 brick 2.3c — the loader
@@ -1121,17 +1186,27 @@ pub fn load_with_modules(primary_data: &[u8], dlls: &[(String, Vec<u8>)]) -> Res
         dll_progs.push((name.clone(), Program::load(data)?));
     }
     let modules = merge_modules(&mut primary, dll_progs)?;
-    // DLL initializers (DllMain) to run before the app entry, in load order.
-    primary.dll_inits = modules
+    // Order module initializers in DEPENDENCY order (a module's DllMain/ctors after
+    // those of every module it imports), like the Windows loader. Load order is NOT
+    // dependency order (auto-lift discovers a direct import such as gio before its
+    // transitive dependency glib), and running gio's DllMain before glib's leaves
+    // glib globals uninitialized (quark table NULL → g_return_if_fail → the warning
+    // path re-enters and self-deadlocks). Empty/singleton closures are unaffected.
+    let init_order = dependency_init_order(&modules);
+    // DLL initializers (DllMain) to run before the app entry, in dependency order.
+    primary.dll_inits = init_order
         .iter()
+        .map(|&i| &modules[i])
         .filter(|m| m.init_entry != 0)
         .map(|m| (m.init_entry, m.hinstance))
         .collect();
     // PE TLS callbacks to run at process attach, before the app entry (a lifted DLL
     // may register one — glib does — and warn if it never ran). Each keeps its own
-    // module's hinstance as the DllHandle argument, like dll_inits.
-    primary.tls_inits = modules
+    // module's hinstance as the DllHandle argument, like dll_inits. Same dependency
+    // order as dll_inits.
+    primary.tls_inits = init_order
         .iter()
+        .map(|&i| &modules[i])
         .flat_map(|m| m.tls_callbacks.iter().map(move |&cb| (cb, m.hinstance)))
         .collect();
     // Static-TLS blocks to materialise before the app entry: each merged DLL's block
@@ -1151,8 +1226,9 @@ pub fn load_with_modules(primary_data: &[u8], dlls: &[(String, Vec<u8>)]) -> Res
     // exe's — mirroring Windows, where a DLL's static objects are constructed before the
     // exe runs. Only populated here (the multi-module path), so a standalone transpile
     // has an empty ctor_list and is unaffected (hash unchanged).
-    primary.ctor_list = modules
+    primary.ctor_list = init_order
         .iter()
+        .map(|&i| &modules[i])
         .flat_map(|m| m.ctors.iter().copied())
         .chain(exe_ctors)
         .collect();
@@ -1936,6 +2012,7 @@ mod tests {
             ctors: Vec::new(),
             tls_callbacks: Vec::new(),
             tls_data: None,
+            imports: Vec::new(),
         };
         let imp = |dll: &str, name: Option<&str>, ord: Option<u32>| PeImport {
             dll: dll.into(),
@@ -1972,6 +2049,7 @@ mod tests {
             ctors: Vec::new(),
             tls_callbacks: Vec::new(),
             tls_data: None,
+            imports: Vec::new(),
         };
         let resolved = resolve_module_imports(&app_imports, std::slice::from_ref(&gdi_mod));
         assert!(!resolved.is_empty(), "comctl32 imports from gdi32 should resolve");
@@ -1996,6 +2074,57 @@ mod tests {
         for va in resolved.values() {
             assert!(gdi_addrs.contains(va));
         }
+    }
+
+    #[test]
+    fn dependency_init_order_runs_dependencies_first() {
+        // Minimal module carrying only a name + its imported DLL names.
+        let m = |name: &str, imports: &[&str]| LoadedModule {
+            name: name.into(),
+            exports: Vec::new(),
+            init_entry: 1,
+            hinstance: 0,
+            ctors: Vec::new(),
+            tls_callbacks: Vec::new(),
+            tls_data: None,
+            imports: imports.iter().map(|d| norm_dll(d)).collect(),
+        };
+        // Discovery/load order puts the dependent (gio) BEFORE its dependency (glib) —
+        // exactly the auto-lift order that caused the deadlock. gobject also needs glib;
+        // gio needs both. kernel32 is a system DLL not in the set (ignored).
+        let modules = vec![
+            m("libgio-2.0-0.dll", &["libglib-2.0-0.dll", "libgobject-2.0-0.dll", "kernel32.dll"]),
+            m("libgobject-2.0-0.dll", &["libglib-2.0-0.dll"]),
+            m("libglib-2.0-0.dll", &["kernel32.dll"]),
+        ];
+        let order = dependency_init_order(&modules);
+        let pos = |name: &str| order.iter().position(|&i| modules[i].matches(name)).unwrap();
+        assert!(pos("libglib-2.0-0.dll") < pos("libgobject-2.0-0.dll"), "glib before gobject");
+        assert!(pos("libglib-2.0-0.dll") < pos("libgio-2.0-0.dll"), "glib before gio");
+        assert!(pos("libgobject-2.0-0.dll") < pos("libgio-2.0-0.dll"), "gobject before gio");
+        assert_eq!(order.len(), 3, "every module is emitted exactly once");
+    }
+
+    #[test]
+    fn dependency_init_order_breaks_cycles_and_is_total() {
+        // A dependency cycle (A<->B) must not hang or drop a module.
+        let m = |name: &str, imports: &[&str]| LoadedModule {
+            name: name.into(),
+            exports: Vec::new(),
+            init_entry: 1,
+            hinstance: 0,
+            ctors: Vec::new(),
+            tls_callbacks: Vec::new(),
+            tls_data: None,
+            imports: imports.iter().map(|d| norm_dll(d)).collect(),
+        };
+        let modules = vec![m("a.dll", &["b.dll"]), m("b.dll", &["a.dll"]), m("c.dll", &[])];
+        let order = dependency_init_order(&modules);
+        assert_eq!(order.len(), 3);
+        let mut seen = order.clone();
+        seen.sort();
+        seen.dedup();
+        assert_eq!(seen.len(), 3, "a total permutation, no module lost or duplicated");
     }
 
     #[test]
