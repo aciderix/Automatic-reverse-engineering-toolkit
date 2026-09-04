@@ -1,0 +1,24 @@
+{
+  "format": "aret-oracle-artifact/v1",
+  "oracle": "winediff",
+  "kind": "WINEDIFF",
+  "command": "bash /home/user/Automatic-reverse-engineering-toolkit/bench/winediff.sh lift_vbase_catch",
+  "result": "PASS",
+  "exit_code": 0,
+  "started_at": "2026-09-04T22:22:30Z",
+  "finished_at": "2026-09-04T22:23:03Z",
+  "environment": {
+    "adapter": "aret-mmu-oracles/1",
+    "oracle": "winediff",
+    "repository": "/home/user/Automatic-reverse-engineering-toolkit",
+    "repository_revision": "b29d1a204e8881cb73bfd1880dd9f9ff62b2a1fd",
+    "script": "bench/winediff.sh",
+    "fixture": "lift_vbase_catch",
+    "timeout_seconds": 3600,
+    "missing_dependencies": [],
+    "timed_out": false,
+    "duration_seconds": 32.753
+  },
+  "stdout": "  ok    lift_vbase_catch\n------------------------------------------\nOS-API (Wine) equivalence: 1/1 programs\n",
+  "stderr": ""
+}
