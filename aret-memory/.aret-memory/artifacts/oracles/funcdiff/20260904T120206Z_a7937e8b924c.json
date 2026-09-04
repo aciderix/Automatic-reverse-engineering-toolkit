@@ -1,0 +1,24 @@
+{
+  "format": "aret-oracle-artifact/v1",
+  "oracle": "funcdiff",
+  "kind": "FUNCDIFF",
+  "command": "bash /home/user/Automatic-reverse-engineering-toolkit/bench/funcdiff.sh",
+  "result": "PASS",
+  "exit_code": 0,
+  "started_at": "2026-09-04T11:59:45Z",
+  "finished_at": "2026-09-04T12:02:06Z",
+  "environment": {
+    "adapter": "aret-mmu-oracles/1",
+    "oracle": "funcdiff",
+    "repository": "/home/user/Automatic-reverse-engineering-toolkit",
+    "repository_revision": "f800eff2106500d6cd61ed8bc8ed29d5f14c01ea",
+    "script": "bench/funcdiff.sh",
+    "fixture": "",
+    "timeout_seconds": 1800,
+    "missing_dependencies": [],
+    "timed_out": false,
+    "duration_seconds": 140.665
+  },
+  "stdout": "  busybox-w32-FRP-5579-g5749feb35.exe LIFT-closure: 6104 scored, 3300 calls, 0 divergence(s)\n  busybox-w32-FRP-5579-g5749feb35.exe OPT-diff:     3926 scored, 0 divergence(s)\n  sqlite3-3400100.exe LIFT-closure: 16606 scored, 17116 calls, 0 divergence(s)\n  sqlite3-3400100.exe OPT-diff:     7673 scored, 0 divergence(s)\n  FUNCDIFF-CORPUS: lift 22710 scored / 20416 calls, opt 11599 scored, 0 divergence(s)\nfuncdiff corpus gate: PASS\n",
+  "stderr": ""
+}
