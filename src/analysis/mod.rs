@@ -243,6 +243,71 @@ pub fn analyze(prog: &Program, disasm: &Disassembler, prologue_scan: bool) -> An
         .collect();
     // The function list: every entry except cold companions (which the parent absorbs).
     let func_entries: BTreeSet<u64> = entries.difference(&cold).copied().collect();
+
+    // False-start guard (KN-0066). Two flags-based shapes prove an address is an
+    // *interior* byte wrongly promoted to a function entry (a jump-table case, an
+    // address-taken interior byte, a shared bare `ret`, a stray decode target).
+    // Building a function there does double harm: at runtime it can abort on a
+    // flags-undefined `Jcc` (`aret_unmodelled`), and — as a truncation boundary — it
+    // orphans the real enclosing function at that point, so an interior branch whose
+    // target lies past the split can no longer be resolved. Dropping it lets the real
+    // function collect straight through.
+    //
+    //  (A) the entry's *own* first instruction is a conditional branch (`Jcc`): it
+    //      reads EFLAGS, and no calling convention makes flags a function live-in, so
+    //      its condition depends on a `cmp`/`test` before this address — impossible at
+    //      a real entry.
+    //  (B) the instruction ending *exactly* at the entry is a `Jcc`: the entry is that
+    //      branch's fall-through. A function never *ends* on a conditional jump (it
+    //      falls through), so the `Jcc` and this address belong to the same function —
+    //      the address is interior. (This is the exact `g_once` fast-path shape
+    //      `mov eax,[cache]; test eax,eax; je init; ret; init: …`, where the inline
+    //      `ret` was seeded as a bogus entry and truncated the function before `init`.)
+    //
+    // Exempt the two authoritative sources, which are proofs not guesses: a
+    // direct-call target (proven callable) and an EH continuation / landing pad
+    // (reached by the unwinder, already kept out of the boundary). Sound and additive:
+    // real code neither opens with a bare `Jcc` nor ends a function on one, so no
+    // genuine entry is dropped and the behavioural hash is unchanged; the worst case
+    // for a mistakenly-kept indirect-dispatch target is a loud abort, never a
+    // miscompile.
+    let call_targets: BTreeSet<u64> = global
+        .values()
+        .filter(|i| i.flow == crate::disasm::Flow::Call)
+        .filter_map(|i| i.target)
+        .collect();
+    // The decoded instruction that ends exactly at `addr`, taken only from the
+    // authoritative reachable stream `global` (never a fresh backward decode, which
+    // x86 non-self-synchronisation makes unsound) — mirrors `boundary_at`'s scan.
+    let ends_at = |addr: u64| -> Option<crate::disasm::Flow> {
+        (1..=15u64).find_map(|k| {
+            global
+                .get(&(addr - k))
+                .filter(|prev| prev.next_addr() == addr)
+                .map(|prev| prev.flow)
+        })
+    };
+    // Fresh decode at the candidate (not `global.get`): the real enclosing function
+    // may have decoded this region with different instruction boundaries, so `global`
+    // need not hold a key exactly at `e`; a fresh decode is what the function builder
+    // sees starting here.
+    let false_starts: BTreeSet<u64> = func_entries
+        .iter()
+        .copied()
+        .filter(|e| {
+            if call_targets.contains(e) || cxx_conts.contains(e) {
+                return false;
+            }
+            let opens_jcc = disasm
+                .decode_at(prog, *e)
+                .is_some_and(|i| i.flow == crate::disasm::Flow::CondJump);
+            let after_jcc = ends_at(*e) == Some(crate::disasm::Flow::CondJump);
+            opens_jcc || after_jcc
+        })
+        .collect();
+    let func_entries: BTreeSet<u64> =
+        func_entries.difference(&false_starts).copied().collect();
+
     // The truncation boundary drives where `collect_function` stops. A C++ catch
     // **continuation** is a resume point *inside its establisher's body* (also reached by the
     // establisher's normal control flow), so it must NOT truncate the establisher — exclude it
