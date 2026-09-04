@@ -6664,6 +6664,31 @@ uint32_t aret_SetProcessAffinityMask(uint32_t esp) { (void)esp; return 1; }
  * privileged); Wine, sandboxed in its prefix, returns TRUE without touching the real
  * clock -- ARET matches that (reports success, host clock unchanged). */
 uint32_t aret_SetSystemTime(uint32_t esp) { (void)esp; return 1; }
+/* GdiplusStartup(ULONG_PTR *token, const GdiplusStartupInput *input,
+ *                GdiplusStartupOutput *output) -> GpStatus (0 = Ok).
+ * Programs (gdk-pixbuf among them) call this to INITIALIZE GDI+ at startup, then may
+ * decode through another path entirely — gdk-pixbuf's PNG load runs on libpng, and
+ * under Wine the whole decode makes no GDI+ call but this one (measured via +relay).
+ * Model the init as a sound success: hand back a non-null token. No GDI+ image object
+ * is ever created — every Gdip* remains an unimplemented import that aborts loudly if
+ * actually used — so returning Ok cannot silently mislead: either the program never
+ * touches GDI+ (correct) or it aborts at the first real Gdip* (safe). The
+ * SuppressBackgroundThread sub-case (the caller drives GDI+'s notification hooks
+ * itself) needs the GDI+ worker we do not model → a defined partial failure.
+ * GdiplusStartupInput = {u32 version; ptr DebugEventCallback; BOOL SuppressBackgroundThread; BOOL SuppressExternalCodecs}. */
+uint32_t aret_GdiplusStartup(uint32_t esp) {
+    uint32_t *token = (uint32_t *)WP(0);
+    const uint32_t *input = (const uint32_t *)WP(1);
+    if (input && input[2]) {   /* SuppressBackgroundThread */
+        aret_partial("GdiplusStartup: SuppressBackgroundThread (GDI+ worker/notification not modelled)");
+        return 1;              /* GDI+ GenericError — a defined non-Ok status */
+    }
+    if (token) *token = 1;     /* non-null GDI+ token; no real GDI+ object is created */
+    return 0;                  /* Ok */
+}
+/* GdiplusShutdown(ULONG_PTR token) -> void. Nothing was allocated by the startup
+ * model, so tearing it down is a no-op. */
+uint32_t aret_GdiplusShutdown(uint32_t esp) { (void)esp; return 0; }
 /* _endthreadex(retval): terminate the calling fiber (same as ExitThread). */
 uint32_t aret_ExitThread(uint32_t esp);   /* fwd: defined with the fiber scheduler below */
 uint32_t aret_endthreadex(uint32_t esp) { return aret_ExitThread(esp); }
