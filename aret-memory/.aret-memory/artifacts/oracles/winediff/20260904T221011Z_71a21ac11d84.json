@@ -1,0 +1,24 @@
+{
+  "format": "aret-oracle-artifact/v1",
+  "oracle": "winediff",
+  "kind": "WINEDIFF",
+  "command": "bash /home/user/Automatic-reverse-engineering-toolkit/bench/winediff.sh lift_async_exception",
+  "result": "PASS",
+  "exit_code": 0,
+  "started_at": "2026-09-04T22:09:37Z",
+  "finished_at": "2026-09-04T22:10:11Z",
+  "environment": {
+    "adapter": "aret-mmu-oracles/1",
+    "oracle": "winediff",
+    "repository": "/home/user/Automatic-reverse-engineering-toolkit",
+    "repository_revision": "cdbf6c2032ddf1a75f245b25d0620177a437ab8a",
+    "script": "bench/winediff.sh",
+    "fixture": "lift_async_exception",
+    "timeout_seconds": 3600,
+    "missing_dependencies": [],
+    "timed_out": false,
+    "duration_seconds": 33.946
+  },
+  "stdout": "  ok    lift_async_exception\n------------------------------------------\nOS-API (Wine) equivalence: 1/1 programs\n",
+  "stderr": ""
+}
