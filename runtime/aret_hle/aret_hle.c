@@ -4853,12 +4853,13 @@ static int aret_gnu_ti_equal(uint32_t a, uint32_t b) {
  * from the imports) and walk `thrown_ti`'s bases. On a match, `*adjust` gets the BYTE OFFSET
  * from the thrown object pointer to the caught base sub-object (0 for equal / single
  * inheritance; the accumulated base offsets under multiple inheritance) — the dispatcher adds
- * it so the catch parameter binds the right sub-object. Only NON-VIRTUAL, PUBLIC bases are
- * followed; a virtual base (needs the object's vtable at runtime) or a non-public base is not
- * matched (the throw then reports unhandled = a sound abort, never a wrong bind), and an
- * UNRECOGNISED type_info vtable is a loud abort (never a guessed match). `catch_ti == 0` =
- * catch-all (no typed pointer to adjust). */
-static int aret_gnu_type_match_adj(uint32_t thrown_ti, uint32_t catch_ti, int32_t *adjust) {
+ * it so the catch parameter binds the right sub-object. PUBLIC bases are followed, both
+ * non-virtual (fixed byte offset) AND virtual (offset read from the object's vtable at
+ * runtime — `obj` is the current sub-object pointer); a non-public base is not catchable, and
+ * an UNRECOGNISED type_info vtable is a loud abort (never a guessed match). `catch_ti == 0` =
+ * catch-all (no typed pointer to adjust). Skipping a virtual base would be a SILENT WRONG
+ * catch, not a sound abort, when a broader handler (catch(...) / a real base) follows — §0. */
+static int aret_gnu_type_match_adj(uint32_t thrown_ti, uint32_t catch_ti, uint32_t obj, int32_t *adjust) {
     if (catch_ti == 0) { *adjust = 0; return 1; }   /* catch(...) */
     uint32_t cls = 0, si = 0, vmi = 0;
     aret_gnu_eh_abi_vptrs(&cls, &si, &vmi);
@@ -4870,7 +4871,7 @@ static int aret_gnu_type_match_adj(uint32_t thrown_ti, uint32_t catch_ti, int32_
     if (si && vptr == si) {
         /* __si_class_type_info: one public base at offset 0. */
         uint32_t base = *(const uint32_t *)(uintptr_t)(thrown_ti + 8);
-        return aret_gnu_type_match_adj(base, catch_ti, adjust);
+        return aret_gnu_type_match_adj(base, catch_ti, obj, adjust);
     }
     if (vmi && vptr == vmi) {
         /* __vmi_class_type_info: {vptr, name, flags, base_count, base_info[]} where each
@@ -4881,11 +4882,20 @@ static int aret_gnu_type_match_adj(uint32_t thrown_ti, uint32_t catch_ti, int32_
             uint32_t bi = thrown_ti + 16 + b * 8;
             uint32_t base = *(const uint32_t *)(uintptr_t)bi;
             uint32_t offflags = *(const uint32_t *)(uintptr_t)(bi + 4);
-            if (offflags & 0x1) continue;   /* virtual base: offset lives in the vtable — not modelled */
             if (!(offflags & 0x2)) continue; /* non-public base: not catchable */
+            int32_t off = (int32_t)offflags >> 8;
+            if (offflags & 0x1) {
+                /* Virtual base: `off` is not the offset but the byte displacement, within the
+                 * object's vtable, of the slot holding the real vbase offset. Read the current
+                 * sub-object's vptr (offset 0) and load the vbase offset from it (Itanium ABI).
+                 * Without an object we cannot resolve it -> no match (never a guessed bind). */
+                if (!obj) continue;
+                uint32_t vtbl = *(const uint32_t *)(uintptr_t)obj;
+                off = *(const int32_t *)(uintptr_t)(vtbl + (uint32_t)off);
+            }
             int32_t sub;
-            if (aret_gnu_type_match_adj(base, catch_ti, &sub)) {
-                *adjust = ((int32_t)offflags >> 8) + sub;   /* accumulate this base's byte offset */
+            if (aret_gnu_type_match_adj(base, catch_ti, obj + (uint32_t)off, &sub)) {
+                *adjust = off + sub;   /* accumulate this base's byte offset */
                 return 1;
             }
         }
@@ -4894,10 +4904,10 @@ static int aret_gnu_type_match_adj(uint32_t thrown_ti, uint32_t catch_ti, int32_
     aret_unmodelled("GNU EH: unrecognised type_info vtable during subtype match");
     return 0;
 }
-/* Boolean form (no adjustment needed by the caller). */
+/* Boolean form (no object to consult -> virtual bases are not resolvable here). */
 static int aret_gnu_type_matches(uint32_t thrown_ti, uint32_t catch_ti) {
     int32_t adj;
-    return aret_gnu_type_match_adj(thrown_ti, catch_ti, &adj);
+    return aret_gnu_type_match_adj(thrown_ti, catch_ti, 0, &adj);
 }
 
 struct aret_gnu_frame {
@@ -5105,7 +5115,7 @@ static void aret_gnu_dispatch(void) {
              * subtype rule (a base catches a derived throw); `adjust` is the this-offset to
              * the caught base sub-object (non-zero under multiple inheritance). */
             uint32_t catch_tinfo = slot ? *(const uint32_t *)(uintptr_t)slot : 0;
-            if (aret_gnu_type_match_adj(tinfo, catch_tinfo, &adjust)) { sel = (int)filter; break; }
+            if (aret_gnu_type_match_adj(tinfo, catch_tinfo, obj, &adjust)) { sel = (int)filter; break; }
         }
         /* No matching catch but a landing pad -> a cleanup: run destructors (selector 0),
          * then the pad's _Unwind_Resume continues the unwind outward. */
