@@ -904,6 +904,13 @@ fn is_eh_runtime_symbol(name: &str) -> bool {
             | "Unwind_DeleteException"
             | "gxx_personality_v0"
             | "gxx_personality_sj0"
+            // C++11 std::exception_ptr transport (mangled names; the leading `_Z` survives the
+            // `_` strip). Host-backed for the same reason as the __cxa_* family: the lifted
+            // bodies read __cxa_get_globals / build a __cxa_dependent_exception the closed
+            // model doesn't maintain, so routing them to the lift returns a null exception_ptr
+            // (silently WRONG). ARET's shims drive the header refcount directly instead.
+            | "ZSt17current_exceptionv"
+            | "ZSt17rethrow_exceptionNSt15__exception_ptr13exception_ptrE"
     )
 }
 

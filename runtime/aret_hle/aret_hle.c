@@ -4973,18 +4973,60 @@ uint64_t aret_gnu_eh_run(uint32_t esp) {
                      g_gnu_run_esi, g_gnu_run_edi, g_gnu_run_ebx);
 }
 
-/* __cxa_allocate_exception(size) -> object buffer. Closed model: we own allocate/throw/
- * begin_catch, so the buffer IS the object (no _Unwind_Exception header) and the same
- * pointer flows through unchanged. A real host malloc -> a valid guest address (same as
- * the CRT's own malloc). */
+/* C++11 std::exception_ptr transport. The reference count that keeps a thrown object alive
+ * while an exception_ptr references it lives in a __cxa_exception HEADER *before* the object:
+ * mingw libstdc++'s __cxa_allocate_exception is malloc(size + 0x60) with the object at
+ * base+0x60, the referenceCount at object-0x60 and the exceptionDestructor at object-0x4c
+ * (measured). The lifted exception_ptr::_M_addref/_M_release write that count directly
+ * (`lock addl/subl $1,-0x60(obj)`), so ARET must reserve the same header for the count to
+ * have a home — otherwise those writes land below the allocation (heap corruption) and
+ * std::current_exception returns a null exception_ptr (silently WRONG, §0). current_exception
+ * and rethrow_exception are host-backed (they need __cxa_get_globals / a dependent exception
+ * the closed model doesn't build); they drive this same count. The object pointer still flows
+ * through unchanged everywhere else — the header is invisible to code that doesn't touch it. */
+#define ARET_CXA_HDR       0x60u                                        /* header bytes before the object */
+#define ARET_CXA_RC(obj)   (*(int32_t *)(uintptr_t)((obj) - 0x60u))     /* referenceCount @ object-0x60 */
+#define ARET_CXA_DTOR(obj) (*(uint32_t *)(uintptr_t)((obj) - 0x4cu))    /* exceptionDestructor @ object-0x4c */
+
+/* object -> its thrown type_info, recorded at __cxa_throw so rethrow_exception (which
+ * re-dispatches the primary object directly, not via a dependent exception) can match it.
+ * Bounded; a genuine overflow is a loud abort, never a silent wrong dispatch. */
+static struct { uint32_t obj, tinfo; } g_gnu_exc_ti[256];
+static int g_gnu_exc_ti_n = 0;
+static void aret_gnu_ti_set(uint32_t obj, uint32_t tinfo) {
+    for (int i = 0; i < g_gnu_exc_ti_n; i++)
+        if (g_gnu_exc_ti[i].obj == obj) { g_gnu_exc_ti[i].tinfo = tinfo; return; }
+    if (g_gnu_exc_ti_n >= 256) aret_unmodelled("GNU EH: exception type_info table overflow");
+    g_gnu_exc_ti[g_gnu_exc_ti_n].obj = obj;
+    g_gnu_exc_ti[g_gnu_exc_ti_n].tinfo = tinfo;
+    g_gnu_exc_ti_n++;
+}
+static uint32_t aret_gnu_ti_get(uint32_t obj) {
+    for (int i = 0; i < g_gnu_exc_ti_n; i++)
+        if (g_gnu_exc_ti[i].obj == obj) return g_gnu_exc_ti[i].tinfo;
+    return 0;
+}
+static void aret_gnu_ti_del(uint32_t obj) {
+    for (int i = 0; i < g_gnu_exc_ti_n; i++)
+        if (g_gnu_exc_ti[i].obj == obj) { g_gnu_exc_ti[i] = g_gnu_exc_ti[--g_gnu_exc_ti_n]; return; }
+}
+
+/* __cxa_allocate_exception(size) -> object pointer. Reserve the 0x60 __cxa_exception header
+ * before the object (zeroed -> referenceCount 0), matching libstdc++ so the exception_ptr
+ * refcount at object-0x60 has a valid home; the object is at base+0x60 and flows through
+ * unchanged. */
 uint32_t aret_cxa_allocate_exception(uint32_t esp) {
     uint32_t sz = arg(esp, 0);
-    void *p = calloc(1, sz ? sz : 1);
-    if (!p) aret_unmodelled("GNU EH: __cxa_allocate_exception out of memory");
-    return (uint32_t)(uintptr_t)p;
+    void *base = calloc(1, (size_t)ARET_CXA_HDR + (sz ? sz : 1));
+    if (!base) aret_unmodelled("GNU EH: __cxa_allocate_exception out of memory");
+    return (uint32_t)(uintptr_t)((char *)base + ARET_CXA_HDR);
 }
 uint32_t aret_cxa_free_exception(uint32_t esp) {
-    free((void *)(uintptr_t)arg(esp, 0));
+    uint32_t obj = arg(esp, 0);
+    if (obj) {
+        aret_gnu_ti_del(obj);
+        free((char *)(uintptr_t)obj - ARET_CXA_HDR);   /* free the header base, not the object */
+    }
     return 0;
 }
 /* __cxa_get_exception_ptr(exc) -> the thrown object pointer, WITHOUT marking the catch as
@@ -5021,13 +5063,21 @@ uint32_t aret_cxa_end_catch(uint32_t esp) {
         return 0;
     }
     if (g_gnu_caught_base) {
-        if (g_gnu_caught_dtor) {
-            uint32_t s = (esp - 0x40) & ~0xfu;   /* free scratch, aligned */
-            *(uint32_t *)(uintptr_t)s = g_gnu_caught_base;
-            (void)aret_call(g_gnu_caught_dtor, s - 4, 0, g_gnu_caught_base /*ecx=this*/, 0, 0, 0, 0, 0);
+        uint32_t obj = g_gnu_caught_base;
+        g_gnu_caught_base = 0;
+        /* Drop this handler's reference; destroy + free only when it was the LAST. An
+         * exception_ptr captured from this handler (std::current_exception) keeps a reference
+         * (referenceCount > 1) and defers the free to its own _M_release. */
+        if (--ARET_CXA_RC(obj) <= 0) {
+            if (g_gnu_caught_dtor) {
+                uint32_t s = (esp - 0x40) & ~0xfu;   /* free scratch, aligned */
+                *(uint32_t *)(uintptr_t)s = obj;
+                (void)aret_call(g_gnu_caught_dtor, s - 4, 0, obj /*ecx=this*/, 0, 0, 0, 0, 0);
+            }
+            aret_gnu_ti_del(obj);
+            free((char *)(uintptr_t)obj - ARET_CXA_HDR);   /* free the header base */
         }
-        free((void *)(uintptr_t)g_gnu_caught_base);
-        g_gnu_caught_base = 0; g_gnu_caught_dtor = 0;
+        g_gnu_caught_dtor = 0;
     }
     return 0;
 }
@@ -5089,6 +5139,12 @@ uint32_t aret_cxa_throw(uint32_t esp) {
     g_gnu_exc_obj = arg(esp, 0);
     g_gnu_exc_tinfo = arg(esp, 1);
     g_gnu_cur_dtor = arg(esp, 2);
+    /* Seed the exception_ptr header: referenceCount = 1 (this in-flight/handler reference),
+     * the destructor at object-0x4c (so a lifted _M_release can run + free it), and record
+     * object -> type_info for a possible later std::rethrow_exception. */
+    ARET_CXA_RC(g_gnu_exc_obj) = 1;
+    ARET_CXA_DTOR(g_gnu_exc_obj) = g_gnu_cur_dtor;
+    aret_gnu_ti_set(g_gnu_exc_obj, g_gnu_exc_tinfo);
     aret_gnu_dispatch();
     return 0;   /* not reached */
 }
@@ -5101,6 +5157,40 @@ uint32_t aret_cxa_throw(uint32_t esp) {
 uint32_t aret_cxa_rethrow(uint32_t esp) {
     (void)esp;
     g_gnu_rethrown = 1;   /* the in-flight exception survives the closing end_catch (see above) */
+    aret_gnu_dispatch();
+    return 0;   /* not reached */
+}
+
+/* std::current_exception()  [_ZSt17current_exceptionv, host-backed]: capture the exception the
+ * current handler is processing as a std::exception_ptr (whose single member is the object
+ * pointer). i386 returns this one-pointer class-with-a-nontrivial-dtor via a hidden sret: the
+ * caller passes &result as arg0 and expects it back in eax. The reference count is bumped so
+ * the object outlives the catch block (the exception_ptr's _M_release drops it later). The real
+ * libstdc++ reads globals->caughtExceptions; here that is g_gnu_caught_base (0 outside a catch =>
+ * a null exception_ptr, matching current_exception's contract). */
+uint32_t aret_ZSt17current_exceptionv(uint32_t esp) {
+    uint32_t sret = arg(esp, 0);
+    uint32_t obj = g_gnu_caught_base;
+    if (obj) ARET_CXA_RC(obj) += 1;
+    *(uint32_t *)(uintptr_t)sret = obj;
+    return sret;   /* i386 sret ABI: the result pointer is returned in eax */
+}
+
+/* std::rethrow_exception(exception_ptr)  [_ZSt17rethrow_exceptionNSt15__exception_ptr13exception_ptrE,
+ * host-backed]: re-raise the carried exception. exception_ptr is passed by (invisible) reference —
+ * arg0 points at its storage, whose first word is the object pointer. The real libstdc++ builds a
+ * __cxa_dependent_exception and calls _Unwind_RaiseException; the closed model re-dispatches the
+ * PRIMARY object directly with its recorded type_info and destructor. Bump the count for the new
+ * in-flight reference (the eventual catch's __cxa_end_catch drops it back); noreturn. A null
+ * exception_ptr is undefined in the standard but a loud abort here, never a silent wrong dispatch. */
+uint32_t aret_ZSt17rethrow_exceptionNSt15__exception_ptr13exception_ptrE(uint32_t esp) {
+    uint32_t pep = arg(esp, 0);
+    uint32_t obj = pep ? *(const uint32_t *)(uintptr_t)pep : 0;
+    if (!obj) aret_unmodelled("std::rethrow_exception on a null exception_ptr");
+    ARET_CXA_RC(obj) += 1;
+    g_gnu_exc_obj = obj;
+    g_gnu_exc_tinfo = aret_gnu_ti_get(obj);
+    g_gnu_cur_dtor = ARET_CXA_DTOR(obj);
     aret_gnu_dispatch();
     return 0;   /* not reached */
 }
