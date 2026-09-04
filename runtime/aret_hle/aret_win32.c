@@ -159,8 +159,13 @@ uint32_t aret_SystemTimeToFileTime(uint32_t esp) {
 /* Environment / process identity / paths                             */
 /* ------------------------------------------------------------------ */
 
-/* A stable non-zero thread id (single-threaded model: the process id serves). */
-uint32_t aret_GetCurrentThreadId(uint32_t esp) { (void)esp; return (uint32_t)getpid(); }
+/* Thread id of the CALLING thread. Fiber-aware: the main fiber keeps the process id (so
+ * single-threaded programs stay byte-identical to the pre-fiber model), each spawned fiber
+ * gets 0x1000+idx — the SAME id CreateThread writes to lpThreadId and GetThreadId returns,
+ * so a thread that compares ids (e.g. libstdc++ std::this_thread::get_id vs a stored id)
+ * sees a consistent value. Defined with the fiber scheduler (or the wasm stub). */
+uint32_t u32_current_thread_id(void);
+uint32_t aret_GetCurrentThreadId(uint32_t esp) { (void)esp; return u32_current_thread_id(); }
 
 uint32_t aret_GetEnvironmentVariableA(uint32_t esp) {
     const char *name = WCS(0);
@@ -2506,6 +2511,20 @@ static int u32_thread_resolve(uint32_t h) {
     if (h == 0xFFFFFFFEu) return g_cur;
     return u32_thread_idx(h);
 }
+/* Thread id per the established scheme: main fiber (idx 0) = getpid() (byte-identical to
+ * the pre-fiber model), each spawned fiber = 0x1000+idx (matches CreateThread's lpThreadId
+ * and GetThreadDesktop). One helper so GetCurrentThreadId, GetThreadId and CreateThread
+ * agree. */
+static uint32_t u32_thread_id(int idx) { return idx <= 0 ? (uint32_t)getpid() : 0x1000u + (uint32_t)idx; }
+uint32_t u32_current_thread_id(void) { return u32_thread_id(g_cur); }
+/* GetThreadId(hThread) -> the thread's id (not the handle). Resolve the handle (or the
+ * -2 current-thread pseudo) to its fiber and return that fiber's id; an unknown handle is
+ * a defined failure (0 + INVALID_HANDLE), never a guessed id. */
+uint32_t aret_GetThreadId(uint32_t esp) {
+    int ti = u32_thread_resolve(WU(0));
+    if (ti < 0) { g_last_error = 6u /*ERROR_INVALID_HANDLE*/; return 0; }
+    return u32_thread_id(ti);
+}
 /* Is a wait handle signaled *for fiber fi*? Thread → its fiber is DONE; event →
  * signaled flag; mutex → free, held by fi (recursive), or abandoned (owner DONE);
  * semaphore → count>0. Any other handle keeps the legacy always-signaled value
@@ -2799,7 +2818,7 @@ static uint32_t u32_spawn(uint32_t start, uint32_t param, uint32_t flags, uint32
     makecontext(&f->ctx, u32_fiber_trampoline, 0);
     f->state = (flags & 0x4u /*CREATE_SUSPENDED*/) ? FST_SUSPENDED : FST_READY;
     g_nfiber++;                        /* publish only once fully built */
-    if (pTid) *(uint32_t *)(uintptr_t)pTid = 0x1000u + (uint32_t)i;
+    if (pTid) *(uint32_t *)(uintptr_t)pTid = u32_thread_id(i);
     return U32_THREAD_BASE | (uint32_t)i;
 }
 /* DuplicateHandle(srcProc, srcHandle, tgtProc, LPHANDLE tgtHandle, access, inherit,
@@ -3355,6 +3374,10 @@ uint32_t aret_ResumeThread(uint32_t esp) { (void)esp; return (uint32_t)-1; }
 uint32_t aret_SuspendThread(uint32_t esp) { (void)esp; return (uint32_t)-1; }
 uint32_t aret_ExitThread(uint32_t esp) { return aret_ExitProcess(esp); }
 uint32_t aret_GetExitCodeThread(uint32_t esp) { uint32_t *o = (uint32_t *)WP(1); if (o) *o = 0; return 0; }
+/* WASM: no fibers, so the only thread is main -> the process id (mirrors the non-wasm
+ * main-fiber id). GetThreadId of any handle resolves to that single thread. */
+uint32_t u32_current_thread_id(void) { return (uint32_t)getpid(); }
+uint32_t aret_GetThreadId(uint32_t esp) { (void)esp; return (uint32_t)getpid(); }
 uint32_t aret_WaitForSingleObject(uint32_t esp) { (void)esp; return 0; }
 uint32_t aret_WaitForMultipleObjects(uint32_t esp) { (void)esp; return 0; }
 /* WASM has no fibers, so there are no thread/kernel-object handles to resolve: only
