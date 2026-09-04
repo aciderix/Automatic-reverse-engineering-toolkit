@@ -2655,6 +2655,18 @@ static void u32_sched_loop(void) {
                         f->wait_cs, f->wait_srw, f->wait_srw_excl, f->wait_cv, f->has_timeout);
                     for (int k = 0; k < f->wait_n && k < 8; k++)
                         fprintf(stderr, " wait_h[%d]=%#x", k, f->wait_h[k]);
+                    if (f->wait_srw) {
+                        int s = u32_srw_slot(f->wait_srw);
+                        if (s >= 0)
+                            fprintf(stderr, " [srw %#x writer=%d readers=%d]",
+                                    f->wait_srw, g_srw[s].writer, g_srw[s].readers);
+                    }
+                    if (f->wait_cs) {
+                        int s = u32_cs_slot(f->wait_cs);
+                        if (s >= 0)
+                            fprintf(stderr, " [cs %#x owner=%d rec=%d]",
+                                    f->wait_cs, g_cs[s].owner, g_cs[s].rec);
+                    }
                     fprintf(stderr, "\n");
                 }
             }
