@@ -3072,11 +3072,20 @@ static void u32_srw_acquire(uint32_t lock, int excl) {
         g_fiber[me].wait_srw = 0;
     }
 }
+/* Diagnostic: trace acquire/release of one SRWLOCK (ARET_SRW_TRACE = its hex addr),
+ * printing the host return address of the lifted caller (addr2line -> sub_VA). */
+static void u32_srw_trace(const char *op, uint32_t lock, void *ra0, void *ra1) {
+    const char *w = getenv("ARET_SRW_TRACE");
+    if (!w) return;
+    uint32_t want = (uint32_t)strtoul(w, NULL, 0);
+    if (want && lock != want) return;
+    fprintf(stderr, "[SRW] %s lock=%#x fiber=%d ra0=%p ra1=%p\n", op, lock, g_cur, ra0, ra1);
+}
 uint32_t aret_InitializeSRWLock(uint32_t esp) { u32_srw_ensure(WU(0)); return 0; }
-uint32_t aret_AcquireSRWLockExclusive(uint32_t esp) { u32_srw_acquire(WU(0), 1); return 0; }
-uint32_t aret_AcquireSRWLockShared(uint32_t esp)    { u32_srw_acquire(WU(0), 0); return 0; }
-uint32_t aret_ReleaseSRWLockExclusive(uint32_t esp) { u32_srw_release(WU(0), 1, g_cur); return 0; }
-uint32_t aret_ReleaseSRWLockShared(uint32_t esp)    { u32_srw_release(WU(0), 0, g_cur); return 0; }
+uint32_t aret_AcquireSRWLockExclusive(uint32_t esp) { u32_srw_trace("acqX", WU(0), __builtin_return_address(0), __builtin_return_address(1)); u32_srw_acquire(WU(0), 1); return 0; }
+uint32_t aret_AcquireSRWLockShared(uint32_t esp)    { u32_srw_trace("acqS", WU(0), __builtin_return_address(0), __builtin_return_address(1)); u32_srw_acquire(WU(0), 0); return 0; }
+uint32_t aret_ReleaseSRWLockExclusive(uint32_t esp) { u32_srw_trace("relX", WU(0), __builtin_return_address(0), __builtin_return_address(1)); u32_srw_release(WU(0), 1, g_cur); return 0; }
+uint32_t aret_ReleaseSRWLockShared(uint32_t esp)    { u32_srw_trace("relS", WU(0), __builtin_return_address(0), __builtin_return_address(1)); u32_srw_release(WU(0), 0, g_cur); return 0; }
 uint32_t aret_TryAcquireSRWLockExclusive(uint32_t esp) {
     if (u32_srw_acquirable(WU(0), 1, g_cur)) { u32_srw_take(WU(0), 1, g_cur); return 1; }
     return 0;
