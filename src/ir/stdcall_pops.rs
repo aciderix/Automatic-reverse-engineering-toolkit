@@ -6283,6 +6283,7 @@ static TABLE: &[(&str, u32)] = &[
     ("NotifyUILanguageChange", 20),
     ("NotifyUnicastIpAddressChange", 20),
     ("NotifyWinEvent", 16),
+    ("NtNotifyChangeMultipleKeys", 48),
     ("NtVdm64CreateProcessInternalW", 48),
     ("OACreateTypeLib2", 12),
     ("OOBEComplete", 4),

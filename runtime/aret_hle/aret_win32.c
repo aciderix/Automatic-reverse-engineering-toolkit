@@ -503,6 +503,8 @@ uint32_t aret_RegDeleteKeyW(uint32_t esp) {
  * (create -> set -> query) is what matches Wine, exactly like the Reg* model. Nt handles are the
  * same opaque values as HKEY (u32_reg_hkey). Measured vs Wine (win32_ntreg). ---- */
 #define NT_STATUS_SUCCESS               0u
+#define NT_STATUS_PENDING               0x00000103u
+#define NT_STATUS_NOT_IMPLEMENTED       0xC0000002u
 #define NT_STATUS_INVALID_HANDLE        0xC0000008u
 #define NT_STATUS_OBJECT_NAME_NOT_FOUND 0xC0000034u
 #define NT_STATUS_BUFFER_OVERFLOW       0x80000005u
@@ -601,6 +603,24 @@ uint32_t aret_NtQueryValueKey(uint32_t esp) {
 uint32_t aret_NtDeleteValueKey(uint32_t esp) {
     /* (KeyHandle@0, ValueName@1) */
     return aret_ntreg_delval(WU(0), WU(1));
+}
+/* NtNotifyChangeMultipleKeys(MasterKeyHandle@0, Count@1, SubordinateObjects@2, Event@3,
+ *   ApcRoutine@4, ApcContext@5, IoStatusBlock@6, CompletionFilter@7, WatchTree@8, Buffer@9,
+ *   BufferSize@10, Asynchronous@11) -> NTSTATUS. Arms a registry-change watch (the syscall floor
+ *   beneath RegNotifyChangeKeyValue). ARET's registry is immutable within a run (deterministic,
+ *   §0), so the notification can never fire: an ASYNC arm is a sound no-op that returns
+ *   STATUS_PENDING — armed, will simply never signal — which is exactly the path glib's
+ *   g_win32_registry_key_watch takes (it GetProcAddress-probes this ntdll export at gio startup,
+ *   caches it via g_once_init_leave_pointer, and asserts the pointer non-NULL; an unmodelled
+ *   export made that resolve to 0 and abort every gio program). A synchronous watch (block until a
+ *   change) has no sound model over an immutable registry — faking a change would loop the caller —
+ *   so it reports a defined partial instead of guessing. */
+uint32_t aret_NtNotifyChangeMultipleKeys(uint32_t esp) {
+    if (!WU(11)) {   /* Asynchronous == FALSE */
+        aret_partial("NtNotifyChangeMultipleKeys: synchronous watch over an immutable registry");
+        return NT_STATUS_NOT_IMPLEMENTED;
+    }
+    return NT_STATUS_PENDING;
 }
 /* NtClose is generic (keys/files/events). A file fd we opened via the Nt* file layer is really
  * closed (and its pending delete-on-close honored) by aret_ntfile_close; a registry key / event /
