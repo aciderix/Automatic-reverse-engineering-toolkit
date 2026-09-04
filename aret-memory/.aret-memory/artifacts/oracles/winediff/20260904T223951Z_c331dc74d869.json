@@ -1,0 +1,24 @@
+{
+  "format": "aret-oracle-artifact/v1",
+  "oracle": "winediff",
+  "kind": "WINEDIFF",
+  "command": "bash /home/user/Automatic-reverse-engineering-toolkit/bench/winediff.sh lift_dynamic_cast",
+  "result": "PASS",
+  "exit_code": 0,
+  "started_at": "2026-09-04T22:39:07Z",
+  "finished_at": "2026-09-04T22:39:51Z",
+  "environment": {
+    "adapter": "aret-mmu-oracles/1",
+    "oracle": "winediff",
+    "repository": "/home/user/Automatic-reverse-engineering-toolkit",
+    "repository_revision": "abd1d49a2c982cad0503dba92d1b6154a523669e",
+    "script": "bench/winediff.sh",
+    "fixture": "lift_dynamic_cast",
+    "timeout_seconds": 3600,
+    "missing_dependencies": [],
+    "timed_out": false,
+    "duration_seconds": 43.897
+  },
+  "stdout": "  ok    lift_dynamic_cast\n------------------------------------------\nOS-API (Wine) equivalence: 1/1 programs\n",
+  "stderr": ""
+}
