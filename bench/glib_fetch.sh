@@ -18,8 +18,15 @@ BASE="https://repo.msys2.org/mingw/mingw32/"
 
 # The exact runtime DLLs the glib_* fixtures need beside the exe. libglib/libgobject are
 # lifted by ARET (.withlocaldll); the rest are Wine-only deps (.winelibs).
+# The second block adds the gdk-pixbuf PNG-decode closure (glib_gdkpng): gio/gmodule +
+# gdk-pixbuf + libpng/zlib (all lifted), plus libgdk_pixbuf's codec siblings
+# (jpeg/tiff and libtiff's own deps) — never used on the PNG path but the strict Wine
+# loader must resolve them to load libgdk_pixbuf, so the oracle needs them present.
 WANT="libglib-2.0-0.dll libgobject-2.0-0.dll libgcc_s_dw2-1.dll libintl-8.dll \
-      libiconv-2.dll libpcre2-8-0.dll libwinpthread-1.dll libcharset-1.dll libffi-8.dll"
+      libiconv-2.dll libpcre2-8-0.dll libwinpthread-1.dll libcharset-1.dll libffi-8.dll \
+      libgio-2.0-0.dll libgmodule-2.0-0.dll libgdk_pixbuf-2.0-0.dll libpng16-16.dll zlib1.dll \
+      libjpeg-8.dll libtiff-6.dll libLerc.dll libdeflate.dll libjbig-0.dll liblzma-5.dll \
+      libwebp-7.dll libzstd.dll libsharpyuv-0.dll"
 
 have_all() {
   local f; for f in $WANT; do [ -f "$out/$f" ] || return 1; done
@@ -65,6 +72,13 @@ echo "== fetching GLib runtime + dev from MSYS2 mingw32 =="
 fetch glib2 dev
 fetch gettext dev
 for p in gcc-libs libiconv pcre2 libwinpthread libffi; do fetch "$p"; done
+# gdk-pixbuf PNG-decode closure (glib_gdkpng) + libgdk_pixbuf's codec siblings and their
+# transitive deps (present only so the Wine oracle's strict loader can resolve
+# libgdk_pixbuf; never called on the PNG path). Best-effort package prefixes — a DLL
+# whose package is missing just leaves the glib_gdkpng fixture to SKIP cleanly.
+for p in gdk-pixbuf2 libpng zlib libjpeg-turbo libtiff libwebp zstd libdeflate xz jbigkit liblerc; do
+  fetch "$p"
+done
 
 miss=""
 for f in $WANT; do [ -f "$out/$f" ] || miss="$miss $f"; done
