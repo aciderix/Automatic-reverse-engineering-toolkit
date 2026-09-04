@@ -1,0 +1,24 @@
+{
+  "format": "aret-oracle-artifact/v1",
+  "oracle": "winediff",
+  "kind": "WINEDIFF",
+  "command": "bash /home/user/Automatic-reverse-engineering-toolkit/bench/winediff.sh glib_gdkpng",
+  "result": "PASS",
+  "exit_code": 0,
+  "started_at": "2026-09-04T17:29:56Z",
+  "finished_at": "2026-09-04T17:32:52Z",
+  "environment": {
+    "adapter": "aret-mmu-oracles/1",
+    "oracle": "winediff",
+    "repository": "/home/user/Automatic-reverse-engineering-toolkit",
+    "repository_revision": "b64a79e8c3d01dd92340e7da0e66b1cfcd386449",
+    "script": "bench/winediff.sh",
+    "fixture": "glib_gdkpng",
+    "timeout_seconds": 3600,
+    "missing_dependencies": [],
+    "timed_out": false,
+    "duration_seconds": 176.022
+  },
+  "stdout": "  ok    glib_gdkpng\n------------------------------------------\nOS-API (Wine) equivalence: 1/1 programs\n",
+  "stderr": ""
+}
