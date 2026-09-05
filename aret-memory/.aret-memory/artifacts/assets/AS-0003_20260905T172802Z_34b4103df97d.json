@@ -1,0 +1,28 @@
+{
+  "format": "aret-pipeline-artifact/v1",
+  "pipeline": "fetch_wall_corpus",
+  "kind": "WALL_CORPUS_FETCH",
+  "policy": "NETWORK",
+  "command": [
+    "bash",
+    "/home/user/Automatic-reverse-engineering-toolkit/bench/wallcorpus_fetch.sh",
+    "/home/user/Automatic-reverse-engineering-toolkit/aret-memory/.aret-memory/artifacts/corpora/wall-full",
+    "450"
+  ],
+  "parameters": {
+    "profile": "full"
+  },
+  "result": "PASS",
+  "exit_code": 0,
+  "started_at": "2026-09-05T17:26:46Z",
+  "finished_at": "2026-09-05T17:28:02Z",
+  "environment": {
+    "repository": "/home/user/Automatic-reverse-engineering-toolkit",
+    "revision": "d20bd5980dc404ff5076e1cf909514860b5fc6fe",
+    "missing_dependencies": [],
+    "timed_out": false,
+    "duration_seconds": 75.75
+  },
+  "stdout": "== fetching MSYS2 mingw32 index ==\n  6911 pkgs -> 2989 unique -> 499 sampled\n== downloading + extracting (10-way) ==\n== UnxUtils (MSVC6) ==\n== corpus ready: 1279 PE32 binaries in /home/user/Automatic-reverse-engineering-toolkit/aret-memory/.aret-memory/artifacts/corpora/wall-full/pe32 ==\n   measure: ARET=/home/user/Automatic-reverse-engineering-toolkit/aret-memory/.aret-memory/artifacts/corpora/wall-full/aret_to.sh bash bench/wallsweep.sh /home/user/Automatic-reverse-engineering-toolkit/aret-memory/.aret-memory/artifacts/corpora/wall-full/pe32\n",
+  "stderr": ""
+}
