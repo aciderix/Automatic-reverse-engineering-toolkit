@@ -238,7 +238,24 @@ itéré au placement des φ, seedé aléatoirement par processus) et **aucune po
 sert désormais de **détecteur** : un warm build qui ne réutilise pas ~tout signale un non-déterminisme.
 
 ### État régression (référence — doit rester vert)
-> **🔄 MAJ 2026-08-29 (autoritative — supersede les chiffres/murs datés ci-dessous)** : **winediff 264/264** (PLEIN
+> **🔄 MAJ 2026-09-05 (AUTORITATIVE — supersede tout ci-dessous ; détail = journal 71 « GEL DE REPRISE 2026-09-05 »)** :
+> hash comportemental **`19acad982194bf07` inchangé** (difftest_transpile 4/4), **83 tests unitaires** verts. Depuis le
+> 2026-09-01 (KN-0053), causes générales prouvées enregistrées en MMU (KN-0054→KN-0086) — dont :
+> **gdk-pixbuf décode le PNG e2e byte-identique Wine** (KN-0079, test de maturité ABOUTI : jump-table over-read KN-0064,
+> faux-départs KN-0074, ordre init DLL KN-0077, reprise EH callee-saved KN-0069) ;
+> **vein C++ EH/RTTI lourd COUVERT** — exception_ptr (KN-0080, faux silencieux §0 corrigé : en-tête __cxa_exception+refcount),
+> nested_exception+RTTI (KN-0081), std::async cross-thread + GetThreadId/thread-id unifié (KN-0082),
+> **catch par base virtuelle** (KN-0083, faux catch silencieux §0 corrigé : offset vbase via vtable),
+> catch-by-value + dynamic_cast complexe (KN-0084) ;
+> **clamp CPUID cohérent** (KN-0085, §0 : n'annoncer que les ISA liftées → libdeflate-gzip byte-identique Wine, avant abort PCLMULQDQ) ;
+> **fread pose le flag EOF** (§0 : zstd -19 marche, avant « Unexpected short read »).
+> **Fixtures winediff permanentes ajoutées** : `glib_gdkpng`, `lift_exception_ptr`, `lift_nested_exception`, `lift_async_exception`,
+> `lift_vbase_catch`, `lift_catch_byval`, `lift_dynamic_cast`, `cpuid_feature_fallback`, `crt_fread_eof`.
+> **Outillage** : réduction taille sortie transpile (KN-0086 : sections.bin auto, `ARET_CLEAN_INTERMEDIATES`, tmpfs `/dev/shm`) ;
+> **transport MCP en HTTP local persistant** (`.mcp.json type:http` + `launch_aret_mcp_http.sh` via SessionStart, `setsid` ;
+> stdio en repli `integration/mcp.stdio.snippet.json`). Front réel = **pivoter vers une nouvelle cible/bord** (mesurer via `--mode walls`).
+>
+> **🔄 MAJ 2026-08-29 (historique)** : **winediff 264/264** (PLEIN
 > VERT, 0 rouge — les 2 anciens rouges `user32_menu2` et `ole_mlang` CORRIGÉS ce jour, cf. 71 [WINEDIFF][WINORACLE] +
 > KN-0029/P-0017 ; `WINEDIFF_BASELINE` supprimé). difftest **272/272**, hash `19acad982194bf07` inchangé. **Phase A
 > (SSE2) et B (shims CRT/kernel32/version) TERMINÉES+PROUVÉES** (KN-0027, KN-0018→0024). Le narratif spirv-cross plus bas
