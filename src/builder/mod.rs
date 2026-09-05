@@ -1969,6 +1969,30 @@ pub fn transpile(
         bail!("native link failed:\n{}", err.trim());
     }
 
+    // Reclaim the build tree once the link has succeeded. `sections.bin` is only the
+    // assembler's `.incbin` input — already baked into aret_layout.S.o and linked — so it
+    // is dead weight the moment the link succeeds, and for a big auto-lift it is ~half the
+    // input size; delete it always. With ARET_CLEAN_INTERMEDIATES=1 also drop the per-chunk
+    // `.c` and the `.o`/`.s` objects (the object cache keeps its OWN hashed copies, so reuse
+    // is unaffected), leaving just the runnable `binary` — a libstdc++ lift shrinks a ~173 MB
+    // out-dir to the ~49 MB executable. Best-effort: a failed unlink never fails the build.
+    let _ = std::fs::remove_file(&blob_path);
+    if std::env::var("ARET_CLEAN_INTERMEDIATES").is_ok_and(|v| v != "0" && !v.is_empty()) {
+        if let Ok(rd) = std::fs::read_dir(out_dir) {
+            for e in rd.flatten() {
+                let p = e.path();
+                let drop = p.extension().is_some_and(|x| {
+                    let x = x.to_ascii_lowercase();
+                    x == "c" || x == "o" || x == "s"   // the bulk (.c chunks + .o objects + .S layout)
+                });
+                // Never delete the linked executable itself (it has no such extension).
+                if drop && p != binary {
+                    let _ = std::fs::remove_file(p);
+                }
+            }
+        }
+    }
+
     let run_output = if run {
         // Inherit the parent's stdin so a redirected/piped input (`aret --run <
         // file`, or a shell pipeline) reaches the transpiled program. `.output()`
