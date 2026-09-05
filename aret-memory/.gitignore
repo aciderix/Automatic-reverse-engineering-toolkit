@@ -1,6 +1,7 @@
 # Environnements et secrets locaux
 .venv/
 .venv.bootstrap.lock
+uv.lock
 *.egg-info/
 .env
 __pycache__/
