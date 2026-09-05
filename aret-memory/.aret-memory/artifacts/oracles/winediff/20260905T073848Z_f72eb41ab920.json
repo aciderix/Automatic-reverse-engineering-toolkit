@@ -1,0 +1,24 @@
+{
+  "format": "aret-oracle-artifact/v1",
+  "oracle": "winediff",
+  "kind": "WINEDIFF",
+  "command": "bash /home/user/Automatic-reverse-engineering-toolkit/bench/winediff.sh cpuid_feature_fallback",
+  "result": "PASS",
+  "exit_code": 0,
+  "started_at": "2026-09-05T07:37:53Z",
+  "finished_at": "2026-09-05T07:38:48Z",
+  "environment": {
+    "adapter": "aret-mmu-oracles/1",
+    "oracle": "winediff",
+    "repository": "/home/user/Automatic-reverse-engineering-toolkit",
+    "repository_revision": "0c0bf37816921a5cbf19d7ecdaf40ff6a3cf6161",
+    "script": "bench/winediff.sh",
+    "fixture": "cpuid_feature_fallback",
+    "timeout_seconds": 3600,
+    "missing_dependencies": [],
+    "timed_out": false,
+    "duration_seconds": 55.837
+  },
+  "stdout": "  ok    cpuid_feature_fallback\n------------------------------------------\nOS-API (Wine) equivalence: 1/1 programs\n",
+  "stderr": ""
+}
