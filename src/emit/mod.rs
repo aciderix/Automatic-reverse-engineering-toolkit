@@ -375,14 +375,19 @@ pub(crate) const FLOAT_HELPERS: &str = concat!(
     // features are what the transpiled binary actually runs on, so this is exact.
     "#ifndef __wasm__\n",
     "#include <cpuid.h>\n",
-    // We mask off the SSE4.1/4.2 and AVX/AVX2/AVX-512 feature bits (plus the
-    // AVX-dependent FMA/F16C and OSXSAVE) so feature dispatchers (notably the CRT's
-    // `__isa_available`) pick the SSE2 code paths, which we lift exactly — the
-    // SSE4.2 string ops (`pcmpistri`/`pcmpestri`) and the VEX-encoded AVX ops
-    // (`vpxor`, `vmovdqu`, …) we do not model. Sound: a CPU with only SSE2 is a
-    // valid configuration and the SSE2 paths compute identically (just scalar/
-    // 16-byte instead of wider).
-    "static inline uint32_t __ix_cpuid(uint32_t leaf,uint32_t sub,uint32_t which){unsigned a=0,b=0,c=0,d=0;__get_cpuid_count(leaf,sub,&a,&b,&c,&d);if(leaf==1)c&=~((1u<<19)|(1u<<20)|(1u<<23)|(1u<<27)|(1u<<28)|(1u<<12)|(1u<<29));if(leaf==7&&sub==0)b&=~((1u<<5)|(1u<<16)|(1u<<17)|(1u<<21)|(1u<<28)|(1u<<30)|(1u<<31));return which==0?a:which==1?b:which==2?c:d;}\n",
+    // Clamp CPUID to the instruction families the lifter models COMPLETELY, so a
+    // feature dispatcher (the CRT's `__isa_available`, zlib/libdeflate CRC, crypto
+    // GCM, …) picks a code path we can execute. Any advertised-but-unmodelled feature
+    // is a §0 trap: the program dispatches into it and hits an unmodelled instruction
+    // -> abort, instead of falling back. We keep only up to SSE2 (+ the SSSE3 `pshufb`
+    // we do model is still lifted when used unconditionally; clamping SSSE3 only steers
+    // *dispatch*). Cleared — leaf 1 ecx: SSE3(0, movddup/lddqu/haddpd), PCLMULQDQ(1),
+    // SSSE3(9, palignr/phaddw), FMA(12), SSE4.1(19), SSE4.2(20), MOVBE(22), POPCNT(23),
+    // AES-NI(25), OSXSAVE(27), AVX(28), F16C(29). leaf 7 ebx: BMI1(3), AVX2(5),
+    // BMI2(8, shlx/shrx/bzhi), AVX512F(16), AVX512DQ(17), ADX(19), AVX512IFMA(21),
+    // AVX512CD(28), SHA(29), AVX512BW(30), AVX512VL(31). Sound: a CPU with only SSE2 is
+    // a valid configuration and its paths compute identically (just narrower).
+    "static inline uint32_t __ix_cpuid(uint32_t leaf,uint32_t sub,uint32_t which){unsigned a=0,b=0,c=0,d=0;__get_cpuid_count(leaf,sub,&a,&b,&c,&d);if(leaf==1)c&=~((1u<<0)|(1u<<1)|(1u<<9)|(1u<<12)|(1u<<19)|(1u<<20)|(1u<<22)|(1u<<23)|(1u<<25)|(1u<<27)|(1u<<28)|(1u<<29));if(leaf==7&&sub==0)b&=~((1u<<3)|(1u<<5)|(1u<<8)|(1u<<16)|(1u<<17)|(1u<<19)|(1u<<21)|(1u<<28)|(1u<<29)|(1u<<30)|(1u<<31));return which==0?a:which==1?b:which==2?c:d;}\n",
     // xgetbv: read the extended control register (XCR0) -> edx:eax. The CRT reads
     // it (after cpuid reports OSXSAVE) to confirm OS-enabled AVX state; the binary
     // only reaches it when the host supports it, so the real instruction is safe.

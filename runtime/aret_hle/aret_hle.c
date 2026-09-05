@@ -3874,6 +3874,20 @@ uint32_t aret_p___initenv(uint32_t esp) {
 uint32_t aret_p__environ(uint32_t esp) {
     (void)esp; extern char **environ; return (uint32_t)(uintptr_t)&environ;
 }
+/* __p___winitenv / __p__wenviron: the WIDE analogues (`wchar_t**`). A console app
+ * entered through the narrow CRT has no populated wide environment, so return the
+ * address of a pointer to an empty (single-NUL) wide env — sound (wide getenv finds
+ * nothing) and, crucially, NON-NULL so the CRT startup does not null-deref and bail
+ * before main (the same reason __p___initenv exists). */
+static wchar_t *aret_wenv_empty = 0;
+uint32_t aret_p___winitenv(uint32_t esp) {
+    (void)esp; static wchar_t **winitenv; winitenv = &aret_wenv_empty;
+    return (uint32_t)(uintptr_t)&winitenv;
+}
+uint32_t aret_p__wenviron(uint32_t esp) {
+    (void)esp; static wchar_t **wenviron; wenviron = &aret_wenv_empty;
+    return (uint32_t)(uintptr_t)&wenviron;
+}
 /* aret_errno / aret_onexit live in aret_crt.c (the canonical sanitized names). */
 uint32_t aret_set_app_type(uint32_t esp) { (void)esp; return 0; }
 uint32_t aret_setusermatherr(uint32_t esp) { (void)esp; return 0; }
