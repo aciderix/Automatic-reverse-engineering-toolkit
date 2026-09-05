@@ -70,6 +70,11 @@ PIPELINES: dict[str, PipelineSpec] = {
         "Agrège les imports HLE non couverts sur un corpus de binaires réels.",
         ("bash",), 3600, "corpus_sweep", True,
     ),
+    "measure_postlift": PipelineSpec(
+        "measure_postlift", "CORPUS_POSTLIFT", "READ_ONLY",
+        "Mesure le mur POST-LIFT : transpile --auto-lift + run vs Wine sur un corpus C++, agrège PASS/DIFF/ABORT par binaire (driver déterministe auto-découvert, build en RAM).",
+        ("bash", "wine"), 7200, "postlift_sweep", True,
+    ),
     "run_regression_gate": PipelineSpec(
         "run_regression_gate", "REGRESSION_GATE", "READ_ONLY",
         "Exécute la porte de régression ARET unifiée avant intégration.",
@@ -265,6 +270,15 @@ def _command_for(spec: PipelineSpec, store: MemoryStore, repository: Path, param
     if runner == "wallsweep":
         corpus = _safe_corpus_path(store, repository, str(parameters.get("corpus_path", "")))
         return ["bash", str(_repository_file(repository, "bench/wallsweep.sh", "Script de pipeline")), str(corpus)]
+    if runner == "postlift_sweep":
+        # Corpus INPUT reste sous le dépôt / .aret-memory/artifacts (validé). Les build
+        # trees, eux, vont en RAM via POSTLIFT_WORK (le script), jamais sur l'allocation
+        # disque. max_binaries borne le sweep (1..500).
+        corpus = _safe_corpus_path(store, repository, str(parameters.get("corpus_path", "")))
+        max_binaries = parameters.get("max_binaries", 30)
+        if not isinstance(max_binaries, int) or isinstance(max_binaries, bool) or not (1 <= max_binaries <= 500):
+            raise AretError("max_binaries doit être un entier 1..500")
+        return ["bash", str(_repository_file(repository, "bench/postlift_sweep.sh", "Script de pipeline")), str(corpus), str(max_binaries)]
     if runner == "corpus_sweep":
         corpus = _safe_corpus_path(store, repository, str(parameters.get("corpus_path", "")))
         return ["bash", str(_repository_file(repository, "bench/corpus_sweep.sh", "Script de pipeline")), str(corpus)]

@@ -26,6 +26,32 @@ def test_catalog_exposes_closed_policies() -> None:
     assert any(item["name"] == "fetch_wall_corpus" for item in catalog["policies"]["NETWORK"])
 
 
+def test_measure_postlift_builds_bounded_corpus_command(tmp_path: Path) -> None:
+    store = MemoryStore(tmp_path / "memory", write_enabled=True)
+    repository = fake_repository(tmp_path)
+    (repository / "bench" / "postlift_sweep.sh").write_text("#!/usr/bin/env bash\n", encoding="utf-8")
+    (repository / "bench" / "postlift_sweep.sh").chmod(0o755)
+    corpus = repository / "corpus"
+    corpus.mkdir()
+    (corpus / "x.exe").write_bytes(b"MZ")
+
+    # Catalogue : présent, READ_ONLY.
+    catalog = pipeline_catalog()
+    assert any(item["name"] == "measure_postlift" for item in catalog["policies"]["READ_ONLY"])
+
+    # Dry-run : argv fermé = [bash, postlift_sweep.sh, <corpus absolu>, <max_binaries>].
+    plan = run_pipeline(store, repository, "measure_postlift", {"corpus_path": "corpus", "max_binaries": 5})
+    assert plan["dry_run"] is True
+    assert plan["command"][0] == "bash"
+    assert plan["command"][-2] == str(corpus.resolve())
+    assert plan["command"][-1] == "5"
+
+    # max_binaries hors bornes -> refus.
+    for bad in (0, 501, "20", True):
+        with pytest.raises(AretError, match="max_binaries"):
+            run_pipeline(store, repository, "measure_postlift", {"corpus_path": "corpus", "max_binaries": bad}, dry_run=False)
+
+
 def test_pipeline_dry_run_is_default_safe_plan(tmp_path: Path) -> None:
     store = MemoryStore(tmp_path / "memory", write_enabled=True)
     repository = fake_repository(tmp_path)

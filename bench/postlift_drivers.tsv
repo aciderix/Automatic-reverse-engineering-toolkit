@@ -1,0 +1,9 @@
+# Curated drivers for postlift_sweep.sh — TAB-separated: "<name-substring>\t<args...>".
+# A corpus binary whose basename contains <name-substring> is driven with <args> verbatim
+# (skipping auto-discovery), the reliable way to exercise tools that need real inputs or
+# that only print on stderr. Empty <args> means "run with no arguments". Lines starting
+# with '#' are ignored. Curated entries take priority; auto-discovery (--version/-V/
+# --help/-h/noargs, stable non-empty stdout) is the fallback.
+#
+# Seed entries are verified deterministic-stdout under Wine on the MSYS2 i686 corpus.
+# Add more as driveable binaries are confirmed.
