@@ -46,7 +46,12 @@ exec 8>"${LOCK}" || true
 if command -v flock >/dev/null 2>&1; then flock -w 20 8 || true; fi
 if up; then exit 0; fi   # un autre lancement a pu réussir sous le verrou
 
-nohup "${ARET_PYTHON}" "${MMU_DIR}/aret_mmu_server.py" \
+# setsid : démarre le serveur dans une NOUVELLE SESSION (nouveau groupe de process),
+# détaché du groupe du hook SessionStart. Sinon, quand le harness nettoie l'arbre de
+# process du hook, le serveur backgroundé est tué avec lui (mesuré : il servait un
+# POST 200 OK puis mourait). nohup couvre SIGHUP ; setsid couvre le kill de groupe.
+setsid_cmd=""; command -v setsid >/dev/null 2>&1 && setsid_cmd="setsid"
+${setsid_cmd} nohup "${ARET_PYTHON}" "${MMU_DIR}/aret_mmu_server.py" \
       --streamable-http --host "${HOST}" --port "${PORT}" \
       --memory-dir "${MEMORY_DIR}" --write-enabled \
       >>"${LOG}" 2>&1 &
