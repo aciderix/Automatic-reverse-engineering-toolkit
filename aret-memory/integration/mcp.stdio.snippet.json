@@ -1,0 +1,15 @@
+{
+  "_comment": "REVERT : configuration MCP stdio d'origine. Pour revenir au transport stdio (si le HTTP local persistant ne se connecte pas), copier ce bloc mcpServers dans le .mcp.json racine. Le lanceur stdio (scripts/launch_aret_mcp.sh) est resté intact.",
+  "mcpServers": {
+    "aret-memory": {
+      "command": "${CLAUDE_PROJECT_DIR:-.}/aret-memory/scripts/launch_aret_mcp.sh",
+      "args": [
+        "--memory-dir",
+        "${CLAUDE_PROJECT_DIR:-.}/aret-memory/.aret-memory"
+      ],
+      "env": {
+        "ARET_WRITE_ENABLED": "true"
+      }
+    }
+  }
+}
