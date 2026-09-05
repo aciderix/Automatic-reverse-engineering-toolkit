@@ -31,12 +31,27 @@ export PYTHONPATH="${MMU_DIR}${PYTHONPATH:+:${PYTHONPATH}}"
 export CLAUDE_PROJECT_DIR="${PROJECT_DIR}"
 export ARET_WRITE_ENABLED="${ARET_WRITE_ENABLED:-true}"
 
-usable() { [ -x "$1" ] && "$1" -c 'import mcp' >/dev/null 2>&1; }
+# venv_ready : verif RAPIDE par FICHIER (aucun interpréteur Python lancé). Le chemin
+# chaud est le cas courant et le plus sensible au timeout de boot : lancer un
+# `python -c 'import mcp'` juste pour VERIFIER coûte ~1 s, puis le serveur ré-importe
+# `mcp` (~1 s) = DOUBLE import sous la tempête de boot. On teste donc l'existence du
+# paquet sur disque (instantané) ; le vrai import, c'est le serveur qui le fait. Si
+# `mcp` etait present mais casse, le serveur echoue bruyamment et le harness retente.
+venv_ready() {
+  [ -x "${VENV_PY}" ] || return 1
+  local d
+  for d in "${MMU_DIR}"/.venv/lib/python*/site-packages/mcp; do
+    [ -d "$d" ] && return 0
+  done
+  return 1
+}
+# importable : verif COMPLETE (vrai import), reservee a la DECISION du chemin froid.
+importable() { [ -x "${VENV_PY}" ] && "${VENV_PY}" -c 'import mcp' >/dev/null 2>&1; }
 
-# --- Chemin CHAUD : venv déjà utilisable -> exec direct (instantané). --------
+# --- Chemin CHAUD : venv présent -> exec direct (aucun spawn Python de contrôle). --
 # "$@" : forward d'eventuels arguments passes par .mcp.json (aucun aujourd'hui,
 # mais on ne les perd pas si un jour la commande en recoit).
-if usable "${VENV_PY}"; then
+if venv_ready; then
   exec "${VENV_PY}" "${SERVER}" --memory-dir "${MEMORY_DIR}" --write-enabled "$@"
 fi
 
@@ -47,7 +62,7 @@ fi
 # systeme n'a pas `mcp` -> il ne ferait que demarrer un serveur qui plante aussitot
 # a l'import, masquant la vraie cause (anti-§0). En cas d'echec : abort BRUYANT.
 echo "ARET-MMU mcp_stdio: venv non prêt, bootstrap..." >&2
-if "${SCRIPT_DIR}/bootstrap_venv.sh" 1>&2 && usable "${VENV_PY}"; then
+if "${SCRIPT_DIR}/bootstrap_venv.sh" 1>&2 && importable; then
   exec "${VENV_PY}" "${SERVER}" --memory-dir "${MEMORY_DIR}" --write-enabled "$@"
 fi
 

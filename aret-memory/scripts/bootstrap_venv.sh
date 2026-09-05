@@ -82,6 +82,12 @@ if ! usable; then
 fi
 
 if usable; then
+  # Pré-compilation .pyc : on ne passe ici qu'APRÈS une vraie (re)construction (le
+  # chemin chaud a court-circuité en tête). Compiler mcp + le paquet ARET-MMU évite
+  # que le TOUT PREMIER spawn — celui du boot, sous forte charge — ait à compiler à
+  # l'import. Best-effort, borné, jamais fatal ; logs sur stderr.
+  "$PY" -m compileall -q "$MMU_DIR"/*.py "$MMU_DIR/core" "$MMU_DIR/evidence" "$MMU_DIR/hooks" "$MMU_DIR/ops" >&2 2>&1 || true
+  for _d in "$VENV_DIR"/lib/python*/site-packages/mcp; do "$PY" -m compileall -q "$_d" >&2 2>&1 || true; done
   log "environnement prêt."
   exit 0
 fi
