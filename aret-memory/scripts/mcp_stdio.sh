@@ -34,17 +34,23 @@ export ARET_WRITE_ENABLED="${ARET_WRITE_ENABLED:-true}"
 usable() { [ -x "$1" ] && "$1" -c 'import mcp' >/dev/null 2>&1; }
 
 # --- Chemin CHAUD : venv déjà utilisable -> exec direct (instantané). --------
+# "$@" : forward d'eventuels arguments passes par .mcp.json (aucun aujourd'hui,
+# mais on ne les perd pas si un jour la commande en recoit).
 if usable "${VENV_PY}"; then
-  exec "${VENV_PY}" "${SERVER}" --memory-dir "${MEMORY_DIR}" --write-enabled
+  exec "${VENV_PY}" "${SERVER}" --memory-dir "${MEMORY_DIR}" --write-enabled "$@"
 fi
 
-# --- Chemin FROID : bootstrap borné (uv ~1 s / pip ~17 s), logs sur stderr. --
+# --- Chemin FROID : bootstrap borné (uv ~5 s / pip ~17 s), logs sur stderr. --
+# On NE masque PAS l'echec du bootstrap (pas de `|| true`) : le `&&` en fait une
+# condition, donc `set -e` ne tue pas le script, mais un echec ne fait PAS croire a
+# une reussite. Le repli `python3` systeme a ete RETIRE : mesure faite, le python
+# systeme n'a pas `mcp` -> il ne ferait que demarrer un serveur qui plante aussitot
+# a l'import, masquant la vraie cause (anti-§0). En cas d'echec : abort BRUYANT.
 echo "ARET-MMU mcp_stdio: venv non prêt, bootstrap..." >&2
-"${SCRIPT_DIR}/bootstrap_venv.sh" 1>&2 || true
-if usable "${VENV_PY}"; then
-  exec "${VENV_PY}" "${SERVER}" --memory-dir "${MEMORY_DIR}" --write-enabled
+if "${SCRIPT_DIR}/bootstrap_venv.sh" 1>&2 && usable "${VENV_PY}"; then
+  exec "${VENV_PY}" "${SERVER}" --memory-dir "${MEMORY_DIR}" --write-enabled "$@"
 fi
 
-# --- Dernier recours : python système (si l'environnement fournit `mcp`). -----
-echo "ARET-MMU mcp_stdio: repli sur python3 système" >&2
-exec python3 "${SERVER}" --memory-dir "${MEMORY_DIR}" --write-enabled
+echo "ARET-MMU mcp_stdio: ECHEC — module 'mcp' indisponible apres bootstrap (venv non" \
+     "construit ; reseau/proxy PyPI injoignable ?). Abandon, PAS de repli silencieux." >&2
+exit 1
