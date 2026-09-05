@@ -949,7 +949,16 @@ uint32_t aret_fread(uint32_t esp) {
     if (got < want) { int c = pull_byte(file); if (c < 0) return 0; ptr[got++] = (char)c; }
     while (got < want) {
         ssize_t n = read(fd, ptr + got, want - got);
-        if (n <= 0) break;
+        if (n <= 0) {
+            /* Set the stream's EOF/error flag, as the CRT does. Without this, a program
+             * using the standard fread+feof idiom (read a block larger than what remains,
+             * then check feof to distinguish a short read from an error) sees a short read
+             * with feof()==0 and treats it as a hard error — e.g. zstd: "Unexpected short
+             * read". n==0 is EOF (_IOEOF=0x10); n<0 is a read error (_IOERR=0x20). */
+            uint8_t *f = (uint8_t *)(uintptr_t)file;
+            *(int32_t *)(f + ARET_F_FLAG) |= (n == 0) ? 0x10 : 0x20;
+            break;
+        }
         got += (size_t)n;
     }
     return (uint32_t)(got / size);
