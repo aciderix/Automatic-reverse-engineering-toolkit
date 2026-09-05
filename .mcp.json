@@ -1,8 +1,18 @@
 {
   "mcpServers": {
     "aret-memory": {
-      "type": "http",
-      "url": "http://127.0.0.1:8765/mcp"
+      "command": "/home/user/Automatic-reverse-engineering-toolkit/aret-memory/.venv/bin/python",
+      "args": [
+        "/home/user/Automatic-reverse-engineering-toolkit/aret-memory/aret_mmu_server.py",
+        "--memory-dir",
+        "/home/user/Automatic-reverse-engineering-toolkit/aret-memory/.aret-memory",
+        "--write-enabled"
+      ],
+      "env": {
+        "PYTHONPATH": "/home/user/Automatic-reverse-engineering-toolkit/aret-memory",
+        "CLAUDE_PROJECT_DIR": "/home/user/Automatic-reverse-engineering-toolkit",
+        "ARET_WRITE_ENABLED": "true"
+      }
     }
   }
 }
