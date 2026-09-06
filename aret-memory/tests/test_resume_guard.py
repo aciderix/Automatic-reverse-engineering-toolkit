@@ -434,3 +434,34 @@ def test_file_sentinel_kill_switch_releases_a_hard_barrier(tmp_path: Path) -> No
 
     sentinel.unlink()
     assert decision(memory_dir, {**session, "tool_name": "Bash"}) is not None  # rétabli
+
+
+def test_decollapse_reconstructs_collapsed_fields_and_is_idempotent() -> None:
+    """Le bug de serialisation du client fusionne les champs dans le premier ; on les reconstruit."""
+    from hooks.resume_guard import decollapse
+    close = "</" + "parameter>"
+    op = "<" + "parameter name="
+    blob = ("WR" + close + "\n" + op + '"current_state">CS' + close + "\n"
+            + op + '"resume_contract_hash">' + "a" * 64 + close + "\n" + "</" + "invoke>")
+    got = decollapse({"working_rules": blob, "current_state": "", "resume_contract_hash": ""})
+    assert got["working_rules"] == "WR"
+    assert got["current_state"] == "CS"
+    assert got["resume_contract_hash"] == "a" * 64
+    clean = {"working_rules": "x", "current_state": "y"}
+    assert decollapse(clean) == clean          # idempotent sur un appel non fusionne
+    assert decollapse("not a dict") == "not a dict"
+
+
+def test_readonly_tools_pass_the_barrier_but_actions_stay_blocked(tmp_path: Path) -> None:
+    """Carve-out lecture : investiguer pendant la barriere est permis ; les actions restent bloquees."""
+    memory_dir = tmp_path / "memory"
+    session = {"session_id": "ro"}
+    arm(memory_dir, session, reason="startup", resume_contract_hash=RESUME_HASH, ready=True)
+    touch_mcp_ready(memory_dir)
+    for ro in ("Read", "Grep", "Glob", "LS", "mcp__aret-memory__aret_get_front",
+               "mcp__aret-memory__aret_find", "mcp__aret-memory__aret_read_artifact"):
+        assert decision(memory_dir, {**session, "tool_name": ro, "tool_input": {}}) is None, ro
+    blocked = decision(memory_dir, {**session, "tool_name": "Bash", "tool_input": {"command": "true"}})
+    assert blocked is not None and blocked["hookSpecificOutput"]["permissionDecision"] == "deny"
+    wr = decision(memory_dir, {**session, "tool_name": "mcp__aret-memory__aret_append_knowledge", "tool_input": {}})
+    assert wr is not None and wr["hookSpecificOutput"]["permissionDecision"] == "deny"

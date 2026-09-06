@@ -12,6 +12,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import sys
 import time
 from datetime import UTC, datetime
@@ -31,6 +32,37 @@ RITUAL_FIELDS: tuple[tuple[str, str, int], ...] = (
     ("risks_and_limits", "limites, preuves et garde-fous", 60),
     ("next_action", "prochaine action proposée", 30),
 )
+
+
+# Anti-collapse : un defaut de serialisation d'appel d'outil du client fusionne, au-dela d'un
+# seuil de tokens, les champs suivant le premier DANS sa valeur, sous forme de marqueurs
+# litteraux. On reconstruit les champs pour que la barriere se leve meme sur un appel fusionne.
+_DECOLLAPSE_MARK = re.compile(r'</parameter>\s*<parameter name="([A-Za-z0-9_]+)">')
+
+
+def _strip_tail(value: str) -> str:
+    for tag in ("</parameter>", "</invoke>"):
+        j = value.find(tag)
+        if j != -1:
+            value = value[:j]
+    return value
+
+
+def decollapse(values: dict) -> dict:
+    """Inverse le collapse : reconstruit les champs fusionnes dans le premier. Idempotent."""
+    if not isinstance(values, dict):
+        return values
+    for key, val in list(values.items()):
+        if isinstance(val, str) and _DECOLLAPSE_MARK.search(val):
+            parts = _DECOLLAPSE_MARK.split(val)
+            out = dict(values)
+            out[key] = _strip_tail(parts[0])
+            i = 1
+            while i + 1 <= len(parts) - 1:
+                out[parts[i]] = _strip_tail(parts[i + 1])
+                i += 2
+            return out
+    return values
 
 
 _TRUTHY = {"1", "true", "yes", "on"}
@@ -112,6 +144,20 @@ def _is_schema_load_tool(payload: dict[str, Any]) -> bool:
     Le bloquer rendait l'acquittement impossible (chicken-and-egg vécu). Charger un
     schéma n'est pas agir : les VRAIS appels d'outils restent refusés."""
     return str(payload.get("tool_name", "")) == "ToolSearch"
+
+
+# Outils LECTURE SEULE autorisés pendant la barrière : investigation/diagnostic pour préparer
+# l'acquittement, sans « poursuivre » ni déverrouiller les actions. Réduit le risque de deadlock.
+# Bash reste BLOQUÉ (arbitraire, peut agir/écrire/lancer aret).
+_READONLY_BUILTINS = frozenset({"Read", "Grep", "Glob", "LS", "NotebookRead", "TodoRead", "BashOutput"})
+_READONLY_MCP_SUBSTR = ("__aret_get_", "__aret_find", "__aret_read", "__aret_boot", "__aret_export")
+
+
+def _is_readonly_tool(payload: dict[str, Any]) -> bool:
+    name = str(payload.get("tool_name", ""))
+    if name in _READONLY_BUILTINS:
+        return True
+    return any(s in name for s in _READONLY_MCP_SUBSTR)
 
 
 def utc_now() -> str:
@@ -209,7 +255,7 @@ def recap_from_input(payload: dict[str, Any]) -> dict[str, Any] | None:
     tool_input = payload.get("tool_input")
     if not isinstance(tool_input, dict):
         return None
-    return tool_input
+    return decollapse(tool_input)
 
 
 def validate_recap(recap: dict[str, Any]) -> dict[str, str]:
@@ -402,6 +448,10 @@ def decision(memory_dir: Path, payload: dict[str, Any]) -> dict[str, Any] | None
     # Charger le schéma de la porte de sortie ne doit JAMAIS être bloqué par la
     # barrière elle-même (sinon on ne peut pas appeler aret_acknowledge_resume).
     if _is_schema_load_tool(payload):
+        return None
+    # LECTURE SEULE autorisée pendant la barrière : investiguer/diagnostiquer pour préparer
+    # l'acquittement ne « poursuit » rien. Les actions (Bash, écritures, oracles) restent bloquées.
+    if _is_readonly_tool(payload):
         return None
     # SONDE DE DISPONIBILITÉ (correctif n°1) : ne hard-bloquer QUE si la porte de
     # sortie (serveur MCP → aret_acknowledge_resume) est PROUVÉE joignable. Serveur

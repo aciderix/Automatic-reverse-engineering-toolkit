@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import re
 import threading
 import time
 from typing import Any
@@ -61,6 +62,64 @@ def _call(operation: str, **kwargs: Any) -> dict[str, Any]:
         return {"ok": False, "operation": operation, "error": {"code": "INTERNAL_ERROR", "message": str(exc)}}
 
 
+# Un défaut de sérialisation d'appel d'outil du client (Claude Code) FUSIONNE, au-delà d'un
+# seuil de tokens qui baisse quand la conversation s'allonge, tous les champs suivant le
+# premier DANS la valeur du premier, sous forme de marqueurs littéraux
+# `</parameter><parameter name="X">…`. On rend la façade IMMUNISÉE : chaque outil multi-champs
+# rend ses paramètres optionnels (la validation pydantic ne tombe donc plus sur un appel
+# fusionné) puis reconstruit les champs ici avant sa propre validation. Idempotent si aucun
+# marqueur n'est présent — un appel normal traverse inchangé.
+_DECOLLAPSE_MARK = re.compile(r'</parameter>\s*<parameter name="([A-Za-z0-9_]+)">')
+
+
+def _strip_tail(value: str) -> str:
+    """Coupe les balises de fermeture parasites que le dernier champ fusionne traine."""
+    for tag in ("</parameter>", "</invoke>"):
+        j = value.find(tag)
+        if j != -1:
+            value = value[:j]
+    return value
+
+
+def _decollapse(values: dict) -> dict:
+    """Inverse le collapse de serialisation d'appel d'outil du client (cf. note ci-dessus).
+
+    Reconstruit les champs fusionnes dans le premier ; idempotent si aucun marqueur present."""
+    for key, val in list(values.items()):
+        if isinstance(val, str) and _DECOLLAPSE_MARK.search(val):
+            parts = _DECOLLAPSE_MARK.split(val)
+            out = dict(values)
+            out[key] = _strip_tail(parts[0])
+            i = 1
+            while i + 1 <= len(parts) - 1:
+                out[parts[i]] = _strip_tail(parts[i + 1])
+                i += 2
+            return out
+    return values
+
+
+def _coerce_list(value: Any) -> Any:
+    """Une liste fusionnée par le collapse revient en chaîne JSON ; on la reparse. Sinon inchangé."""
+    if isinstance(value, str):
+        text = value.strip()
+        if text.startswith("[") and text.endswith("]"):
+            try:
+                import json as _json
+                parsed = _json.loads(text)
+                if isinstance(parsed, list):
+                    return parsed
+            except Exception:
+                pass
+        return None if not text else [text]
+    return value
+
+
+def _pick(fields: dict[str, Any], raw: dict[str, Any], key: str) -> Any:
+    """Valeur reconstruite si non vide, sinon la valeur brute d'origine (préserve None/types)."""
+    v = fields.get(key, "")
+    return v if isinstance(v, str) and v != "" else raw.get(key)
+
+
 @mcp.tool()
 def aret_boot() -> dict[str, Any]:
     """Retourne la doctrine minimale, les bornes de pagination et l’état opérationnel du Memory Store."""
@@ -108,23 +167,35 @@ def aret_get_resume_status() -> dict[str, Any]:
 
 @mcp.tool()
 def aret_acknowledge_resume(
-    working_rules: str,
-    current_state: str,
-    capabilities: str,
-    git_state: str,
-    risks_and_limits: str,
-    next_action: str,
-    resume_contract_hash: str,
+    working_rules: str | None = None,
+    current_state: str | None = None,
+    capabilities: str | None = None,
+    git_state: str | None = None,
+    risks_and_limits: str | None = None,
+    next_action: str | None = None,
+    resume_contract_hash: str | None = None,
 ) -> dict[str, Any]:
-    """Valide le récapitulatif rituel requis après SessionStart ou PostCompact avant toute poursuite ARET."""
+    """Valide le récapitulatif rituel requis après SessionStart ou PostCompact avant toute poursuite ARET.
+
+    Champs optionnels + dé-collapse : un appel fusionné (bug de sérialisation du client) est reconstruit ici."""
+    fields = _decollapse({
+        "working_rules": working_rules or "",
+        "current_state": current_state or "",
+        "capabilities": capabilities or "",
+        "git_state": git_state or "",
+        "risks_and_limits": risks_and_limits or "",
+        "next_action": next_action or "",
+        "resume_contract_hash": resume_contract_hash or "",
+    })
+    resume_contract_hash = str(fields.get("resume_contract_hash", "")).strip()
     try:
         recap = validate_recap({
-            "working_rules": working_rules,
-            "current_state": current_state,
-            "capabilities": capabilities,
-            "git_state": git_state,
-            "risks_and_limits": risks_and_limits,
-            "next_action": next_action,
+            "working_rules": fields.get("working_rules", ""),
+            "current_state": fields.get("current_state", ""),
+            "capabilities": fields.get("capabilities", ""),
+            "git_state": fields.get("git_state", ""),
+            "risks_and_limits": fields.get("risks_and_limits", ""),
+            "next_action": fields.get("next_action", ""),
         })
         if len(resume_contract_hash) != 64 or any(char not in "0123456789abcdef" for char in resume_contract_hash):
             raise ValueError("resume_contract_hash doit être un SHA-256 hexadécimal de 64 caractères")
@@ -220,15 +291,15 @@ def aret_read_artifact(proof_id: str, max_bytes: int = 65536) -> dict[str, Any]:
 
 @mcp.tool()
 def aret_append_knowledge(
-    knowledge_type: str,
-    title: str,
-    content: str,
+    knowledge_type: str | None = None,
+    title: str | None = None,
+    content: str | None = None,
     status: str | None = None,
     component_id: str | None = None,
     function_id: str | None = None,
     brick_id: str | None = None,
     tags: list[str] | str | None = None,
-    proof_ids: list[str] | None = None,
+    proof_ids: list[str] | str | None = None,
     supersedes_id: str | None = None,
     effective_at: str | None = None,
     document_source: dict[str, Any] | None = None,
@@ -236,17 +307,25 @@ def aret_append_knowledge(
 ) -> dict[str, Any]:
     """Ajoute une connaissance append-only et auditée, avec provenance documentaire optionnelle et contrôlée.
 
+    Champs optionnels + dé-collapse : un appel fusionné (bug de sérialisation du client) est reconstruit.
     knowledge_type ∈ {RULE, ARCHITECTURE, DECISION, FORENSIC, OBSERVATION, HYPOTHESIS, STATE,
     MEASUREMENT, DISCOVERY} (insensible à la casse).
     document_source, si fourni, EXIGE les sept clés : repository, revision, path, start_line,
-    end_line, section, hash — `path` relatif au dépôt (ni `/` initial ni `..`), 1≤start_line≤end_line.
-    Ne pas fournir un hash inventé : omettre document_source si l'empreinte de section n'est pas connue
-    (les références peuvent alors vivre dans `content`)."""
+    end_line, section, hash — `path` relatif au dépôt (ni `/` initial ni `..`), 1≤start_line≤end_line."""
+    raw = {
+        "knowledge_type": knowledge_type, "title": title, "content": content, "status": status,
+        "component_id": component_id, "function_id": function_id, "brick_id": brick_id,
+        "tags": tags, "proof_ids": proof_ids, "supersedes_id": supersedes_id, "effective_at": effective_at,
+    }
+    fields = _decollapse({k: (v if isinstance(v, str) else "") for k, v in raw.items()})
     return _call(
-        "append_knowledge", knowledge_type=knowledge_type, status=status, title=title, content=content,
-        component_id=component_id, function_id=function_id, brick_id=brick_id, tags=tags,
-        proof_ids=proof_ids, supersedes_id=supersedes_id, actor=actor,
-        effective_at=effective_at, document_source=document_source,
+        "append_knowledge",
+        knowledge_type=_pick(fields, raw, "knowledge_type"), status=_pick(fields, raw, "status"),
+        title=_pick(fields, raw, "title"), content=_pick(fields, raw, "content"),
+        component_id=_pick(fields, raw, "component_id"), function_id=_pick(fields, raw, "function_id"),
+        brick_id=_pick(fields, raw, "brick_id"), tags=_coerce_list(_pick(fields, raw, "tags")),
+        proof_ids=_coerce_list(_pick(fields, raw, "proof_ids")), supersedes_id=_pick(fields, raw, "supersedes_id"),
+        actor=actor, effective_at=_pick(fields, raw, "effective_at"), document_source=document_source,
     )
 
 
@@ -270,18 +349,18 @@ def aret_replace_front(updates: dict[str, str], actor: str = "mcp-agent") -> dic
 
 @mcp.tool()
 def aret_prepare_handoff(
-    work_summary: str,
-    verified_results: str,
-    open_risks: str,
-    deferred_items: str,
-    next_action: str,
-    technical_checkpoint_state: str,
+    work_summary: str = "",
+    verified_results: str = "",
+    open_risks: str = "",
+    deferred_items: str = "",
+    next_action: str = "",
+    technical_checkpoint_state: str = "",
     technical_target: str = "",
     technical_change: str = "",
     execution_state: str = "",
     last_validation: str = "",
     immediate_actions: str = "",
-    relevant_addresses: list[str] | None = None,
+    relevant_addresses: list[str] | str | None = None,
     actor: str = "mcp-agent",
 ) -> dict[str, Any]:
     """Prépare atomiquement le handoff et le checkpoint technique ; c'est l'outil unique qui répare une reprise dégradée.
@@ -307,20 +386,28 @@ def aret_prepare_handoff(
     corrigez-les en une seule fois. Si le dossier assemblé n'est pas prêt (p.ex. dépassement de
     budget), un diagnostic COMPACT est rendu (`written=true`, `errors`, `overflow_bytes`,
     `field_bytes`) SANS ré-écho du playbook — raccourcissez les champs visés puis rappelez l'outil."""
+    raw = {
+        "work_summary": work_summary, "verified_results": verified_results, "open_risks": open_risks,
+        "deferred_items": deferred_items, "next_action": next_action,
+        "technical_checkpoint_state": technical_checkpoint_state, "technical_target": technical_target,
+        "technical_change": technical_change, "execution_state": execution_state,
+        "last_validation": last_validation, "immediate_actions": immediate_actions,
+    }
+    f = _decollapse(dict(raw))
     return _call(
         "prepare_handoff",
-        work_summary=work_summary,
-        verified_results=verified_results,
-        open_risks=open_risks,
-        deferred_items=deferred_items,
-        next_action=next_action,
-        technical_checkpoint_state=technical_checkpoint_state,
-        technical_target=technical_target,
-        technical_change=technical_change,
-        execution_state=execution_state,
-        last_validation=last_validation,
-        immediate_actions=immediate_actions,
-        relevant_addresses=relevant_addresses,
+        work_summary=f.get("work_summary", ""),
+        verified_results=f.get("verified_results", ""),
+        open_risks=f.get("open_risks", ""),
+        deferred_items=f.get("deferred_items", ""),
+        next_action=f.get("next_action", ""),
+        technical_checkpoint_state=f.get("technical_checkpoint_state", "") or "NONE",
+        technical_target=f.get("technical_target", ""),
+        technical_change=f.get("technical_change", ""),
+        execution_state=f.get("execution_state", ""),
+        last_validation=f.get("last_validation", ""),
+        immediate_actions=f.get("immediate_actions", ""),
+        relevant_addresses=_coerce_list(relevant_addresses),
         actor=actor,
     )
 
