@@ -4410,6 +4410,20 @@ static int u32_is_ctrl_class(uint32_t cref, int wide) {
     }
     return 0;
 }
+/* A predefined common-control class that ARET REGISTERS (so an app can CreateWindowEx it)
+ * but whose message semantics it does NOT model — SysTreeView32/SysListView32, the rich
+ * edits, the comctl32 bars. Distinct from the MODELLED controls (button/static/edit/
+ * listbox/combobox, answered by u32_control_proc). A message to one of these that we
+ * cannot honour must abort loudly (§0), never return a silent 0 the app then trusts —
+ * e.g. PuTTY reads its SysTreeView32 selection to choose which config panel to build, so
+ * a swallowed TVM_* yields the WRONG dialog presented as correct. */
+static int u32_classname_unmodeled_ctrl(const char *cls) {
+    if (!cls || !cls[0]) return 0;
+    static const char *const u[] = { "systreeview32", "syslistview32", "richedit", "richedit20a",
+        "richedit20w", "msctls_statusbar32", "msctls_updown32", "toolbarwindow32", "tooltips_class32", 0 };
+    for (int i = 0; u[i]; i++) if (!strcasecmp(cls, u[i])) return 1;
+    return 0;
+}
 /* Create a window (shared A/W core): bind wndproc + capture rect/style/text.
  * `is_ctrl` permits a data-only control window with no WNDPROC (predefined class). */
 static uint32_t u32_window_create(uint32_t wndproc, uint32_t exstyle, uint32_t style,
@@ -4763,6 +4777,10 @@ uint32_t aret_CreateWindowExW(uint32_t esp) {
              if (WU(3) & 0x40000000u) g_u32_win[h - 1].ctrl_id = (int)WU(9);  /* WS_CHILD: hMenu=id */
              u32_fire_cbt_createwnd(esp, (int)h - 1, WU(8), WU(9), WU(1), WU(2));  /* MFC CWnd attach */
              if (!u32_create_dispatch(esp, (int)h - 1, WU(8), WU(9))) { g_u32_win[h - 1].used = 0; return 0; } }
+    if (getenv("ARET_GUI_TRACE"))
+        fprintf(stderr, "[GUI] CWEx.W h=%u cls=%s title=\"%.32s\" parent=%u vis=%d child=%d id=%d\n",
+                h, h ? g_u32_win[h - 1].classname : "?", h ? g_u32_win[h - 1].title : "", WU(8),
+                h ? g_u32_win[h - 1].visible : 0, (WU(3) & 0x40000000u) ? 1 : 0, h ? g_u32_win[h - 1].ctrl_id : 0);
     return h;
 }
 /* CreateWindowExA — className@1 is a narrow name (or an atom). Widen a name to
@@ -4784,6 +4802,10 @@ uint32_t aret_CreateWindowExA(uint32_t esp) {
              if (WU(3) & 0x40000000u) g_u32_win[h - 1].ctrl_id = (int)WU(9);  /* WS_CHILD: hMenu=id */
              u32_fire_cbt_createwnd(esp, (int)h - 1, WU(8), WU(9), WU(1), WU(2));  /* MFC CWnd attach */
              if (!u32_create_dispatch(esp, (int)h - 1, WU(8), WU(9))) { g_u32_win[h - 1].used = 0; return 0; } }
+    if (getenv("ARET_GUI_TRACE"))
+        fprintf(stderr, "[GUI] CWEx.A h=%u cls=%s title=\"%.32s\" parent=%u vis=%d child=%d id=%d\n",
+                h, h ? g_u32_win[h - 1].classname : "?", h ? g_u32_win[h - 1].title : "", WU(8),
+                h ? g_u32_win[h - 1].visible : 0, (WU(3) & 0x40000000u) ? 1 : 0, h ? g_u32_win[h - 1].ctrl_id : 0);
     return h;
 }
 /* DestroyWindow(HWND) -> BOOL. */
@@ -4900,7 +4922,22 @@ static int u32_control_proc(uint32_t esp, uint32_t hwnd, uint32_t msg, uint32_t 
 static int u32_sys_control_msg(uint32_t esp, uint32_t hwnd, uint32_t msg,
                                uint32_t wp, uint32_t lp, int wide, uint32_t *out) {
     if (u32_control_proc(esp, hwnd, msg, wp, lp, out)) return 1;
-    return u32_defproc_text(hwnd, msg, wp, lp, wide, out);
+    if (u32_defproc_text(hwnd, msg, wp, lp, wide, out)) return 1;
+    /* §0: a class-specific message (>= WM_USER) to a common control ARET does not model
+     * cannot be answered correctly. Returning 0 (a "failed/empty" value) is a wrong value
+     * the caller trusts — so abort loudly instead of silently misleading it. Generic
+     * window messages (< WM_USER: WM_SETFONT, WM_SIZE, WM_DESTROY, …) still fall through. */
+    int i = (hwnd >= 1 && hwnd <= U32_MAX_WIN && g_u32_win[hwnd - 1].used) ? (int)hwnd - 1 : -1;
+    if (i >= 0 && msg >= 0x0400u /*WM_USER*/ && u32_classname_unmodeled_ctrl(g_u32_win[i].classname)) {
+        if (getenv("ARET_GUI_TRACE"))
+            fprintf(stderr, "[GUI] UNMODELLED ctrl msg cls=%s msg=%#x wp=%#x lp=%#x -> abort\n",
+                    g_u32_win[i].classname, msg, wp, lp);
+        static char buf[160];
+        snprintf(buf, sizeof buf, "%s: class message %#x (common control semantics not modelled)",
+                 g_u32_win[i].classname, msg);
+        aret_unimpl(buf);
+    }
+    return 0;
 }
 /* Hit-test a dialog's controls at client (x,y) and deliver a click to the one under the
  * point (defined with the control paint code). Used by the real-input path (a mouse
@@ -7692,6 +7729,8 @@ static void sdl_pump(void) {
                          ? (down ? 0x0204u : 0x0205u)   /* WM_RBUTTONDOWN/UP */
                          : (down ? 0x0201u : 0x0202u);  /* WM_LBUTTONDOWN/UP */
             u32_q_push((uint32_t)(wi + 1), msg, 0, lp);
+            if (getenv("ARET_GUI_TRACE"))
+                fprintf(stderr, "[GUI] mouse msg=%#x win=%d x=%d y=%d -> WM delivered\n", msg, wi, e.button.x, e.button.y);
             break; }
         case SDL_TEXTINPUT:
             /* Typed characters go to the focused EDIT (shown on screen); also delivered
@@ -8880,11 +8919,20 @@ static void u32_composite_children(uint32_t esp, int di) {
     if (b < 0 || !g_gdi[b].bits) return;
     int W = g_u32_win[di].cw, H = g_u32_win[di].ch;
     uint32_t *dst = (uint32_t *)g_gdi[b].bits;
+    int trace = getenv("ARET_GUI_TRACE") ? 1 : 0;
+    int painted = 0, skipped_invis = 0;
     for (int c = 0; c < U32_MAX_WIN; c++) {
         if (!g_u32_win[c].used || g_u32_win[c].parent != (uint32_t)(di + 1)) continue;
-        if (!g_u32_win[c].visible) continue;
+        if (!g_u32_win[c].visible) { skipped_invis++; continue; }
+        if (trace)
+            fprintf(stderr, "[GUI]   child c=%d cls=%s title=\"%.28s\" @%d,%d %dx%d\n",
+                    c, g_u32_win[c].classname, g_u32_win[c].title,
+                    g_u32_win[c].x, g_u32_win[c].y, g_u32_win[c].w, g_u32_win[c].h);
         u32_composite_one_child(esp, c, dst, W, H);
+        painted++;
     }
+    if (trace)
+        fprintf(stderr, "[GUI] composite di=%d painted=%d invisible_skipped=%d\n", di, painted, skipped_invis);
 }
 /* Composite a dialog's client framebuffer: fill COLOR_3DFACE (the dialog erase colour,
  * measured vs Wine) then compose its child controls on top. */
