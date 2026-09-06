@@ -6516,6 +6516,24 @@ uint32_t aret_CheckDlgButton(uint32_t esp) {
 uint32_t aret_IsDlgButtonChecked(uint32_t esp) {
     int c = u32_dlg_ctrl(WU(0), WI(1)); return c < 0 ? 0 : (uint32_t)g_u32_win[c].check_state;
 }
+/* CheckRadioButton(hDlg, idFirst, idLast, idCheck) -> BOOL. Check the button idCheck and
+ * uncheck every other button whose control id lies in [idFirst, idLast]. Mirrors Wine
+ * (user32/dialog.c): walk the dialog's child controls, set BST_CHECKED on the match and
+ * BST_UNCHECKED on the rest of the contiguous group. Same check_state field CheckDlgButton
+ * sets, so IsDlgButtonChecked and the paint recomposite stay coherent. */
+uint32_t aret_CheckRadioButton(uint32_t esp) {
+    int d = u32_win_idx(WU(0)); if (d < 0) return 0;
+    uint32_t dh = (uint32_t)(d + 1);
+    int first = WI(1), last = WI(2), check = WI(3);
+    for (int i = 0; i < U32_MAX_WIN; i++) {
+        if (!g_u32_win[i].used || g_u32_win[i].parent != dh) continue;
+        int id = g_u32_win[i].ctrl_id;
+        if (id < first || id > last) continue;
+        g_u32_win[i].check_state = (id == check) ? 1 /*BST_CHECKED*/ : 0 /*BST_UNCHECKED*/;
+        u32_ctrl_recomposite(esp, i);
+    }
+    return 1;
+}
 /* RedrawWindow(hwnd, lprcUpdate, hrgn, flags) -> BOOL. Fold into the paint model:
  * RDW_INVALIDATE marks a WM_PAINT owed, RDW_VALIDATE clears it, RDW_UPDATENOW
  * delivers it now. */
