@@ -7556,6 +7556,9 @@ static void sdl_window_show(uint32_t esp, int i) {
     }
     g_u32_win[i].client_bmp = b ? gdi_handle(b) : 0;
     g_u32_win[i].cw = w; g_u32_win[i].ch = h;
+    if (getenv("ARET_GUI_TRACE"))
+        fprintf(stderr, "[GUI] show win=%d x=%d y=%d w=%d h=%d dialog=%d\n",
+                i, g_u32_win[i].x, g_u32_win[i].y, w, h, g_u32_win[i].is_dialog);
     if (g_u32_win[i].is_dialog) u32_dialog_composite(esp, i);   /* fill 3DFACE + paint child controls */
     if (!sdl_ensure()) return;                       /* no display: framebuffer only */
     int px = g_u32_win[i].x, py = g_u32_win[i].y;
@@ -7574,6 +7577,19 @@ static void sdl_window_show(uint32_t esp, int i) {
  * bytes are [B,G,R,0] which is exactly SDL_PIXELFORMAT_RGB888 memory order. */
 static void sdl_window_present(int i) {
     if (i < 0 || i >= U32_MAX_WIN) return;
+    /* Debug: dump ARET's actual client-area pixels (top-down BGRA), independent of SDL/X
+     * compositing — the ground truth of what ARET drew, for the framebuffer oracle. */
+    const char *dp = getenv("ARET_GUI_DUMP");
+    if (dp) {
+        int db = gdi_idx(g_u32_win[i].client_bmp);
+        if (db >= 0 && g_gdi[db].bits) {
+            char path[600];
+            snprintf(path, sizeof path, "%s.win%d.%dx%d.bgra", dp, i, g_u32_win[i].cw, g_u32_win[i].ch);
+            FILE *f = fopen(path, "wb");
+            if (f) { fwrite(g_gdi[db].bits, 4, (size_t)g_u32_win[i].cw * g_u32_win[i].ch, f); fclose(f);
+                     if (getenv("ARET_GUI_TRACE")) fprintf(stderr, "[GUI] present win=%d dumped %s\n", i, path); }
+        }
+    }
     SDL_Renderer *ren = (SDL_Renderer *)g_u32_win[i].sdl_ren;
     SDL_Texture  *tex = (SDL_Texture *)g_u32_win[i].sdl_tex;
     if (!ren || !tex) return;
