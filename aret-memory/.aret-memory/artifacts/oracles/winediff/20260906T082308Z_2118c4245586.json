@@ -1,0 +1,24 @@
+{
+  "format": "aret-oracle-artifact/v1",
+  "oracle": "winediff",
+  "kind": "WINEDIFF",
+  "command": "bash /home/user/Automatic-reverse-engineering-toolkit/bench/winediff.sh gdi_raster",
+  "result": "SKIPPED",
+  "exit_code": 0,
+  "started_at": "2026-09-06T08:22:58Z",
+  "finished_at": "2026-09-06T08:23:08Z",
+  "environment": {
+    "adapter": "aret-mmu-oracles/1",
+    "oracle": "winediff",
+    "repository": "/home/user/Automatic-reverse-engineering-toolkit",
+    "repository_revision": "e9363ea2f28a8baa35783c3518b43e120954b44c",
+    "script": "bench/winediff.sh",
+    "fixture": "gdi_raster",
+    "timeout_seconds": 3600,
+    "missing_dependencies": [],
+    "timed_out": false,
+    "duration_seconds": 9.666
+  },
+  "stdout": "SKIP  (no fixture matches 'gdi_raster')\n",
+  "stderr": ""
+}
