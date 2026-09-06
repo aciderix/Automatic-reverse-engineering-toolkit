@@ -10,6 +10,7 @@ from hooks.resume_guard import (
     acknowledge,
     arm,
     barrier_off_sentinel,
+    build_attempt_diagnostic,
     decision,
     mcp_ready_marker,
     state_path,
@@ -355,6 +356,65 @@ def test_toolsearch_schema_load_is_never_blocked(tmp_path: Path) -> None:
     assert decision(memory_dir, {**session, "tool_name": "Bash"}) is not None
     # …mais ToolSearch (chargement de schéma) passe toujours.
     assert decision(memory_dir, {**session, "tool_name": "ToolSearch"}) is None
+
+
+def test_build_attempt_diagnostic_detects_a_collapsed_call() -> None:
+    """Un appel fusionné (un seul champ reçu) est constaté, pas deviné."""
+    collapsed = build_attempt_diagnostic({"working_rules": "x" * 1800})
+    assert collapsed is not None
+    assert collapsed["collapsed"] is True
+    assert collapsed["recap_fields_received"] == 1
+    assert "current_state" in collapsed["missing_fields"]
+    assert "resume_contract_hash" in collapsed["missing_fields"]
+
+    whole = build_attempt_diagnostic({**_recap()})
+    assert whole is not None
+    assert whole["collapsed"] is False
+    assert whole["recap_fields_received"] == len(("wr", "cs", "cap", "git", "risk", "next"))  # 6
+    assert whole["missing_fields"] == []
+
+
+def test_block_message_surfaces_the_observed_collapse(tmp_path: Path) -> None:
+    """Le message de blocage AFFICHE ce que le hook a réellement reçu de l'acquittement.
+
+    Objectif : rendre le blocage auto-explicatif avec des données mesurées (non devinées),
+    sans jamais lever la barrière — pour déboguer la cause exacte au moment où elle survient."""
+    memory_dir = tmp_path / "memory"
+    session = {"session_id": "test-diag"}
+    arm(memory_dir, session, reason="SessionStart", resume_contract_hash=RESUME_HASH, ready=True)
+    touch_mcp_ready(memory_dir)  # canal MCP prouvé vivant
+
+    # L'agent tente un acquittement FUSIONNÉ : seul working_rules arrive (tout collé dedans).
+    collapsed_input = {"working_rules": "x" * 1800}
+    assert decision(memory_dir, {
+        **session, "tool_name": "mcp__aret-memory__aret_acknowledge_resume", "tool_input": collapsed_input,
+    }) is None
+
+    # Le blocage SUIVANT expose le collapse observé + l'état système, en données mesurées.
+    blocked = decision(memory_dir, {**session, "tool_name": "Bash", "tool_input": {"command": "true"}})
+    assert blocked is not None
+    context = blocked["hookSpecificOutput"]["additionalContext"]
+    assert "COLLAPSE CONFIRMÉ" in context
+    assert "working_rules(1800c)" in context          # longueur réellement reçue
+    assert "current_state" in context                  # listé comme manquant
+    assert "l'acquittement EST atteignable" in context  # canal MCP vivant, donc cause = contenu
+    # La barrière n'est PAS levée pour autant : elle reste dure.
+    assert blocked["hookSpecificOutput"]["permissionDecision"] == "deny"
+
+
+def test_block_message_surfaces_a_wellformed_but_unaccepted_attempt(tmp_path: Path) -> None:
+    """Champs bien arrivés mais barrière tenue ⇒ le message oriente vers le hash / les minimums."""
+    memory_dir = tmp_path / "memory"
+    session = {"session_id": "test-diag-ok"}
+    arm(memory_dir, session, reason="SessionStart", resume_contract_hash=RESUME_HASH, ready=True)
+    touch_mcp_ready(memory_dir)
+    assert decision(memory_dir, {
+        **session, "tool_name": "mcp__aret-memory__aret_acknowledge_resume", "tool_input": _recap("d" * 64),
+    }) is None
+    blocked = decision(memory_dir, {**session, "tool_name": "Bash", "tool_input": {"command": "true"}})
+    context = blocked["hookSpecificOutput"]["additionalContext"]
+    assert "Les champs sont bien arrivés" in context
+    assert "resume_contract_hash correspond EXACTEMENT" in context
 
 
 def test_file_sentinel_kill_switch_releases_a_hard_barrier(tmp_path: Path) -> None:

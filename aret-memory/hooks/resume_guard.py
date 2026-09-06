@@ -280,8 +280,105 @@ def ritual_prompt(resume_contract_hash: str) -> str:
         "Le contexte de reprise a déjà été injecté depuis SQLite canonique : ne relisez pas les documents source. "
         "Avant toute action de poursuite, produisez un récapitulatif fidèle couvrant : " + fields + ". "
         "Puis appelez aret_acknowledge_resume avec les six champs correspondants et "
-        f"resume_contract_hash={resume_contract_hash}."
+        f"resume_contract_hash={resume_contract_hash}. "
+        "SOIS BREF : 1 phrase courte par champ, total < ~900 octets. Un recap trop long peut voir ses 6 champs "
+        "FUSIONNER dans le premier au niveau de la sérialisation d'appel d'outil (le serveur ne reçoit alors qu'un "
+        "seul champ et refuse) ; si l'appel échoue ainsi, RACCOURCIS le recap et réessaie — ne change pas le hash."
     )
+
+
+def _recap_field_names() -> list[str]:
+    return [field for field, _, _ in RITUAL_FIELDS]
+
+
+def build_attempt_diagnostic(tool_input: Any) -> dict[str, Any] | None:
+    """Photographie ce que le hook a RÉELLEMENT reçu d'un appel d'acquittement.
+
+    C'est la donnée-clé de débogage : PreToolUse voit le `tool_input` AVANT le serveur.
+    Si les 6 champs de recap ne sont pas tous présents, l'appel a fusionné en transit
+    (limite de sérialisation d'appel d'outil du harness) — fait constaté, non deviné.
+    """
+    if not isinstance(tool_input, dict):
+        return None
+    lengths = {k: len(v) for k, v in tool_input.items() if isinstance(v, str)}
+    total_bytes = sum(len(v.encode("utf-8")) for v in tool_input.values() if isinstance(v, str))
+    recap_fields = _recap_field_names()
+    present_recap = [field for field in recap_fields if field in tool_input]
+    missing = [field for field in (recap_fields + ["resume_contract_hash"]) if field not in tool_input]
+    return {
+        "at": utc_now(),
+        "present_lengths": lengths,
+        "missing_fields": missing,
+        "total_bytes": total_bytes,
+        "recap_fields_received": len(present_recap),
+        "collapsed": len(present_recap) < len(recap_fields),
+    }
+
+
+def _record_ack_attempt(memory_dir: Path, payload: dict[str, Any], state: dict[str, Any] | None) -> None:
+    """Persiste la photographie de la dernière tentative d'acquittement pour l'afficher au prochain blocage."""
+    if state is None:
+        return
+    diagnostic = build_attempt_diagnostic(payload.get("tool_input"))
+    if diagnostic is None:
+        return
+    state["last_ack_attempt"] = diagnostic
+    try:
+        _write_state(memory_dir, payload, state)
+    except OSError:
+        pass
+
+
+def attempt_diagnostic_text(state: dict[str, Any] | None) -> str:
+    """Rend, en clair, ce que le système a observé de la dernière tentative d'acquittement.
+
+    Toutes les valeurs proviennent du `tool_input` réellement reçu — aucune n'est devinée.
+    """
+    diagnostic = (state or {}).get("last_ack_attempt")
+    if not isinstance(diagnostic, dict):
+        return ""
+    present = ", ".join(f"{k}({v}c)" for k, v in sorted(diagnostic.get("present_lengths", {}).items())) or "aucun"
+    missing = ", ".join(diagnostic.get("missing_fields", [])) or "aucun"
+    lines = [
+        " DIAGNOSTIC — données OBSERVÉES par le hook sur ta dernière tentative d'acquittement (non devinées) :",
+        f" - champs réellement reçus : {present}",
+        f" - champs MANQUANTS à l'arrivée : {missing}",
+        f" - total reçu : {diagnostic.get('total_bytes')} octets ; champs de recap reçus : {diagnostic.get('recap_fields_received')}/{len(RITUAL_FIELDS)}",
+    ]
+    if diagnostic.get("collapsed"):
+        lines.append(
+            " => COLLAPSE CONFIRMÉ : les champs ont fusionné dans le premier AVANT d'atteindre le serveur "
+            "(limite de sérialisation d'appel d'outil du harness ; serveur + transport MCP hors de cause). "
+            "PARADE : raccourcis fortement le recap (< ~900 octets, 1 phrase courte/champ) puis réémets."
+        )
+    else:
+        lines.append(
+            " => Les champs sont bien arrivés : si la barrière tient encore, vérifie que resume_contract_hash "
+            "correspond EXACTEMENT au dossier injecté et que chaque champ atteint sa longueur minimale."
+        )
+    return "\n" + "\n".join(lines)
+
+
+def system_facts_text(memory_dir: Path, payload: dict[str, Any], state: dict[str, Any] | None) -> str:
+    """État système OBSERVÉ au moment du blocage (faits mesurés, aucune supposition)."""
+    facts = [f" - outil bloqué : {payload.get('tool_name', '?')}"]
+    marker = mcp_ready_marker(memory_dir)
+    try:
+        age = int(time.time() - marker.stat().st_mtime)
+        facts.append(
+            f" - canal MCP (aret_acknowledge_resume) : marqueur vivant à {age}s (seuil {int(MCP_LIVENESS_MAX_AGE_S)}s) "
+            "=> l'acquittement EST atteignable ; un blocage persistant vient donc du CONTENU de ton appel, pas du serveur"
+        )
+    except OSError:
+        facts.append(" - canal MCP : marqueur de vivacité ABSENT (serveur jamais connecté)")
+    if isinstance(state, dict):
+        facts.append(f" - barrière : reason={state.get('reason')} mode={state.get('mode')} armée={state.get('armed_at')}")
+    return "\n ÉTAT SYSTÈME OBSERVÉ :\n" + "\n".join(facts)
+
+
+def diagnostic_suffix(memory_dir: Path, payload: dict[str, Any], state: dict[str, Any] | None) -> str:
+    """Tout le diagnostic non-deviné à joindre à un message de blocage."""
+    return system_facts_text(memory_dir, payload, state) + attempt_diagnostic_text(state)
 
 
 def decision(memory_dir: Path, payload: dict[str, Any]) -> dict[str, Any] | None:
@@ -298,6 +395,9 @@ def decision(memory_dir: Path, payload: dict[str, Any]) -> dict[str, Any] | None
     if state.get("acknowledged_at"):
         return None
     if is_resume_acknowledgement(payload):
+        # On laisse toujours passer l'acquittement, MAIS on photographie ce que le hook a
+        # reçu : si les champs ont fusionné en transit, le prochain blocage l'affichera.
+        _record_ack_attempt(memory_dir, payload, state)
         return None
     # Charger le schéma de la porte de sortie ne doit JAMAIS être bloqué par la
     # barrière elle-même (sinon on ne peut pas appeler aret_acknowledge_resume).
@@ -321,7 +421,7 @@ def decision(memory_dir: Path, payload: dict[str, Any]) -> dict[str, Any] | None
             "hookEventName": "PreToolUse",
             "permissionDecision": "deny",
             "permissionDecisionReason": "BARRIÈRE DE REPRISE ARET-MMU : le récapitulatif rituel doit être confirmé avant toute action de poursuite.",
-            "additionalContext": ritual_prompt(str(state.get("resume_contract_hash", ""))),
+            "additionalContext": ritual_prompt(str(state.get("resume_contract_hash", ""))) + diagnostic_suffix(memory_dir, payload, state),
         }
     }
 
@@ -341,7 +441,7 @@ def stop_feedback(memory_dir: Path, payload: dict[str, Any]) -> dict[str, Any] |
     return {
         "hookSpecificOutput": {
             "hookEventName": "Stop",
-            "additionalContext": "BARRIÈRE DE REPRISE ARET-MMU ACTIVE : ne concluez pas et ne poursuivez pas encore. " + ritual_prompt(str(state.get("resume_contract_hash", ""))),
+            "additionalContext": "BARRIÈRE DE REPRISE ARET-MMU ACTIVE : ne concluez pas et ne poursuivez pas encore. " + ritual_prompt(str(state.get("resume_contract_hash", ""))) + diagnostic_suffix(memory_dir, payload, state),
         }
     }
 
