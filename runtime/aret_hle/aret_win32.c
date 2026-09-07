@@ -4825,9 +4825,10 @@ uint32_t aret_CreateWindowExA(uint32_t esp) {
              u32_fire_cbt_createwnd(esp, (int)h - 1, WU(8), WU(9), WU(1), WU(2));  /* MFC CWnd attach */
              if (!u32_create_dispatch(esp, (int)h - 1, WU(8), WU(9))) { g_u32_win[h - 1].used = 0; return 0; } }
     if (getenv("ARET_GUI_TRACE"))
-        fprintf(stderr, "[GUI] CWEx.A h=%u cls=%s title=\"%.32s\" parent=%u vis=%d child=%d id=%d\n",
-                h, h ? g_u32_win[h - 1].classname : "?", h ? g_u32_win[h - 1].title : "", WU(8),
-                h ? g_u32_win[h - 1].visible : 0, (WU(3) & 0x40000000u) ? 1 : 0, h ? g_u32_win[h - 1].ctrl_id : 0);
+        fprintf(stderr, "[GUI] CWEx.A h=%u cls=%s title=\"%.32s\" @%d,%d %dx%d parent=%u id=%d\n",
+                h, h ? g_u32_win[h - 1].classname : "?", h ? g_u32_win[h - 1].title : "",
+                (int)(int32_t)WU(4), (int)(int32_t)WU(5), (int)(int32_t)WU(6), (int)(int32_t)WU(7),
+                WU(8), h ? g_u32_win[h - 1].ctrl_id : 0);
     return h;
 }
 /* DestroyWindow(HWND) -> BOOL. */
@@ -5142,6 +5143,9 @@ uint32_t aret_SetWindowPos(uint32_t esp) {
     int i = u32_win_idx(WU(0));
     if (i < 0) return 0;
     uint32_t f = WU(6);
+    if (getenv("ARET_GUI_TRACE") && g_u32_win[i].ctrl_id)
+        fprintf(stderr, "[GUI] SetWindowPos id=%d %d,%d %dx%d flags=%#x (was @%d,%d)\n",
+                g_u32_win[i].ctrl_id, WI(2), WI(3), WI(4), WI(5), f, g_u32_win[i].x, g_u32_win[i].y);
     if (!(f & 0x0002u)) { g_u32_win[i].x = WI(2); g_u32_win[i].y = WI(3); }  /* !SWP_NOMOVE */
     if (!(f & 0x0001u)) { g_u32_win[i].w = WI(4); g_u32_win[i].h = WI(5); }  /* !SWP_NOSIZE */
     if (f & 0x0040u) g_u32_win[i].visible = 1;                               /* SWP_SHOWWINDOW */
@@ -5152,6 +5156,9 @@ uint32_t aret_SetWindowPos(uint32_t esp) {
 uint32_t aret_MoveWindow(uint32_t esp) {
     int i = u32_win_idx(WU(0));
     if (i < 0) return 0;
+    if (getenv("ARET_GUI_TRACE") && g_u32_win[i].ctrl_id)
+        fprintf(stderr, "[GUI] MoveWindow id=%d %d,%d %dx%d (was @%d,%d)\n",
+                g_u32_win[i].ctrl_id, WI(1), WI(2), WI(3), WI(4), g_u32_win[i].x, g_u32_win[i].y);
     g_u32_win[i].x = WI(1); g_u32_win[i].y = WI(2);
     g_u32_win[i].w = WI(3); g_u32_win[i].h = WI(4);
     return 1;
@@ -6878,6 +6885,9 @@ uint32_t aret_DeferWindowPos(uint32_t esp) {
     int i = u32_win_idx(WU(1));
     if (i >= 0) {
         uint32_t f = WU(7);
+        if (getenv("ARET_GUI_TRACE") && g_u32_win[i].ctrl_id)
+            fprintf(stderr, "[GUI] DeferWindowPos id=%d %d,%d %dx%d flags=%#x (was @%d,%d)\n",
+                    g_u32_win[i].ctrl_id, WI(3), WI(4), WI(5), WI(6), f, g_u32_win[i].x, g_u32_win[i].y);
         if (!(f & 0x0002u)) { g_u32_win[i].x = WI(3); g_u32_win[i].y = WI(4); }  /* !SWP_NOMOVE */
         if (!(f & 0x0001u)) { g_u32_win[i].w = WI(5); g_u32_win[i].h = WI(6); }  /* !SWP_NOSIZE */
         if (f & 0x0040u) g_u32_win[i].visible = 1;
@@ -8525,6 +8535,15 @@ static void u32_draw_radio_glyph(struct gdi_obj *bm, int x, int y, int checked) 
  * transparent). Measured vs Wine (WM_PRINTCLIENT). The exact caption pixels depend on the
  * resolved font face (same env caveat as gdi_uifont), so a fixture verifies the frame
  * structurally + that caption pixels exist. */
+/* A control's text font resolved to a real TrueType face: its WM_SETFONT font when that
+ * has a usable face name, else DEFAULT_GUI_FONT. A faceless font (the default SYSTEM_FONT,
+ * or a CreateFont with an empty lfFaceName, or no font set at all) would otherwise render
+ * BLANK — Windows resolves such a font to a real default, and for a dialog control there is
+ * no Wine DIB oracle (doc 70 §7), so a legible default beats a silent gap. */
+static uint32_t u32_font_or_default(uint32_t f) {
+    int fi = f ? gdi_idx(f) : -1;
+    return (fi >= 0 && g_gdi[fi].lf_face[0]) ? f : u32_stock(17 /*DEFAULT_GUI_FONT*/);
+}
 static void u32_button_paint(uint32_t hdc, int wi) {
     struct gdi_obj *bm = gdi_dc_surface(hdc);
     int d = gdi_idx(hdc);
@@ -8533,9 +8552,9 @@ static void u32_button_paint(uint32_t hdc, int wi) {
     int32_t rc[4] = { 0, 0, w, h };
     u32_drawedge(bm, rc, 0x5 /*EDGE_RAISED*/, 0xF | 0x800u | 0x1000u);   /* frame + 3DFACE fill */
     const char *cap = g_u32_win[wi].title;
-    if (cap && cap[0] && g_u32_win[wi].ctrl_font) {
+    if (cap && cap[0]) {
         uint32_t sf = g_gdi[d].sel_font, tc = g_gdi[d].text_color; int bk = g_gdi[d].bk_mode;
-        g_gdi[d].sel_font = g_u32_win[wi].ctrl_font;
+        g_gdi[d].sel_font = u32_font_or_default(g_u32_win[wi].ctrl_font);
         g_gdi[d].text_color = u32_syscolor(18) /*COLOR_BTNTEXT*/;
         g_gdi[d].bk_mode = 1 /*TRANSPARENT*/;
         uint32_t cps[256]; int m = 0; for (; cap[m] && m < 255; m++) cps[m] = u32_ansi_cp((unsigned char)cap[m]);
@@ -8546,7 +8565,15 @@ static void u32_button_paint(uint32_t hdc, int wi) {
 }
 /* Draw `str` in `font` into `rect`, COLOR `idx`, transparent, `fmt` = DrawText flags. */
 static void u32_paint_text(uint32_t hdc, int d, uint32_t font, const char *str, const int32_t *rect, uint32_t fmt, int idx) {
-    if (!str || !str[0] || !font) return;
+    if (!str || !str[0]) return;
+    /* A control painted with a faceless font — the default SYSTEM_FONT, or a CreateFont
+     * with an empty lfFaceName — has no TrueType face for the raster, so it would render
+     * BLANK (a silent visual gap: the text content IS there). Windows resolves such a font
+     * to a real default face; for a dialog control there is no Wine DIB oracle (doc 70 §7),
+     * so we render its text in DEFAULT_GUI_FONT rather than nothing. Scoped to control paint
+     * (this helper) — raw TextOut/DrawText keep the sound abort for their pixel oracle. */
+    font = u32_font_or_default(font);
+    if (!font) return;
     uint32_t sf = g_gdi[d].sel_font, tc = g_gdi[d].text_color; int bk = g_gdi[d].bk_mode;
     g_gdi[d].sel_font = font;
     g_gdi[d].text_color = u32_syscolor(idx);
@@ -8558,6 +8585,12 @@ static void u32_paint_text(uint32_t hdc, int d, uint32_t font, const char *str, 
 /* Draw a control's own caption (the window title) with the control font. Shared by
  * STATIC/EDIT/BUTTON caption painting. */
 static void u32_ctrl_text(uint32_t hdc, int d, int wi, const int32_t *rect, uint32_t fmt, int idx) {
+    if (getenv("ARET_GUI_TRACE") && g_u32_win[wi].title[0]) {
+        uint32_t f = g_u32_win[wi].ctrl_font; int fi = f ? gdi_idx(f) : -1;
+        fprintf(stderr, "[GUI] ctrl_text wi=%d cls=%s font=%#x fi=%d face=\"%s\" h=%d title=\"%.24s\"\n",
+                wi, g_u32_win[wi].classname, f, fi, (fi >= 0 ? g_gdi[fi].lf_face : "?"),
+                (fi >= 0 ? g_gdi[fi].lf_height : 0), g_u32_win[wi].title);
+    }
     u32_paint_text(hdc, d, g_u32_win[wi].ctrl_font, g_u32_win[wi].title, rect, fmt, idx);
 }
 /* LISTBOX/COMBOBOX item model (heap list of strings). */
@@ -8640,13 +8673,15 @@ static void u32_group_paint(uint32_t hdc, int wi) {
     struct gdi_obj *bm = gdi_dc_surface(hdc); int d = gdi_idx(hdc);
     if (!bm || d < 0) return;
     int w = g_u32_win[wi].w, h = g_u32_win[wi].h;
-    u32_ctrl_fill(bm, w, h, u32_syscolor(15 /*COLOR_3DFACE*/));
+    /* NO interior fill: a group box is a transparent frame + label so it never erases the
+     * controls it encloses (the composite pre-fills a transparent sentinel and blits only
+     * the frame/label pixels). The dialog's own 3DFACE erase is the interior background. */
     int32_t fr[4] = { 0, 6, w, h };
     u32_drawedge(bm, fr, 0x6 /*EDGE_ETCHED*/, 0xFu /*BF_RECT*/);
     const char *cap = g_u32_win[wi].title;
-    if (cap && cap[0] && g_u32_win[wi].ctrl_font) {
+    if (cap && cap[0]) {
         uint32_t sf = g_gdi[d].sel_font, tc = g_gdi[d].text_color, bc = g_gdi[d].bk_color; int bk = g_gdi[d].bk_mode;
-        g_gdi[d].sel_font = g_u32_win[wi].ctrl_font;
+        g_gdi[d].sel_font = u32_font_or_default(g_u32_win[wi].ctrl_font);
         g_gdi[d].text_color = u32_syscolor(8 /*COLOR_WINDOWTEXT*/);
         g_gdi[d].bk_color = u32_syscolor(15 /*COLOR_3DFACE*/);
         g_gdi[d].bk_mode = 2 /*OPAQUE — erases the border behind the label*/;
@@ -9052,8 +9087,8 @@ static void u32_treeview_paint(uint32_t hdc, int wi) {
     uint32_t win = u32_syscolor(5 /*COLOR_WINDOW*/);
     for (int y = 0; y < H; y++) for (int x = 0; x < W; x++) gdi_put(bm, x, y, win);
     /* A treeview always renders its items in some font: the one it was given
-     * (WM_SETFONT), else the shell default — never blank. */
-    uint32_t font = g_u32_win[wi].ctrl_font ? g_u32_win[wi].ctrl_font : u32_stock(17 /*DEFAULT_GUI_FONT*/);
+     * (WM_SETFONT) when it has a real face, else the shell default — never blank. */
+    uint32_t font = u32_font_or_default(g_u32_win[wi].ctrl_font);
     int row = 0;
     u32_tv_paint_walk(hdc, bm, d, font, wi, 0, 0, &row, W, H, (uint32_t)g_u32_win[wi].cur_sel);
     int32_t rc[4] = { 0, 0, W, H };
@@ -9189,6 +9224,28 @@ static void u32_composite_one_child(uint32_t esp, int ci, uint32_t *dst, int W, 
      * proc is our non-painting stub. Driving the subclass's WM_PAINT would paint nothing
      * (a black box). Only a genuinely non-standard control (a lifted comctl32 progress
      * bar/trackbar, unknown class + own WNDPROC) paints itself via WM_PAINT below. */
+    /* A BS_GROUPBOX is a TRANSPARENT frame + label: paint it into a temp pre-filled with a
+     * sentinel, then blit only the non-sentinel (frame/label) pixels so its interior never
+     * erases the sibling controls it encloses — whatever their creation order vs the frame.
+     * (Windows: those are separate child windows that survive the group's own erase.) */
+    if (!strcasecmp(g_u32_win[ci].classname, "button") && u32_btn_is_group(g_u32_win[ci].style)) {
+        int td = gdi_alloc(GDIT_DC); if (!td) return;
+        u32_dc_defaults(td);
+        int tb = gdi_alloc(GDIT_BITMAP); if (!tb) { g_gdi[td].used = 0; return; }
+        g_gdi[tb].w = cw; g_gdi[tb].h = ch; g_gdi[tb].topdown = 1; g_gdi[tb].bpp = 32;
+        g_gdi[tb].bits = (uint8_t *)calloc((size_t)cw * ch, 4); g_gdi[tb].owns_bits = 1;
+        if (!g_gdi[tb].bits) { g_gdi[tb].used = 0; g_gdi[td].used = 0; return; }
+        uint32_t *tp = (uint32_t *)g_gdi[tb].bits;
+        const uint32_t KEY = 0x00FEEDFEu;                 /* transparent sentinel */
+        for (int p = 0; p < cw * ch; p++) tp[p] = KEY;
+        g_gdi[td].sel_bitmap = gdi_handle(tb);
+        u32_group_paint(gdi_handle(td), ci);              /* frame + label only, no interior fill */
+        for (int yy = 0; yy < ch; yy++) { int dy = oy + yy; if (dy < 0 || dy >= H) continue;
+            for (int xx = 0; xx < cw; xx++) { int dx = ox + xx; if (dx < 0 || dx >= W) continue;
+                uint32_t px = tp[yy * cw + xx]; if (px != KEY) dst[dy * W + dx] = px; } }
+        free(g_gdi[tb].bits); g_gdi[tb].used = 0; g_gdi[td].used = 0;
+        return;
+    }
     if (u32_ctrl_paintable(g_u32_win[ci].classname)) {
         int td = gdi_alloc(GDIT_DC); if (!td) return;
         u32_dc_defaults(td);
@@ -9225,6 +9282,10 @@ static void u32_composite_children(uint32_t esp, int di) {
     uint32_t *dst = (uint32_t *)g_gdi[b].bits;
     int trace = getenv("ARET_GUI_TRACE") ? 1 : 0;
     int painted = 0, skipped_invis = 0;
+    /* Composite in creation order (Windows Z-order: later = on top). A BS_GROUPBOX is
+     * painted as a TRANSPARENT frame + label (u32_composite_one_child), so it never
+     * erases the sibling controls it encloses — matching Windows, where those are
+     * separate child windows that survive the group's own erase. */
     for (int c = 0; c < U32_MAX_WIN; c++) {
         if (!g_u32_win[c].used || g_u32_win[c].parent != (uint32_t)(di + 1)) continue;
         if (!g_u32_win[c].visible) { skipped_invis++; continue; }
