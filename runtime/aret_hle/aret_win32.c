@@ -4008,6 +4008,28 @@ static struct {
 #endif
 } g_u32_win[U32_MAX_WIN];
 
+/* ---- SysTreeView32 (comctl32) item model ------------------------------------------
+ * A real hierarchical tree of items with selection and TVN_SELCHANGED notification, so
+ * a treeview-driven dialog builds the RIGHT contents (PuTTY reads the selected node's
+ * lParam to pick which config panel to create). Nodes live in a global pool shared by
+ * every treeview window; HTREEITEM = pool index + 1. A treeview's current selection is
+ * kept in g_u32_win[tv].cur_sel (unused by treeviews otherwise). */
+#define U32_MAX_TVNODE 2048
+static struct u32_tvnode {
+    int used;
+    int tv;              /* owning treeview window index (0-based) */
+    uint32_t parent;     /* HTREEITEM of parent (0 = top level) */
+    int rank;            /* order among siblings (lower = earlier) */
+    char *text;          /* item label (heap, ANSI) */
+    uint32_t lparam;     /* TVITEM.lParam (app payload) */
+    uint32_t state;      /* TVIS_* (SELECTED 0x02, EXPANDED 0x20) */
+    int cchildren;       /* TVITEM.cChildren hint */
+} g_u32_tv[U32_MAX_TVNODE];
+static int u32_treeview_proc(uint32_t esp, uint32_t hwnd, uint32_t msg, uint32_t wp,
+                             uint32_t lp, int i, uint32_t *out);   /* fwd */
+static void u32_treeview_paint(uint32_t hdc, int wi);             /* fwd */
+static void u32_tv_free_all(int tv);                              /* fwd */
+
 #ifdef ARET_HAVE_SDL
 /* G2b window-presentation helpers (defined after the GDI object model, which they
  * use for the client framebuffer). Show creates the real SDL window on first
@@ -4812,6 +4834,7 @@ uint32_t aret_CreateWindowExA(uint32_t esp) {
 uint32_t aret_DestroyWindow(uint32_t esp) {
     uint32_t h = WU(0);
     if (h >= 1 && h <= U32_MAX_WIN && g_u32_win[h - 1].used) {
+        if (!strcasecmp(g_u32_win[h - 1].classname, "systreeview32")) u32_tv_free_all((int)h - 1);
 #ifdef ARET_HAVE_SDL
         sdl_window_destroy((int)h - 1);
 #endif
@@ -8680,7 +8703,7 @@ static void u32_combobox_paint(uint32_t hdc, int wi) {
 /* Which predefined classes have a built-in paint. */
 static int u32_ctrl_paintable(const char *cls) {
     return !strcasecmp(cls, "button") || !strcasecmp(cls, "static") || !strcasecmp(cls, "edit")
-        || !strcasecmp(cls, "listbox") || !strcasecmp(cls, "combobox");
+        || !strcasecmp(cls, "listbox") || !strcasecmp(cls, "combobox") || !strcasecmp(cls, "systreeview32");
 }
 /* BUTTON sub-styles (low 4 bits BS_*): push = BS_PUSHBUTTON/BS_DEFPUSHBUTTON; check =
  * BS_CHECKBOX/BS_AUTOCHECKBOX/BS_3STATE/BS_AUTO3STATE; group box = BS_GROUPBOX(7)
@@ -8717,6 +8740,7 @@ static void u32_control_paint_full(uint32_t hdc, int wi) {
         return;
     }
     if (!strcasecmp(cls, "combobox")) { u32_combobox_paint(hdc, wi); return; }
+    if (!strcasecmp(cls, "systreeview32")) { u32_treeview_paint(hdc, wi); return; }
 }
 /* Recomposite the parent dialog of control `ci` (reflect a state change on screen).
  * esp==0 (SDL input path) is fine: a dialog's controls are painted without a lifted
@@ -8756,6 +8780,285 @@ static void u32_ctrl_click(uint32_t esp, int i) {
                                  (uint32_t)(i + 1));
     }
 }
+/* ---- SysTreeView32 implementation -------------------------------------------------
+ * TVITEM byte layout (32-bit): mask 0, hItem 4, state 8, stateMask 12, pszText 16,
+ * cchTextMax 20, iImage 24, iSelectedImage 28, cChildren 32, lParam 36 (size 40).
+ * TVINSERTSTRUCT: hParent 0, hInsertAfter 4, item(TVITEM) 8. HTREEITEM = pool idx + 1. */
+static struct u32_tvnode *u32_tv_node(uint32_t h) {
+    if (h < 1 || h > U32_MAX_TVNODE || !g_u32_tv[h - 1].used) return NULL;
+    return &g_u32_tv[h - 1];
+}
+static int u32_tv_child_count(int tv, uint32_t parent) {
+    int c = 0;
+    for (int k = 0; k < U32_MAX_TVNODE; k++)
+        if (g_u32_tv[k].used && g_u32_tv[k].tv == tv && g_u32_tv[k].parent == parent) c++;
+    return c;
+}
+static uint32_t u32_tv_first_child(int tv, uint32_t parent) {
+    uint32_t best = 0; int bestrank = 0x7fffffff;
+    for (int k = 0; k < U32_MAX_TVNODE; k++)
+        if (g_u32_tv[k].used && g_u32_tv[k].tv == tv && g_u32_tv[k].parent == parent && g_u32_tv[k].rank < bestrank)
+            { bestrank = g_u32_tv[k].rank; best = (uint32_t)(k + 1); }
+    return best;
+}
+static uint32_t u32_tv_next_sibling(uint32_t h) {
+    struct u32_tvnode *n = u32_tv_node(h); if (!n) return 0;
+    uint32_t best = 0; int bestrank = 0x7fffffff;
+    for (int k = 0; k < U32_MAX_TVNODE; k++)
+        if (g_u32_tv[k].used && g_u32_tv[k].tv == n->tv && g_u32_tv[k].parent == n->parent
+            && g_u32_tv[k].rank > n->rank && g_u32_tv[k].rank < bestrank)
+            { bestrank = g_u32_tv[k].rank; best = (uint32_t)(k + 1); }
+    return best;
+}
+static uint32_t u32_tv_prev_sibling(uint32_t h) {
+    struct u32_tvnode *n = u32_tv_node(h); if (!n) return 0;
+    uint32_t best = 0; int bestrank = -1;
+    for (int k = 0; k < U32_MAX_TVNODE; k++)
+        if (g_u32_tv[k].used && g_u32_tv[k].tv == n->tv && g_u32_tv[k].parent == n->parent
+            && g_u32_tv[k].rank < n->rank && g_u32_tv[k].rank > bestrank)
+            { bestrank = g_u32_tv[k].rank; best = (uint32_t)(k + 1); }
+    return best;
+}
+static void u32_tv_free_rec(uint32_t h) {
+    struct u32_tvnode *n = u32_tv_node(h); if (!n) return;
+    int tv = n->tv;
+    for (int k = 0; k < U32_MAX_TVNODE; k++)
+        if (g_u32_tv[k].used && g_u32_tv[k].tv == tv && g_u32_tv[k].parent == h)
+            u32_tv_free_rec((uint32_t)(k + 1));
+    free(n->text); n->text = NULL; n->used = 0;
+}
+static void u32_tv_free_all(int tv) {
+    for (int k = 0; k < U32_MAX_TVNODE; k++)
+        if (g_u32_tv[k].used && g_u32_tv[k].tv == tv)
+            { free(g_u32_tv[k].text); g_u32_tv[k].text = NULL; g_u32_tv[k].used = 0; }
+}
+/* Insert a node under `parent`, positioned per hInsertAfter (TVI_FIRST/LAST/SORT or an
+ * explicit sibling handle). Sibling ranks are shifted so ordering stays correct. */
+static uint32_t u32_tv_insert(int tv, uint32_t parent, uint32_t after,
+                              const char *text, uint32_t lparam, uint32_t state, int cchildren) {
+    int slot = -1;
+    for (int k = 0; k < U32_MAX_TVNODE; k++) if (!g_u32_tv[k].used) { slot = k; break; }
+    if (slot < 0) return 0;
+    int n = u32_tv_child_count(tv, parent), rank;
+    if (after == 0xFFFF0001u /*TVI_FIRST*/) rank = 0;
+    else if (after == 0xFFFF0000u /*TVI_ROOT*/ || after == 0xFFFF0002u /*TVI_LAST*/
+             || after == 0xFFFF0003u /*TVI_SORT*/ || after == 0) rank = n;
+    else { struct u32_tvnode *s = u32_tv_node(after);
+           rank = (s && s->parent == parent && s->tv == tv) ? s->rank + 1 : n; }
+    if (rank < 0) rank = 0; if (rank > n) rank = n;
+    for (int k = 0; k < U32_MAX_TVNODE; k++)
+        if (g_u32_tv[k].used && g_u32_tv[k].tv == tv && g_u32_tv[k].parent == parent && g_u32_tv[k].rank >= rank)
+            g_u32_tv[k].rank++;
+    g_u32_tv[slot].used = 1; g_u32_tv[slot].tv = tv; g_u32_tv[slot].parent = parent;
+    g_u32_tv[slot].rank = rank; g_u32_tv[slot].lparam = lparam; g_u32_tv[slot].state = state;
+    g_u32_tv[slot].cchildren = cchildren; g_u32_tv[slot].text = NULL;
+    if (text) { size_t kk = strlen(text); g_u32_tv[slot].text = (char *)malloc(kk + 1);
+                if (g_u32_tv[slot].text) memcpy(g_u32_tv[slot].text, text, kk + 1); }
+    return (uint32_t)(slot + 1);
+}
+/* Read a TVITEM's pszText (if TVIF_TEXT) from guest memory, wide or narrow, into buf. */
+static const char *u32_tv_read_text(uint32_t itembase, int wide, char *buf, int cap) {
+    uint32_t mask = *(uint32_t *)(uintptr_t)(itembase + 0);
+    if (!(mask & 0x0001u /*TVIF_TEXT*/)) return NULL;
+    uint32_t psz = *(uint32_t *)(uintptr_t)(itembase + 16);
+    if (!psz) return NULL;
+    if (wide) u32_w2n((const uint16_t *)(uintptr_t)psz, buf, cap);
+    else { const char *s = (const char *)(uintptr_t)psz; int k = 0;
+           for (; s[k] && k < cap - 1; k++) buf[k] = s[k]; buf[k] = 0; }
+    return buf;
+}
+/* Send a WM_NOTIFY carrying an NMTREEVIEW to the treeview's parent dialog (synchronous). */
+static void u32_tv_notify(uint32_t esp, int tv, uint32_t code, uint32_t hOld, uint32_t hNew) {
+    uint32_t parent = g_u32_win[tv].parent;
+    if (!parent) return;
+    uint32_t pproc = u32_win_wndproc(parent);
+    if (!pproc) return;
+    static uint8_t nm[128];                     /* NMTREEVIEW (32-bit); the call is synchronous */
+    memset(nm, 0, sizeof nm);
+    uint32_t *h = (uint32_t *)nm;               /* NMHDR: hwndFrom@0 idFrom@4 code@8 */
+    h[0] = (uint32_t)(tv + 1);
+    h[1] = (uint32_t)g_u32_win[tv].ctrl_id;
+    h[2] = code;
+    struct u32_tvnode *no = u32_tv_node(hNew);  /* NMTREEVIEW: action@12 itemOld@16 itemNew@56 */
+    uint32_t *iold = (uint32_t *)(nm + 16); iold[0] = 0x10u /*TVIF_HANDLE*/; iold[1] = hOld;
+    uint32_t *inew = (uint32_t *)(nm + 56);
+    inew[0] = 0x10u | 0x08u | 0x04u;            /* TVIF_HANDLE|TVIF_STATE|TVIF_PARAM */
+    inew[1] = hNew;                             /* itemNew.hItem  @60 */
+    inew[2] = no ? no->state : 0;               /* itemNew.state  @64 */
+    inew[9] = no ? no->lparam : 0;              /* itemNew.lParam @92 (56+36) */
+    u32_call_wndproc(esp, pproc, parent, 0x004Eu /*WM_NOTIFY*/,
+                     (uint32_t)g_u32_win[tv].ctrl_id, (uint32_t)(uintptr_t)nm);
+}
+/* Move the caret selection to hNew: update state, fire TVN_SELCHANGING/SELCHANGED, repaint. */
+static void u32_tv_select(uint32_t esp, int tv, uint32_t hNew) {
+    uint32_t hOld = (uint32_t)g_u32_win[tv].cur_sel;
+    if (hOld == hNew) return;
+    struct u32_tvnode *o = u32_tv_node(hOld); if (o) o->state &= ~0x0002u /*TVIS_SELECTED*/;
+    struct u32_tvnode *n = u32_tv_node(hNew); if (n) n->state |= 0x0002u;
+    g_u32_win[tv].cur_sel = (int)hNew;
+    uint32_t par = g_u32_win[tv].parent;
+    int uni = (par >= 1 && par <= U32_MAX_WIN && g_u32_win[par - 1].used) ? g_u32_win[par - 1].unicode : 0;
+    u32_tv_notify(esp, tv, uni ? 0xFFFFFE3Eu /*TVN_SELCHANGINGW*/ : 0xFFFFFE6Fu /*TVN_SELCHANGINGA*/, hOld, hNew);
+    u32_tv_notify(esp, tv, uni ? 0xFFFFFE3Du /*TVN_SELCHANGEDW*/  : 0xFFFFFE6Eu /*TVN_SELCHANGEDA*/,  hOld, hNew);
+    u32_ctrl_recomposite(esp, tv);
+}
+/* Full treeview message handler. Implemented TVM_* return 1; anything else returns 0 so
+ * u32_sys_control_msg's §0 guard aborts on an unmodelled class message rather than lying. */
+static int u32_treeview_proc(uint32_t esp, uint32_t hwnd, uint32_t msg, uint32_t wp,
+                             uint32_t lp, int i, uint32_t *out) {
+    (void)hwnd;
+    if (msg == 0x0030u /*WM_SETFONT*/)    { g_u32_win[i].ctrl_font = wp; *out = 0; return 1; }
+    if (msg == 0x0031u /*WM_GETFONT*/)    { *out = g_u32_win[i].ctrl_font; return 1; }
+    if (msg == 0x0087u /*WM_GETDLGCODE*/) { *out = 0x0001u /*DLGC_WANTARROWS*/; return 1; }
+    switch (msg) {
+    case 0x1100u:      /* TVM_INSERTITEMA */
+    case 0x1132u: {    /* TVM_INSERTITEMW */
+        if (!lp) { *out = 0; return 1; }
+        int wide = (msg == 0x1132u);
+        uint32_t hParent = *(uint32_t *)(uintptr_t)(lp + 0);
+        uint32_t after   = *(uint32_t *)(uintptr_t)(lp + 4);
+        uint32_t itembase = lp + 8;
+        uint32_t mask   = *(uint32_t *)(uintptr_t)(itembase + 0);
+        uint32_t state  = (mask & 0x0008u /*TVIF_STATE*/)    ? *(uint32_t *)(uintptr_t)(itembase + 8)  : 0;
+        int cchildren   = (mask & 0x0040u /*TVIF_CHILDREN*/) ? (int)*(uint32_t *)(uintptr_t)(itembase + 32) : 0;
+        uint32_t lparam = (mask & 0x0004u /*TVIF_PARAM*/)    ? *(uint32_t *)(uintptr_t)(itembase + 36) : 0;
+        char tbuf[256]; const char *txt = u32_tv_read_text(itembase, wide, tbuf, (int)sizeof tbuf);
+        uint32_t parent = (hParent == 0xFFFF0000u /*TVI_ROOT*/ || hParent == 0) ? 0 : hParent;
+        uint32_t h = u32_tv_insert(i, parent, after, txt, lparam, state, cchildren);
+        u32_ctrl_recomposite(esp, i);
+        *out = h; return 1;
+    }
+    case 0x1101u: {    /* TVM_DELETEITEM */
+        if (lp == 0xFFFF0000u /*TVI_ROOT*/ || lp == 0) { u32_tv_free_all(i); g_u32_win[i].cur_sel = 0; }
+        else { if ((uint32_t)g_u32_win[i].cur_sel == lp) g_u32_win[i].cur_sel = 0; u32_tv_free_rec(lp); }
+        u32_ctrl_recomposite(esp, i); *out = 1; return 1;
+    }
+    case 0x1102u: {    /* TVM_EXPAND */
+        struct u32_tvnode *n = u32_tv_node(lp);
+        if (n) { if (wp == 2 /*TVE_EXPAND*/)        n->state |= 0x0020u;
+                 else if (wp == 1 /*TVE_COLLAPSE*/) n->state &= ~0x0020u;
+                 else if (wp == 3 /*TVE_TOGGLE*/)   n->state ^= 0x0020u; }
+        u32_ctrl_recomposite(esp, i); *out = n ? 1 : 0; return 1;
+    }
+    case 0x1105u: {    /* TVM_GETCOUNT */
+        int c = 0; for (int k = 0; k < U32_MAX_TVNODE; k++) if (g_u32_tv[k].used && g_u32_tv[k].tv == i) c++;
+        *out = (uint32_t)c; return 1;
+    }
+    case 0x110Au: {    /* TVM_GETNEXTITEM */
+        uint32_t r = 0;
+        switch (wp) {
+        case 0x0000u: r = u32_tv_first_child(i, 0);  break;            /* TVGN_ROOT */
+        case 0x0001u: r = u32_tv_next_sibling(lp);   break;            /* TVGN_NEXT */
+        case 0x0002u: r = u32_tv_prev_sibling(lp);   break;            /* TVGN_PREVIOUS */
+        case 0x0003u: { struct u32_tvnode *n = u32_tv_node(lp); r = n ? n->parent : 0; break; } /* TVGN_PARENT */
+        case 0x0004u: r = u32_tv_first_child(i, lp); break;            /* TVGN_CHILD */
+        case 0x0005u: r = u32_tv_first_child(i, 0);  break;            /* TVGN_FIRSTVISIBLE (approx) */
+        case 0x0009u: r = (uint32_t)g_u32_win[i].cur_sel; break;       /* TVGN_CARET */
+        default:      r = 0; break;
+        }
+        *out = r; return 1;
+    }
+    case 0x110Bu: {    /* TVM_SELECTITEM */
+        if (wp == 0x0009u /*TVGN_CARET*/) u32_tv_select(esp, i, lp);
+        *out = 1; return 1;
+    }
+    case 0x110Cu:      /* TVM_GETITEMA */
+    case 0x113Eu: {    /* TVM_GETITEMW */
+        if (!lp) { *out = 0; return 1; }
+        int wide = (msg == 0x113Eu);
+        uint32_t itembase = lp;
+        uint32_t mask  = *(uint32_t *)(uintptr_t)(itembase + 0);
+        uint32_t hItem = *(uint32_t *)(uintptr_t)(itembase + 4);
+        struct u32_tvnode *n = u32_tv_node(hItem);
+        if (!n) { *out = 0; return 1; }
+        if (mask & 0x0004u /*TVIF_PARAM*/) *(uint32_t *)(uintptr_t)(itembase + 36) = n->lparam;
+        if (mask & 0x0008u /*TVIF_STATE*/) { uint32_t sm = *(uint32_t *)(uintptr_t)(itembase + 12);
+            *(uint32_t *)(uintptr_t)(itembase + 8) = n->state & sm; }
+        if (mask & 0x0040u /*TVIF_CHILDREN*/) *(uint32_t *)(uintptr_t)(itembase + 32) =
+            (u32_tv_first_child(i, hItem) ? 1u : (uint32_t)(n->cchildren ? 1 : 0));
+        if (mask & 0x0001u /*TVIF_TEXT*/) {
+            uint32_t psz = *(uint32_t *)(uintptr_t)(itembase + 16);
+            int cap = (int)*(uint32_t *)(uintptr_t)(itembase + 20);
+            const char *t = n->text ? n->text : "";
+            if (psz && cap > 0) {
+                if (wide) { uint16_t *d = (uint16_t *)(uintptr_t)psz; int k = 0;
+                            for (; t[k] && k < cap - 1; k++) d[k] = (uint16_t)(unsigned char)t[k]; d[k] = 0; }
+                else { char *d = (char *)(uintptr_t)psz; int k = 0;
+                       for (; t[k] && k < cap - 1; k++) d[k] = t[k]; d[k] = 0; }
+            }
+        }
+        *out = 1; return 1;
+    }
+    case 0x110Du:      /* TVM_SETITEMA */
+    case 0x113Fu: {    /* TVM_SETITEMW */
+        if (!lp) { *out = 0; return 1; }
+        int wide = (msg == 0x113Fu);
+        uint32_t itembase = lp;
+        uint32_t mask  = *(uint32_t *)(uintptr_t)(itembase + 0);
+        uint32_t hItem = *(uint32_t *)(uintptr_t)(itembase + 4);
+        struct u32_tvnode *n = u32_tv_node(hItem);
+        if (!n) { *out = 0; return 1; }
+        if (mask & 0x0004u) n->lparam = *(uint32_t *)(uintptr_t)(itembase + 36);
+        if (mask & 0x0008u) { uint32_t sm = *(uint32_t *)(uintptr_t)(itembase + 12);
+            uint32_t ns = *(uint32_t *)(uintptr_t)(itembase + 8); n->state = (n->state & ~sm) | (ns & sm); }
+        if (mask & 0x0001u) { char tbuf[256]; const char *t = u32_tv_read_text(itembase, wide, tbuf, (int)sizeof tbuf);
+            if (t) { free(n->text); size_t kk = strlen(t); n->text = (char *)malloc(kk + 1);
+                     if (n->text) memcpy(n->text, t, kk + 1); } }
+        u32_ctrl_recomposite(esp, i); *out = 1; return 1;
+    }
+    case 0x1114u:      /* TVM_ENSUREVISIBLE — our layout shows all items, nothing scrolls */
+        *out = 0; return 1;
+    default:
+        return 0;      /* unmodelled TVM_* -> §0 abort in u32_sys_control_msg */
+    }
+}
+/* Paint the visible items of `parent` (rank order, honouring TVIS_EXPANDED), recursing
+ * into expanded nodes. *rowp is the running visible-row index. */
+static void u32_tv_paint_walk(uint32_t hdc, struct gdi_obj *bm, int d, uint32_t font, int wi,
+                              uint32_t parent, int depth, int *rowp, int W, int H, uint32_t sel) {
+    for (uint32_t h = u32_tv_first_child(wi, parent); h; h = u32_tv_next_sibling(h)) {
+        struct u32_tvnode *n = u32_tv_node(h); if (!n) break;
+        int row = (*rowp)++;
+        int y = 2 + row * 16, x = 3 + depth * 16;
+        if (y >= H) return;
+        int selected = (h == sel);
+        if (selected) { uint32_t hi = u32_syscolor(13 /*COLOR_HIGHLIGHT*/);
+            for (int yy = y; yy < y + 16 && yy < H; yy++)
+                for (int xx = x + 13; xx < W - 2; xx++) gdi_put(bm, xx, yy, hi); }
+        if (u32_tv_first_child(wi, h)) {                      /* +/- expander box */
+            uint32_t ln = u32_syscolor(8 /*COLOR_WINDOWTEXT*/);
+            int bx = x, by = y + 3, bs = 9;
+            for (int t = 0; t < bs; t++) { gdi_put(bm, bx + t, by, ln); gdi_put(bm, bx + t, by + bs - 1, ln);
+                                           gdi_put(bm, bx, by + t, ln); gdi_put(bm, bx + bs - 1, by + t, ln); }
+            for (int t = 2; t < bs - 2; t++) gdi_put(bm, bx + t, by + bs / 2, ln);                 /* horizontal */
+            if (!(n->state & 0x0020u /*EXPANDED*/))
+                for (int t = 2; t < bs - 2; t++) gdi_put(bm, bx + bs / 2, by + t, ln);             /* vertical -> '+' */
+        }
+        int32_t rc[4] = { x + 15, y, W - 2, y + 16 };
+        u32_paint_text(hdc, d, font, n->text ? n->text : "", rc,
+                       0x4u /*DT_VCENTER*/ | 0x20u /*DT_SINGLELINE*/ | 0x800u /*DT_NOPREFIX*/,
+                       selected ? 14 /*COLOR_HIGHLIGHTTEXT*/ : 8 /*COLOR_WINDOWTEXT*/);
+        if (n->state & 0x0020u /*EXPANDED*/)
+            u32_tv_paint_walk(hdc, bm, d, font, wi, h, depth + 1, rowp, W, H, sel);
+    }
+}
+/* Full treeview appearance: COLOR_WINDOW client, the visible item tree, a sunken border.
+ * No Wine DIB oracle exists for a treeview (doc 70 §7): verified structurally (correct
+ * items/text/selection) and qualitatively on the virtual screen. */
+static void u32_treeview_paint(uint32_t hdc, int wi) {
+    struct gdi_obj *bm = gdi_dc_surface(hdc); if (!bm) return;
+    int d = gdi_idx(hdc); if (d < 0) return;
+    int W = g_u32_win[wi].w, H = g_u32_win[wi].h;
+    uint32_t win = u32_syscolor(5 /*COLOR_WINDOW*/);
+    for (int y = 0; y < H; y++) for (int x = 0; x < W; x++) gdi_put(bm, x, y, win);
+    /* A treeview always renders its items in some font: the one it was given
+     * (WM_SETFONT), else the shell default — never blank. */
+    uint32_t font = g_u32_win[wi].ctrl_font ? g_u32_win[wi].ctrl_font : u32_stock(17 /*DEFAULT_GUI_FONT*/);
+    int row = 0;
+    u32_tv_paint_walk(hdc, bm, d, font, wi, 0, 0, &row, W, H, (uint32_t)g_u32_win[wi].cur_sel);
+    int32_t rc[4] = { 0, 0, W, H };
+    u32_drawedge(bm, rc, 0x0Au /*EDGE_SUNKEN*/, 0xFu /*BF_RECT*/);
+}
 /* Built-in proc for a predefined control with no app WNDPROC. BUTTON/STATIC/EDIT:
  * WM_SETFONT stores the font, WM_GETFONT returns it, WM_PRINTCLIENT paints the control's
  * client into the given DC; a BUTTON also handles BM_GETCHECK/BM_SETCHECK/BM_CLICK.
@@ -8764,6 +9067,7 @@ static int u32_control_proc(uint32_t esp, uint32_t hwnd, uint32_t msg, uint32_t 
     int i = (hwnd >= 1 && hwnd <= U32_MAX_WIN && g_u32_win[hwnd - 1].used) ? (int)hwnd - 1 : -1;
     if (i < 0) return 0;
     const char *cls = g_u32_win[i].classname;
+    if (!strcasecmp(cls, "systreeview32")) return u32_treeview_proc(esp, hwnd, msg, wp, lp, i, out);
     if (!u32_ctrl_paintable(cls)) return 0;
     if (msg == 0x0030u /*WM_SETFONT*/)  { g_u32_win[i].ctrl_font = wp; *out = 0; return 1; }
     if (msg == 0x0031u /*WM_GETFONT*/)  { *out = g_u32_win[i].ctrl_font; return 1; }
