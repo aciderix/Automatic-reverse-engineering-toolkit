@@ -270,14 +270,28 @@ run_one() {
       kill "$xpid" 2>/dev/null; xpid=""
     fi
   fi
-  # Oracle: real PE under Wine. Run from the fixture dir so any files land there.
-  local oracle got
-  oracle="$(cd "$WD" && "${wdo[@]}" "${disp[@]}" wine "$WD/$name.exe" "${pargs[@]}" <"$infile" 2>/dev/null | norm)"
+  # Oracle: real PE under Wine. Run from the fixture dir so any files land there. Each engine
+  # is bounded by a per-fixture timeout: a hung Wine (measured: thread_* fixtures wedged under
+  # a degraded host and stalled a whole -P run to its 60-min ceiling) must FAIL LOUDLY here,
+  # never wedge a slot, and a timed-out (empty) pair must not read as an "ok". Raw output goes
+  # to a file so the timeout exit status (124) is captured directly rather than lost through
+  # the norm pipe. Overridable via WINEDIFF_FIXTURE_TIMEOUT.
+  local oracle got owrc agrc
+  local WDT="${WINEDIFF_FIXTURE_TIMEOUT:-180}"
+  # `-k 10`: send SIGTERM at WDT, then SIGKILL 10s later if the child ignores it (a wedged
+  # wine can). Either way coreutils reports timeout as 124; a straight SIGKILL escalation can
+  # surface as 137, so both are treated as a timeout below.
+  ( cd "$WD" && timeout -k 10 "$WDT" "${wdo[@]}" "${disp[@]}" wine "$WD/$name.exe" "${pargs[@]}" <"$infile" >"$WD/oracle.raw" 2>/dev/null ); owrc=$?
+  oracle="$(norm <"$WD/oracle.raw")"
   # ARET: transpile + run the same PE natively (args after `--`).
   rm -rf "$WD/out"
-  got="$(cd "$WD" && "${disp[@]}" "$ARET" "$WD/$name.exe" "${withdll[@]}" --mode transpile --out-dir "$WD/out" --run -- "${pargs[@]}" <"$infile" 2>"$WD/aerr" \
-        | extract_aret | norm)"
+  ( cd "$WD" && timeout -k 10 "$WDT" "${disp[@]}" "$ARET" "$WD/$name.exe" "${withdll[@]}" --mode transpile --out-dir "$WD/out" --run -- "${pargs[@]}" <"$infile" >"$WD/aret.raw" 2>"$WD/aerr" ); agrc=$?
+  got="$(extract_aret <"$WD/aret.raw" | norm)"
   [ -n "$xpid" ] && kill "$xpid" 2>/dev/null
+  # A timeout is a distinct non-PASS outcome (124, or 137 on SIGKILL escalation), reported
+  # BEFORE the equality test so a both-timed-out pair can never be scored "ok" (both empty).
+  if [ "$owrc" = 124 ] || [ "$owrc" = 137 ]; then echo "TIMEOUT $name (oracle wine >${WDT}s)"; return 1; fi
+  if [ "$agrc" = 124 ] || [ "$agrc" = 137 ]; then echo "TIMEOUT $name (ARET >${WDT}s)"; return 1; fi
   if [ "$oracle" = "$got" ]; then
     echo "  ok    $name"; return 0
   elif [ -z "$got" ]; then
@@ -353,6 +367,14 @@ fi
 
 mkdir -p "$TMP/log" "$TMP/w"
 export ARET_WD_TMP="$TMP"
+# Shared object cache across all fixtures of this run: the ~15k-line HLE runtime (aret_win32.c
+# et al.) is byte-identical for every fixture, so it compiles ONCE and the other ~290 fixtures
+# reuse the .o instead of recompiling it each — the dominant cost of a run after a runtime
+# change. The cache stores via a pid-suffixed temp + atomic rename (objcache.rs), so it is
+# concurrency-safe under -P; identical key => identical object, last-rename-wins is harmless.
+# Purely a compile-time cache: the produced binary (and thus every PASS/FAIL verdict) is
+# unchanged. Overridable/inspectable via ARET_OBJCACHE; ARET_NO_OBJCACHE=1 disables it.
+export ARET_OBJCACHE="${ARET_OBJCACHE:-$TMP/objcache}"
 jobs="${WINEDIFF_JOBS:-$(nproc 2>/dev/null || echo 4)}"
 # Window-creating fixtures run SERIALLY, the rest in parallel. Measured, not assumed:
 # with everything parallel, `user32_listbox` and `user32_isdlgmsg` intermittently came
