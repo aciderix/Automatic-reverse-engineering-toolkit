@@ -396,6 +396,22 @@ uint32_t aret_stdio_common_vsprintf(uint32_t esp) {
     if (dst && cap) { size_t c = n < cap - 1 ? n : cap - 1; memcpy(dst, tmp, c); dst[c] = 0; }
     return (uint32_t)n;
 }
+size_t aret_wvformat(uint16_t *out, size_t cap, const uint16_t *fmt, const uint32_t *a);  /* fwd */
+/* __stdio_common_vswprintf(uint64 options, wchar_t* buf, size_t count, const wchar_t* fmt,
+ * _locale_t locale, va_list va) — the UCRT WIDE vsnprintf core (the wide twin of
+ * __stdio_common_vsprintf; swprintf/vswprintf route through it). Same slot layout: options
+ * 0-1, buf=2, count=3, fmt=4, locale=5, va=6. Truncating vswprintf contract via the shared
+ * wide formatter aret_wvformat (options/locale ignored — the C locale is our default). */
+uint32_t aret_stdio_common_vswprintf(uint32_t esp) {
+    uint16_t *dst = (uint16_t *)AP(2); size_t cap = AU(3);
+    const uint16_t *fmt = (const uint16_t *)AP(4);
+    const uint32_t *va = (const uint32_t *)(uintptr_t)AU(6);
+    if (!fmt) return (uint32_t)-1;
+    static uint16_t tmp[8192];
+    size_t n = aret_wvformat(tmp, 8192, fmt, va);
+    if (dst && cap) { size_t c = n < cap - 1 ? n : cap - 1; memcpy(dst, tmp, c * 2); dst[c] = 0; }
+    return (uint32_t)n;
+}
 
 /* sscanf core — parse `in` per `fmt`, writing to the pointer args `a[]`. Returns the
  * number of items assigned, or EOF(-1) if input ran out before the first assignment.
