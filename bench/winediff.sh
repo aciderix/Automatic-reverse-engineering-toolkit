@@ -280,13 +280,16 @@ run_one() {
   local WDT="${WINEDIFF_FIXTURE_TIMEOUT:-180}"
   # `-k 10`: send SIGTERM at WDT, then SIGKILL 10s later if the child ignores it (a wedged
   # wine can). Either way coreutils reports timeout as 124; a straight SIGKILL escalation can
-  # surface as 137, so both are treated as a timeout below.
-  ( cd "$WD" && timeout -k 10 "$WDT" "${wdo[@]}" "${disp[@]}" wine "$WD/$name.exe" "${pargs[@]}" <"$infile" >"$WD/oracle.raw" 2>/dev/null ); owrc=$?
-  oracle="$(norm <"$WD/oracle.raw")"
+  # surface as 137, so both are treated as a timeout below. The engine's stdout MUST stay a
+  # PIPE (not a file): console_tty and kin report GetFileType(stdout), so a file vs a pipe is
+  # a real observable difference. The exit status is smuggled out to a per-fixture file from
+  # inside the pipeline's first stage, so the pipe is preserved while the timeout is still seen.
+  oracle="$(cd "$WD" && { timeout -k 10 "$WDT" "${wdo[@]}" "${disp[@]}" wine "$WD/$name.exe" "${pargs[@]}" <"$infile" 2>/dev/null; echo $? >"$WD/owrc"; } | norm)"
+  owrc="$(cat "$WD/owrc" 2>/dev/null)"
   # ARET: transpile + run the same PE natively (args after `--`).
   rm -rf "$WD/out"
-  ( cd "$WD" && timeout -k 10 "$WDT" "${disp[@]}" "$ARET" "$WD/$name.exe" "${withdll[@]}" --mode transpile --out-dir "$WD/out" --run -- "${pargs[@]}" <"$infile" >"$WD/aret.raw" 2>"$WD/aerr" ); agrc=$?
-  got="$(extract_aret <"$WD/aret.raw" | norm)"
+  got="$(cd "$WD" && { timeout -k 10 "$WDT" "${disp[@]}" "$ARET" "$WD/$name.exe" "${withdll[@]}" --mode transpile --out-dir "$WD/out" --run -- "${pargs[@]}" <"$infile" 2>"$WD/aerr"; echo $? >"$WD/agrc"; } | extract_aret | norm)"
+  agrc="$(cat "$WD/agrc" 2>/dev/null)"
   [ -n "$xpid" ] && kill "$xpid" 2>/dev/null
   # A timeout is a distinct non-PASS outcome (124, or 137 on SIGKILL escalation), reported
   # BEFORE the equality test so a both-timed-out pair can never be scored "ok" (both empty).
