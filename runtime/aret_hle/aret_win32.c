@@ -5151,6 +5151,9 @@ uint32_t aret_GetWindowRect(uint32_t esp) {
     if (i < 0) return 0;
     int sx, sy; u32_screen_origin(i, &sx, &sy);
     r[0] = sx; r[1] = sy; r[2] = sx + g_u32_win[i].w; r[3] = sy + g_u32_win[i].h;
+    if (getenv("ARET_GUI_TRACE"))
+        fprintf(stderr, "[GUI] GetWindowRect id=%d -> %d,%d,%d,%d\n",
+                g_u32_win[i].ctrl_id, r[0], r[1], r[2], r[3]);
     return 1;
 }
 /* SetWindowPos(HWND, hwndInsertAfter, X, Y, cx, cy, uFlags) -> BOOL. Honours
@@ -6579,6 +6582,9 @@ uint32_t aret_MapWindowPoints(uint32_t esp) {
     if (fi >= 0) u32_screen_origin(fi, &fx, &fy);       /* full parent chain, not just one level */
     if (ti >= 0) u32_screen_origin(ti, &tx, &ty);
     int dx = fx - tx, dy = fy - ty;
+    if (getenv("ARET_GUI_TRACE"))
+        fprintf(stderr, "[GUI] MapWindowPoints from_id=%d to_id=%d d=%d,%d n=%u\n",
+                fi >= 0 ? g_u32_win[fi].ctrl_id : -1, ti >= 0 ? g_u32_win[ti].ctrl_id : -1, dx, dy, n);
     if (pt) for (uint32_t k = 0; k < n; k++) { pt[k * 2] += dx; pt[k * 2 + 1] += dy; }
     return ((uint32_t)(dy & 0xFFFF) << 16) | (uint32_t)(dx & 0xFFFF);
 }
@@ -11569,6 +11575,8 @@ uint32_t aret_GetClientRect(uint32_t esp) {
     int i = u32_win_idx(WU(0));
     if (i < 0) { r[0] = r[1] = r[2] = r[3] = 0; return 0; }
     r[0] = 0; r[1] = 0; r[2] = g_u32_win[i].w; r[3] = g_u32_win[i].h;
+    if (getenv("ARET_GUI_TRACE"))
+        fprintf(stderr, "[GUI] GetClientRect id=%d -> %dx%d\n", g_u32_win[i].ctrl_id, r[2], r[3]);
     return 1;
 }
 /* AdjustWindowRect(RECT*, style, bMenu) / …Ex -> BOOL. No non-client area is
