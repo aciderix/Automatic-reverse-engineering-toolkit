@@ -1,0 +1,24 @@
+{
+  "format": "aret-oracle-artifact/v1",
+  "oracle": "winediff",
+  "kind": "WINEDIFF",
+  "command": "bash /home/user/Automatic-reverse-engineering-toolkit/bench/winediff.sh",
+  "result": "ERROR",
+  "exit_code": null,
+  "started_at": "2026-09-11T20:38:35Z",
+  "finished_at": "2026-09-11T21:38:35Z",
+  "environment": {
+    "adapter": "aret-mmu-oracles/1",
+    "oracle": "winediff",
+    "repository": "/home/user/Automatic-reverse-engineering-toolkit",
+    "repository_revision": "f700048788915bd403e31c3c9ecc4f1db6aa68c3",
+    "script": "bench/winediff.sh",
+    "fixture": "",
+    "timeout_seconds": 3600,
+    "missing_dependencies": [],
+    "timed_out": true,
+    "duration_seconds": 3600.005
+  },
+  "stdout": "",
+  "stderr": ""
+}
