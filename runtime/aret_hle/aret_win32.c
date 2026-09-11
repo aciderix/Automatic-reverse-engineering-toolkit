@@ -6801,12 +6801,29 @@ static uint32_t u32_rm_prop(uint32_t hwnd, const char *key) {
     if (!key) return 0; int i = u32_prop_find(hwnd, key);
     if (i < 0) return 0; uint32_t v = g_u32_prop[i].val; g_u32_prop[i].used = 0; return v;
 }
-uint32_t aret_SetPropA(uint32_t esp) { return u32_set_prop(WU(0), WCS(1), WU(2)); }
-uint32_t aret_GetPropA(uint32_t esp) { return u32_get_prop(WU(0), WCS(1)); }
-uint32_t aret_RemovePropA(uint32_t esp) { return u32_rm_prop(WU(0), WCS(1)); }
-uint32_t aret_SetPropW(uint32_t esp) { char k[64]; u32_w2n((const uint16_t *)WP(1), k, sizeof k); return u32_set_prop(WU(0), k, WU(2)); }
-uint32_t aret_GetPropW(uint32_t esp) { char k[64]; u32_w2n((const uint16_t *)WP(1), k, sizeof k); return u32_get_prop(WU(0), k); }
-uint32_t aret_RemovePropW(uint32_t esp) { char k[64]; u32_w2n((const uint16_t *)WP(1), k, sizeof k); return u32_rm_prop(WU(0), k); }
+/* The Get/Set/RemoveProp string argument is EITHER a string pointer OR a MAKEINTATOM
+ * integer atom (value < 0x10000) — comctl32 keys all its per-window state on a global atom
+ * (GlobalAddAtom then GetPropW(hwnd, atom)), so treating the atom as a pointer derefs a small
+ * integer and crashes. Resolve an atom to its registered global-atom name (so a prop set by
+ * name and read by atom, or vice-versa, share one key like Windows), else a stable synthetic
+ * "#<n>" key; a real pointer is copied/widened as before. General for every prop caller. */
+static int u32_resolve_global_atom(uint32_t atom, char *out, int cap);   /* fwd (with atom table) */
+static void u32_prop_key(uint32_t arg, int wide, char *out, int cap) {
+    if (arg < 0x10000u) {
+        if (arg && u32_resolve_global_atom(arg, out, cap)) return;
+        snprintf(out, (size_t)cap, "#%u", arg);       /* unregistered atom / 0 -> stable key */
+        return;
+    }
+    if (wide) u32_w2n((const uint16_t *)(uintptr_t)arg, out, cap);
+    else { const char *s = (const char *)(uintptr_t)arg; int k = 0;
+           for (; s[k] && k < cap - 1; k++) out[k] = s[k]; out[k] = 0; }
+}
+uint32_t aret_SetPropA(uint32_t esp) { char k[64]; u32_prop_key(WU(1), 0, k, sizeof k); return u32_set_prop(WU(0), k, WU(2)); }
+uint32_t aret_GetPropA(uint32_t esp) { char k[64]; u32_prop_key(WU(1), 0, k, sizeof k); return u32_get_prop(WU(0), k); }
+uint32_t aret_RemovePropA(uint32_t esp) { char k[64]; u32_prop_key(WU(1), 0, k, sizeof k); return u32_rm_prop(WU(0), k); }
+uint32_t aret_SetPropW(uint32_t esp) { char k[64]; u32_prop_key(WU(1), 1, k, sizeof k); return u32_set_prop(WU(0), k, WU(2)); }
+uint32_t aret_GetPropW(uint32_t esp) { char k[64]; u32_prop_key(WU(1), 1, k, sizeof k); return u32_get_prop(WU(0), k); }
+uint32_t aret_RemovePropW(uint32_t esp) { char k[64]; u32_prop_key(WU(1), 1, k, sizeof k); return u32_rm_prop(WU(0), k); }
 /* GetOpenFileNameA/GetSaveFileNameA(OPENFILENAME*) -> BOOL. No file chooser is
  * shown (display-free): report cancellation (FALSE), the sound "user picked
  * nothing" outcome — never a guessed filename. */
@@ -13469,6 +13486,15 @@ static uint32_t u32_atom_name_of(struct u32_atom *t, uint32_t atom, char out[256
     for (; t[i].name[k]; k++) out[k] = t[i].name[k];
     out[k] = 0;
     return k;
+}
+/* Resolve a GLOBAL atom (as used by Get/Set/RemoveProp with MAKEINTATOM) to its narrow
+ * name; returns 1 with `out` filled, 0 if the atom is not a live global atom. */
+static int u32_resolve_global_atom(uint32_t atom, char *out, int cap) {
+    char tmp[256];
+    uint32_t n = u32_atom_name_of(g_atom_global, atom, tmp);
+    if (n == 0 || !tmp[0]) return 0;
+    int k = 0; for (; tmp[k] && k < cap - 1; k++) out[k] = tmp[k]; out[k] = 0;
+    return 1;
 }
 /* Copy the atom name into a narrow buffer: full length if it fits, else fill the
  * buffer (bounded), set ERROR_MORE_DATA, and return the copied count for the
