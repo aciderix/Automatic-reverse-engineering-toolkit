@@ -4000,6 +4000,7 @@ static struct {
     int is_dialog;           /* created by u32_dialog_create -> composite its child controls for display */
     char **items; int item_count, item_cap, cur_sel;   /* LISTBOX/COMBOBOX item model */
     uint32_t dlg_font;       /* HFONT of the dialog font (DS_SETFONT), applied to its controls */
+    struct { uint32_t proc, id, ref; } subcls[8]; int subcls_n;  /* comctl32 SetWindowSubclass chain */
     int wnd_rgn_set, wnd_rgn_l, wnd_rgn_t, wnd_rgn_r, wnd_rgn_b, wnd_rgn_complex;  /* Set/GetWindowRgn */
 #ifdef ARET_HAVE_SDL
     void *sdl_win, *sdl_ren, *sdl_tex;  /* SDL window/renderer/streaming texture */
@@ -4478,6 +4479,7 @@ static uint32_t u32_window_create(uint32_t wndproc, uint32_t exstyle, uint32_t s
             g_u32_win[i].extra_len = 0;
             g_u32_win[i].items = NULL; g_u32_win[i].item_count = 0; g_u32_win[i].item_cap = 0; g_u32_win[i].cur_sel = -1;
             g_u32_win[i].is_dialog = 0; g_u32_win[i].du_x = 0; g_u32_win[i].du_y = 0; g_u32_win[i].dlg_font = 0;
+            g_u32_win[i].subcls_n = 0;
             g_u32_win[i].wnd_rgn_set = 0;
             memset(g_u32_win[i].extra, 0, sizeof g_u32_win[i].extra);
             int k = 0; if (title) for (; title[k] && k < 255; k++) g_u32_win[i].title[k] = title[k];
@@ -4989,12 +4991,105 @@ static int u32_sys_control_msg(uint32_t esp, uint32_t hwnd, uint32_t msg,
 static void u32_dialog_hittest_click(uint32_t esp, int di, int x, int y);
 static void u32_ctrl_recomposite(uint32_t esp, int ci);   /* fwd: recompose a control's parent dialog (no-op without SDL) */
 static uint32_t g_u32_focus;   /* fwd: focused window/control (keyboard target); defined below */
+
+/* ---- comctl32 window subclassing (SetWindowSubclass & friends) --------------------
+ * A window carries a chain of subclass procs. A message delivered to the window runs the
+ * NEWEST subclass proc first (signature proc(hwnd,msg,wp,lp,uIdSubclass,dwRefData)); each
+ * calls DefSubclassProc to pass to the next-older proc, and the bottom of the chain is the
+ * window's original wndproc (or, for a predefined control with no wndproc, the built-in
+ * system-control dispatch). The current position in the chain per active delivery is held
+ * on g_u32_subcls_stk so a proc that reentrantly SendMessages the same window opens a fresh
+ * walk. General (used by comctl32 apps — notepad subclasses its EDIT); no per-binary code. */
+static struct { uint32_t hwnd; int idx; } g_u32_subcls_stk[64];
+static int g_u32_subcls_sp;
+/* Call a 6-arg stdcall SUBCLASSPROC just below the live esp (same frame recipe as
+ * u32_call_wndproc, two extra args). */
+static uint32_t u32_call_subclassproc(uint32_t esp, uint32_t proc, uint32_t hwnd, uint32_t msg,
+                                      uint32_t wp, uint32_t lp, uint32_t id, uint32_t ref) {
+    uint32_t frame = (esp - 64) & ~15u;
+    uint32_t *f = (uint32_t *)(uintptr_t)frame;
+    f[0] = 0; f[1] = hwnd; f[2] = msg; f[3] = wp; f[4] = lp; f[5] = id; f[6] = ref;
+    return (uint32_t)aret_call(proc, frame, 0, 0, 0, 0, 0, 0, 0);
+}
+/* Advance one step down the current delivery's subclass chain (used by both the entry and
+ * DefSubclassProc): the next-lower proc, or the original handler at the bottom. */
+static uint32_t u32_subcls_call_next(uint32_t esp, int wi, uint32_t hwnd, uint32_t msg,
+                                     uint32_t wp, uint32_t lp, int wide) {
+    int sp = g_u32_subcls_sp - 1;
+    int idx = (sp >= 0 && g_u32_subcls_stk[sp].hwnd == hwnd) ? --g_u32_subcls_stk[sp].idx : -1;
+    if (idx >= 0 && idx < g_u32_win[wi].subcls_n)
+        return u32_call_subclassproc(esp, g_u32_win[wi].subcls[idx].proc, hwnd, msg, wp, lp,
+                                     g_u32_win[wi].subcls[idx].id, g_u32_win[wi].subcls[idx].ref);
+    uint32_t orig = g_u32_win[wi].wndproc;                 /* bottom of chain */
+    if (orig) return u32_call_wndproc(esp, orig, hwnd, msg, wp, lp);
+    uint32_t r = 0; u32_sys_control_msg(esp, hwnd, msg, wp, lp, wide, &r); return r;
+}
+/* Deliver a message to a subclassed window: push a fresh chain-walk, run the newest proc.
+ * Returns 1 (handled, result in *out) when the window has a subclass chain, else 0. */
+static int u32_deliver_subclassed(uint32_t esp, uint32_t hwnd, uint32_t msg, uint32_t wp,
+                                  uint32_t lp, int wide, uint32_t *out) {
+    int wi = (hwnd >= 1 && hwnd <= U32_MAX_WIN && g_u32_win[hwnd - 1].used) ? (int)hwnd - 1 : -1;
+    if (wi < 0 || g_u32_win[wi].subcls_n <= 0 || g_u32_subcls_sp >= 64) return 0;
+    g_u32_subcls_stk[g_u32_subcls_sp].hwnd = hwnd;
+    g_u32_subcls_stk[g_u32_subcls_sp].idx = g_u32_win[wi].subcls_n;   /* first --idx -> newest */
+    g_u32_subcls_sp++;
+    *out = u32_subcls_call_next(esp, wi, hwnd, msg, wp, lp, wide);
+    g_u32_subcls_sp--;
+    return 1;
+}
+/* SetWindowSubclass(hwnd, pfnSubclass, uIdSubclass, dwRefData) -> BOOL. Adds the (proc,id)
+ * pair at the top of the chain, or updates dwRefData if it is already installed. */
+uint32_t aret_SetWindowSubclass(uint32_t esp) {
+    uint32_t hwnd = WU(0), proc = WU(1), id = WU(2), ref = WU(3);
+    int wi = (hwnd >= 1 && hwnd <= U32_MAX_WIN && g_u32_win[hwnd - 1].used) ? (int)hwnd - 1 : -1;
+    if (wi < 0 || !proc) return 0;
+    for (int i = 0; i < g_u32_win[wi].subcls_n; i++)
+        if (g_u32_win[wi].subcls[i].proc == proc && g_u32_win[wi].subcls[i].id == id) {
+            g_u32_win[wi].subcls[i].ref = ref; return 1; }
+    if (g_u32_win[wi].subcls_n >= 8) return 0;
+    int i = g_u32_win[wi].subcls_n++;
+    g_u32_win[wi].subcls[i].proc = proc; g_u32_win[wi].subcls[i].id = id; g_u32_win[wi].subcls[i].ref = ref;
+    return 1;
+}
+/* GetWindowSubclass(hwnd, pfnSubclass, uIdSubclass, pdwRefData) -> BOOL. */
+uint32_t aret_GetWindowSubclass(uint32_t esp) {
+    uint32_t hwnd = WU(0), proc = WU(1), id = WU(2); uint32_t *pref = (uint32_t *)WP(3);
+    int wi = (hwnd >= 1 && hwnd <= U32_MAX_WIN && g_u32_win[hwnd - 1].used) ? (int)hwnd - 1 : -1;
+    if (wi < 0) return 0;
+    for (int i = 0; i < g_u32_win[wi].subcls_n; i++)
+        if (g_u32_win[wi].subcls[i].proc == proc && g_u32_win[wi].subcls[i].id == id) {
+            if (pref) *pref = g_u32_win[wi].subcls[i].ref; return 1; }
+    return 0;
+}
+/* RemoveWindowSubclass(hwnd, pfnSubclass, uIdSubclass) -> BOOL. */
+uint32_t aret_RemoveWindowSubclass(uint32_t esp) {
+    uint32_t hwnd = WU(0), proc = WU(1), id = WU(2);
+    int wi = (hwnd >= 1 && hwnd <= U32_MAX_WIN && g_u32_win[hwnd - 1].used) ? (int)hwnd - 1 : -1;
+    if (wi < 0) return 0;
+    for (int i = 0; i < g_u32_win[wi].subcls_n; i++)
+        if (g_u32_win[wi].subcls[i].proc == proc && g_u32_win[wi].subcls[i].id == id) {
+            for (int j = i + 1; j < g_u32_win[wi].subcls_n; j++) g_u32_win[wi].subcls[j - 1] = g_u32_win[wi].subcls[j];
+            g_u32_win[wi].subcls_n--; return 1; }
+    return 0;
+}
+/* DefSubclassProc(hwnd, msg, wParam, lParam) -> LRESULT. Continue the current delivery down
+ * the chain (called from inside a subclass proc). */
+uint32_t aret_DefSubclassProc(uint32_t esp) {
+    uint32_t hwnd = WU(0);
+    int wi = (hwnd >= 1 && hwnd <= U32_MAX_WIN && g_u32_win[hwnd - 1].used) ? (int)hwnd - 1 : -1;
+    if (wi < 0) return 0;
+    return u32_subcls_call_next(esp, wi, hwnd, WU(1), WU(2), WU(3), g_u32_win[wi].unicode);
+}
+
 /* SendMessage(HWND,UINT,WPARAM,LPARAM) -> LRESULT. Synchronous: call the WNDPROC now; a
  * predefined control with no WNDPROC is served by the system-control dispatch. */
 static uint32_t u32_send_message(uint32_t esp, int wide) {
-    uint32_t wndproc = u32_win_wndproc(WU(0));
-    if (!wndproc) { uint32_t r = 0; if (u32_sys_control_msg(esp, WU(0), WU(1), WU(2), WU(3), wide, &r)) return r; return 0; }
-    uint32_t r = u32_call_wndproc(esp, wndproc, WU(0), WU(1), WU(2), WU(3));
+    uint32_t r;
+    if (!u32_deliver_subclassed(esp, WU(0), WU(1), WU(2), WU(3), wide, &r)) {
+        uint32_t wndproc = u32_win_wndproc(WU(0));
+        if (!wndproc) { r = 0; if (u32_sys_control_msg(esp, WU(0), WU(1), WU(2), WU(3), wide, &r)) return r; return 0; }
+        r = u32_call_wndproc(esp, wndproc, WU(0), WU(1), WU(2), WU(3));
+    }
     /* DefDlgProc default for WM_GETFONT: a DLGPROC that returns FALSE (0) leaves the query to
      * the dialog manager, which reports the dialog's DS_SETFONT font. Apps read it at
      * WM_INITDIALOG to apply to controls they create dynamically — PuTTY's ctlposinit does
@@ -5017,9 +5112,13 @@ uint32_t aret_DispatchMessageW(uint32_t esp) {
     uint32_t hwnd = m[0], msg = m[1], wp = m[2], lp = m[3];
     if (msg == U32_WM_TIMER && lp)          /* TIMERPROC callback */
         return u32_call_wndproc(esp, lp, hwnd, msg, wp, (uint32_t)(mono_ns() / 1000000ull));
-    uint32_t wndproc = u32_win_wndproc(hwnd);
-    if (!wndproc) return 0;
-    uint32_t ret = u32_call_wndproc(esp, wndproc, hwnd, msg, wp, lp);
+    int wu = (hwnd >= 1 && hwnd <= U32_MAX_WIN && g_u32_win[hwnd - 1].used) ? g_u32_win[hwnd - 1].unicode : 1;
+    uint32_t ret;
+    if (!u32_deliver_subclassed(esp, hwnd, msg, wp, lp, wu, &ret)) {
+        uint32_t wndproc = u32_win_wndproc(hwnd);
+        if (!wndproc) return 0;
+        ret = u32_call_wndproc(esp, wndproc, hwnd, msg, wp, lp);
+    }
     /* After the DLGPROC sees a left-button release on a dialog (it usually ignores it),
      * route the click to the child control under the cursor — our controls are not
      * separate input windows, so the dialog does the hit-test that Wine's per-window
