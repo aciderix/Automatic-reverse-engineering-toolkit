@@ -5127,14 +5127,30 @@ static int u32_win_idx(uint32_t hwnd) {
 /* GetWindowRect(HWND, RECT*) -> BOOL. Screen coords {left,top,right,bottom} =
  * {x, y, x+w, y+h} (Wine returns exactly the CreateWindow geometry). The desktop
  * pseudo-window reports the virtual screen. */
+/* Screen-space origin of window `i`: sum its own x/y with every ancestor's up to the
+ * top-level (whose x/y IS its screen position). A child's stored x/y is relative to its
+ * parent's client area, so GetWindowRect / Client<->Screen / MapWindowPoints must walk the
+ * chain — returning a child's parent-relative rect as if it were screen coords makes an app
+ * that reads a control's rect and re-maps it (PuTTY's radioline) land it at a wrong,
+ * often negative, position. For a top-level window this is just its own x/y (unchanged). */
+static void u32_screen_origin(int i, int *sx, int *sy) {
+    int x = 0, y = 0, cur = i, guard = 0;
+    while (cur >= 0 && cur < U32_MAX_WIN && g_u32_win[cur].used && guard++ < U32_MAX_WIN) {
+        x += g_u32_win[cur].x; y += g_u32_win[cur].y;
+        uint32_t p = g_u32_win[cur].parent;
+        if (p < 1 || p > U32_MAX_WIN) break;
+        cur = (int)p - 1;
+    }
+    *sx = x; *sy = y;
+}
 uint32_t aret_GetWindowRect(uint32_t esp) {
     uint32_t hwnd = WU(0); int32_t *r = (int32_t *)WP(1);
     if (!r) return 0;
     if (hwnd == U32_DESKTOP) { r[0] = 0; r[1] = 0; r[2] = U32_SCREEN_W; r[3] = U32_SCREEN_H; return 1; }
     int i = u32_win_idx(hwnd);
     if (i < 0) return 0;
-    r[0] = g_u32_win[i].x; r[1] = g_u32_win[i].y;
-    r[2] = g_u32_win[i].x + g_u32_win[i].w; r[3] = g_u32_win[i].y + g_u32_win[i].h;
+    int sx, sy; u32_screen_origin(i, &sx, &sy);
+    r[0] = sx; r[1] = sy; r[2] = sx + g_u32_win[i].w; r[3] = sy + g_u32_win[i].h;
     return 1;
 }
 /* SetWindowPos(HWND, hwndInsertAfter, X, Y, cx, cy, uFlags) -> BOOL. Honours
@@ -6559,8 +6575,9 @@ uint32_t aret_MapWindowPoints(uint32_t esp) {
     int32_t *pt = (int32_t *)WP(2);
     uint32_t n = WU(3);
     int fi = u32_win_idx(WU(0)), ti = u32_win_idx(WU(1));
-    int fx = fi >= 0 ? g_u32_win[fi].x : 0, fy = fi >= 0 ? g_u32_win[fi].y : 0;
-    int tx = ti >= 0 ? g_u32_win[ti].x : 0, ty = ti >= 0 ? g_u32_win[ti].y : 0;
+    int fx = 0, fy = 0, tx = 0, ty = 0;                 /* screen origins; DESKTOP/invalid = (0,0) */
+    if (fi >= 0) u32_screen_origin(fi, &fx, &fy);       /* full parent chain, not just one level */
+    if (ti >= 0) u32_screen_origin(ti, &tx, &ty);
     int dx = fx - tx, dy = fy - ty;
     if (pt) for (uint32_t k = 0; k < n; k++) { pt[k * 2] += dx; pt[k * 2 + 1] += dy; }
     return ((uint32_t)(dy & 0xFFFF) << 16) | (uint32_t)(dx & 0xFFFF);
@@ -11972,13 +11989,15 @@ uint32_t aret_CharPrevW(uint32_t esp) { uint32_t s = WU(0), c = WU(1); return c 
 uint32_t aret_ClientToScreen(uint32_t esp) {
     int i = u32_win_idx(WU(0)); int32_t *pt = (int32_t *)WP(1);
     if (i < 0 || !pt) return 0;
-    pt[0] += g_u32_win[i].x; pt[1] += g_u32_win[i].y;
+    int sx, sy; u32_screen_origin(i, &sx, &sy);   /* full parent chain, not just this window */
+    pt[0] += sx; pt[1] += sy;
     return 1;
 }
 uint32_t aret_ScreenToClient(uint32_t esp) {
     int i = u32_win_idx(WU(0)); int32_t *pt = (int32_t *)WP(1);
     if (i < 0 || !pt) return 0;
-    pt[0] -= g_u32_win[i].x; pt[1] -= g_u32_win[i].y;
+    int sx, sy; u32_screen_origin(i, &sx, &sy);
+    pt[0] -= sx; pt[1] -= sy;
     return 1;
 }
 
