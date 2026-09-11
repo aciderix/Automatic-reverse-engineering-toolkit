@@ -5647,6 +5647,38 @@ uint32_t aret_PathFindFileNameA(uint32_t esp) { ARET_PFFN_BODY(char) }
 uint32_t aret_PathFindFileNameW(uint32_t esp) { ARET_PFFN_BODY(uint16_t) }
 #undef ARET_PFFN_BODY
 
+/* GetFileTitleA/W(lpFile, lpTitle, cbBuf) -> short. The file-name (title) component of a
+ * path, copied into lpTitle. Matches Wine's comdlg32 contract (measured): NULL arg, empty
+ * path, a wildcard char (`*` `[` `]`), or a trailing separator (`/ \ :`) -> -1; otherwise the
+ * component after the last `/ \ :` (or the whole string if none). Returns 0 on success; if
+ * the buffer (cbBuf chars) is too small, returns the required size (title length + NUL). */
+#define ARET_GFT_BODY(TYPE)                                                          \
+    const TYPE *f = (const TYPE *)(uintptr_t)WU(0);                                  \
+    TYPE *t = (TYPE *)(uintptr_t)WU(1);                                              \
+    int cb = (int)(WU(2) & 0xFFFFu);                                                 \
+    if (!f || !t) return (uint32_t)(int32_t)-1;                                      \
+    int len = 0; while (f[len]) len++;                                               \
+    if (len == 0) return (uint32_t)(int32_t)-1;                                      \
+    for (int k = 0; k < len; k++)                                                    \
+        if (f[k]==(TYPE)'*' || f[k]==(TYPE)'[' || f[k]==(TYPE)']') return (uint32_t)(int32_t)-1; \
+    if (f[len-1]==(TYPE)'/' || f[len-1]==(TYPE)'\\' || f[len-1]==(TYPE)':') return (uint32_t)(int32_t)-1; \
+    int i = len - 1;                                                                 \
+    for (; i >= 0; i--) if (f[i]==(TYPE)'/' || f[i]==(TYPE)'\\' || f[i]==(TYPE)':') break; \
+    i++;   /* char after the last separator, or 0 when none was found */             \
+    int need = 0; while (f[i + need]) need++; need++;   /* + NUL */                  \
+    if (cb < need) return (uint32_t)need;                                            \
+    for (int k = 0; k < need; k++) t[k] = f[i + k];                                  \
+    return 0;
+uint32_t aret_GetFileTitleA(uint32_t esp) { ARET_GFT_BODY(char) }
+uint32_t aret_GetFileTitleW(uint32_t esp) { ARET_GFT_BODY(uint16_t) }
+#undef ARET_GFT_BODY
+
+/* DragAcceptFiles(hwnd, fAccept) -> void. Registers a window to receive dropped files
+ * (WM_DROPFILES via the shell). ARET models no drag-and-drop source, so no file is ever
+ * dropped and no WM_DROPFILES is ever delivered — registering is a sound no-op with no
+ * observable effect on a headless run (not a guessed value: it produces nothing to guess). */
+uint32_t aret_DragAcceptFiles(uint32_t esp) { (void)esp; return 0; }
+
 /* shlwapi, the ROOT-AWARE lexical path family (wave 1). Eight functions that all
  * turn on the same question — where does this path's root end — so they are derived
  * and gated together: `winecorpus/win32_pathroot.c` sweeps ONE grid of 25 paths
