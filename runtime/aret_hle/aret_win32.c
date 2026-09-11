@@ -4029,6 +4029,8 @@ static int u32_treeview_proc(uint32_t esp, uint32_t hwnd, uint32_t msg, uint32_t
                              uint32_t lp, int i, uint32_t *out);   /* fwd */
 static void u32_treeview_paint(uint32_t hdc, int wi);             /* fwd */
 static void u32_tv_free_all(int tv);                              /* fwd */
+static int  u32_font_tm_height(uint32_t font);                    /* fwd */
+static void u32_combo_fit_height(int wi);                         /* fwd */
 
 #ifdef ARET_HAVE_SDL
 /* G2b window-presentation helpers (defined after the GDI object model, which they
@@ -4798,7 +4800,8 @@ uint32_t aret_CreateWindowExW(uint32_t esp) {
              g_u32_win[h - 1].extra_len = we > 64 ? 64 : (int)we;
              if (WU(3) & 0x40000000u) g_u32_win[h - 1].ctrl_id = (int)WU(9);  /* WS_CHILD: hMenu=id */
              u32_fire_cbt_createwnd(esp, (int)h - 1, WU(8), WU(9), WU(1), WU(2));  /* MFC CWnd attach */
-             if (!u32_create_dispatch(esp, (int)h - 1, WU(8), WU(9))) { g_u32_win[h - 1].used = 0; return 0; } }
+             if (!u32_create_dispatch(esp, (int)h - 1, WU(8), WU(9))) { g_u32_win[h - 1].used = 0; return 0; }
+             u32_combo_fit_height((int)h - 1); }   /* combobox window h = closed field height, not dropped cy */
     if (getenv("ARET_GUI_TRACE"))
         fprintf(stderr, "[GUI] CWEx.W h=%u cls=%s title=\"%.32s\" parent=%u vis=%d child=%d id=%d\n",
                 h, h ? g_u32_win[h - 1].classname : "?", h ? g_u32_win[h - 1].title : "", WU(8),
@@ -4823,7 +4826,8 @@ uint32_t aret_CreateWindowExA(uint32_t esp) {
              g_u32_win[h - 1].extra_len = we > 64 ? 64 : (int)we;
              if (WU(3) & 0x40000000u) g_u32_win[h - 1].ctrl_id = (int)WU(9);  /* WS_CHILD: hMenu=id */
              u32_fire_cbt_createwnd(esp, (int)h - 1, WU(8), WU(9), WU(1), WU(2));  /* MFC CWnd attach */
-             if (!u32_create_dispatch(esp, (int)h - 1, WU(8), WU(9))) { g_u32_win[h - 1].used = 0; return 0; } }
+             if (!u32_create_dispatch(esp, (int)h - 1, WU(8), WU(9))) { g_u32_win[h - 1].used = 0; return 0; }
+             u32_combo_fit_height((int)h - 1); }   /* combobox window h = closed field height, not dropped cy */
     if (getenv("ARET_GUI_TRACE"))
         fprintf(stderr, "[GUI] CWEx.A h=%u cls=%s title=\"%.32s\" @%d,%d %dx%d parent=%u id=%d\n",
                 h, h ? g_u32_win[h - 1].classname : "?", h ? g_u32_win[h - 1].title : "",
@@ -4910,6 +4914,21 @@ static int u32_defproc_common(uint32_t esp, uint32_t hwnd, uint32_t msg, uint32_
         }
         *out = 0; return 1;
     }
+    if (msg == 0x0030u /* WM_SETFONT */) {   /* a plain window / dialog remembering its font
+        * (predefined controls are answered earlier by u32_control_proc). */
+        if (i >= 0) g_u32_win[i].ctrl_font = wp;
+        *out = 0; return 1;
+    }
+    if (msg == 0x0031u /* WM_GETFONT */) {   /* the window's font: its WM_SETFONT font, else
+        * the dialog's DS_SETFONT font. Real DefDlgProc reports the dialog font here, and apps
+        * read it to apply to controls they create dynamically — PuTTY's ctlposinit does
+        * cp->font = SendMessage(hDlg, WM_GETFONT): without this it gets 0 and every control
+        * falls back to the SYSTEM font, whose metrics ARET cannot model, mis-sizing e.g. a
+        * COMBOBOX and pushing the siblings an app centres against it. Controls are served
+        * earlier by u32_control_proc; this answers dialogs and plain windows. */
+        *out = (i >= 0) ? (g_u32_win[i].ctrl_font ? g_u32_win[i].ctrl_font : g_u32_win[i].dlg_font) : 0;
+        return 1;
+    }
     return 0;
 }
 /* DefWindowProcW(HWND,UINT,WPARAM,LPARAM) -> LRESULT. Handles the text messages
@@ -4975,7 +4994,19 @@ static uint32_t g_u32_focus;   /* fwd: focused window/control (keyboard target);
 static uint32_t u32_send_message(uint32_t esp, int wide) {
     uint32_t wndproc = u32_win_wndproc(WU(0));
     if (!wndproc) { uint32_t r = 0; if (u32_sys_control_msg(esp, WU(0), WU(1), WU(2), WU(3), wide, &r)) return r; return 0; }
-    return u32_call_wndproc(esp, wndproc, WU(0), WU(1), WU(2), WU(3));
+    uint32_t r = u32_call_wndproc(esp, wndproc, WU(0), WU(1), WU(2), WU(3));
+    /* DefDlgProc default for WM_GETFONT: a DLGPROC that returns FALSE (0) leaves the query to
+     * the dialog manager, which reports the dialog's DS_SETFONT font. Apps read it at
+     * WM_INITDIALOG to apply to controls they create dynamically — PuTTY's ctlposinit does
+     * cp->font = SendMessage(hDlg, WM_GETFONT, 0, 0). ARET stores the dialog's wndproc as the
+     * raw DLGPROC (no DefDlgProc chaining), so without this the dialog returns 0 and every
+     * dynamically-created control falls back to the SYSTEM font — whose bitmap metrics ARET
+     * does not model — mis-sizing e.g. a COMBOBOX and displacing siblings laid out against it. */
+    if (WU(1) == 0x0031u /*WM_GETFONT*/ && r == 0) {
+        int di = (WU(0) >= 1 && WU(0) <= U32_MAX_WIN && g_u32_win[WU(0) - 1].used) ? (int)WU(0) - 1 : -1;
+        if (di >= 0 && g_u32_win[di].is_dialog && g_u32_win[di].dlg_font) r = g_u32_win[di].dlg_font;
+    }
+    return r;
 }
 uint32_t aret_SendMessageW(uint32_t esp) { return u32_send_message(esp, 1); }
 /* DispatchMessageW(const MSG*) -> LRESULT. Route to the window's WNDPROC (or the
@@ -7136,7 +7167,11 @@ static uint32_t u32_sysmetric(int idx) {
     default: return 0;
     }
 }
-uint32_t aret_GetSystemMetrics(uint32_t esp) { return u32_sysmetric(WI(0)); }
+uint32_t aret_GetSystemMetrics(uint32_t esp) {
+    uint32_t v = u32_sysmetric(WI(0));
+    if (getenv("ARET_GUI_TRACE")) fprintf(stderr, "[GUI] GetSystemMetrics idx=%d -> %u\n", WI(0), v);
+    return v;
+}
 
 /* ================================================================== */
 /* Dialogs — DLGTEMPLATE parse -> controls + modal pump (display-free) */
@@ -7293,6 +7328,7 @@ static uint32_t u32_dialog_create(uint32_t esp, const uint8_t *tpl, uint32_t dlg
         /* Windows sends WM_SETFONT(dialog font) to each control at dialog init; mirror
          * it so a control paints its caption in the dialog font (the app may override). */
         if (hc && dfont) g_u32_win[hc - 1].ctrl_font = dfont;
+        if (hc) u32_combo_fit_height((int)hc - 1);   /* combobox: window h = closed height */
         /* Keyboard focus is set AFTER WM_INITDIALOG by u32_dialog_default_focus (first
          * tab-stop), the way the real dialog manager does it — not guessed at create time. */
     }
@@ -7650,8 +7686,9 @@ static void sdl_window_show(uint32_t esp, int i) {
     g_u32_win[i].client_bmp = b ? gdi_handle(b) : 0;
     g_u32_win[i].cw = w; g_u32_win[i].ch = h;
     if (getenv("ARET_GUI_TRACE"))
-        fprintf(stderr, "[GUI] show win=%d x=%d y=%d w=%d h=%d dialog=%d\n",
-                i, g_u32_win[i].x, g_u32_win[i].y, w, h, g_u32_win[i].is_dialog);
+        fprintf(stderr, "[GUI] show win=%d x=%d y=%d w=%d h=%d dialog=%d style=%#x exstyle=%#x\n",
+                i, g_u32_win[i].x, g_u32_win[i].y, w, h, g_u32_win[i].is_dialog,
+                g_u32_win[i].style, g_u32_win[i].exstyle);
     if (g_u32_win[i].is_dialog) u32_dialog_composite(esp, i);   /* fill 3DFACE + paint child controls */
     if (!sdl_ensure()) return;                       /* no display: framebuffer only */
     int px = g_u32_win[i].x, py = g_u32_win[i].y;
@@ -8742,11 +8779,12 @@ static void u32_combobox_paint(uint32_t hdc, int wi) {
     struct gdi_obj *bm = gdi_dc_surface(hdc); int d = gdi_idx(hdc);
     if (!bm || d < 0) return;
     int w = g_u32_win[wi].w, h = g_u32_win[wi].h;
-    int fh = h < 21 ? h : 21;                      /* closed field height */
+    int fh = h;                                    /* the closed combo window IS the field
+                                                    * (u32_combo_fit_height sized h = closed) */
     /* A focused CBS_DROPDOWNLIST shows its selection highlighted (COLOR_HIGHLIGHT field
      * + COLOR_HIGHLIGHTTEXT), like Wine; unfocused it is COLOR_WINDOW + COLOR_WINDOWTEXT. */
     int focused = (g_u32_focus == (uint32_t)(wi + 1));
-    u32_ctrl_fill(bm, w, h, u32_syscolor(15 /*COLOR_3DFACE*/));  /* area below the field */
+    u32_ctrl_fill(bm, w, h, u32_syscolor(15 /*COLOR_3DFACE*/));  /* base (field overwrites it) */
     uint32_t fieldc = focused ? u32_syscolor(13 /*COLOR_HIGHLIGHT*/) : u32_syscolor(5 /*COLOR_WINDOW*/);
     for (int y = 0; y < fh; y++) for (int x = 0; x < w - 17; x++) gdi_put(bm, x, y, fieldc);
     for (int y = 0; y < fh; y++) for (int x = w - 17; x < w; x++) gdi_put(bm, x, y, u32_syscolor(5 /*COLOR_WINDOW*/));
@@ -8965,7 +9003,7 @@ static void u32_tv_select(uint32_t esp, int tv, uint32_t hNew) {
 static int u32_treeview_proc(uint32_t esp, uint32_t hwnd, uint32_t msg, uint32_t wp,
                              uint32_t lp, int i, uint32_t *out) {
     (void)hwnd;
-    if (msg == 0x0030u /*WM_SETFONT*/)    { g_u32_win[i].ctrl_font = wp; *out = 0; return 1; }
+    if (msg == 0x0030u /*WM_SETFONT*/)    { g_u32_win[i].ctrl_font = wp; u32_combo_fit_height(i); *out = 0; return 1; }
     if (msg == 0x0031u /*WM_GETFONT*/)    { *out = g_u32_win[i].ctrl_font; return 1; }
     if (msg == 0x0087u /*WM_GETDLGCODE*/) { *out = 0x0001u /*DLGC_WANTARROWS*/; return 1; }
     switch (msg) {
@@ -9127,7 +9165,7 @@ static int u32_control_proc(uint32_t esp, uint32_t hwnd, uint32_t msg, uint32_t 
     const char *cls = g_u32_win[i].classname;
     if (!strcasecmp(cls, "systreeview32")) return u32_treeview_proc(esp, hwnd, msg, wp, lp, i, out);
     if (!u32_ctrl_paintable(cls)) return 0;
-    if (msg == 0x0030u /*WM_SETFONT*/)  { g_u32_win[i].ctrl_font = wp; *out = 0; return 1; }
+    if (msg == 0x0030u /*WM_SETFONT*/)  { g_u32_win[i].ctrl_font = wp; u32_combo_fit_height(i); *out = 0; return 1; }
     if (msg == 0x0031u /*WM_GETFONT*/)  { *out = g_u32_win[i].ctrl_font; return 1; }
     if (msg == 0x0087u /*WM_GETDLGCODE*/) {   /* control classification (values measured vs Wine) */
         if (!strcasecmp(cls, "button")) { uint32_t t = g_u32_win[i].style & 0xFu;
@@ -10659,6 +10697,47 @@ static int u32_text_width(FT_Face f, const uint32_t *cps, int len) {
 }
 #endif /* ARET_HAVE_FREETYPE */
 
+/* tmHeight (ascent+descent, pixels) of the EXACT font handle — no DEFAULT_GUI_FONT
+ * substitution: a 0 handle or a faceless font (the SYSTEM bitmap font a control carries
+ * when no WM_SETFONT has been sent, which ARET models as faceless → sound abort) yields 0,
+ * meaning "metrics unknown", so callers leave geometry unchanged rather than guess a
+ * different font. Also 0 without FreeType, or when the face does not resolve. Uses a scratch
+ * DC, best-effort (g_dc_font_quiet) so an unresolved font never aborts. */
+static int u32_font_tm_height(uint32_t font) {
+#ifdef ARET_HAVE_FREETYPE
+    int fi = font ? gdi_idx(font) : -1;
+    if (fi < 0 || !g_gdi[fi].lf_face[0]) return 0;   /* no resolvable face -> unknown */
+    int d = gdi_alloc(GDIT_DC);
+    if (!d) return 0;
+    u32_dc_defaults(d);
+    g_gdi[d].sel_font = font;
+    int asc = 0, desc = 0;
+    g_dc_font_quiet = 1;
+    FT_Face ft = u32_dc_font(d, &asc, &desc);
+    g_dc_font_quiet = 0;
+    g_gdi[d].used = 0;
+    return ft ? (asc + desc) : 0;
+#else
+    (void)font; return 0;
+#endif
+}
+/* Windows/Wine size a COMBOBOX *window* to its CLOSED (text-area) height, NOT the cy
+ * passed to CreateWindow — cy is only the dropped-down list height. Measured vs Wine on
+ * three fonts (tmHeight 16/17/36 -> closed window height 24/25/44): closed_h = tmHeight + 8
+ * exactly (= CBGetTextAreaHeight's tmHeight+4, plus the 2px top/bottom client edge). An app
+ * that lays out other controls from the combo's GetWindowRect (PuTTY vertically-centres the
+ * connection-type radios within the combo's line) is pushed off by (cy - closed_h) otherwise.
+ * The combo re-fits on every WM_SETFONT, so this is called at creation (DEFAULT_GUI_FONT) and
+ * on each WM_SETFONT. A general control-model fix (every combobox, every binary), not a
+ * per-binary patch. No-op for non-comboboxes or when metrics are unavailable (geometry left
+ * exactly as today — never a guessed height). */
+static void u32_combo_fit_height(int wi) {
+    if (wi < 0 || !g_u32_win[wi].used) return;
+    if (strcasecmp(g_u32_win[wi].classname, "combobox")) return;
+    int tm = u32_font_tm_height(g_u32_win[wi].ctrl_font);
+    if (tm > 0) g_u32_win[wi].h = tm + 8;
+}
+
 /* ANSI byte → Unicode codepoint via CP1252 (Windows ACP, verified GetACP()=1252):
  * ASCII and 0xA0-0xFF are identical to Latin-1; 0x80-0x9F are the CP1252-specific
  * slots (€, curly quotes, dashes…). Undefined slots (0x81/0x8D/0x8F/0x90/0x9D) map
@@ -11915,6 +11994,19 @@ uint32_t aret_GetObjectA(uint32_t esp) {
         *(uint16_t *)lpv = (uint16_t)g_gdi[i].pal_count;        /* GetObject(hpal,2,&WORD) = entry count */
         return 2;
     }
+    if (g_gdi[i].type == GDIT_FONT) {                          /* GetObject(hfont,sizeof(LOGFONTA),&lf) */
+        if (cb < 60) return 0;                                  /* LOGFONTA = 28 fixed + 32 face */
+        memset(lpv, 0, 60);
+        *(int32_t *)(lpv + 0)  = g_gdi[i].lf_height;            /* lfHeight   */
+        *(int32_t *)(lpv + 16) = g_gdi[i].lf_weight;            /* lfWeight   */
+        lpv[20] = g_gdi[i].lf_italic ? 1 : 0;                   /* lfItalic   */
+        lpv[21] = g_gdi[i].lf_underline ? 1 : 0;               /* lfUnderline*/
+        lpv[22] = g_gdi[i].lf_strikeout ? 1 : 0;               /* lfStrikeOut*/
+        lpv[26] = (uint8_t)g_gdi[i].lf_quality;                /* lfQuality  */
+        int k = 0; for (; k < 31 && g_gdi[i].lf_face[k]; k++) lpv[28 + k] = (uint8_t)g_gdi[i].lf_face[k];
+        lpv[28 + k] = 0;                                        /* lfFaceName (NUL-terminated) */
+        return 60;
+    }
     return 0;
 }
 uint32_t aret_GetObjectW(uint32_t esp) { return aret_GetObjectA(esp); }
@@ -12005,6 +12097,9 @@ uint32_t aret_ScreenToClient(uint32_t esp) {
     int i = u32_win_idx(WU(0)); int32_t *pt = (int32_t *)WP(1);
     if (i < 0 || !pt) return 0;
     int sx, sy; u32_screen_origin(i, &sx, &sy);
+    if (getenv("ARET_GUI_TRACE"))
+        fprintf(stderr, "[GUI] ScreenToClient id=%d pt=%d,%d origin=%d,%d -> %d,%d\n",
+                g_u32_win[i].ctrl_id, pt[0], pt[1], sx, sy, pt[0] - sx, pt[1] - sy);
     pt[0] -= sx; pt[1] -= sy;
     return 1;
 }
