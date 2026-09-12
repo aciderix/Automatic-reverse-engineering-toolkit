@@ -12621,10 +12621,18 @@ uint32_t aret_LoadMenuW(uint32_t esp)     { return u32_load_menu(WU(1)); }
  * hMenu both yield GetMenu != 0 with the resource's items; neither -> GetMenu NULL. */
 static void u32_attach_window_menu(int i, uint32_t style, uint32_t hMenu, uint32_t cref) {
     if (style & 0x40000000u) return;                 /* WS_CHILD: hMenu is a control id, not a menu */
-    if (hMenu) { g_u32_wmenu[i] = hMenu; return; }    /* explicit hMenu wins */
-    int ci = u32_class_index(cref);
-    if (ci >= 0 && g_u32_class[ci].menu_name)         /* class lpszMenuName -> auto-load */
-        g_u32_wmenu[i] = u32_load_menu(g_u32_class[ci].menu_name);
+    if (hMenu) { g_u32_wmenu[i] = hMenu; }            /* explicit hMenu wins */
+    else {
+        int ci = u32_class_index(cref);
+        if (ci >= 0 && g_u32_class[ci].menu_name)     /* class lpszMenuName -> auto-load */
+            g_u32_wmenu[i] = u32_load_menu(g_u32_class[ci].menu_name);
+    }
+    if (getenv("ARET_GUI_TRACE") && g_u32_wmenu[i]) {
+        int mi = u32_menu_idx(g_u32_wmenu[i]);
+        fprintf(stderr, "[GUI] menu attached to win=%d hmenu=%#x items=%d (%s)\n",
+                i, g_u32_wmenu[i], mi >= 0 ? g_u32_menu[mi].count : -1,
+                hMenu ? "explicit hMenu" : "class lpszMenuName");
+    }
 }
 /* Accelerator table (keyboard shortcuts): cosmetic for a functional run. LoadAccelerators
  * returns NULL (no table); TranslateAccelerator then returns 0 (this message is NOT an
