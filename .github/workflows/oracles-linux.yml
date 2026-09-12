@@ -102,6 +102,25 @@ jobs:
           key: objcache-${{ runner.os }}-${{ hashFiles('runtime/**', 'Cargo.lock') }}
           restore-keys: objcache-${{ runner.os }}-
 
+      # Third-party runtime DLLs (glib/gobject/ffi + zlib + headers) that a handful of
+      # winediff fixtures need beside the exe; fetched from MSYS2 into bench/.cache and
+      # CACHED across runs (keyed on the fetch scripts — the reproducible artifacts). The
+      # fetch is best-effort: a registry blip leaves those fixtures SKIPping (honest, not
+      # a red gate), never failing the job. Without it glib_*/zlib_roundtrip/libintl_printf
+      # SKIP for missing DLLs/headers.
+      - name: Third-party DLL cache (glib/zlib)
+        if: matrix.oracle == 'winediff'
+        uses: actions/cache@v4
+        with:
+          path: bench/.cache
+          key: winecache-${{ runner.os }}-${{ hashFiles('bench/glib_fetch.sh', 'bench/zlib_fetch.sh') }}
+          restore-keys: winecache-${{ runner.os }}-
+      - name: Fetch third-party DLLs (idempotent, best-effort)
+        if: matrix.oracle == 'winediff'
+        run: |
+          bash bench/glib_fetch.sh || echo "::warning::glib_fetch incomplete — its fixtures will SKIP"
+          bash bench/zlib_fetch.sh || echo "::warning::zlib_fetch incomplete — its fixtures will SKIP"
+
       # Produce the canonical measurement (no store, no secret). The adapter prints the
       # verdict line to stderr; the JSON goes to the artifact.
       - name: Measure ${{ matrix.oracle }}
