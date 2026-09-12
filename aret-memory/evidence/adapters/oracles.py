@@ -333,6 +333,91 @@ def run_oracle(
     }
 
 
+def import_oracle_measurement(
+    store: MemoryStore,
+    measurement: "str | Path | dict[str, Any]",
+    knowledge_id: str | None = None,
+    promote: bool = False,
+    actor: str = "aret-ci-import",
+) -> dict[str, Any]:
+    """Import a CI-produced aret-oracle-artifact/v1 MEASUREMENT and mint a LOCALLY-signed,
+    admissible proof — the "CI measures / local signs" model.
+
+    CI never holds the proof HMAC secret; it only runs the oracle (--measure-only) and
+    publishes the measurement. Here, on the workstation, we re-derive the verdict from the
+    measurement's OWN stdout/stderr with the SAME normalise_result, and only if the claimed
+    result matches do we sign it with the local secret and record an admissible proof. A
+    measurement whose declared result its output does not support is REFUSED (§0: never
+    present an unsupported PASS as correct), so CI cannot fabricate an admissible proof."""
+    store._require_write()
+    if isinstance(measurement, dict):
+        data = measurement
+    else:
+        data = json.loads(Path(measurement).read_text(encoding="utf-8"))
+    if not isinstance(data, dict) or data.get("format") != "aret-oracle-artifact/v1":
+        raise AretError("Format de mesure inattendu (attendu aret-oracle-artifact/v1)")
+    name = str(data.get("oracle", "")).strip().lower()
+    if name not in ORACLES:
+        raise AretError("Oracle inconnu dans la mesure : " + (name or "<vide>"))
+    spec = ORACLES[name]
+    for key in ("kind", "command", "result", "exit_code", "started_at", "finished_at", "environment", "stdout", "stderr"):
+        if key not in data:
+            raise AretError(f"Mesure incomplète : champ '{key}' manquant")
+    if str(data["kind"]) != spec.kind:
+        raise AretError(f"kind incohérent dans la mesure : {data['kind']} != {spec.kind}")
+    claimed = str(data["result"]).strip().upper()
+    if claimed not in {"PASS", "FAIL", "SKIPPED", "ERROR", "UNKNOWN"}:
+        raise AretError(f"Résultat de mesure invalide : {claimed}")
+    env = data.get("environment") if isinstance(data.get("environment"), dict) else {}
+    missing = list(env.get("missing_dependencies", []) or [])
+    timed_out = bool(env.get("timed_out", False))
+    # ANTI-TAMPER: the verdict must follow from the measurement's own captured output,
+    # re-derived with the exact same rule the local signing path uses.
+    recomputed = normalise_result(spec, data.get("exit_code"), str(data.get("stdout", "")), str(data.get("stderr", "")), missing, timed_out)
+    if recomputed != claimed:
+        raise AretError(
+            f"Mesure rejetée (§0) : verdict déclaré '{claimed}' non soutenu par sa propre sortie "
+            f"(re-calcul = '{recomputed}'). Aucune preuve signée."
+        )
+    # Rebuild the canonical artifact (same shape run_oracle writes) and store it verbatim.
+    artifact = {
+        "format": "aret-oracle-artifact/v1", "oracle": spec.name, "kind": spec.kind,
+        "command": data["command"], "result": claimed, "exit_code": data["exit_code"],
+        "started_at": data["started_at"], "finished_at": data["finished_at"],
+        "environment": env, "stdout": data["stdout"], "stderr": data["stderr"],
+    }
+    artifact_rel = f"oracles/{spec.name}/ci_{datetime.now(UTC).strftime('%Y%m%dT%H%M%SZ')}_{uuid4().hex[:12]}.json"
+    artifact_path = store.artifacts_dir / artifact_rel
+    artifact_path.parent.mkdir(parents=True, exist_ok=True)
+    artifact_path.write_text(json.dumps(artifact, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    artifact_hash = hashlib.sha256(artifact_path.read_bytes()).hexdigest()
+    receipt_payload = {
+        "kind": spec.kind, "command": data["command"], "result": claimed, "exit_code": data["exit_code"],
+        "artifact_path": artifact_rel, "artifact_hash": artifact_hash, "environment": env,
+        "started_at": data["started_at"], "finished_at": data["finished_at"],
+    }
+    secret = store.proof_hmac_secret
+    receipt = create_receipt(receipt_payload, secret) if secret else {"payload_hash": "", "receipt_hmac": ""}
+    proof = store.record_proof(
+        **receipt_payload, stdout_ref=artifact_rel, stderr_ref=artifact_rel,
+        receipt_hmac=receipt["receipt_hmac"], actor=actor,
+    )
+    attachment = None
+    if knowledge_id:
+        attachment = store.attach_proof(knowledge_id, proof["id"], actor, promote=promote)
+    elif promote:
+        raise AretError("promotion demandée sans knowledge_id")
+    return {
+        "proof": proof,
+        "artifact": {"path": artifact_rel, "sha256": artifact_hash},
+        "execution": {
+            "oracle": spec.name, "result": claimed, "recomputed_result": recomputed, "source": "ci-measurement",
+            "repository_revision": str(env.get("repository_revision", "")),
+        },
+        "attachment": attachment,
+    }
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Exécuter un oracle ARET et enregistrer sa preuve")
     parser.add_argument("oracle", choices=sorted(ORACLES))

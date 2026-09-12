@@ -14,7 +14,7 @@ from mcp.server import MCPServer
 from pathlib import Path
 
 from core.repository import AretError, MemoryStore
-from evidence.adapters.oracles import ORACLES, run_oracle
+from evidence.adapters.oracles import ORACLES, import_oracle_measurement, run_oracle
 from evidence.adapters.pipelines import pipeline_catalog, register_asset, run_pipeline, toolchain_status
 from hooks.resume_guard import touch_mcp_ready, validate_recap
 from ops.git_memory import GitMemoryError, automatic_sync
@@ -589,6 +589,31 @@ def aret_get_oracle_run(run_id: str) -> dict[str, Any]:
         return {"ok": False, "operation": "get_oracle_run", "error": {"code": type(exc).__name__, "message": str(exc)}}
     except Exception as exc:
         return {"ok": False, "operation": "get_oracle_run", "error": {"code": "INTERNAL_ERROR", "message": str(exc)}}
+
+
+@mcp.tool()
+def aret_import_oracle_measurement(
+    measurement_path: str, knowledge_id: str | None = None, promote: bool = False,
+    actor: str = "aret-ci-import",
+) -> dict[str, Any]:
+    """Importe une MESURE d'oracle produite en CI (artefact aret-oracle-artifact/v1, émis par
+    `oracles.py --measure-only`) et frappe une preuve admissible SIGNÉE LOCALEMENT — le modèle
+    « la CI mesure / le poste signe ».
+
+    La CI ne détient JAMAIS le secret HMAC : elle ne fait que lancer l'oracle et publier la
+    mesure. Ici, le verdict est RE-DÉRIVÉ du stdout/stderr de la mesure (même normalise_result
+    que le chemin local) ; il n'est signé que s'il correspond. Une mesure dont le résultat
+    déclaré n'est pas soutenu par sa propre sortie est REFUSÉE (§0) — la CI ne peut donc pas
+    fabriquer une preuve admissible. `measurement_path` = le fichier JSON de mesure téléchargé
+    depuis l'artefact CI. La preuve résultante est canonique/adressable comme toute preuve MCP."""
+    try:
+        return {"ok": True, "operation": "import_oracle_measurement", "result": import_oracle_measurement(
+            store, measurement_path, knowledge_id, promote, actor,
+        )}
+    except AretError as exc:
+        return {"ok": False, "operation": "import_oracle_measurement", "error": {"code": type(exc).__name__, "message": str(exc)}}
+    except Exception as exc:
+        return {"ok": False, "operation": "import_oracle_measurement", "error": {"code": "INTERNAL_ERROR", "message": str(exc)}}
 
 
 @mcp.tool()

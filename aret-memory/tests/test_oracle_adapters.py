@@ -6,7 +6,19 @@ import pytest
 
 from core.repository import AretError, MemoryStore
 from evidence.adapters import oracles
-from evidence.adapters.oracles import OracleSpec, run_oracle
+from evidence.adapters.oracles import OracleSpec, import_oracle_measurement, run_oracle
+
+
+def _measurement(result: str, stdout: str, *, kind: str = "DIFFTEST", oracle: str = "difftest", exit_code: int = 0) -> dict:
+    """A minimal aret-oracle-artifact/v1 measurement, as CI's --measure-only emits."""
+    return {
+        "format": "aret-oracle-artifact/v1", "oracle": oracle, "kind": kind,
+        "command": f"bash bench/{oracle}.sh", "result": result, "exit_code": exit_code,
+        "started_at": "2026-09-12T00:00:00Z", "finished_at": "2026-09-12T00:01:00Z",
+        "environment": {"adapter": "aret-mmu-oracles/1", "oracle": oracle, "repository_revision": "deadbeef",
+                        "missing_dependencies": [], "timed_out": False, "duration_seconds": 1.0},
+        "stdout": stdout, "stderr": "",
+    }
 
 
 def prepared_store(memory_dir: Path, secret: str = "test-secret") -> tuple[MemoryStore, str]:
@@ -78,6 +90,40 @@ def test_missing_oracle_dependency_is_explicit_skip(tmp_path: Path, monkeypatch:
     assert result["execution"]["result"] == "SKIPPED"
     assert result["proof"]["result"] == "SKIPPED"
     assert result["execution"]["missing_dependencies"] == ["definitely-missing-aret-tool"]
+
+
+def test_import_ci_measurement_signs_admissible_and_promotes(tmp_path: Path) -> None:
+    store, knowledge_id = prepared_store(tmp_path / "memory")
+    m = _measurement("PASS", "differential equivalence: 1/1 functions\n")
+    result = import_oracle_measurement(store, m, knowledge_id, promote=True)
+    assert result["execution"]["result"] == "PASS"
+    assert result["execution"]["recomputed_result"] == "PASS"
+    assert result["execution"]["source"] == "ci-measurement"
+    assert result["proof"]["admissible"] == 1          # signed LOCALLY, not by CI
+    assert result["attachment"]["promoted"] is True
+    assert store.read(f"ARET://knowledge/{knowledge_id}")["status"] == "PROVEN"
+    assert (store.artifacts_dir / result["artifact"]["path"]).is_file()
+
+
+def test_import_tampered_measurement_is_refused(tmp_path: Path) -> None:
+    store, knowledge_id = prepared_store(tmp_path / "memory")
+    # Declares PASS but the stdout does not support it -> must be refused, nothing signed.
+    m = _measurement("PASS", "this output proves nothing\n")
+    with pytest.raises(AretError, match="non soutenu"):
+        import_oracle_measurement(store, m, knowledge_id, promote=True)
+    assert store.read(f"ARET://knowledge/{knowledge_id}")["status"] == "OBSERVED"
+
+
+def test_import_measurement_from_file_path(tmp_path: Path) -> None:
+    import json
+    store, _ = prepared_store(tmp_path / "memory")
+    path = tmp_path / "winediff.json"
+    path.write_text(json.dumps(_measurement(
+        "PASS", "ok foo\nOS-API (Wine) equivalence: 296/296 programs\n", kind="WINEDIFF", oracle="winediff",
+    )), encoding="utf-8")
+    result = import_oracle_measurement(store, path)
+    assert result["proof"]["result"] == "PASS"
+    assert result["proof"]["admissible"] == 1
 
 
 def test_attach_nonadmissible_pass_cannot_promote(tmp_path: Path) -> None:
