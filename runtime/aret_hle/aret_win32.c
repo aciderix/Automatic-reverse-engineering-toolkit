@@ -3830,12 +3830,26 @@ static const uint8_t *u32_rsrc_data_entry(uint32_t type_ref, uint32_t name_ref) 
     off = u32_rsrc_entry(rb, rb + (off & 0x7FFFFFFFu), nid, nname); /* name level */
     if (!(off & 0x80000000u)) return NULL;
     const uint8_t *lang = rb + (off & 0x7FFFFFFFu);              /* language level */
-    /* Take the first language entry (its OffsetToData points at the leaf). */
+    /* Language (sub-)level: entries are keyed by LANGID and the PE sorts them ascending,
+     * so blindly taking the FIRST picks the lowest id (e.g. Arabic 0x0401 before English
+     * 0x0409) — wrong for a multilingual (MUI) binary. Windows/Wine resolve by the thread
+     * UI language; ARET's effective locale is en-US, so prefer (in order) en-US 0x0409,
+     * any English sublang (primary LANG_ENGLISH=0x09), LANG_NEUTRAL 0x0000, else the first
+     * available. General fix: applies to every localized resource (menu/dialog/string/…). */
     uint16_t nnamed = *(const uint16_t *)(lang + 12), nidc = *(const uint16_t *)(lang + 14);
-    if ((int)nnamed + (int)nidc < 1) return NULL;
-    uint32_t leaf = *(const uint32_t *)(lang + 16 + 4);          /* first entry OffsetToData */
-    if (leaf & 0x80000000u) return NULL;                        /* must be a data entry, not a dir */
-    return rb + leaf;
+    if ((int)nidc < 1) return NULL;                             /* language entries are id-keyed */
+    const uint8_t *ents = lang + 16 + (uint32_t)nnamed * 8;     /* skip any named entries */
+    uint32_t best_leaf = 0; int best_rank = 1 << 30;
+    for (int i = 0; i < (int)nidc; i++) {
+        uint32_t id = *(const uint32_t *)(ents + (size_t)i * 8);
+        uint32_t od = *(const uint32_t *)(ents + (size_t)i * 8 + 4);
+        if (od & 0x80000000u) continue;                        /* must be a leaf data entry */
+        int rank = (id == 0x0409u) ? 0 : ((id & 0x3FFu) == 0x09u) ? 1
+                 : (id == 0x0000u) ? 2 : (3 + i);               /* else first-encountered order */
+        if (rank < best_rank) { best_rank = rank; best_leaf = od; }
+    }
+    if (!best_leaf) return NULL;
+    return rb + best_leaf;
 }
 
 /* EnumResourceLanguages{A,W}(hModule, lpType, lpName, lpEnumFunc, lParam) -> BOOL.
