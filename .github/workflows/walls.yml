@@ -1,0 +1,102 @@
+# Corpus wall sweep in CI — the breadth coverage MAP (doc 70 §5.0 / doc 90).
+#
+# `aret --mode walls` over a corpus of real PE32 binaries, aggregated by
+# bench/wallsweep.sh, ranks the coverage gaps by how many DISTINCT binaries each
+# blocks — so the next fix is chosen by data, not intuition. This is a MEASUREMENT,
+# never a gate: `--mode walls` enumerates statically-decidable gaps (unmodelled
+# instructions, unimplemented imports, unresolved calls), it does NOT certify
+# behaviour (a miscompile is invisible to it). So this job is always green and just
+# publishes the ranked map; every fix it motivates is still proven by the differential
+# oracles (oracles-linux.yml). Kept a SEPARATE workflow from the gates so its long,
+# corpus-sized run never blocks or bloats the oracle gate.
+name: walls
+
+on:
+  workflow_dispatch:
+    inputs:
+      n_packages:
+        description: 'How many MSYS2 packages to sample into the corpus (breadth vs time).'
+        default: '80'
+  schedule:
+    - cron: '41 4 * * *'   # nightly, offset off the hour
+  push:
+    paths:
+      - '.github/workflows/walls.yml'
+
+permissions:
+  contents: read
+  packages: read
+
+concurrency:
+  group: walls-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  sweep:
+    runs-on: ubuntu-latest
+    container:
+      image: ghcr.io/aciderix/aret-ci-toolchain:latest
+      credentials:
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+    timeout-minutes: 45
+    env:
+      NPKG: ${{ github.event.inputs.n_packages || '80' }}
+      WALLSWEEP_TIMEOUT: '60'        # per-binary wall-clock cap (s)
+      CORPUS_DIR: ${{ github.workspace }}/.wallcorpus
+    steps:
+      - uses: actions/checkout@v4
+      - name: Trust the workspace for git
+        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
+      - name: Rust cache
+        uses: Swatinem/rust-cache@v2
+      - name: Build aret (release, locked)
+        run: cargo build --release --locked
+
+      # The PE32 corpus is fetched from MSYS2 (not committed; the fetch script is the
+      # reproducible artifact) and cached. The key carries NPKG + the fetch script so a
+      # different breadth or an updated fetcher rotates it; content is inherently best-effort
+      # (MSYS2 moves), hence restore-keys. A fetch blip just yields a smaller corpus.
+      - name: Corpus cache
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.CORPUS_DIR }}
+          key: wallcorpus-${{ runner.os }}-${{ hashFiles('bench/wallcorpus_fetch.sh') }}-${{ env.NPKG }}
+          restore-keys: wallcorpus-${{ runner.os }}-
+      - name: Fetch PE32 corpus (idempotent, best-effort)
+        run: bash bench/wallcorpus_fetch.sh "$CORPUS_DIR" "$NPKG" || echo "::warning::wallcorpus fetch incomplete — sweeping what was gathered"
+
+      # Persist the per-binary .walls maps across runs (WALLSWEEP_KEEP); key on the
+      # HLE/runtime + lockfile so a code change re-analyses. Re-aggregation is then cheap.
+      - name: Wall-map cache
+        uses: actions/cache@v4
+        with:
+          path: ${{ github.workspace }}/.wallmaps
+          key: wallmaps-${{ runner.os }}-${{ hashFiles('runtime/**', 'src/**', 'Cargo.lock') }}
+          restore-keys: wallmaps-${{ runner.os }}-
+
+      - name: Sweep (measurement, never a gate)
+        run: |
+          mkdir -p "$CORPUS_DIR/pe32"
+          n=$(find "$CORPUS_DIR/pe32" -type f 2>/dev/null | wc -l)
+          echo "corpus: $n PE32 binaries"
+          if [ "$n" -eq 0 ]; then echo "::warning::empty corpus — nothing to sweep"; echo "empty corpus" > walls.txt; exit 0; fi
+          WALLSWEEP_KEEP="$GITHUB_WORKSPACE/.wallmaps" bash bench/wallsweep.sh "$CORPUS_DIR/pe32" | tee walls.txt || true
+
+      - name: Publish the wall map
+        if: always()
+        run: |
+          {
+            echo "## ARET wall sweep (coverage map — not a gate)"
+            echo ""
+            echo '```'
+            sed -n '1,60p' walls.txt 2>/dev/null || echo "(no output)"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+      - name: Upload wall map
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: wall-sweep
+          path: walls.txt
+          if-no-files-found: warn
