@@ -66,6 +66,9 @@ jobs:
           # winediff: the Wine oracle, FULL corpus (~295 fixtures). winediff.sh is
           # self-contained (own Xvfb + fresh $TMP/wineprefix + wineboot), so the fresh
           # CI container is the structural cure for the shared-wineserver wedge.
+          # NOTE: the text/paint fixtures need the image's fonts (fontconfig +
+          # fonts-liberation + fonts-dejavu-core) so ARET and Wine resolve the same
+          # glyphs; without them ~22 text fixtures DIFF purely on the environment.
           - oracle: winediff
     name: ${{ matrix.oracle }}${{ matrix.fixture && format('/{0}', matrix.fixture) || '' }}
     steps:
