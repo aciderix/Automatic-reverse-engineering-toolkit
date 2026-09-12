@@ -135,17 +135,20 @@ def safe_fixture(value: str | None) -> str | None:
     return candidate
 
 
-def run_oracle(
-    store: MemoryStore,
+def build_measurement(
     repository: Path,
     oracle_name: str,
-    knowledge_id: str | None = None,
-    promote: bool = False,
     fixture: str | None = None,
     timeout_seconds: int | None = None,
-    actor: str = "aret-oracle-adapter",
-) -> dict[str, Any]:
-    store._require_write()
+) -> tuple[OracleSpec, dict[str, Any], Path, list[str], bool]:
+    """Exécute un oracle de la liste fermée et construit l'artefact de mesure canonique
+    `aret-oracle-artifact/v1`, SANS aucun accès à l'Evidence Store ni au secret de
+    signature.
+
+    C'est la SEULE source de vérité de l'exécution et du verdict (via normalise_result).
+    Partagée par run_oracle (poste local : signe et enregistre) et measure_oracle (CI :
+    publie seulement la mesure, re-vérifiée et re-signée LOCALEMENT ensuite — le secret
+    ne quitte jamais le poste)."""
     name = oracle_name.strip().lower()
     if name not in ORACLES:
         raise AretError("Oracle inconnu : choisir parmi " + ", ".join(sorted(ORACLES)))
@@ -208,6 +211,38 @@ def run_oracle(
         "stdout": stdout,
         "stderr": stderr,
     }
+    return spec, artifact, aret_binary, missing, timed_out
+
+
+def measure_oracle(
+    repository: Path,
+    oracle_name: str,
+    fixture: str | None = None,
+    timeout_seconds: int | None = None,
+) -> dict[str, Any]:
+    """Exécute un oracle et renvoie l'artefact de mesure `aret-oracle-artifact/v1`, SANS
+    Evidence Store ni secret. Destiné à la CI : la mesure est publiée telle quelle, puis
+    re-vérifiée (re-parse du stdout) et signée LOCALEMENT par l'importateur de preuve."""
+    _spec, artifact, _binary, _missing, _timed_out = build_measurement(repository, oracle_name, fixture, timeout_seconds)
+    return artifact
+
+
+def run_oracle(
+    store: MemoryStore,
+    repository: Path,
+    oracle_name: str,
+    knowledge_id: str | None = None,
+    promote: bool = False,
+    fixture: str | None = None,
+    timeout_seconds: int | None = None,
+    actor: str = "aret-oracle-adapter",
+) -> dict[str, Any]:
+    store._require_write()
+    spec, artifact, _aret_binary, missing, timed_out = build_measurement(repository, oracle_name, fixture, timeout_seconds)
+    result = artifact["result"]
+    exit_code = artifact["exit_code"]
+    command_text = artifact["command"]
+    environment_summary = artifact["environment"]
     artifact_rel = f"oracles/{spec.name}/{datetime.now(UTC).strftime('%Y%m%dT%H%M%SZ')}_{uuid4().hex[:12]}.json"
     artifact_path = store.artifacts_dir / artifact_rel
     artifact_path.parent.mkdir(parents=True, exist_ok=True)
@@ -221,8 +256,8 @@ def run_oracle(
         "artifact_path": artifact_rel,
         "artifact_hash": artifact_hash,
         "environment": environment_summary,
-        "started_at": started,
-        "finished_at": finished,
+        "started_at": artifact["started_at"],
+        "finished_at": artifact["finished_at"],
     }
     secret = store.proof_hmac_secret
     receipt = create_receipt(receipt_payload, secret) if secret else {"payload_hash": "", "receipt_hmac": ""}
@@ -256,7 +291,23 @@ def main() -> None:
     parser.add_argument("--fixture")
     parser.add_argument("--timeout-seconds", type=int)
     parser.add_argument("--write-enabled", action="store_true")
+    parser.add_argument("--measure-only", action="store_true",
+                        help="N'exécute que la mesure et émet l'artefact aret-oracle-artifact/v1 ; "
+                             "aucun Evidence Store, aucun secret (mode CI).")
+    parser.add_argument("--output", type=Path, help="Fichier de sortie pour --measure-only (défaut : stdout).")
     args = parser.parse_args()
+    # Mode CI : produire la mesure canonique, jamais signer ici. Le secret reste local ;
+    # la preuve admissible est frappée sur le poste par l'importateur, qui re-vérifie
+    # le verdict à partir du stdout de cette mesure.
+    if args.measure_only:
+        artifact = measure_oracle(args.repository, args.oracle, args.fixture, args.timeout_seconds)
+        text = json.dumps(artifact, ensure_ascii=False, indent=2) + "\n"
+        if args.output:
+            args.output.write_text(text, encoding="utf-8")
+        else:
+            sys.stdout.write(text)
+        sys.stderr.write(f"{args.oracle} {artifact['result']} exit={artifact['exit_code']}\n")
+        return
     if not args.write_enabled:
         raise SystemExit("--write-enabled est requis pour enregistrer une preuve")
     os.environ["ARET_MEMORY_DIR"] = str(args.memory_dir)
