@@ -34,6 +34,8 @@ RUN dpkg --add-architecture i386 \
       gcc-multilib g++-multilib \
       libunicorn-dev \
       libsdl2-dev:i386 \
+      libfreetype-dev libfontconfig-dev \
+      libfreetype6:i386 libfontconfig1:i386 \
       xvfb \
       z3 \
       clang lld llvm \
@@ -75,4 +77,11 @@ RUN set -e; \
     clang --version >/dev/null; \
     command -v Xvfb >/dev/null; \
     cargo --version; \
-    echo "ARET CI toolchain ready: $(wine --version), mingw ok, gcc-m32 ok, unicorn ok, sdl2 ok, $(cargo --version)"
+    # GDI text oracle: the builder activates FreeType text only when pkg-config finds
+    # freetype2+fontconfig, and links the i386 .so.N into the 32-bit output. Without these
+    # ARET draws blank text and the ~21 gdi_*/paint winediff fixtures DIFF. Fail the image
+    # build loudly if the feature's build-time + i386-runtime prerequisites are missing.
+    pkg-config --exists freetype2 fontconfig; \
+    test -e /usr/lib/i386-linux-gnu/libfreetype.so.6; \
+    test -e /usr/lib/i386-linux-gnu/libfontconfig.so.1; \
+    echo "ARET CI toolchain ready: $(wine --version), mingw ok, gcc-m32 ok, unicorn ok, sdl2 ok, freetype+fontconfig(i386) ok, $(cargo --version)"
