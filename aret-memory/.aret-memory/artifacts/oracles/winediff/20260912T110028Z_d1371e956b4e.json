@@ -1,0 +1,24 @@
+{
+  "format": "aret-oracle-artifact/v1",
+  "oracle": "winediff",
+  "kind": "WINEDIFF",
+  "command": "bash /home/user/Automatic-reverse-engineering-toolkit/bench/winediff.sh crt_div64",
+  "result": "FAIL",
+  "exit_code": 1,
+  "started_at": "2026-09-12T11:00:19Z",
+  "finished_at": "2026-09-12T11:00:28Z",
+  "environment": {
+    "adapter": "aret-mmu-oracles/1",
+    "oracle": "winediff",
+    "repository": "/home/user/Automatic-reverse-engineering-toolkit",
+    "repository_revision": "a5d5d44ad8aefb730aeb91e8c9f81f80e0d9137a",
+    "script": "bench/winediff.sh",
+    "fixture": "crt_div64",
+    "timeout_seconds": 3600,
+    "missing_dependencies": [],
+    "timed_out": false,
+    "duration_seconds": 8.958
+  },
+  "stdout": "FAIL  crt_div64 (no ARET output; )\n------------------------------------------\nOS-API (Wine) equivalence: 0/1 programs\n",
+  "stderr": ""
+}
