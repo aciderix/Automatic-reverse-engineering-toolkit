@@ -68,7 +68,8 @@ jobs:
           # CI container is the structural cure for the shared-wineserver wedge.
           # NOTE: the text/paint fixtures need the image's fonts (fontconfig +
           # fonts-liberation + fonts-dejavu-core) so ARET and Wine resolve the same
-          # glyphs; without them ~22 text fixtures DIFF purely on the environment.
+          # glyphs, AND the freetype/fontconfig -dev + i386 runtime so ARET's GDI text
+          # feature compiles ON (else it draws blank and ~21 text fixtures DIFF).
           - oracle: winediff
     name: ${{ matrix.oracle }}${{ matrix.fixture && format('/{0}', matrix.fixture) || '' }}
     steps:
