@@ -14,6 +14,7 @@ import re
 import shutil
 import subprocess
 import sys
+import threading
 import time
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -135,11 +136,60 @@ def safe_fixture(value: str | None) -> str | None:
     return candidate
 
 
+def _execute_command(
+    command: list[str], cwd: Path, environment: dict[str, str], limit: int, stream: bool,
+) -> tuple[str, str, int | None, bool]:
+    """Run the oracle subprocess and return (stdout, stderr, exit_code, timed_out).
+
+    stream=False (the signing path, run_oracle): exactly the previous
+    subprocess.run(capture_output=True) behaviour — captured, silent.
+    stream=True (the CI measure path): stdout is ALSO echoed live to our stderr as it
+    arrives (per-fixture progress in the CI log); the captured stdout/stderr are
+    byte-identical to the silent path either way. A timeout kills the process and sets
+    timed_out, and exit_code stays None on timeout — like the non-stream path."""
+    if not stream:
+        try:
+            completed = subprocess.run(command, cwd=cwd, env=environment, text=True, capture_output=True, timeout=limit, check=False)
+            return completed.stdout, completed.stderr, completed.returncode, False
+        except subprocess.TimeoutExpired as exc:
+            out = exc.stdout if isinstance(exc.stdout, str) else (exc.stdout or b"").decode("utf-8", errors="replace")
+            err = exc.stderr if isinstance(exc.stderr, str) else (exc.stderr or b"").decode("utf-8", errors="replace")
+            return out, err, None, True
+    proc = subprocess.Popen(command, cwd=cwd, env=environment, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    out_buf: list[str] = []
+    err_buf: list[str] = []
+
+    def _pump(stream_obj: Any, buf: list[str], echo: bool) -> None:
+        for line in iter(stream_obj.readline, ""):
+            buf.append(line)
+            if echo:
+                sys.stderr.write(line)
+                sys.stderr.flush()
+        stream_obj.close()
+
+    t_out = threading.Thread(target=_pump, args=(proc.stdout, out_buf, True), daemon=True)
+    t_err = threading.Thread(target=_pump, args=(proc.stderr, err_buf, False), daemon=True)
+    t_out.start()
+    t_err.start()
+    timed_out = False
+    try:
+        proc.wait(timeout=limit)
+    except subprocess.TimeoutExpired:
+        timed_out = True
+        proc.kill()
+        proc.wait()
+    t_out.join()
+    t_err.join()
+    exit_code = None if timed_out else proc.returncode
+    return "".join(out_buf), "".join(err_buf), exit_code, timed_out
+
+
 def build_measurement(
     repository: Path,
     oracle_name: str,
     fixture: str | None = None,
     timeout_seconds: int | None = None,
+    stream: bool = False,
 ) -> tuple[OracleSpec, dict[str, Any], Path, list[str], bool]:
     """Exécute un oracle de la liste fermée et construit l'artefact de mesure canonique
     `aret-oracle-artifact/v1`, SANS aucun accès à l'Evidence Store ni au secret de
@@ -184,13 +234,7 @@ def build_measurement(
         objcache = os.environ.get("ARET_OBJCACHE")
         if objcache:
             environment["ARET_OBJCACHE"] = objcache
-        try:
-            completed = subprocess.run(command, cwd=repository, env=environment, text=True, capture_output=True, timeout=limit, check=False)
-            stdout, stderr, exit_code = completed.stdout, completed.stderr, completed.returncode
-        except subprocess.TimeoutExpired as exc:
-            timed_out = True
-            stdout = exc.stdout if isinstance(exc.stdout, str) else (exc.stdout or b"").decode("utf-8", errors="replace")
-            stderr = exc.stderr if isinstance(exc.stderr, str) else (exc.stderr or b"").decode("utf-8", errors="replace")
+        stdout, stderr, exit_code, timed_out = _execute_command(command, repository, environment, limit, stream)
     finished = utc_now()
     result = normalise_result(spec, exit_code, stdout, stderr, missing, timed_out)
     command_text = " ".join(json.dumps(part) if re.search(r"\s", part) else part for part in command)
@@ -231,7 +275,7 @@ def measure_oracle(
     """Exécute un oracle et renvoie l'artefact de mesure `aret-oracle-artifact/v1`, SANS
     Evidence Store ni secret. Destiné à la CI : la mesure est publiée telle quelle, puis
     re-vérifiée (re-parse du stdout) et signée LOCALEMENT par l'importateur de preuve."""
-    _spec, artifact, _binary, _missing, _timed_out = build_measurement(repository, oracle_name, fixture, timeout_seconds)
+    _spec, artifact, _binary, _missing, _timed_out = build_measurement(repository, oracle_name, fixture, timeout_seconds, stream=True)
     return artifact
 
 
