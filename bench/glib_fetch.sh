@@ -16,6 +16,32 @@ dev="$out/dev"                   # headers + import libs (to COMPILE the fixture
 mkdir -p "$out" "$dev"
 BASE="https://repo.msys2.org/mingw/mingw32/"
 
+# REPRODUCIBILITY PIN (§0). The winediff gate must prove ARET against the SAME binary in
+# dev and CI — an unpinned `tail -1` makes the two machines test DIFFERENT glibs the day
+# MSYS2 rolls forward. glib 2.88.3 is proven bit-identique to the Wine oracle (winediff
+# 296/296). glib >= 2.90 hits a REAL, separate ARET wall — an unrecovered indirect call
+# at 0x503390 (glib_core/glib_object abort). That wall is NOT masked here: it is a tracked
+# frontier (its own KN), and abort is the §0-safe state. MSYS2 is a rolling repo (it drops
+# old packages), so we select this EXACT version and FAIL LOUDLY if it is gone — never a
+# silent drift to latest — so the reserve (a committed DLL snapshot) kicks in visibly.
+# libglib/libgobject/libgio/libgmodule all ship in the glib2 package, so one pin fixes the
+# whole lifted glib family. Other deps stay at latest: only glib2 carries the measured wall.
+PINNED_GLIB="2.88.3"
+declare -A PIN=( [glib2]="$PINNED_GLIB" )
+
+# The glib version actually present in the dev tree (the single source of truth for the
+# §0 self-check below). Empty if the headers are absent.
+glib_version() {
+  local gc="$dev/lib/glib-2.0/include/glibconfig.h"
+  [ -f "$gc" ] || return 1
+  local M m u
+  M="$(grep -hoE 'GLIB_MAJOR_VERSION [0-9]+' "$gc" | awk '{print $2}')"
+  m="$(grep -hoE 'GLIB_MINOR_VERSION [0-9]+' "$gc" | awk '{print $2}')"
+  u="$(grep -hoE 'GLIB_MICRO_VERSION [0-9]+' "$gc" | awk '{print $2}')"
+  [ -n "$M" ] && [ -n "$m" ] && [ -n "$u" ] || return 1
+  printf '%s.%s.%s' "$M" "$m" "$u"
+}
+
 # The exact runtime DLLs the glib_* fixtures need beside the exe. libglib/libgobject are
 # lifted by ARET (.withlocaldll); the rest are Wine-only deps (.winelibs).
 # The second block adds the gdk-pixbuf PNG-decode closure (glib_gdkpng): gio/gmodule +
@@ -31,7 +57,8 @@ WANT="libglib-2.0-0.dll libgobject-2.0-0.dll libgcc_s_dw2-1.dll libintl-8.dll \
 have_all() {
   local f; for f in $WANT; do [ -f "$out/$f" ] || return 1; done
   [ -f "$dev/include/glib-2.0/glib.h" ] && [ -f "$dev/lib/libglib-2.0.dll.a" ] \
-    && [ -f "$dev/include/libintl.h" ] && [ -f "$dev/lib/libintl.dll.a" ]
+    && [ -f "$dev/include/libintl.h" ] && [ -f "$dev/lib/libintl.dll.a" ] \
+    && [ "$(glib_version 2>/dev/null)" = "$PINNED_GLIB" ]   # a drifted cache re-fetches
 }
 if have_all; then echo "== GLib runtime already present in $out =="; ls "$out"; exit 0; fi
 
@@ -43,8 +70,17 @@ tmp="$(mktemp -d)"; trap 'rm -rf "$tmp"' EXIT
 # for glib2, the dev tree (headers + import libs) needed to compile the fixture.
 fetch() {
   local prefix="$1" want_dev="${2:-}"
-  local pk; pk="$(printf '%s\n' "$idx" | grep -oE "mingw-w64-i686-$prefix-[0-9][^\"]+\.pkg\.tar\.zst" \
-                   | grep -v '\.sig' | sort -u | tail -1)"
+  local pin="${PIN[$prefix]:-}" pk
+  if [ -n "$pin" ]; then
+    # Pinned: select this exact version only. If it is gone (rolling repo), DON'T fall
+    # back to latest — leave it unfetched so the miss-check below fails loudly.
+    pk="$(printf '%s\n' "$idx" | grep -oE "mingw-w64-i686-$prefix-$pin-[0-9][^\"]*\.pkg\.tar\.zst" \
+          | grep -v '\.sig' | sort -u | tail -1)"
+    [ -n "$pk" ] || { echo "  !! $prefix épinglé $pin ABSENT de msys2 (repo rolling) — réserve = snapshot DLL"; return; }
+  else
+    pk="$(printf '%s\n' "$idx" | grep -oE "mingw-w64-i686-$prefix-[0-9][^\"]+\.pkg\.tar\.zst" \
+          | grep -v '\.sig' | sort -u | tail -1)"
+  fi
   [ -n "$pk" ] || { echo "  ?? aucun paquet pour $prefix"; return; }
   local members='mingw32/bin'
   [ -n "$want_dev" ] && members='mingw32/bin mingw32/include mingw32/lib'
@@ -85,5 +121,12 @@ for f in $WANT; do [ -f "$out/$f" ] || miss="$miss $f"; done
 [ -f "$dev/include/glib-2.0/glib.h" ] || miss="$miss glib.h"
 [ -f "$dev/lib/libglib-2.0.dll.a" ]   || miss="$miss libglib-2.0.dll.a"
 if [ -n "$miss" ]; then echo "== INCOMPLET, manque :$miss =="; exit 1; fi
-echo "== GLib runtime ready in $out (dev in $dev) =="
+# §0 self-check : PROVE we fetched the pinned glib, not a silent substitute. The whole
+# gate's reproducibility rests on this exact version; a mismatch here is a loud failure.
+gotv="$(glib_version || true)"
+if [ "$gotv" != "$PINNED_GLIB" ]; then
+  echo "== ERREUR §0 : glib épinglé $PINNED_GLIB mais dev = '${gotv:-absent}' — fetch non reproductible =="
+  exit 1
+fi
+echo "== GLib runtime ready in $out (dev in $dev), glib $gotv (épinglé) =="
 ls "$out"

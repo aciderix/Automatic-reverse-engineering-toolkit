@@ -14,13 +14,28 @@ out="$here/.cache/zlib"; dev="$out/dev"
 mkdir -p "$out" "$dev/lib"
 BASE="https://repo.msys2.org/mingw/mingw32/"
 
-if [ -f "$out/zlib1.dll" ] && [ -f "$dev/include/zlib.h" ] && [ -f "$dev/lib/libz.dll.a" ]; then
-  echo "== zlib runtime already present in $out =="; ls "$out"; exit 0
+# REPRODUCIBILITY PIN (§0), same rationale as glib_fetch.sh: the winediff gate must prove
+# ARET against the SAME binary in dev and CI, so we select an EXACT zlib version instead of
+# `tail -1` (which drifts the day MSYS2 rolls forward). 1.3.2 is the proven version
+# (zlib_roundtrip PASS). MSYS2 is rolling (drops old packages), so if the pin is gone we
+# FAIL LOUDLY rather than silently taking latest — the reserve is a committed DLL snapshot.
+PINNED_ZLIB="1.3.2"
+
+# The zlib version actually present in the dev header (source of truth for the self-check).
+zlib_version() {
+  [ -f "$dev/include/zlib.h" ] || return 1
+  grep -hoE '#define ZLIB_VERSION "[0-9][^"]*"' "$dev/include/zlib.h" | grep -oE '[0-9][0-9.]*' | head -1
+}
+
+if [ -f "$out/zlib1.dll" ] && [ -f "$dev/include/zlib.h" ] && [ -f "$dev/lib/libz.dll.a" ] \
+   && [ "$(zlib_version 2>/dev/null)" = "$PINNED_ZLIB" ]; then
+  echo "== zlib runtime already present in $out (zlib $PINNED_ZLIB, épinglé) =="; ls "$out"; exit 0
 fi
 
-pk="$(curl -sS -m 60 "$BASE" | grep -oE 'mingw-w64-i686-zlib-[0-9][^"]+\.pkg\.tar\.zst' \
+# Pinned: this exact version only; no fall-back to latest if it is gone.
+pk="$(curl -sS -m 60 "$BASE" | grep -oE "mingw-w64-i686-zlib-$PINNED_ZLIB-[0-9][^\"]*\.pkg\.tar\.zst" \
       | grep -v '\.sig' | sort -u | tail -1)"
-[ -n "$pk" ] || { echo "ERREUR : paquet zlib introuvable"; exit 1; }
+[ -n "$pk" ] || { echo "ERREUR : zlib épinglé $PINNED_ZLIB ABSENT de msys2 (repo rolling) — réserve = snapshot DLL"; exit 1; }
 tmp="$(mktemp -d)"; trap 'rm -rf "$tmp"' EXIT
 curl -sS -m 180 -L "$BASE$pk" -o "$tmp/z.zst" 2>/dev/null \
   && tar --use-compress-program=unzstd -xf "$tmp/z.zst" -C "$tmp" \
@@ -37,4 +52,10 @@ miss=""
 [ -f "$dev/include/zlib.h" ]   || miss="$miss zlib.h"
 [ -f "$dev/lib/libz.dll.a" ]   || miss="$miss libz.dll.a"
 [ -n "$miss" ] && { echo "== INCOMPLET, manque :$miss =="; exit 1; }
-echo "== zlib runtime ready in $out ($pk) =="; ls "$out"
+# §0 self-check : prove we fetched the pinned zlib, not a silent substitute.
+gotv="$(zlib_version || true)"
+if [ "$gotv" != "$PINNED_ZLIB" ]; then
+  echo "== ERREUR §0 : zlib épinglé $PINNED_ZLIB mais dev = '${gotv:-absent}' — fetch non reproductible =="
+  exit 1
+fi
+echo "== zlib runtime ready in $out ($pk), zlib $gotv (épinglé) =="; ls "$out"

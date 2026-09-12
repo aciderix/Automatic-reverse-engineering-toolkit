@@ -32,6 +32,11 @@ on:
   push:
     paths:
       - '.github/workflows/oracles-linux.yml'
+      # The third-party DLL fetch scripts are oracle INPUTS (they fix which glib/zlib the
+      # winediff fixtures are proven against). A change to them — e.g. a version pin — must
+      # re-run the gate so the new binary is measured, not just the nightly.
+      - 'bench/glib_fetch.sh'
+      - 'bench/zlib_fetch.sh'
 
 # Least privilege: read the checkout, read the ghcr toolchain image. No packages:write,
 # no secret — this workflow measures, it never mints a proof.
