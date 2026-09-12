@@ -1,0 +1,64 @@
+# Build and publish the ARET CI oracle toolchain image (docker/ci-toolchain/Dockerfile).
+#
+# The oracle workflows (oracles-linux.yml) run FROM this image so they start with the
+# full Wine/mingw/unicorn/xvfb stack already present — no per-job apt dance. This
+# workflow is the only place that rebuilds it: it runs when the Dockerfile (or this
+# file) changes, and on demand. The published image is content-stable, so its layers
+# cache in the registry and a rebuild only re-pushes changed layers.
+name: ci-image
+
+on:
+  push:
+    paths:
+      - 'docker/ci-toolchain/**'
+      - '.github/workflows/ci-image.yml'
+  workflow_dispatch:
+
+# Least privilege: read the checkout, write packages (the ghcr image). Nothing here
+# touches the proof HMAC secret — this image is pure toolchain, never a proof minter.
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@v3
+
+      # The owner segment of a ghcr name must be lowercase; github.repository_owner
+      # already is for this repo, but lowercasing keeps it correct for any fork.
+      - name: Compute image name
+        id: img
+        run: echo "name=ghcr.io/$(echo '${{ github.repository_owner }}' | tr '[:upper:]' '[:lower:]')/aret-ci-toolchain" >> "$GITHUB_OUTPUT"
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: docker/ci-toolchain
+          file: docker/ci-toolchain/Dockerfile
+          push: true
+          tags: |
+            ${{ steps.img.outputs.name }}:latest
+            ${{ steps.img.outputs.name }}:${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Report
+        run: |
+          {
+            echo "## ARET CI toolchain image"
+            echo ""
+            echo "- \`${{ steps.img.outputs.name }}:latest\`"
+            echo "- \`${{ steps.img.outputs.name }}:${{ github.sha }}\`"
+          } >> "$GITHUB_STEP_SUMMARY"
