@@ -1,0 +1,24 @@
+{
+  "format": "aret-oracle-artifact/v1",
+  "oracle": "winediff",
+  "kind": "WINEDIFF",
+  "command": "bash /home/user/Automatic-reverse-engineering-toolkit/bench/winediff.sh comctl_loadbitmap",
+  "result": "PASS",
+  "exit_code": 0,
+  "started_at": "2026-09-12T15:40:17Z",
+  "finished_at": "2026-09-12T15:40:41Z",
+  "environment": {
+    "adapter": "aret-mmu-oracles/1",
+    "oracle": "winediff",
+    "repository": "/home/user/Automatic-reverse-engineering-toolkit",
+    "repository_revision": "93aeb73e543ff9e2210812a016f31b6ae1dd2de4",
+    "script": "bench/winediff.sh",
+    "fixture": "comctl_loadbitmap",
+    "timeout_seconds": 3600,
+    "missing_dependencies": [],
+    "timed_out": false,
+    "duration_seconds": 24.171
+  },
+  "stdout": "  ok    comctl_loadbitmap\n------------------------------------------\nOS-API (Wine) equivalence: 1/1 programs\n",
+  "stderr": ""
+}
