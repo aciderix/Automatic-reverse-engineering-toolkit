@@ -1,0 +1,99 @@
+# Run the ARET Linux oracles in CI, off the dev container.
+#
+# WHY. The differential oracles (difftest, cpudiff, funcdiff, winediff, …) are the
+# project's gates, and they all run against a local toolchain + Wine. Running them in
+# the dev container eats its wall-clock and, for the Wine oracles, hits the shared
+# wineserver wedge after a container restart. Moving them to CI gives each oracle a
+# FRESH container (from the pinned toolchain image) with a fresh WINEPREFIX, which is
+# the structural cure for that wedge — and it frees the dev container for real work.
+#
+# MEASURE HERE, SIGN LOCALLY. This workflow never holds the proof HMAC secret. Each
+# job produces the canonical aret-oracle-artifact/v1 MEASUREMENT (evidence adapter,
+# --measure-only) and uploads it. The admissible PROOF is minted on the workstation by
+# re-parsing that same stdout and signing locally (the "CI measures / local signs"
+# model). So CI cannot fabricate an admissible proof; it can only measure.
+#
+# GATE SEMANTICS (playbook: "déverdir un job ne déverdit jamais la vérité"). A gate
+# oracle turns the job RED on FAIL/ERROR — a signal to go qualify it (§0.5:
+# environmental vs real), never a trigger to auto-"fix". SKIPPED (a toolchain piece
+# genuinely absent) stays green, and a pure measurement oracle never gates. The
+# verdict and the raw output are always published, red or green.
+name: oracles-linux
+
+on:
+  workflow_dispatch:
+    inputs:
+      oracles:
+        description: 'Comma-separated oracle names to run (subset of the matrix).'
+        default: 'difftest'
+  schedule:
+    # Nightly non-regression (03:17 UTC — off the top of the hour to avoid the rush).
+    - cron: '17 3 * * *'
+  push:
+    paths:
+      - '.github/workflows/oracles-linux.yml'
+
+# Least privilege: read the checkout, read the ghcr toolchain image. No packages:write,
+# no secret — this workflow measures, it never mints a proof.
+permissions:
+  contents: read
+  packages: read
+
+concurrency:
+  group: oracles-linux-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  oracle:
+    runs-on: ubuntu-latest
+    container:
+      image: ghcr.io/aciderix/aret-ci-toolchain:latest
+      credentials:
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+    strategy:
+      fail-fast: false
+      matrix:
+        # Start with difftest (fast, Wine-free) to validate the skeleton + caches.
+        # Wine oracles (winediff, …) land in a later step once the binary caches are set.
+        oracle: [difftest]
+    name: ${{ matrix.oracle }}
+    steps:
+      - uses: actions/checkout@v4
+
+      # The container runs as root; git refuses a repo it sees as another user's
+      # ("dubious ownership"), which would make the measurement's repository_revision
+      # read UNKNOWN. Mark the workspace safe so the revision is captured truthfully.
+      - name: Trust the workspace for git
+        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
+
+      # Caches the downloaded crates and the build artifacts, keyed on Cargo.lock +
+      # rustc, so `aret` is only rebuilt when the code actually changes. Honors the
+      # image's CARGO_HOME (/opt/cargo).
+      - name: Rust cache
+        uses: Swatinem/rust-cache@v2
+
+      - name: Build aret (release, locked)
+        run: cargo build --release --locked
+
+      # Produce the canonical measurement (no store, no secret). The adapter prints the
+      # verdict line to stderr; the JSON goes to the artifact.
+      - name: Measure ${{ matrix.oracle }}
+        run: |
+          mkdir -p ci-out
+          PYTHONPATH=aret-memory python3 -m evidence.adapters.oracles "${{ matrix.oracle }}" \
+            --repository . --measure-only --output "ci-out/${{ matrix.oracle }}.json"
+
+      # Report the verdict to the run summary and gate the job. Always runs so a
+      # measurement is published even when the build or measure step failed.
+      - name: Report verdict and gate
+        if: always()
+        run: python3 .github/scripts/oracle_report.py ci-out
+
+      - name: Upload measurement artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: oracle-${{ matrix.oracle }}
+          path: ci-out/*.json
+          if-no-files-found: warn
