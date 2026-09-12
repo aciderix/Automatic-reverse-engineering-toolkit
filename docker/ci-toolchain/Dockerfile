@@ -40,7 +40,17 @@ RUN dpkg --add-architecture i386 \
       build-essential pkg-config \
       git curl ca-certificates unzip tar xz-utils zstd \
       python3 python3-venv python3-pip \
+      fontconfig fonts-liberation fonts-dejavu-core \
  && rm -rf /var/lib/apt/lists/*
+
+# Fonts are load-bearing for the GUI text oracle, not cosmetic. ARET's text path and
+# Wine both substitute the Win32 faces (MS Sans Serif / Tahoma / MS Shell Dlg / Arial…)
+# to the metric-compatible Liberation family via fontconfig, with DejaVu as the generic
+# fallback. A bare ubuntu:24.04 ships NO fonts, so both engines fall back elsewhere and
+# the ~22 text/paint winediff fixtures DIFF — an ENVIRONMENT gap, not an ARET bug (they
+# pass in the dev container, which has these very packages). Installing fontconfig +
+# fonts-liberation + fonts-dejavu-core makes the CI image resolve the same glyphs the
+# dev container and Wine do, so the text oracle compares like for like.
 
 # Rust via rustup (stable, minimal). Cargo.lock is format v4 and needs a current
 # Cargo — the distro cargo is too old, exactly as session-start.sh notes. Installed
