@@ -1754,7 +1754,16 @@ pub fn transpile(
             | "DialogBoxParamA" | "DialogBoxParamW"
             | "DialogBoxIndirectParamA" | "DialogBoxIndirectParamW"
             | "CreateDialogParamA" | "CreateDialogParamW"
-            | "CreateDialogIndirectParamA" | "CreateDialogIndirectParamW"))
+            | "CreateDialogIndirectParamA" | "CreateDialogIndirectParamW"
+            // A window with a menu bar has its menu TEXT drawn by the system (user32's
+            // non-client menu-bar painter) even if the app never calls a text API — so an
+            // app that creates/loads/attaches a menu needs FreeType to raster that text.
+            // (The class-menu path via RegisterClass.lpszMenuName has no menu import; such
+            // apps are usually text editors that already import a text/font API above.)
+            | "CreateMenu" | "CreatePopupMenu" | "LoadMenuA" | "LoadMenuW"
+            | "LoadMenuIndirectA" | "LoadMenuIndirectW" | "SetMenu"
+            | "AppendMenuA" | "AppendMenuW" | "InsertMenuA" | "InsertMenuW"
+            | "InsertMenuItemA" | "InsertMenuItemW"))
     {
         freetype_flags()
     } else {

@@ -4035,6 +4035,12 @@ static void u32_combo_fit_height(int wi);                         /* fwd */
 /* Always-compiled fwd (the call sites in CreateWindowEx and the definition are outside
  * ARET_HAVE_SDL, so this must not live in the SDL-only fwd block below). */
 static void u32_attach_window_menu(int i, uint32_t style, uint32_t hMenu, uint32_t cref);
+/* B-cadré non-client menu bar (defined late, near the menu model): height of the menu-bar
+ * band reserved at the top of a menu-bearing top-level window (0 otherwise), and the band
+ * painter. Forward-declared here because GetClientRect / the SDL show+present paths (all
+ * earlier in the file) use them. */
+static int  u32_win_menu_h(int i);
+static void u32_paint_menu_bar(int wi, uint8_t *dst, int W, int mh);
 
 #ifdef ARET_HAVE_SDL
 /* G2b window-presentation helpers (defined after the GDI object model, which they
@@ -7835,14 +7841,16 @@ static void sdl_window_show(uint32_t esp, int i) {
     /* Client-area framebuffer (a top-down 32bpp DIB) is allocated even if the
      * real window can't be created (headless): GetDC still gives the program a
      * surface to draw into, and the drawing round-trips like Wine's. */
+    int mh = u32_win_menu_h(i);              /* non-client menu-bar band reserved at top */
+    int ch = h - mh; if (ch < 1) ch = 1;
     int b = gdi_alloc(GDIT_BITMAP);
     if (b) {
-        g_gdi[b].w = w; g_gdi[b].h = h; g_gdi[b].topdown = 1; g_gdi[b].bpp = 32;
-        g_gdi[b].bits = (uint8_t *)calloc((size_t)w * h, 4); g_gdi[b].owns_bits = 1;
+        g_gdi[b].w = w; g_gdi[b].h = ch; g_gdi[b].topdown = 1; g_gdi[b].bpp = 32;
+        g_gdi[b].bits = (uint8_t *)calloc((size_t)w * ch, 4); g_gdi[b].owns_bits = 1;
         if (!g_gdi[b].bits) { g_gdi[b].used = 0; b = 0; }
     }
     g_u32_win[i].client_bmp = b ? gdi_handle(b) : 0;
-    g_u32_win[i].cw = w; g_u32_win[i].ch = h;
+    g_u32_win[i].cw = w; g_u32_win[i].ch = ch;   /* client framebuffer = window minus menu band */
     if (getenv("ARET_GUI_TRACE"))
         fprintf(stderr, "[GUI] show win=%d x=%d y=%d w=%d h=%d dialog=%d style=%#x exstyle=%#x\n",
                 i, g_u32_win[i].x, g_u32_win[i].y, w, h, g_u32_win[i].is_dialog,
@@ -7865,28 +7873,44 @@ static void sdl_window_show(uint32_t esp, int i) {
  * bytes are [B,G,R,0] which is exactly SDL_PIXELFORMAT_RGB888 memory order. */
 static void sdl_window_present(int i) {
     if (i < 0 || i >= U32_MAX_WIN) return;
-    /* Debug: dump ARET's actual client-area pixels (top-down BGRA), independent of SDL/X
-     * compositing — the ground truth of what ARET drew, for the framebuffer oracle. */
+    int b = gdi_idx(g_u32_win[i].client_bmp);
+    int cw = g_u32_win[i].cw, ch = g_u32_win[i].ch;
+    int mh = u32_win_menu_h(i);                      /* non-client menu band at top (0 if none) */
+    /* When the window has a menu bar, the on-screen window is [menu band | client]. Build
+     * one full-window buffer = painted band (top mh rows) + the client framebuffer below it,
+     * used for BOTH the dump (so the band is part of the proof) and the SDL upload. */
+    uint8_t *full = NULL; int FW = cw, FH = ch + mh;
+    if (mh > 0 && b >= 0 && g_gdi[b].bits) {
+        full = (uint8_t *)malloc((size_t)FW * FH * 4);
+        if (full) {
+            u32_paint_menu_bar(i, full, FW, mh);                                   /* top band */
+            memcpy(full + (size_t)mh * FW * 4, g_gdi[b].bits, (size_t)cw * ch * 4); /* client */
+        }
+    }
+    /* Debug: dump ARET's actual pixels (top-down BGRA), independent of SDL/X compositing —
+     * the ground truth for the framebuffer oracle. With a menu, dump the FULL window. */
     const char *dp = getenv("ARET_GUI_DUMP");
     if (dp) {
-        int db = gdi_idx(g_u32_win[i].client_bmp);
-        if (db >= 0 && g_gdi[db].bits) {
+        uint8_t *dbits = full ? full : (b >= 0 ? g_gdi[b].bits : NULL);
+        int dw = full ? FW : cw, dh = full ? FH : ch;
+        if (dbits) {
             char path[600];
-            snprintf(path, sizeof path, "%s.win%d.%dx%d.bgra", dp, i, g_u32_win[i].cw, g_u32_win[i].ch);
+            snprintf(path, sizeof path, "%s.win%d.%dx%d.bgra", dp, i, dw, dh);
             FILE *f = fopen(path, "wb");
-            if (f) { fwrite(g_gdi[db].bits, 4, (size_t)g_u32_win[i].cw * g_u32_win[i].ch, f); fclose(f);
+            if (f) { fwrite(dbits, 4, (size_t)dw * dh, f); fclose(f);
                      if (getenv("ARET_GUI_TRACE")) fprintf(stderr, "[GUI] present win=%d dumped %s\n", i, path); }
         }
     }
     SDL_Renderer *ren = (SDL_Renderer *)g_u32_win[i].sdl_ren;
     SDL_Texture  *tex = (SDL_Texture *)g_u32_win[i].sdl_tex;
-    if (!ren || !tex) return;
-    int b = gdi_idx(g_u32_win[i].client_bmp);
-    if (b < 0 || !g_gdi[b].bits) return;
-    SDL_UpdateTexture(tex, NULL, g_gdi[b].bits, g_u32_win[i].cw * 4);
-    SDL_RenderClear(ren);
-    SDL_RenderCopy(ren, tex, NULL, NULL);
-    SDL_RenderPresent(ren);
+    if (ren && tex && b >= 0 && g_gdi[b].bits) {
+        if (full) SDL_UpdateTexture(tex, NULL, full, FW * 4);
+        else      SDL_UpdateTexture(tex, NULL, g_gdi[b].bits, cw * 4);
+        SDL_RenderClear(ren);
+        SDL_RenderCopy(ren, tex, NULL, NULL);
+        SDL_RenderPresent(ren);
+    }
+    free(full);
 }
 static void sdl_window_destroy(int i) {
     if (i < 0 || i >= U32_MAX_WIN) return;
@@ -11811,7 +11835,11 @@ uint32_t aret_GetClientRect(uint32_t esp) {
     if (!r) return 0;
     int i = u32_win_idx(WU(0));
     if (i < 0) { r[0] = r[1] = r[2] = r[3] = 0; return 0; }
-    r[0] = 0; r[1] = 0; r[2] = g_u32_win[i].w; r[3] = g_u32_win[i].h;
+    /* A menu-bearing top-level window reserves a non-client menu-bar band at the top
+     * (SM_CYMENU): the CLIENT excludes it, so an app sizing a child to its client (notepad's
+     * EDIT) leaves room for the bar. ARET models this menu band but not the frame/caption
+     * (window==client otherwise), so this is a partial non-client model scoped to the menu. */
+    r[0] = 0; r[1] = 0; r[2] = g_u32_win[i].w; r[3] = g_u32_win[i].h - u32_win_menu_h(i);
     if (getenv("ARET_GUI_TRACE"))
         fprintf(stderr, "[GUI] GetClientRect id=%d -> %dx%d\n", g_u32_win[i].ctrl_id, r[2], r[3]);
     return 1;
@@ -12040,6 +12068,53 @@ uint32_t aret_DeleteMenu(uint32_t esp) {
     return 1;
 }
 uint32_t aret_RemoveMenu(uint32_t esp) { return aret_DeleteMenu(esp); }
+
+/* B-cadré — non-client menu bar. Height of the menu band reserved at the top of a window:
+ * SM_CYMENU for a non-WS_CHILD window that currently has a (real) menu, else 0. */
+static int u32_win_menu_h(int i) {
+    if (i < 0 || i >= U32_MAX_WIN || !g_u32_win[i].used) return 0;
+    if (g_u32_win[i].style & 0x40000000u) return 0;           /* WS_CHILD never has a menu bar */
+    if (!g_u32_wmenu[i] || u32_menu_idx(g_u32_wmenu[i]) < 0) return 0;
+    return (int)u32_sysmetric(15);                            /* SM_CYMENU */
+}
+/* Paint the classic menu bar into a W x mh top-down BGRA band (dst). Background COLOR_MENU,
+ * each top-level item's text in COLOR_MENUTEXT with the default GUI font, laid out left to
+ * right. Reuses the GDI text path (u32_paint_text) — already bit-exact vs Wine — via a
+ * temporary memory DC over the band. Item widths come from DT_CALCRECT; HPAD is the per-item
+ * horizontal padding (to refine against Wine's MENU_DrawMenuBar pixel layout). */
+static void u32_paint_menu_bar(int wi, uint8_t *dst, int W, int mh) {
+    if (!dst || W <= 0 || mh <= 0) return;
+    uint32_t *px = (uint32_t *)dst;
+    uint32_t bg = u32_syscolor(4 /*COLOR_MENU*/);
+    for (int k = 0; k < W * mh; k++) px[k] = bg;
+    int mi = (wi >= 0 && wi < U32_MAX_WIN) ? u32_menu_idx(g_u32_wmenu[wi]) : -1;
+    if (mi < 0) return;
+    int tb = gdi_alloc(GDIT_BITMAP); if (!tb) return;
+    g_gdi[tb].w = W; g_gdi[tb].h = mh; g_gdi[tb].bits = dst; g_gdi[tb].owns_bits = 0;
+    g_gdi[tb].topdown = 1; g_gdi[tb].bpp = 32;
+    int td = gdi_alloc(GDIT_DC); if (!td) { g_gdi[tb].used = 0; return; }
+    u32_dc_defaults(td); g_gdi[td].sel_bitmap = gdi_handle(tb);
+    uint32_t hdc = gdi_handle(td);
+    const int HPAD = 8;                       /* per-item horizontal padding (measured ~approx) */
+    int x = 0;
+    for (int k = 0; k < g_u32_menu[mi].count; k++) {
+        const char *t = g_u32_menu[mi].it[k].text;
+        if (!t || !t[0]) continue;            /* skip separators / empty */
+        uint32_t cps[128]; int m = 0; for (; t[m] && m < 127; m++) cps[m] = u32_ansi_cp((unsigned char)t[m]);
+        int32_t rc[4] = { 0, 0, W, mh };
+        g_gdi[td].sel_font = u32_font_or_default(0);
+        u32_drawtext(hdc, cps, m, (uint32_t)(uintptr_t)rc, 0x400u | 0x20u /*DT_CALCRECT|DT_SINGLELINE*/);
+        int tw = rc[2] - rc[0]; if (tw < 0) tw = 0;
+        int itemw = tw + 2 * HPAD;
+        int32_t ir[4] = { x, 0, x + itemw, mh };
+        u32_paint_text(hdc, td, 0, t, ir, 0x1u | 0x4u | 0x20u /*DT_CENTER|DT_VCENTER|DT_SINGLELINE*/, 7 /*COLOR_MENUTEXT*/);
+        if (getenv("ARET_GUI_TRACE"))
+            fprintf(stderr, "[GUI] menubar item k=%d \"%s\" tw=%d itemw=%d x=%d font=%#x\n",
+                    k, t, tw, itemw, x, u32_font_or_default(0));
+        x += itemw;
+    }
+    g_gdi[td].used = 0; g_gdi[tb].used = 0;
+}
 uint32_t aret_GetMenuItemCount(uint32_t esp) { int i = u32_menu_idx(WU(0)); return i < 0 ? 0xFFFFFFFFu : (uint32_t)g_u32_menu[i].count; }
 
 uint32_t aret_EnableMenuItem(uint32_t esp) {
