@@ -125,3 +125,29 @@ jobs:
           name: oracle-${{ matrix.oracle }}${{ matrix.fixture && format('-{0}', matrix.fixture) || '' }}
           path: ci-out/*.json
           if-no-files-found: warn
+
+  # Cross-oracle state view: collect every per-oracle measurement into one results.json
+  # + a combined run summary, so a session reads the whole run's state in ONE place.
+  # Runs on a bare runner (stdlib python only, no toolchain image) and always(), so it
+  # reports even when a matrix job failed. Gates too: FAIL/ERROR anywhere turns it red.
+  aggregate:
+    needs: [oracle]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Download all oracle measurements
+        uses: actions/download-artifact@v4
+        with:
+          path: ci-measurements
+          pattern: oracle-*
+          merge-multiple: true
+      - name: Aggregate to results.json + run summary
+        run: python3 .github/scripts/oracle_aggregate.py ci-measurements results.json
+      - name: Upload results.json
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: oracle-results
+          path: results.json
+          if-no-files-found: warn
