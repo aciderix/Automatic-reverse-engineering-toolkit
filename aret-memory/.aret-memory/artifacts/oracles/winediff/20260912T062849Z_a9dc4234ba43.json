@@ -1,0 +1,24 @@
+{
+  "format": "aret-oracle-artifact/v1",
+  "oracle": "winediff",
+  "kind": "WINEDIFF",
+  "command": "bash /home/user/Automatic-reverse-engineering-toolkit/bench/winediff.sh user32_adjustwindowrect",
+  "result": "PASS",
+  "exit_code": 0,
+  "started_at": "2026-09-12T06:28:38Z",
+  "finished_at": "2026-09-12T06:28:49Z",
+  "environment": {
+    "adapter": "aret-mmu-oracles/1",
+    "oracle": "winediff",
+    "repository": "/home/user/Automatic-reverse-engineering-toolkit",
+    "repository_revision": "cf0a14eaf2de1e4c621c07f4400569f34ddf5872",
+    "script": "bench/winediff.sh",
+    "fixture": "user32_adjustwindowrect",
+    "timeout_seconds": 3600,
+    "missing_dependencies": [],
+    "timed_out": false,
+    "duration_seconds": 10.965
+  },
+  "stdout": "  ok    user32_adjustwindowrect\n------------------------------------------\nOS-API (Wine) equivalence: 1/1 programs\n",
+  "stderr": ""
+}
