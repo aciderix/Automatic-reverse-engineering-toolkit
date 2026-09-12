@@ -12002,10 +12002,12 @@ uint32_t aret_GetMenuState(uint32_t esp) {
     int i = u32_menu_idx(WU(0)); if (i < 0) return 0xFFFFFFFFu;
     int s = u32_menu_find(&g_u32_menu[i], WU(1), WU(2)); if (s < 0) return 0xFFFFFFFFu;
     uint32_t f = g_u32_menu[i].it[s].flags;
-    if (f & 0x10u) {                                     /* popup: hiword = submenu count */
+    if (f & 0x10u) {                                     /* popup: HIGH BYTE = submenu count,
+                                                          * low byte = flags (measured vs Wine:
+                                                          * 4-item &File popup -> 0x410) */
         int sub = u32_menu_idx(g_u32_menu[i].it[s].submenu);
         uint32_t cnt = sub >= 0 ? (uint32_t)g_u32_menu[sub].count : 0;
-        return (cnt << 16) | (f & 0xFFFFu);
+        return (cnt << 8) | (f & 0xFFu);
     }
     return f & 0xFFFFu;
 }
@@ -12503,8 +12505,57 @@ uint32_t aret_GetLocaleInfoA(uint32_t esp) {
     for (int i = 0; i < len; i++) buf[i] = s[i];
     buf[len] = 0; return (uint32_t)(len + 1);
 }
-uint32_t aret_LoadMenuA(uint32_t esp)     { (void)esp; return 0; }    /* no menu resource loaded (sound) */
-uint32_t aret_LoadMenuW(uint32_t esp)     { (void)esp; return 0; }    /* idem (W): menu bar is cosmetic here (sound: NULL = no menu) */
+/* Parse a CLASSIC RT_MENU template (measured on notepad/Wine: version 0, items at data+4)
+ * into menu `mi`, recursing for popups; returns the pointer just past the MF_END item. A
+ * MENUITEMTEMPLATE is: WORD mtOption; if !MF_POPUP a WORD mtID; then a NUL-terminated WCHAR
+ * string; if MF_POPUP(0x10) its subitems follow. MF_END(0x80) ends the level. */
+static const uint8_t *u32_menu_parse_classic(int mi, const uint8_t *p) {
+    for (;;) {
+        uint16_t opt = *(const uint16_t *)p; p += 2;
+        int popup = (opt & 0x0010u) != 0, end = (opt & 0x0080u) != 0;
+        uint32_t idOrSub = 0;
+        if (!popup) { idOrSub = *(const uint16_t *)p; p += 2; }
+        const uint16_t *w = (const uint16_t *)p;
+        int wlen = 0; while (w[wlen]) wlen++;
+        char text[128]; int k = 0; for (; k < wlen && k < 127; k++) text[k] = (char)(w[k] & 0xFF); text[k] = 0;
+        p += (wlen + 1) * 2;
+        if (popup) {
+            uint32_t sub = u32_menu_new(); idOrSub = sub;
+            int si = u32_menu_idx(sub);
+            if (si >= 0) p = u32_menu_parse_classic(si, p);
+        }
+        if (mi >= 0 && g_u32_menu[mi].count < U32_MAX_MITEMS) {
+            uint32_t sflags = (uint32_t)opt & ~0x0080u;   /* drop MF_END */
+            if ((opt & 0x0800u) || (!popup && idOrSub == 0 && text[0] == 0))
+                sflags = 0x0800u | 0x0001u | 0x0002u;     /* separator: MF_SEPARATOR|GRAYED|DISABLED (Wine) */
+            int s = g_u32_menu[mi].count++;
+            u32_menu_setitem(mi, s, sflags, idOrSub, text);
+        }
+        if (end) break;
+    }
+    return p;
+}
+/* LoadMenuA/W(hInstance, lpMenuName) -> HMENU. Loads the app's own RT_MENU resource from
+ * its .rsrc and builds the menu model (Get/SetMenu, GetMenuItemCount, GetSubMenu, tracking
+ * then work). MENUEX (version 1) templates are not parsed -> NULL (sound: no menu, the prior
+ * behaviour), never a misparse. NB: this CREATES the menu; drawing the menu bar (non-client)
+ * is a separate concern ARET does not yet render. */
+static uint32_t u32_load_menu(uint32_t name_ref) {
+    const uint8_t *de = u32_rsrc_data_entry(4 /*RT_MENU*/, name_ref);
+    if (!de) return 0;
+    uint32_t rva = *(const uint32_t *)de;
+    if (!aret_image_lo) return 0;
+    const uint8_t *data = (const uint8_t *)(uintptr_t)(aret_image_lo + rva);
+    uint16_t ver = *(const uint16_t *)data;
+    if (ver != 0) return 0;                       /* MENUEX not modelled -> no menu (sound) */
+    uint16_t off = *(const uint16_t *)(data + 2); /* offset from end-of-header to first item */
+    uint32_t h = u32_menu_new(); int mi = u32_menu_idx(h);
+    if (mi < 0) return 0;
+    u32_menu_parse_classic(mi, data + 4 + off);
+    return h;
+}
+uint32_t aret_LoadMenuA(uint32_t esp)     { return u32_load_menu(WU(1)); }
+uint32_t aret_LoadMenuW(uint32_t esp)     { return u32_load_menu(WU(1)); }
 /* Accelerator table (keyboard shortcuts): cosmetic for a functional run. LoadAccelerators
  * returns NULL (no table); TranslateAccelerator then returns 0 (this message is NOT an
  * accelerator) so the caller dispatches it normally — a defined, sound outcome, not a guess. */
