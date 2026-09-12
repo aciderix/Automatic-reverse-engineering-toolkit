@@ -81,7 +81,14 @@ TECHNICAL_CHECKPOINT_MAX_BYTES = {
 }
 # Le dossier garde une réserve pour Git, capacités et rituel injectés par le hook.
 # La borne de transport globale reste 18 500 octets, sans troncature.
-RESUME_DOSSIER_MAX_BYTES = 12_500
+# Le cap doit tenir le playbook AUTORÉ (config/playbook.md ≈ 10,8 Ko, ~87 % de l'ancien
+# 12 500) PLUS un handoff réaliste avec un checkpoint technique ACTIF complet : mesuré,
+# ce cas — pourtant entièrement valide (chaque champ sous sa borne, cf. prepare_handoff)
+# — produisait 12 703 octets, donc un dossier « non prêt » à partir d'une entrée acceptée.
+# Relevé à 14 000 pour rétablir la marge des handoffs réalistes ; la borne PAR CHAMP et le
+# contrôle de taille TOTALE de prepare_handoff (le garde « deux passes ») continuent de
+# refuser un handoff boursouflé, et 14 000 reste bien sous la borne de transport 18 500.
+RESUME_DOSSIER_MAX_BYTES = 14_000
 RESUME_DOSSIER_MIN_BYTES = 2_000
 # Resume Dossier V1.3 : fenêtre dérivée de faits machine déjà persistés.
 # Ces observations ne sont jamais une intention, un correctif ou une prochaine action.

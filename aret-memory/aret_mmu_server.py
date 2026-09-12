@@ -367,7 +367,7 @@ def aret_prepare_handoff(
 
     BORNES (octets UTF-8, pas caractères : un accent = 2 octets — viser large) :
     - work_summary, verified_results, open_risks, deferred_items, next_action : 1000 octets chacun.
-    - Dossier de reprise ASSEMBLÉ (playbook + handoff + adresses) : 12500 octets MAX, 2000 MIN.
+    - Dossier de reprise ASSEMBLÉ (playbook + handoff + adresses) : 14000 octets MAX, 2000 MIN.
       Si dépassement, RACCOURCIR ces cinq champs (le playbook stable est incompressible).
     technical_checkpoint_state est un ENUM, pas du texte : "NONE" ou "ACTIVE".
     - "NONE" : les cinq champs technical_* DOIVENT rester vides (aucun geste technique inventé).
