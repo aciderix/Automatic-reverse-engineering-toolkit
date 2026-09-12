@@ -51,18 +51,22 @@ jobs:
       credentials:
         username: ${{ github.actor }}
         password: ${{ secrets.GITHUB_TOKEN }}
-    timeout-minutes: 30
+    timeout-minutes: 45
+    # ARET_OBJCACHE is the 60min->10min lever for winediff: the HLE is compiled once and
+    # reused across the ~295 fixtures (even a cold dir pays off within a single run). The
+    # adapter forwards this var to the oracle subprocess. Harmless for difftest (unused).
+    env:
+      ARET_OBJCACHE: ${{ github.workspace }}/.aret-objcache
     strategy:
       fail-fast: false
       matrix:
         include:
           # difftest: fast, Wine-free — validates the skeleton + caches.
           - oracle: difftest
-          # winediff: the Wine oracle. First on ONE deterministic headless fixture to
-          # prove wine+mingw+measure+gate work in the image; the full corpus (with
-          # ARET_OBJCACHE + third-party binary caches) lands in the next step.
+          # winediff: the Wine oracle, FULL corpus (~295 fixtures). winediff.sh is
+          # self-contained (own Xvfb + fresh $TMP/wineprefix + wineboot), so the fresh
+          # CI container is the structural cure for the shared-wineserver wedge.
           - oracle: winediff
-            fixture: user32_adjustwindowrect
     name: ${{ matrix.oracle }}${{ matrix.fixture && format('/{0}', matrix.fixture) || '' }}
     steps:
       - uses: actions/checkout@v4
@@ -82,11 +86,23 @@ jobs:
       - name: Build aret (release, locked)
         run: cargo build --release --locked
 
+      # Persist the content-addressed object cache across runs (winediff only). The key
+      # is coarse on purpose — content-addressing makes a stale entry a miss, never a
+      # wrong result — keyed on the HLE/runtime sources + the lockfile so a code change
+      # naturally rotates it.
+      - name: Object cache (HLE + lifted-DLL objects)
+        if: matrix.oracle == 'winediff'
+        uses: actions/cache@v4
+        with:
+          path: ${{ github.workspace }}/.aret-objcache
+          key: objcache-${{ runner.os }}-${{ hashFiles('runtime/**', 'Cargo.lock') }}
+          restore-keys: objcache-${{ runner.os }}-
+
       # Produce the canonical measurement (no store, no secret). The adapter prints the
       # verdict line to stderr; the JSON goes to the artifact.
       - name: Measure ${{ matrix.oracle }}
         run: |
-          mkdir -p ci-out
+          mkdir -p ci-out "$ARET_OBJCACHE"
           FIXTURE_ARG=""
           if [ -n "${{ matrix.fixture }}" ]; then FIXTURE_ARG="--fixture ${{ matrix.fixture }}"; fi
           PYTHONPATH=aret-memory python3 -m evidence.adapters.oracles "${{ matrix.oracle }}" \

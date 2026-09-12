@@ -176,6 +176,14 @@ def build_measurement(
     timed_out = False
     if not missing:
         environment = {"PATH": os.environ.get("PATH", ""), "LC_ALL": "C", "TZ": "UTC", "ARET": str(aret_binary)}
+        # Forward the content-addressed object cache dir when the caller set one. It is
+        # the 60min->10min lever for winediff (the HLE is compiled once and reused across
+        # fixtures). Optimization only: the cache is keyed by content, so a stale entry is
+        # a miss — never a wrong result — and determinism is preserved. Kept to an explicit
+        # allowlist so the oracle subprocess env stays otherwise hermetic.
+        objcache = os.environ.get("ARET_OBJCACHE")
+        if objcache:
+            environment["ARET_OBJCACHE"] = objcache
         try:
             completed = subprocess.run(command, cwd=repository, env=environment, text=True, capture_output=True, timeout=limit, check=False)
             stdout, stderr, exit_code = completed.stdout, completed.stderr, completed.returncode
