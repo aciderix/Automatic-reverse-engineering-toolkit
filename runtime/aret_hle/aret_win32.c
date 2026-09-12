@@ -4044,6 +4044,7 @@ static void u32_dialog_composite(uint32_t esp, int di);       /* fwd: fill 3DFAC
 static void u32_composite_children(uint32_t esp, int di);     /* fwd: compose visible child controls over the client */
 static void u32_present_toplevel(uint32_t esp, int wi);       /* fwd: compose children (dialog or plain) then present */
 static void u32_free_child_bmp(int i);                        /* fwd: free a child control's client framebuffer */
+static void u32_attach_window_menu(int i, uint32_t style, uint32_t hMenu, uint32_t cref); /* fwd: top-level menu at CreateWindow (hMenu or class lpszMenuName) */
 static void sdl_window_destroy(int i);
 static void sdl_pump(void);
 static int  sdl_win_idx_from_id(uint32_t winid);
@@ -4801,6 +4802,7 @@ uint32_t aret_CreateWindowExW(uint32_t esp) {
              uint32_t we = u32_class_wndextra(WU(1));
              g_u32_win[h - 1].extra_len = we > 64 ? 64 : (int)we;
              if (WU(3) & 0x40000000u) g_u32_win[h - 1].ctrl_id = (int)WU(9);  /* WS_CHILD: hMenu=id */
+             u32_attach_window_menu((int)h - 1, WU(3), WU(9), WU(1));       /* top-level: hMenu or class menu */
              u32_fire_cbt_createwnd(esp, (int)h - 1, WU(8), WU(9), WU(1), WU(2));  /* MFC CWnd attach */
              if (!u32_create_dispatch(esp, (int)h - 1, WU(8), WU(9))) { g_u32_win[h - 1].used = 0; return 0; }
              u32_combo_fit_height((int)h - 1); }   /* combobox window h = closed field height, not dropped cy */
@@ -4827,6 +4829,7 @@ uint32_t aret_CreateWindowExA(uint32_t esp) {
              uint32_t we = u32_class_wndextra(cref);
              g_u32_win[h - 1].extra_len = we > 64 ? 64 : (int)we;
              if (WU(3) & 0x40000000u) g_u32_win[h - 1].ctrl_id = (int)WU(9);  /* WS_CHILD: hMenu=id */
+             u32_attach_window_menu((int)h - 1, WU(3), WU(9), cref);        /* top-level: hMenu or class menu */
              u32_fire_cbt_createwnd(esp, (int)h - 1, WU(8), WU(9), WU(1), WU(2));  /* MFC CWnd attach */
              if (!u32_create_dispatch(esp, (int)h - 1, WU(8), WU(9))) { g_u32_win[h - 1].used = 0; return 0; }
              u32_combo_fit_height((int)h - 1); }   /* combobox window h = closed field height, not dropped cy */
@@ -12609,6 +12612,20 @@ static uint32_t u32_load_menu(uint32_t name_ref) {
 }
 uint32_t aret_LoadMenuA(uint32_t esp)     { return u32_load_menu(WU(1)); }
 uint32_t aret_LoadMenuW(uint32_t esp)     { return u32_load_menu(WU(1)); }
+/* A top-level window receives its menu at CreateWindow time exactly as user32 does: an
+ * explicit hMenu argument wins; otherwise, if the window class named a menu resource
+ * (lpszMenuName), user32 auto-loads it. WS_CHILD windows never carry a menu (their hMenu
+ * arg is the control id, handled by the caller). This is the attachment half — the menu
+ * then exists in the model (GetMenu/GetMenuItemCount/TrackPopupMenu); drawing the menu bar
+ * is separate. Measured vs Wine (winecorpus/user32_classmenu): class menu and explicit
+ * hMenu both yield GetMenu != 0 with the resource's items; neither -> GetMenu NULL. */
+static void u32_attach_window_menu(int i, uint32_t style, uint32_t hMenu, uint32_t cref) {
+    if (style & 0x40000000u) return;                 /* WS_CHILD: hMenu is a control id, not a menu */
+    if (hMenu) { g_u32_wmenu[i] = hMenu; return; }    /* explicit hMenu wins */
+    int ci = u32_class_index(cref);
+    if (ci >= 0 && g_u32_class[ci].menu_name)         /* class lpszMenuName -> auto-load */
+        g_u32_wmenu[i] = u32_load_menu(g_u32_class[ci].menu_name);
+}
 /* Accelerator table (keyboard shortcuts): cosmetic for a functional run. LoadAccelerators
  * returns NULL (no table); TranslateAccelerator then returns 0 (this message is NOT an
  * accelerator) so the caller dispatches it normally — a defined, sound outcome, not a guess. */

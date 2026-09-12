@@ -1,0 +1,17 @@
+#include <windows.h>
+
+100 MENU
+BEGIN
+    POPUP "&File"
+    BEGIN
+        MENUITEM "&New",   1
+        MENUITEM "&Open",  2
+        MENUITEM SEPARATOR
+        MENUITEM "E&xit",  3
+    END
+    POPUP "&Edit"
+    BEGIN
+        MENUITEM "&Undo",  4
+    END
+    MENUITEM "&Help",      5
+END
