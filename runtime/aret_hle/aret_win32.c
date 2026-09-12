@@ -4032,6 +4032,9 @@ static void u32_treeview_paint(uint32_t hdc, int wi);             /* fwd */
 static void u32_tv_free_all(int tv);                              /* fwd */
 static int  u32_font_tm_height(uint32_t font);                    /* fwd */
 static void u32_combo_fit_height(int wi);                         /* fwd */
+/* Always-compiled fwd (the call sites in CreateWindowEx and the definition are outside
+ * ARET_HAVE_SDL, so this must not live in the SDL-only fwd block below). */
+static void u32_attach_window_menu(int i, uint32_t style, uint32_t hMenu, uint32_t cref);
 
 #ifdef ARET_HAVE_SDL
 /* G2b window-presentation helpers (defined after the GDI object model, which they
@@ -4044,7 +4047,6 @@ static void u32_dialog_composite(uint32_t esp, int di);       /* fwd: fill 3DFAC
 static void u32_composite_children(uint32_t esp, int di);     /* fwd: compose visible child controls over the client */
 static void u32_present_toplevel(uint32_t esp, int wi);       /* fwd: compose children (dialog or plain) then present */
 static void u32_free_child_bmp(int i);                        /* fwd: free a child control's client framebuffer */
-static void u32_attach_window_menu(int i, uint32_t style, uint32_t hMenu, uint32_t cref); /* fwd: top-level menu at CreateWindow (hMenu or class lpszMenuName) */
 static void sdl_window_destroy(int i);
 static void sdl_pump(void);
 static int  sdl_win_idx_from_id(uint32_t winid);
