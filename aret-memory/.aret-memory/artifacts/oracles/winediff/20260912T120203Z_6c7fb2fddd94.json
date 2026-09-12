@@ -1,0 +1,24 @@
+{
+  "format": "aret-oracle-artifact/v1",
+  "oracle": "winediff",
+  "kind": "WINEDIFF",
+  "command": "bash /home/user/Automatic-reverse-engineering-toolkit/bench/winediff.sh user32_classmenu",
+  "result": "PASS",
+  "exit_code": 0,
+  "started_at": "2026-09-12T12:01:53Z",
+  "finished_at": "2026-09-12T12:02:03Z",
+  "environment": {
+    "adapter": "aret-mmu-oracles/1",
+    "oracle": "winediff",
+    "repository": "/home/user/Automatic-reverse-engineering-toolkit",
+    "repository_revision": "12464f07bd8ebc1cf3382cd41eac888d158e0193",
+    "script": "bench/winediff.sh",
+    "fixture": "user32_classmenu",
+    "timeout_seconds": 3600,
+    "missing_dependencies": [],
+    "timed_out": false,
+    "duration_seconds": 9.667
+  },
+  "stdout": "  ok    user32_classmenu\n------------------------------------------\nOS-API (Wine) equivalence: 1/1 programs\n",
+  "stderr": ""
+}
