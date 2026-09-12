@@ -51,13 +51,19 @@ jobs:
       credentials:
         username: ${{ github.actor }}
         password: ${{ secrets.GITHUB_TOKEN }}
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
-        # Start with difftest (fast, Wine-free) to validate the skeleton + caches.
-        # Wine oracles (winediff, …) land in a later step once the binary caches are set.
-        oracle: [difftest]
-    name: ${{ matrix.oracle }}
+        include:
+          # difftest: fast, Wine-free — validates the skeleton + caches.
+          - oracle: difftest
+          # winediff: the Wine oracle. First on ONE deterministic headless fixture to
+          # prove wine+mingw+measure+gate work in the image; the full corpus (with
+          # ARET_OBJCACHE + third-party binary caches) lands in the next step.
+          - oracle: winediff
+            fixture: user32_adjustwindowrect
+    name: ${{ matrix.oracle }}${{ matrix.fixture && format('/{0}', matrix.fixture) || '' }}
     steps:
       - uses: actions/checkout@v4
 
@@ -81,8 +87,10 @@ jobs:
       - name: Measure ${{ matrix.oracle }}
         run: |
           mkdir -p ci-out
+          FIXTURE_ARG=""
+          if [ -n "${{ matrix.fixture }}" ]; then FIXTURE_ARG="--fixture ${{ matrix.fixture }}"; fi
           PYTHONPATH=aret-memory python3 -m evidence.adapters.oracles "${{ matrix.oracle }}" \
-            --repository . --measure-only --output "ci-out/${{ matrix.oracle }}.json"
+            --repository . --measure-only $FIXTURE_ARG --output "ci-out/${{ matrix.oracle }}.json"
 
       # Report the verdict to the run summary and gate the job. Always runs so a
       # measurement is published even when the build or measure step failed.
@@ -94,6 +102,6 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: oracle-${{ matrix.oracle }}
+          name: oracle-${{ matrix.oracle }}${{ matrix.fixture && format('-{0}', matrix.fixture) || '' }}
           path: ci-out/*.json
           if-no-files-found: warn
