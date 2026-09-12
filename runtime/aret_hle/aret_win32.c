@@ -7283,9 +7283,13 @@ static uint32_t u32_sysmetric(int idx) {
     case 17: return U32_SCREEN_H;           /* SM_CYFULLSCREEN (approx) */
     case 2:  return 16;   /* SM_CXVSCROLL */
     case 3:  return 16;   /* SM_CYHSCROLL */
-    case 4:  return 19;   /* SM_CYCAPTION */
+    case 4:  return 26;   /* SM_CYCAPTION — MEASURED vs wine-9.0 (was a stray 19, matching
+                           * neither Wine's 26 nor its NCM iCaptionHeight 25). Latent: no
+                           * fixture probed it until user32_adjustwindowrect. */
     case 5:  return 1;    /* SM_CXBORDER */
     case 6:  return 1;    /* SM_CYBORDER */
+    case 7:  return 3;    /* SM_CXDLGFRAME / SM_CXFIXEDFRAME (measured vs Wine) */
+    case 8:  return 3;    /* SM_CYDLGFRAME / SM_CYFIXEDFRAME (measured vs Wine) */
     case 11: return 32;   /* SM_CXICON */
     case 12: return 32;   /* SM_CYICON */
     case 13: return 32;   /* SM_CXCURSOR */
@@ -7299,6 +7303,7 @@ static uint32_t u32_sysmetric(int idx) {
     case 46: return 2;    /* SM_CYEDGE */
     case 49: return 16;   /* SM_CXSMICON */
     case 50: return 16;   /* SM_CYSMICON */
+    case 51: return 18;   /* SM_CYSMCAPTION — tool-window caption height (measured vs Wine) */
     case 54: case 55: return 18; /* SM_CXMENUSIZE / SM_CYMENUSIZE (measured vs Wine) */
     case 68: case 69: return 4;  /* SM_CXDRAG / SM_CYDRAG — drag threshold, fixed 4px
                                   * (measured vs Wine; surfaced by the relay diff on
@@ -11806,11 +11811,59 @@ uint32_t aret_GetClientRect(uint32_t esp) {
         fprintf(stderr, "[GUI] GetClientRect id=%d -> %dx%d\n", g_u32_win[i].ctrl_id, r[2], r[3]);
     return 1;
 }
-/* AdjustWindowRect(RECT*, style, bMenu) / …Ex -> BOOL. No non-client area is
- * modelled, so the rect is left unchanged (exact for borderless; Wine leaves a
- * WS_POPUP rect unchanged). */
-uint32_t aret_AdjustWindowRect(uint32_t esp)   { return WP(0) ? 1u : 0u; }
-uint32_t aret_AdjustWindowRectEx(uint32_t esp) { return WP(0) ? 1u : 0u; }
+/* AdjustWindowRect(RECT*, style, bMenu) / …Ex(RECT*, style, bMenu, exStyle) -> BOOL.
+ * Inflate a CLIENT rect into the WINDOW rect by the non-client frame (borders, caption
+ * bar, one menu row) — the inverse of the client<-window relation. This is a PURE
+ * function on the caller's RECT; it does NOT touch ARET's window model (which stays
+ * window==client). A borderless WS_POPUP is left unchanged; every decorated style grows,
+ * so a no-op here made SDI apps (notepad) size their top-level window too small by the
+ * whole frame.
+ *
+ * Algorithm and constants reproduce wine-9.0 EXACTLY, MEASURED via
+ * winecorpus/user32_adjustwindowrect.c (all 11 style/ex cases bit-identical):
+ *   base adjust: STATICEDGE-only -> 1 ; else THICKFRAME|DLGFRAME|EX_DLGMODALFRAME -> 2 ;
+ *     else 0.  + (THICKFRAME ? SM_CXFRAME-SM_CXDLGFRAME : 0)  + (BORDER|DLGFRAME|
+ *     EX_DLGMODALFRAME ? 1 : 0). Inflate all sides by it.
+ *   caption bar: (style&WS_CAPTION)==WS_CAPTION -> top -= EX_TOOLWINDOW ? SM_CYSMCAPTION
+ *     : SM_CYCAPTION.   menu: top -= SM_CYMENU.   EX_CLIENTEDGE: + SM_CXEDGE/SM_CYEDGE.
+ * All metrics come from the one table (u32_sysmetric) so AdjustWindowRect can never drift
+ * from GetSystemMetrics. */
+static uint32_t u32_adjust_window_rect(uint32_t esp, uint32_t ex) {
+    int32_t *r = (int32_t *)WP(0);
+    if (!r) return 0;
+    uint32_t style = WU(1);
+    int menu = (int)(WU(2) != 0);
+    enum { WS_BORDER=0x00800000u, WS_DLGFRAME=0x00400000u, WS_THICKFRAME=0x00040000u,
+           WS_CAPTION=0x00C00000u };
+    enum { WS_EX_DLGMODALFRAME=0x00000001u, WS_EX_TOOLWINDOW=0x00000080u,
+           WS_EX_CLIENTEDGE=0x00000200u, WS_EX_STATICEDGE=0x00020000u };
+
+    int adjust;
+    if ((ex & (WS_EX_STATICEDGE | WS_EX_DLGMODALFRAME)) == WS_EX_STATICEDGE)
+        adjust = 1;                                   /* static outer edge, always present */
+    else if ((ex & WS_EX_DLGMODALFRAME) || (style & (WS_THICKFRAME | WS_DLGFRAME)))
+        adjust = 2;                                   /* outer frame */
+    else
+        adjust = 0;
+    if (style & WS_THICKFRAME)
+        adjust += (int)u32_sysmetric(32) - (int)u32_sysmetric(7);  /* SM_CXFRAME - SM_CXDLGFRAME */
+    if ((style & (WS_BORDER | WS_DLGFRAME)) || (ex & WS_EX_DLGMODALFRAME))
+        adjust += 1;                                  /* the other (inner) border line */
+    r[0] -= adjust; r[1] -= adjust; r[2] += adjust; r[3] += adjust;
+
+    if ((style & WS_CAPTION) == WS_CAPTION)
+        r[1] -= (int)((ex & WS_EX_TOOLWINDOW) ? u32_sysmetric(51) : u32_sysmetric(4));
+    if (menu)
+        r[1] -= (int)u32_sysmetric(15);               /* SM_CYMENU */
+
+    if (ex & WS_EX_CLIENTEDGE) {
+        int cx = (int)u32_sysmetric(45), cy = (int)u32_sysmetric(46);  /* SM_CXEDGE/SM_CYEDGE */
+        r[0] -= cx; r[1] -= cy; r[2] += cx; r[3] += cy;
+    }
+    return 1;
+}
+uint32_t aret_AdjustWindowRect(uint32_t esp)   { return u32_adjust_window_rect(esp, 0); }
+uint32_t aret_AdjustWindowRectEx(uint32_t esp) { return u32_adjust_window_rect(esp, WU(3)); }
 
 /* Focus / activation: tracked so Get* round-trips Set*; no real input focus.
  * SetFocus notifies the two windows like Wine: WM_KILLFOCUS to the one losing focus
