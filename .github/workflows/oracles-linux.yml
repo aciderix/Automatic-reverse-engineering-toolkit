@@ -37,6 +37,19 @@ on:
       # re-run the gate so the new binary is measured, not just the nightly.
       - 'bench/glib_fetch.sh'
       - 'bench/zlib_fetch.sh'
+      # The oracle gate proves the TRANSPILER + HLE against Wine, so a change to either MUST
+      # re-run it on the push that introduced it — not just wait for the nightly. Before this,
+      # an HLE fix like GetScrollBarInfo (runtime/**) or a new fixture (bench/winecorpus/**)
+      # shipped un-gated until 03:17 UTC; the whole point of the CI arc is to carry that proof
+      # here, off the dev container. concurrency:cancel-in-progress bounds the cost of frequent
+      # pushes (a newer push cancels the older run on the same ref).
+      - 'src/**'
+      - 'runtime/**'
+      - 'Cargo.lock'
+      # The differential harness and its corpus ARE the gate — a change to either re-measures.
+      - 'bench/winediff.sh'
+      - 'bench/difftest.sh'
+      - 'bench/winecorpus/**'
 
 # Least privilege: read the checkout, read the ghcr toolchain image. No packages:write,
 # no secret — this workflow measures, it never mints a proof.
