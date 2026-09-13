@@ -13311,14 +13311,25 @@ uint32_t aret_IsClipboardFormatAvailable(uint32_t esp) {
     for (int i = 0; i < g_u32_clip_n; i++) if (g_u32_clip[i].fmt == fmt) return 1;
     return 0;
 }
-/* Caret: position state (round-trips); show/hide/create/destroy are display no-ops. */
+/* Caret — the text insertion point: a per-process singleton {owner, x, y, shape} + blink rate.
+ * Semantics MEASURED vs Wine (winecorpus/user32_caret):
+ *   - GetCaretPos before any caret -> 0,0; SetCaretPos updates the pos and returns TRUE even
+ *     with NO caret; CreateCaret and DestroyCaret both RESET the pos to 0,0.
+ *   - ShowCaret/HideCaret return TRUE only while a caret exists (an owner is set), else FALSE.
+ *   - GetCaretBlinkTime default 500 ms; SetCaretBlinkTime updates it and it PERSISTS across
+ *     DestroyCaret. Blinking is time-based, not observable headless (no drawing modelled here). */
 static int32_t g_u32_caret_x, g_u32_caret_y;
-uint32_t aret_CreateCaret(uint32_t esp)  { (void)esp; return 1; }
-uint32_t aret_DestroyCaret(uint32_t esp) { (void)esp; return 1; }
-uint32_t aret_ShowCaret(uint32_t esp)    { (void)esp; return 1; }
-uint32_t aret_HideCaret(uint32_t esp)    { (void)esp; return 1; }
+static uint32_t g_u32_caret_owner;          /* HWND owning the caret; 0 = none */
+static int g_u32_caret_w, g_u32_caret_h;    /* caret shape from CreateCaret (for future drawing) */
+static uint32_t g_u32_caret_blink = 500;    /* GetCaretBlinkTime, ms (Wine default) */
+uint32_t aret_CreateCaret(uint32_t esp)  { g_u32_caret_owner = WU(0); g_u32_caret_w = WI(2); g_u32_caret_h = WI(3); g_u32_caret_x = g_u32_caret_y = 0; return 1; }
+uint32_t aret_DestroyCaret(uint32_t esp) { (void)esp; g_u32_caret_owner = 0; g_u32_caret_x = g_u32_caret_y = 0; return 1; }
+uint32_t aret_ShowCaret(uint32_t esp)    { (void)esp; return g_u32_caret_owner != 0; }
+uint32_t aret_HideCaret(uint32_t esp)    { (void)esp; return g_u32_caret_owner != 0; }
 uint32_t aret_SetCaretPos(uint32_t esp)  { g_u32_caret_x = WI(0); g_u32_caret_y = WI(1); return 1; }
 uint32_t aret_GetCaretPos(uint32_t esp)  { int32_t *p = (int32_t *)WP(0); if (p) { p[0] = g_u32_caret_x; p[1] = g_u32_caret_y; } return 1; }
+uint32_t aret_GetCaretBlinkTime(uint32_t esp) { (void)esp; return g_u32_caret_blink; }
+uint32_t aret_SetCaretBlinkTime(uint32_t esp) { g_u32_caret_blink = WU(0); return 1; }
 /* IMM (input method): no IME present — the sound, correct state on a non-CJK setup. */
 uint32_t aret_ImmGetContext(uint32_t esp)             { (void)esp; return 0; }
 uint32_t aret_ImmReleaseContext(uint32_t esp)         { (void)esp; return 1; }

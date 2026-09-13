@@ -3517,6 +3517,7 @@ static TABLE: &[(&str, u32)] = &[
     ("GetCalendarMonthsInYear", 12),
     ("GetCalendarSupportedDateRange", 12),
     ("GetCalendarWeekNumber", 16),
+    ("GetCaretBlinkTime", 0),
     ("GetCaretPos", 4),
     ("GetCertificate", 16),
     ("GetCertificateByHandle", 16),
