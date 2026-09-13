@@ -11156,7 +11156,15 @@ static int u32_textout_full(uint32_t hdc, int x, int y, const uint32_t *cps, int
     return 1;
 #else
     (void)hdc; (void)x; (void)y; (void)cps; (void)len; (void)dx; (void)rect; (void)do_opaque; (void)do_clip;
-    aret_partial("TextOut: FreeType not linked (rebuild with freetype2+fontconfig)");
+    /* §0: a text-DRAWING call without FreeType would render BLANK — a silently wrong
+     * surface presented as the app's output (§0.1: a false silence is worse than nothing;
+     * §0.5: the observable output is the rendered pixels). Abort LOUDLY, never a defined
+     * "failure" that the caller ignores and keeps drawing an empty window. This path is
+     * dead on a proper host: the builder links freetype2+fontconfig whenever a text API is
+     * imported, so it only fires on a build host that lacks them — exactly when we want a
+     * loud stop. (Measurement paths — text extent / char widths — keep aret_partial: a 0
+     * metric is a genuine defined failure the best-effort dialog-unit path tolerates.) */
+    aret_unimpl("TextOut/ExtTextOut: text drawing needs FreeType (rebuild host with freetype2+fontconfig)");
     return 0;
 #endif
 }
@@ -11313,7 +11321,10 @@ static uint32_t u32_drawtext(uint32_t hdc, const uint32_t *cps, int len, uint32_
     return (uint32_t)textH;
 #else
     (void)hdc; (void)cps; (void)len; (void)prc; (void)fmt;
-    aret_partial("DrawText: FreeType not linked"); return 0;
+    /* §0: same as TextOut — DrawText renders text, so without FreeType abort loudly rather
+     * than silently drawing nothing. Dead on a proper host (builder links freetype). */
+    aret_unimpl("DrawText: text drawing needs FreeType (rebuild host with freetype2+fontconfig)");
+    return 0;
 #endif
 }
 uint32_t aret_DrawTextA(uint32_t esp) {
