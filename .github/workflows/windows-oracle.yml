@@ -107,3 +107,54 @@ jobs:
           path: |
             out/*.windows.txt
             fp/*.txt
+
+  # Automate the Windows-vs-Wine finding (doc 70 §1). The probe job fingerprinted every
+  # eligible fixture on real Windows and uploaded its raw output (fp/<name>.txt); here we
+  # reproduce the SAME fixtures under Wine (bench/winoracle/wine_hashes.sh), re-hash the
+  # Windows raw outputs the same way (CRLF-stripped), and diff the two lists. The fixtures
+  # whose hashes DIFFER are the finding — a Windows/Wine disagreement to think about.
+  # NEVER a gate: this job always stays green (a divergence is not a regression). Runs on
+  # the linux toolchain image (wine + mingw already present), so the Windows batch above is
+  # untouched. `if: always()` so it still reports if a probe step failed.
+  wine-compare:
+    needs: [probe]
+    if: always()
+    runs-on: ubuntu-latest
+    container:
+      image: ghcr.io/aciderix/aret-ci-toolchain:latest
+      credentials:
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - name: Trust the workspace for git
+        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
+      - name: Download the Windows fingerprints (raw outputs from the probe job)
+        uses: actions/download-artifact@v4
+        with:
+          name: windows-oracle
+          path: winruntime
+      - name: Wine fingerprints (same fixtures, same eligibility)
+        run: bash bench/winoracle/wine_hashes.sh | tee wine_fp.txt
+      - name: Diff Windows vs Wine (measurement, never a gate)
+        run: python3 .github/scripts/winoracle_diff.py winruntime wine_fp.txt | tee winoracle_diff.txt
+      - name: Publish the finding
+        if: always()
+        run: |
+          {
+            echo "## Windows vs Wine oracle — divergences (a finding, NOT a gate)"
+            echo ""
+            echo '```'
+            cat winoracle_diff.txt 2>/dev/null || echo "(no output)"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+      - name: Upload the diff
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-vs-wine
+          path: |
+            wine_fp.txt
+            winoracle_diff.txt
+          if-no-files-found: warn
