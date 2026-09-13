@@ -4063,6 +4063,7 @@ static void u32_paint_menu_bar(int wi, uint8_t *dst, int W, int mh);
  * into WM_* messages. All are no-ops when there is no usable display. */
 static void sdl_window_show(uint32_t esp, int i);
 static void sdl_window_present(int i);
+static void u32_paint_scrollbars(int wi, uint8_t *full, int FW, int FH, int mh);  /* fwd: non-client scrollbars */
 static void u32_dialog_composite(uint32_t esp, int di);       /* fwd: fill 3DFACE + compose child controls */
 static void u32_composite_children(uint32_t esp, int di);     /* fwd: compose visible child controls over the client */
 static void u32_present_toplevel(uint32_t esp, int wi);       /* fwd: compose children (dialog or plain) then present */
@@ -5531,13 +5532,42 @@ static void u32_client_in_window(int i, int32_t *cr /* l,t,r,b */) {
 
 static int gdi_muldiv(long long a, long long b, long long c);   /* round-to-nearest MulDiv (below) */
 
+/* Arrow-button size + thumb size/position along a scrollbar of `pixels` length, from the
+ * window's scroll range/page/pos — wine-9.0 get_scroll_bar_rect arithmetic. Shared by
+ * GetScrollBarInfo (structure oracle) and the non-client PAINTER, so the drawn thumb and
+ * the reported thumb can never diverge. */
+static void u32_sb_thumb(int i, int bar, int pixels, int *arrow, int *thumb_sz, int *thumb_pos) {
+    const int cxv = (int)u32_sysmetric(2);        /* Wine uses SM_CXVSCROLL on both axes */
+    const int SCROLL_MIN_RECT = 4, SCROLL_MIN_THUMB = 8;
+    int b = (bar <= 2) ? bar : 0;
+    if (pixels <= 2*cxv + SCROLL_MIN_RECT) {
+        *arrow = (pixels > SCROLL_MIN_RECT) ? (pixels - SCROLL_MIN_RECT)/2 : 0;
+        *thumb_pos = *thumb_sz = 0;
+        return;
+    }
+    int mn = g_u32_win[i].scroll[b].min, mx = g_u32_win[i].scroll[b].max;
+    int page = g_u32_win[i].scroll[b].page, cur = g_u32_win[i].scroll[b].pos;
+    *arrow = cxv;
+    pixels -= 2*cxv;
+    if (page) {
+        *thumb_sz = (int)gdi_muldiv(pixels, page, (long long)mx - mn + 1);
+        if (*thumb_sz < SCROLL_MIN_THUMB) *thumb_sz = SCROLL_MIN_THUMB;  /* DPI=96 */
+    } else *thumb_sz = cxv;
+    if ((pixels -= *thumb_sz) < 0) {
+        *thumb_pos = *thumb_sz = 0;
+    } else {
+        int max = mx - (page-1 > 0 ? page-1 : 0);
+        if (mn >= max) *thumb_pos = *arrow;
+        else *thumb_pos = *arrow + (int)gdi_muldiv(pixels, (long long)cur - mn, (long long)max - mn);
+    }
+}
+
 /* get_scroll_bar_rect: fills rc (window coords), *arrow, *thumb_size, *thumb_pos.
  * Returns 1 if vertical. bar: SB_HORZ=0 / SB_VERT=1 / SB_CTL=2. */
 static int u32_scrollbar_rect(int i, int bar, int32_t *rc, int *arrow, int *thumb_sz, int *thumb_pos) {
     enum { WS_HSCROLL=0x00100000u, WS_VSCROLL=0x00200000u };
     const int cxv = (int)u32_sysmetric(2);   /* SM_CXVSCROLL — Wine uses this on both axes */
     const int cyh = (int)u32_sysmetric(3);   /* SM_CYHSCROLL */
-    const int SCROLL_MIN_RECT = 4, SCROLL_MIN_THUMB = 8;
     int vertical, pixels;
     int32_t c[4]; u32_client_in_window(i, c);
     if (bar == 1 /*SB_VERT*/) {
@@ -5555,27 +5585,7 @@ static int u32_scrollbar_rect(int i, int bar, int32_t *rc, int *arrow, int *thum
         vertical = (g_u32_win[i].style & 0x1u /*SBS_VERT*/) != 0;
     }
     pixels = vertical ? (rc[3]-rc[1]) : (rc[2]-rc[0]);
-    int b = (bar <= 2) ? bar : 0;
-    if (pixels <= 2*cxv + SCROLL_MIN_RECT) {
-        *arrow = (pixels > SCROLL_MIN_RECT) ? (pixels - SCROLL_MIN_RECT)/2 : 0;
-        *thumb_pos = *thumb_sz = 0;
-    } else {
-        int mn = g_u32_win[i].scroll[b].min, mx = g_u32_win[i].scroll[b].max;
-        int page = g_u32_win[i].scroll[b].page, cur = g_u32_win[i].scroll[b].pos;
-        *arrow = cxv;
-        pixels -= 2*cxv;
-        if (page) {
-            *thumb_sz = (int)gdi_muldiv(pixels, page, (long long)mx - mn + 1);
-            if (*thumb_sz < SCROLL_MIN_THUMB) *thumb_sz = SCROLL_MIN_THUMB;  /* DPI=96 */
-        } else *thumb_sz = cxv;
-        if ((pixels -= *thumb_sz) < 0) {
-            *thumb_pos = *thumb_sz = 0;
-        } else {
-            int max = mx - (page-1 > 0 ? page-1 : 0);
-            if (mn >= max) *thumb_pos = *arrow;
-            else *thumb_pos = *arrow + (int)gdi_muldiv(pixels, (long long)cur - mn, (long long)max - mn);
-        }
-    }
+    u32_sb_thumb(i, bar, pixels, arrow, thumb_sz, thumb_pos);
     return vertical;
 }
 
@@ -8062,15 +8072,22 @@ static void sdl_window_present(int i) {
     int b = gdi_idx(g_u32_win[i].client_bmp);
     int cw = g_u32_win[i].cw, ch = g_u32_win[i].ch;
     int mh = u32_win_menu_h(i);                      /* non-client menu band at top (0 if none) */
-    /* When the window has a menu bar, the on-screen window is [menu band | client]. Build
-     * one full-window buffer = painted band (top mh rows) + the client framebuffer below it,
-     * used for BOTH the dump (so the band is part of the proof) and the SDL upload. */
+    /* The on-screen window is [menu band | client], plus the non-client scrollbar bands on a
+     * WS_VSCROLL/WS_HSCROLL window (right column / bottom row). Build one full-window buffer =
+     * painted band (top mh rows) + the client framebuffer + the scrollbars overlaid, used for
+     * BOTH the dump (so the chrome is part of the capture) and the SDL upload. A window with
+     * neither a menu nor a scrollbar style takes full==NULL and uploads the client bits
+     * unchanged — byte-identical to before (the scrollbar draw is strictly additive, gated on
+     * the style bits). Colors are the classic scheme (aesthetic, not pixel-compared — KN-0112);
+     * the STRUCTURE is the proven GetScrollBarInfo geometry (KN-0114). */
+    int has_sb = (g_u32_win[i].style & 0x00300000u) != 0;  /* WS_HSCROLL|WS_VSCROLL */
     uint8_t *full = NULL; int FW = cw, FH = ch + mh;
-    if (mh > 0 && b >= 0 && g_gdi[b].bits) {
+    if ((mh > 0 || has_sb) && b >= 0 && g_gdi[b].bits) {
         full = (uint8_t *)malloc((size_t)FW * FH * 4);
         if (full) {
-            u32_paint_menu_bar(i, full, FW, mh);                                   /* top band */
+            if (mh > 0) u32_paint_menu_bar(i, full, FW, mh);                       /* top band */
             memcpy(full + (size_t)mh * FW * 4, g_gdi[b].bits, (size_t)cw * ch * 4); /* client */
+            if (has_sb) u32_paint_scrollbars(i, full, FW, FH, mh);                 /* nc scrollbars */
         }
     }
     /* Debug: dump ARET's actual pixels (top-down BGRA), independent of SDL/X compositing —
@@ -8881,6 +8898,76 @@ uint32_t aret_DrawEdge(uint32_t esp) {
     const int32_t *r = (const int32_t *)WP(1);
     if (!bm || !r) return 0;
     return (uint32_t)u32_drawedge(bm, r, WU(2), WU(3));
+}
+
+/* A small centred arrow glyph (classic scrollbar button), COLOR_BTNTEXT, in the (bx,by,w,h)
+ * button. dir: 0 up / 1 down / 2 left / 3 right. Aesthetic (not pixel-compared, KN-0112). */
+static void u32_sb_arrow(struct gdi_obj *bm, int bx, int by, int w, int h, int dir) {
+    uint32_t col = u32_syscolor(18 /*COLOR_BTNTEXT*/);
+    int cx = bx + w/2, cy = by + h/2, n = 4;   /* triangle: height n, base 2n-1 */
+    for (int k = 0; k < n; k++) {
+        if (dir == 0)      { int y = cy - n/2 + k;     for (int x = cx-k; x <= cx+k; x++) gdi_put(bm, x, y, col); }
+        else if (dir == 1) { int y = cy + n/2 - k;     for (int x = cx-k; x <= cx+k; x++) gdi_put(bm, x, y, col); }
+        else if (dir == 2) { int x = cx - n/2 + k;     for (int y = cy-k; y <= cy+k; y++) gdi_put(bm, x, y, col); }
+        else               { int x = cx + n/2 - k;     for (int y = cy-k; y <= cy+k; y++) gdi_put(bm, x, y, col); }
+    }
+}
+
+/* Paint the non-client scrollbar bands into the composite window buffer `full` (FW x FH,
+ * top-down BGRA; client starts at row mh below the menu band). Called only for a
+ * WS_VSCROLL/WS_HSCROLL window (gated in sdl_window_present), so it never touches a plain
+ * window's pixels. STRUCTURE = the proven geometry (u32_sb_thumb, the same math as
+ * GetScrollBarInfo — KN-0114); COLORS = the classic scheme (aesthetic, not compared —
+ * KN-0112). Coordinates are composite-relative (ARET renders a frameless [menu|client]
+ * window); the scrollbar occupies the right column / bottom row of the client region. */
+static void u32_paint_scrollbars(int wi, uint8_t *full, int FW, int FH, int mh) {
+    if (!full) return;
+    uint32_t style = g_u32_win[wi].style;
+    int vs = (style & 0x00200000u) != 0;   /* WS_VSCROLL */
+    int hs = (style & 0x00100000u) != 0;   /* WS_HSCROLL */
+    if (!vs && !hs) return;
+    const int SW = (int)u32_sysmetric(2);  /* SM_CXVSCROLL == SM_CYHSCROLL == 16 (classic) */
+    if (SW <= 0) return;
+    int cw = FW, ctop = mh, cbot = FH;
+    int tb = gdi_alloc(GDIT_BITMAP); if (!tb) return;
+    g_gdi[tb].w = FW; g_gdi[tb].h = FH; g_gdi[tb].bits = full; g_gdi[tb].owns_bits = 0;
+    g_gdi[tb].topdown = 1; g_gdi[tb].bpp = 32;
+    struct gdi_obj *bm = &g_gdi[tb];
+    uint32_t track = u32_syscolor(0 /*COLOR_SCROLLBAR*/);
+    const uint32_t RAISED = 0x5u, BF = 0xFu | 0x800u;   /* EDGE_RAISED, BF_RECT|BF_MIDDLE */
+    if (vs) {
+        int x0 = cw - SW, x1 = cw, y0 = ctop, y1 = cbot - (hs ? SW : 0);
+        if (y1 - y0 >= 2 && x0 >= 0) {
+            for (int y = y0; y < y1; y++) for (int x = x0; x < x1; x++) gdi_put(bm, x, y, track);
+            int arrow, tsz, tpos; u32_sb_thumb(wi, 1, y1 - y0, &arrow, &tsz, &tpos);
+            if (arrow > 0) {
+                int32_t ru[4] = { x0, y0, x1, y0 + arrow };  u32_drawedge(bm, ru, RAISED, BF);
+                u32_sb_arrow(bm, x0, y0, SW, arrow, 0);
+                int32_t rd[4] = { x0, y1 - arrow, x1, y1 };  u32_drawedge(bm, rd, RAISED, BF);
+                u32_sb_arrow(bm, x0, y1 - arrow, SW, arrow, 1);
+            }
+            if (tsz > 0) { int32_t rt[4] = { x0, y0 + tpos, x1, y0 + tpos + tsz }; u32_drawedge(bm, rt, RAISED, BF); }
+        }
+    }
+    if (hs) {
+        int y0 = cbot - SW, y1 = cbot, x0 = 0, x1 = cw - (vs ? SW : 0);
+        if (x1 - x0 >= 2 && y0 >= ctop) {
+            for (int y = y0; y < y1; y++) for (int x = x0; x < x1; x++) gdi_put(bm, x, y, track);
+            int arrow, tsz, tpos; u32_sb_thumb(wi, 0, x1 - x0, &arrow, &tsz, &tpos);
+            if (arrow > 0) {
+                int32_t rl[4] = { x0, y0, x0 + arrow, y1 };  u32_drawedge(bm, rl, RAISED, BF);
+                u32_sb_arrow(bm, x0, y0, arrow, SW, 2);
+                int32_t rr[4] = { x1 - arrow, y0, x1, y1 };  u32_drawedge(bm, rr, RAISED, BF);
+                u32_sb_arrow(bm, x1 - arrow, y0, arrow, SW, 3);
+            }
+            if (tsz > 0) { int32_t rt[4] = { x0 + tpos, y0, x0 + tpos + tsz, y1 }; u32_drawedge(bm, rt, RAISED, BF); }
+        }
+    }
+    if (vs && hs) {                                   /* dead corner square (classic 3DFACE) */
+        uint32_t face = u32_syscolor(15 /*COLOR_3DFACE*/);
+        for (int y = cbot - SW; y < cbot; y++) for (int x = cw - SW; x < cw; x++) gdi_put(bm, x, y, face);
+    }
+    g_gdi[tb].used = 0;
 }
 /* DrawFrameControl(hdc, rect, type, state): the composite control frames. Modelled:
  * DFC_BUTTON + DFCS_BUTTONPUSH (a normal push button = a soft-raised bevel filled with
