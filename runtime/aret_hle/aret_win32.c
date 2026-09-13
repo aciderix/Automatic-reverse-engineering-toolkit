@@ -7372,8 +7372,16 @@ static uint32_t u32_get_ncm(uint32_t pv, int wide) {
      * byte-identical to the oracle. */
     int32_t *iv = (int32_t *)p;
     iv[1] = 1;                                     /* iBorderWidth     */
-    iv[2] = 17;                                    /* iScrollWidth     */
-    iv[3] = 17;                                    /* iScrollHeight    */
+    /* iScrollWidth/iScrollHeight are the SAME quantity as SM_CXVSCROLL/SM_CYHSCROLL: in
+     * Wine both come from Control Panel\Desktop\WindowMetrics ScrollWidth, so they move
+     * together (classic 16 / themed 17). Source them from the metric table so the two APIs
+     * can NEVER disagree — the same single-source-of-truth fix as GetMenuCheckMarkDimensions.
+     * (The caption/menu metrics below are deliberately NOT derived: Wine itself reports
+     * iCaptionHeight 25 vs SM_CYCAPTION 26 and iMenuHeight 18 vs SM_CYMENU 19.) The old
+     * hardcoded 17 was a latent inconsistency — SM said 16, NCM said 17 — masked by the
+     * themed oracle until winediff was pinned classic; user32_ncm caught it. */
+    iv[2] = (int32_t)u32_sysmetric(2);             /* iScrollWidth  == SM_CXVSCROLL */
+    iv[3] = (int32_t)u32_sysmetric(3);             /* iScrollHeight == SM_CYHSCROLL */
     iv[4] = 18;                                    /* iCaptionWidth    */
     iv[5] = 25;                                    /* iCaptionHeight   */
     uint32_t o = 24;
