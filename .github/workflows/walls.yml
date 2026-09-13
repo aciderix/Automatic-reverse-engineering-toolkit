@@ -16,7 +16,7 @@ on:
     inputs:
       n_packages:
         description: 'How many MSYS2 packages to sample into the corpus (breadth vs time).'
-        default: '600'
+        default: '250'
   schedule:
     - cron: '41 4 * * *'   # nightly, offset off the hour
   push:
@@ -47,9 +47,14 @@ jobs:
     # runs are fast; a cold run that still overruns just publishes a best-effort partial map.
     timeout-minutes: 90
     env:
-      # ~600 sampled MSYS2 packages (+ ~119 fixed UnxUtils) -> ~1200 PE32, a breadth map
-      # rather than a token sample. Overridable via the workflow_dispatch input.
-      NPKG: ${{ github.event.inputs.n_packages || '600' }}
+      # ~250 sampled MSYS2 packages (+ ~119 fixed UnxUtils) -> ~500 PE32. NOTE: msys2's
+      # bigger packages are giant C++/LLVM/Qt libraries (libpython, Qt5Qml, obj2yaml,
+      # libassimp, ...) whose STATIC analysis blows the per-binary 60s cap and fails cleanly
+      # (contributing nothing to the #binaries ranking). Pushing NPKG much higher just
+      # samples MORE of those giants: the sweep burns 60s on each for no added coverage and
+      # can exceed the job timeout. 250 keeps the corpus dominated by the small/medium real
+      # programs the map is actually about. Overridable via the workflow_dispatch input.
+      NPKG: ${{ github.event.inputs.n_packages || '250' }}
       WALLSWEEP_TIMEOUT: '60'        # per-binary wall-clock cap (s)
       CORPUS_DIR: ${{ github.workspace }}/.wallcorpus
       # Symbols the GNU C++ runtime provides — ARET lifts libstdc++/libgcc (the
