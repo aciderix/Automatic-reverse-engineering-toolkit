@@ -22,6 +22,9 @@ on:
   push:
     paths:
       - '.github/workflows/walls.yml'
+      # The corpus fetch script is an input to the sweep (it decides which PE32 binaries
+      # are gathered); a change to it must re-run the map so it is measured, not just nightly.
+      - 'bench/wallcorpus_fetch.sh'
 
 permissions:
   contents: read
