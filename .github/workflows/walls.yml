@@ -16,7 +16,7 @@ on:
     inputs:
       n_packages:
         description: 'How many MSYS2 packages to sample into the corpus (breadth vs time).'
-        default: '80'
+        default: '600'
   schedule:
     - cron: '41 4 * * *'   # nightly, offset off the hour
   push:
@@ -42,11 +42,23 @@ jobs:
       credentials:
         username: ${{ github.actor }}
         password: ${{ secrets.GITHUB_TOKEN }}
-    timeout-minutes: 45
+    # 90 min protects the COLD run (first fetch of ~600 packages + first analysis of the
+    # whole corpus). Both the corpus and the per-binary maps are cached, so steady-state
+    # runs are fast; a cold run that still overruns just publishes a best-effort partial map.
+    timeout-minutes: 90
     env:
-      NPKG: ${{ github.event.inputs.n_packages || '80' }}
+      # ~600 sampled MSYS2 packages (+ ~119 fixed UnxUtils) -> ~1200 PE32, a breadth map
+      # rather than a token sample. Overridable via the workflow_dispatch input.
+      NPKG: ${{ github.event.inputs.n_packages || '600' }}
       WALLSWEEP_TIMEOUT: '60'        # per-binary wall-clock cap (s)
       CORPUS_DIR: ${{ github.workspace }}/.wallcorpus
+      # Symbols the GNU C++ runtime provides — ARET lifts libstdc++/libgcc (the
+      # lift_libstdcxx gate proves it end-to-end), so treating these as lift-provided is
+      # TRUE, not masking: it yields the POST-LIFT wall (what a binary still needs once the
+      # runtime is lifted beside it). Kept PRECISE — std:: (ZSt/ZNSt/ZNKSt/ZNSs), operator
+      # new/delete (Znw/Zna/Zdl/Zda), __cxa_*/_Unwind_*, std typeinfo (ZT*St), dynamic_cast
+      # — so app/C++ libraries (Qt ZN..Q.., Cap'n Proto ZN2kj..) stay VISIBLE as real walls.
+      WALLSWEEP_COVERED: '^(ZSt|ZNSt|ZNKSt|ZNSs|ZNKSs|Znw|Zna|Zdl|Zda|cxa_|Unwind_|ZTVSt|ZTISt|ZTSSt)|^dynamic_cast$'
     steps:
       - uses: actions/checkout@v4
       - name: Trust the workspace for git
@@ -83,8 +95,17 @@ jobs:
           mkdir -p "$CORPUS_DIR/pe32"
           n=$(find "$CORPUS_DIR/pe32" -type f 2>/dev/null | wc -l)
           echo "corpus: $n PE32 binaries"
-          if [ "$n" -eq 0 ]; then echo "::warning::empty corpus — nothing to sweep"; echo "empty corpus" > walls.txt; exit 0; fi
-          WALLSWEEP_KEEP="$GITHUB_WORKSPACE/.wallmaps" bash bench/wallsweep.sh "$CORPUS_DIR/pe32" | tee walls.txt || true
+          if [ "$n" -eq 0 ]; then
+            echo "::warning::empty corpus — nothing to sweep"
+            echo "empty corpus" | tee walls_raw.txt > walls_postlift.txt; exit 0
+          fi
+          # RAW map — generates and KEEPS the per-binary .walls maps.
+          WALLSWEEP_KEEP="$GITHUB_WORKSPACE/.wallmaps" bash bench/wallsweep.sh "$CORPUS_DIR/pe32" | tee walls_raw.txt || true
+          # POST-LIFT map — re-aggregate the SAME cached maps with the GNU C++ runtime treated
+          # as lift-provided (instant, no re-analysis). This is the actionable view: the import
+          # gaps that remain once ARET lifts the C++ runtime beside the binary.
+          WALLSWEEP_KEEP="$GITHUB_WORKSPACE/.wallmaps" WALLSWEEP_COVERED="$WALLSWEEP_COVERED" \
+            bash bench/wallsweep.sh "$CORPUS_DIR/pe32" | tee walls_postlift.txt || true
 
       - name: Publish the wall map
         if: always()
@@ -92,14 +113,29 @@ jobs:
           {
             echo "## ARET wall sweep (coverage map — not a gate)"
             echo ""
+            echo "> CAVEAT: the *unmodelled-instructions* ranking is contaminated by recovery"
+            echo "> false-starts landing in string/data (opcodes 0x60-0x6F etc. = ASCII bytes"
+            echo "> decoded as \`outsb\`/\`popad\`/\`arpl\`/\`daa\`…). Those regions abort safely in a"
+            echo "> real transpile; prioritise from the POST-LIFT imports below, not the raw"
+            echo "> instruction counts. See CORE-0063 (recovery false-starts, separate task)."
+            echo ""
+            echo "### POST-LIFT wall (C++ runtime lift-provided) — the actionable view"
             echo '```'
-            sed -n '1,60p' walls.txt 2>/dev/null || echo "(no output)"
+            sed -n '1,50p' walls_postlift.txt 2>/dev/null || echo "(no output)"
             echo '```'
+            echo "<details><summary>Raw map (pre-lift, includes runtime ARET already handles)</summary>"
+            echo ""
+            echo '```'
+            sed -n '1,50p' walls_raw.txt 2>/dev/null || echo "(no output)"
+            echo '```'
+            echo "</details>"
           } >> "$GITHUB_STEP_SUMMARY"
-      - name: Upload wall map
+      - name: Upload wall maps
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: wall-sweep
-          path: walls.txt
+          path: |
+            walls_raw.txt
+            walls_postlift.txt
           if-no-files-found: warn
