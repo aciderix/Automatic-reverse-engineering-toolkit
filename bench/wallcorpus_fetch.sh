@@ -16,6 +16,18 @@
 set -u
 OUT="${1:?usage: wallcorpus_fetch.sh <out-dir> [N_PACKAGES]}"
 NPKG="${2:-450}"
+
+# HARD DEPENDENCY (§0 : jamais de faux-silencieux). The ONLY filter that decides whether a
+# downloaded binary is kept is `file -b` (PE32 x86 classification below). If `file` is
+# absent, every candidate is silently rejected and the corpus comes out EMPTY while the
+# script still "succeeds" — which is exactly how the CI image (lacking `file`) produced an
+# empty wall map that looked green. Fail LOUDLY instead so the cause is unmistakable.
+command -v file >/dev/null 2>&1 || {
+  echo "ERREUR : 'file' introuvable — la classification PE32 est impossible, le corpus serait VIDE." >&2
+  echo "        Installer le paquet 'file' (l'image CI doit l'inclure)." >&2
+  exit 1
+}
+
 mkdir -p "$OUT"/{pe32,tmp,logs}
 BASE="https://repo.msys2.org/mingw/mingw32/"
 

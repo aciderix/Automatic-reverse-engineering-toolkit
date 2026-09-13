@@ -41,6 +41,7 @@ RUN dpkg --add-architecture i386 \
       clang lld llvm \
       build-essential pkg-config \
       git curl ca-certificates unzip tar xz-utils zstd \
+      file \
       python3 python3-venv python3-pip \
       fontconfig fonts-liberation fonts-dejavu-core \
  && rm -rf /var/lib/apt/lists/*
@@ -76,6 +77,7 @@ RUN set -e; \
     z3 --version; \
     clang --version >/dev/null; \
     command -v Xvfb >/dev/null; \
+    command -v file >/dev/null; \
     cargo --version; \
     # GDI text oracle: the builder activates FreeType text only when pkg-config finds
     # freetype2+fontconfig, and links the i386 .so.N into the 32-bit output. Without these
@@ -84,4 +86,4 @@ RUN set -e; \
     pkg-config --exists freetype2 fontconfig; \
     test -e /usr/lib/i386-linux-gnu/libfreetype.so.6; \
     test -e /usr/lib/i386-linux-gnu/libfontconfig.so.1; \
-    echo "ARET CI toolchain ready: $(wine --version), mingw ok, gcc-m32 ok, unicorn ok, sdl2 ok, freetype+fontconfig(i386) ok, $(cargo --version)"
+    echo "ARET CI toolchain ready: $(wine --version), mingw ok, gcc-m32 ok, unicorn ok, sdl2 ok, freetype+fontconfig(i386) ok, file ok, $(cargo --version)"
