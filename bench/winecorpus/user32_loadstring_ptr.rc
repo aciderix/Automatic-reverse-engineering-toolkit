@@ -1,0 +1,10 @@
+#include <windows.h>
+
+/* String table for the LoadString cchBufferMax==0 pointer idiom. Both Wine and ARET
+ * read the SAME embedded RT_STRING bytes from the SAME PE, so the length and the
+ * dereferenced content are bit-identical by construction. */
+STRINGTABLE
+BEGIN
+  100 "pointer-mode string"
+  200 "Ln %d, Col %d"
+END

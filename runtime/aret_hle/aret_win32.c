@@ -13592,15 +13592,27 @@ uint32_t aret_GetDC(uint32_t esp);   /* fwd */
 uint32_t aret_GetDCEx(uint32_t esp)  { return aret_GetDC(esp); }   /* clip region/flags ignored */
 uint32_t aret_SetTimer(uint32_t esp);/* fwd */
 uint32_t aret_SetSystemTimer(uint32_t esp) { return aret_SetTimer(esp); }
-/* LoadStringW: copy the RT_STRING entry as wide (no narrowing). */
+/* LoadStringW: copy the RT_STRING entry as wide (no narrowing). cchBufferMax==0 is a
+ * documented Win32 idiom (used by e.g. notepad's status-bar formatter): lpBuffer is then
+ * an LPWSTR* that receives a READ-ONLY pointer directly to the (non-NUL-terminated)
+ * resource string, and the return value is its length in WCHARs. Before this, cch==0
+ * returned 0 → callers got an empty format string and formatted "" (measured: notepad
+ * status bar "Ln 1, Col 1" came out empty). The memory model is identity-mapped (guest
+ * addr == host ptr, like aret_LoadResource), so the guest address handed back is the
+ * host pointer value into the mapped image. Matches Wine LoadStringW (KN). */
 uint32_t aret_LoadStringW(uint32_t esp) {
     uint32_t uID = WU(1); uint16_t *buf = (uint16_t *)WP(2); uint32_t cch = WU(3);
-    if (!buf || cch == 0) return 0;
+    if (!buf) return 0;
     const uint8_t *de = u32_rsrc_data_entry(6 /*RT_STRING*/, uID / 16 + 1);
-    if (!de) { buf[0] = 0; return 0; }
+    if (!de) { if (cch) buf[0] = 0; return 0; }
     const uint16_t *p = (const uint16_t *)(uintptr_t)(aret_image_lo + *(const uint32_t *)de);
     for (uint32_t i = 0; i < uID % 16; i++) p += 1 + *p;
-    uint16_t len = *p++; uint32_t n = len < cch - 1 ? len : cch - 1;
+    uint16_t len = *p++;                       /* p now at the first WCHAR of the entry */
+    if (cch == 0) {                            /* hand back a read-only pointer to the resource */
+        *(uint32_t *)buf = (uint32_t)(uintptr_t)p;
+        return len;
+    }
+    uint32_t n = len < cch - 1 ? len : cch - 1;
     for (uint32_t i = 0; i < n; i++) buf[i] = p[i]; buf[n] = 0; return n;
 }
 uint32_t aret_FindResourceA(uint32_t esp);   /* fwd */
