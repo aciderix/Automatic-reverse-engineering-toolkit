@@ -4010,6 +4010,7 @@ static struct {
     int extra_len;           /* cbWndExtra bytes (from the class) */
     uint8_t extra[64];       /* cbWndExtra storage: SetWindowLong at offset >=0 (control state ptr) */
     struct { int min, max, page, pos; } scroll[3];  /* SB_HORZ=0 / SB_VERT=1 / SB_CTL=2 */
+    int edit_sel_a, edit_sel_b;      /* EDIT selection [a,b) in chars over `title` (EM_*SEL) */
     int du_x, du_y;          /* dialog base units (per-dialog, from its font); 0 = not a mapped dialog */
     int is_dialog;           /* created by u32_dialog_create -> composite its child controls for display */
     char **items; int item_count, item_cap, cur_sel;   /* LISTBOX/COMBOBOX item model */
@@ -4982,6 +4983,83 @@ uint32_t aret_PostMessageW(uint32_t esp) { return (uint32_t)u32_q_push(WU(0), WU
  * built-in control proc (paint, font). Fwd-declared here, defined after the GDI
  * primitives it uses (u32_drawedge/u32_drawtext). */
 static int u32_control_proc(uint32_t esp, uint32_t hwnd, uint32_t msg, uint32_t wp, uint32_t lp, uint32_t *out);
+
+/* Line-start offsets of an EDIT's text (CRLF-separated). starts[0]=0; a new line begins
+ * after each "\r\n" (the separator counts toward the text, as Windows stores it). Returns
+ * the line count. An empty buffer is 1 line. */
+static int u32_edit_lines(const char *t, int *starts, int maxn) {
+    int n = 0; if (maxn > 0) starts[n] = 0; n = 1;
+    for (int k = 0; t[k]; k++)
+        if (t[k] == '\r' && t[k+1] == '\n') { if (n < maxn) starts[n] = k + 2; n++; k++; }
+    return n;
+}
+/* EDIT (multiline) message model over the control's `title` text + a [a,b) selection.
+ * MEASURED vs Wine (winecorpus/user32_edit_ml): line count / index / length count the CRLF
+ * in the offsets; EM_GETLINE copies a line excluding CRLF (buffer's first WORD = capacity);
+ * EM_REPLACESEL splices the selection. `wide` selects the char width of the text payloads.
+ * Text is bounded by `title` (255 chars) — a large document overflows it (a separate scaling
+ * concern, tracked); within that it round-trips bit-identically to Wine. Returns 1 if the
+ * message was an EDIT message it handled (so WM_SETTEXT/GETTEXT still fall to u32_defproc_text). */
+static int u32_edit_msg(uint32_t esp, int i, uint32_t msg, uint32_t wp, uint32_t lp, int wide, uint32_t *out) {
+    (void)esp;
+    char *t = g_u32_win[i].title;
+    int len = (int)strlen(t);
+    int starts[160];
+    switch (msg) {
+    case 0x00BAu: /* EM_GETLINECOUNT */
+        *out = (uint32_t)u32_edit_lines(t, starts, 160); return 1;
+    case 0x00BBu: { /* EM_LINEINDEX: wp=line (-1 = caret line) -> char index of line start */
+        int nl = u32_edit_lines(t, starts, 160), line = (int)wp;
+        if (line < 0) { int c = g_u32_win[i].edit_sel_b; line = 0;
+                        for (int k = 0; k < nl; k++) if (starts[k] <= c) line = k; }
+        *out = (line >= 0 && line < nl) ? (uint32_t)starts[line] : 0xFFFFFFFFu; return 1; }
+    case 0x00C1u: { /* EM_LINELENGTH: wp=char index (-1 = caret line) -> line length sans CRLF */
+        int nl = u32_edit_lines(t, starts, 160), ci = (int)wp;
+        if (ci < 0) ci = g_u32_win[i].edit_sel_b;
+        int line = 0; for (int k = 0; k < nl; k++) if (starts[k] <= ci) line = k;
+        int ls = starts[line], le = (line + 1 < nl) ? starts[line+1] - 2 : len;
+        *out = (uint32_t)(le - ls); return 1; }
+    case 0x00C9u: { /* EM_LINEFROMCHAR: wp=char index (-1 = sel start) -> line number */
+        int nl = u32_edit_lines(t, starts, 160), ci = (int)wp;
+        if (ci < 0) ci = g_u32_win[i].edit_sel_a;
+        int line = 0; for (int k = 0; k < nl; k++) if (starts[k] <= ci) line = k;
+        *out = (uint32_t)line; return 1; }
+    case 0x00C4u: { /* EM_GETLINE: wp=line, lp=buffer (first WORD = capacity), no NUL added */
+        int nl = u32_edit_lines(t, starts, 160), line = (int)wp;
+        if (line < 0 || line >= nl || !lp) { *out = 0; return 1; }
+        int ls = starts[line], le = (line + 1 < nl) ? starts[line+1] - 2 : len;
+        int linelen = le - ls, maxc = *(uint16_t *)(uintptr_t)lp;
+        int cc = linelen < maxc ? linelen : maxc; if (cc < 0) cc = 0;
+        if (wide) { uint16_t *d = (uint16_t *)(uintptr_t)lp; for (int j = 0; j < cc; j++) d[j] = (uint16_t)(unsigned char)t[ls+j]; }
+        else      { char *d = (char *)(uintptr_t)lp;         for (int j = 0; j < cc; j++) d[j] = t[ls+j]; }
+        *out = (uint32_t)cc; return 1; }
+    case 0x00B0u: { /* EM_GETSEL: wp=*start lp=*end -> MAKELONG(start,end) */
+        int a = g_u32_win[i].edit_sel_a, b = g_u32_win[i].edit_sel_b;
+        if (wp) *(uint32_t *)(uintptr_t)wp = (uint32_t)a;
+        if (lp) *(uint32_t *)(uintptr_t)lp = (uint32_t)b;
+        *out = (((uint32_t)b & 0xFFFF) << 16) | ((uint32_t)a & 0xFFFF); return 1; }
+    case 0x00B1u: { /* EM_SETSEL: wp=start lp=end. start=-1 deselects; end=-1 = end of text */
+        int a = (int)wp, b = (int)lp;
+        if (b < 0) b = len; if (b > len) b = len; if (b < 0) b = 0;
+        if (a < 0) a = b;                       /* start -1 -> collapse to caret (deselect) */
+        if (a > len) a = len; if (a < 0) a = 0;
+        g_u32_win[i].edit_sel_a = a; g_u32_win[i].edit_sel_b = b; *out = 1; return 1; }
+    case 0x00C2u: { /* EM_REPLACESEL: lp=text -> splice over [a,b), caret after inserted */
+        int a = g_u32_win[i].edit_sel_a, b = g_u32_win[i].edit_sel_b;
+        if (a > b) { int s = a; a = b; b = s; }
+        if (a < 0) a = 0; if (a > len) a = len; if (b > len) b = len; if (b < a) b = a;
+        char rep[256]; int rn = 0;
+        if (lp) { if (wide) { const uint16_t *s = (const uint16_t *)(uintptr_t)lp; for (; s[rn] && rn < 255; rn++) rep[rn] = (char)(s[rn] & 0xFF); }
+                  else       { const char *s = (const char *)(uintptr_t)lp;         for (; s[rn] && rn < 255; rn++) rep[rn] = s[rn]; } }
+        char nt[256]; int p = 0;
+        for (int k = 0; k < a && p < 255; k++) nt[p++] = t[k];
+        for (int k = 0; k < rn && p < 255; k++) nt[p++] = rep[k];
+        for (int k = b; k < len && p < 255; k++) nt[p++] = t[k];
+        nt[p] = 0; memcpy(t, nt, (size_t)p + 1);
+        g_u32_win[i].edit_sel_a = g_u32_win[i].edit_sel_b = a + rn; *out = 0; return 1; }
+    default: return 0;
+    }
+}
 /* Full dispatch for a predefined control with no application WNDPROC: first its class
  * behaviour (fonts, button check/click, list/combo item model, WM_PRINTCLIENT —
  * u32_control_proc), then the common text messages (WM_SETTEXT/WM_GETTEXT/
@@ -4993,6 +5071,9 @@ static int u32_control_proc(uint32_t esp, uint32_t hwnd, uint32_t msg, uint32_t 
 static int u32_sys_control_msg(uint32_t esp, uint32_t hwnd, uint32_t msg,
                                uint32_t wp, uint32_t lp, int wide, uint32_t *out) {
     if (u32_control_proc(esp, hwnd, msg, wp, lp, out)) return 1;
+    { int ei = (hwnd >= 1 && hwnd <= U32_MAX_WIN && g_u32_win[hwnd - 1].used) ? (int)hwnd - 1 : -1;
+      if (ei >= 0 && !strcasecmp(g_u32_win[ei].classname, "edit")
+          && u32_edit_msg(esp, ei, msg, wp, lp, wide, out)) return 1; }
     if (u32_defproc_text(hwnd, msg, wp, lp, wide, out)) return 1;
     /* §0: a class-specific message (>= WM_USER) to a common control ARET does not model
      * cannot be answered correctly. Returning 0 (a "failed/empty" value) is a wrong value
@@ -7292,25 +7373,31 @@ uint32_t aret_EndDeferWindowPos(uint32_t esp) { (void)esp; return 1; }
  * WNDPROC observes them exactly as under Windows (DefWindowProc stores/reports).
  * A and W share the machinery; the ANSI/wide payload distinction is realised by
  * which DefWindowProc the guest's WNDPROC chains to. */
-/* SetWindowTextA(HWND, lpString) -> BOOL. */
-uint32_t aret_SetWindowTextA(uint32_t esp) {
+/* SetWindowText(HWND, lpString) -> BOOL. `wide` MUST match the API variant: a W caller
+ * passes a UTF-16 string, so u32_defproc_text has to read it as wide — the old
+ * SetWindowTextW = SetWindowTextA delegation ran the ANSI path on UTF-16 and stopped at the
+ * first NUL byte (storing 1 char of any string), a silent §0 corruption surfaced by the
+ * multiline EDIT probe. */
+static uint32_t u32_set_window_text(uint32_t esp, int wide) {
     uint32_t wndproc = u32_win_wndproc(WU(0));
     /* A predefined control has no app WNDPROC: store the text directly (DefWindowProc's
      * job), then repaint its parent dialog so the change shows (SetDlgItemText path). */
-    if (!wndproc) { uint32_t o = 0; u32_defproc_text(WU(0), U32_WM_SETTEXT, 0, WU(1), 0, &o);
+    if (!wndproc) { uint32_t o = 0; u32_defproc_text(WU(0), U32_WM_SETTEXT, 0, WU(1), wide, &o);
                     u32_ctrl_recomposite(esp, (int)WU(0) - 1); return o; }
     u32_call_wndproc(esp, wndproc, WU(0), U32_WM_SETTEXT, 0, WU(1));
     return 1;
 }
-uint32_t aret_SetWindowTextW(uint32_t esp) { return aret_SetWindowTextA(esp); }
-/* GetWindowTextA(HWND, lpString, nMaxCount) -> int (chars copied, excl. NUL). */
-uint32_t aret_GetWindowTextA(uint32_t esp) {
+uint32_t aret_SetWindowTextA(uint32_t esp) { return u32_set_window_text(esp, 0); }
+uint32_t aret_SetWindowTextW(uint32_t esp) { return u32_set_window_text(esp, 1); }
+/* GetWindowText(HWND, lpString, nMaxCount) -> int (chars copied, excl. NUL). */
+static uint32_t u32_get_window_text(uint32_t esp, int wide) {
     uint32_t wndproc = u32_win_wndproc(WU(0));
-    if (!wndproc) { uint32_t o = 0; u32_defproc_text(WU(0), U32_WM_GETTEXT, WU(2), WU(1), 0, &o); return o; }
+    if (!wndproc) { uint32_t o = 0; u32_defproc_text(WU(0), U32_WM_GETTEXT, WU(2), WU(1), wide, &o); return o; }
     return u32_call_wndproc(esp, wndproc, WU(0), U32_WM_GETTEXT, WU(2), WU(1));
 }
-uint32_t aret_GetWindowTextW(uint32_t esp) { return aret_GetWindowTextA(esp); }
-/* GetWindowTextLengthA(HWND) -> int. */
+uint32_t aret_GetWindowTextA(uint32_t esp) { return u32_get_window_text(esp, 0); }
+uint32_t aret_GetWindowTextW(uint32_t esp) { return u32_get_window_text(esp, 1); }
+/* GetWindowTextLength(HWND) -> int (chars; ANSI==wide count for the stored text). */
 uint32_t aret_GetWindowTextLengthA(uint32_t esp) {
     uint32_t wndproc = u32_win_wndproc(WU(0));
     if (!wndproc) { uint32_t o = 0; u32_defproc_text(WU(0), U32_WM_GETTEXTLENGTH, 0, 0, 0, &o); return o; }
