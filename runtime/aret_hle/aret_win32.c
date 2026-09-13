@@ -4583,6 +4583,18 @@ static int u32_create_dispatch(uint32_t esp, int i, uint32_t hinstance, uint32_t
         ok = 0;
     }
     free(cs);
+    /* Windows sizes the window during CreateWindow (after WM_CREATE), delivering WM_SIZE with
+     * the CLIENT dimensions. Apps lay out their just-created children here — notepad's WM_SIZE
+     * relays WM_SIZE to its status bar (which then auto-sizes to the client bottom) and resizes
+     * its EDIT. Without it the status bar stays 0x0 (comparison finding KN-0121). wParam=
+     * SIZE_RESTORED(0); lParam=MAKELONG(clientW, clientH) = window minus the menu band. Only for
+     * a real-sized window whose WM_CREATE succeeded. */
+    if (ok) {
+        int cw = g_u32_win[i].w, ch = g_u32_win[i].h - u32_win_menu_h(i);
+        if (cw > 0 && ch > 0)
+            u32_call_wndproc(esp, wp, hwnd, 0x0005u /* WM_SIZE */, 0 /*SIZE_RESTORED*/,
+                             ((uint32_t)(ch & 0xFFFF) << 16) | (uint32_t)(cw & 0xFFFF));
+    }
     return ok;
 }
 
