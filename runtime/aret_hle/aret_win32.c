@@ -9858,6 +9858,12 @@ static void u32_composite_one_child(uint32_t esp, int ci, uint32_t *dst, int W, 
         if (!g_gdi[tb].bits) { g_gdi[tb].used = 0; g_gdi[td].used = 0; return; }
         g_gdi[td].sel_bitmap = gdi_handle(tb);
         u32_control_paint_full(gdi_handle(td), ci);
+        /* A child control with WS_VSCROLL/WS_HSCROLL (e.g. notepad's EDIT) carries its
+         * scrollbars in its own non-client area: draw them into the control's bitmap so they
+         * appear in the parent composite, exactly as a top-level window's are (KN-0114/0116).
+         * Gated on the style bits, so a control without them is byte-identical to before. */
+        if (g_u32_win[ci].style & 0x00300000u /*WS_HSCROLL|WS_VSCROLL*/)
+            u32_paint_scrollbars(ci, (uint8_t *)g_gdi[tb].bits, cw, ch, 0);
         u32_blit_clip(dst, W, H, (uint32_t *)g_gdi[tb].bits, cw, ch, ox, oy);
         free(g_gdi[tb].bits); g_gdi[tb].used = 0; g_gdi[td].used = 0;
         return;
