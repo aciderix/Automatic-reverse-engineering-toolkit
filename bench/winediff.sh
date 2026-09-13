@@ -353,6 +353,16 @@ export TZ=UTC
 export LC_ALL=C
 wine wineboot --init >/dev/null 2>&1 || true
 
+# Pin the oracle to the CLASSIC look (16px scrollbars) so its NON-CLIENT STRUCTURE matches
+# ARET's classic theme (KN-0112). Wine defaults to the themed 17px (WindowMetrics ScrollWidth
+# -255); ARET is deliberately 16px everywhere, so the fair reference is a classic-pinned Wine
+# — otherwise a bit-exact structural oracle (user32_scrollbar: GetScrollBarInfo/GetSystemMetrics)
+# would diverge purely on the theme, which is aesthetic and explicitly not compared. Only the
+# scroll metrics change (16 vs 17); caption/menu/frame metrics already match ARET's classic
+# values. -240 twips / 15 = 16px at 96 DPI. Set once in the shared prefix, before any fixture.
+wine reg add "HKCU\\Control Panel\\Desktop\\WindowMetrics" /v ScrollWidth  /t REG_SZ /d -240 /f >/dev/null 2>&1 || true
+wine reg add "HKCU\\Control Panel\\Desktop\\WindowMetrics" /v ScrollHeight /t REG_SZ /d -240 /f >/dev/null 2>&1 || true
+
 # Optional single-fixture selection: `winediff.sh NAME` runs just that one.
 sel="${1:-}"
 names=()

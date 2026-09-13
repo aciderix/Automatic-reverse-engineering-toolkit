@@ -5473,6 +5473,160 @@ uint32_t aret_GetScrollInfo(uint32_t esp) {
     if (mask & 0x10u /*SIF_TRACKPOS*/) *(int *)(si + 24) = g_u32_win[i].scroll[b].pos;
     return 1;
 }
+
+/* GetScrollBarInfo(hwnd, idObject, SCROLLBARINFO*) -> BOOL.
+ *
+ * The scrollbar STRUCTURE (rectangle, arrow-button/thumb sizes, thumb position) is pure
+ * geometry: a function of the window rect, the scroll metrics, and the scroll range/page/pos.
+ * Unlike the COLORS (a theme decision, deliberately not pixel-compared — KN-0112), this
+ * geometry is the SAME whatever the palette, so it is proven BIT-EXACT vs Wine.
+ *
+ * Algorithm reproduces wine-9.0 win32u/scroll.c get_scroll_bar_rect + get_scroll_bar_info
+ * EXACTLY (constants SCROLL_MIN_RECT=4, SCROLL_MIN_THUMB=8, overlap=0; Wine uses SM_CXVSCROLL
+ * for the arrow adjust on BOTH axes — reproduced verbatim). Proven via
+ * winecorpus/user32_scrollbar.c against Wine pinned to the classic look.
+ *
+ * NOTE on the client rect: Wine derives the bar from the true client-in-window rect. ARET's
+ * GetClientRect is the window==client approximation (frame/caption not carved), so here we
+ * recompute the non-client insets locally (same per-style logic as AdjustWindowRect, plus
+ * the scrollbar bands) to get the correct client-in-window coords. This makes GetScrollBarInfo
+ * exact without touching the broader window==client model (a separate general cause). */
+
+static uint32_t u32_sysmetric(int idx);   /* fwd: metric table (defined with GetSystemMetrics) */
+
+/* Non-client insets (frame + caption + menu [+ client edge]) on each side, in the SAME
+ * per-style terms AdjustWindowRect uses, so the two never drift. */
+static void u32_ncinsets(int i, int *l, int *t, int *r, int *b) {
+    uint32_t style = g_u32_win[i].style, ex = g_u32_win[i].exstyle;
+    enum { WS_BORDER=0x00800000u, WS_DLGFRAME=0x00400000u, WS_THICKFRAME=0x00040000u,
+           WS_CAPTION=0x00C00000u };
+    enum { WS_EX_DLGMODALFRAME=0x00000001u, WS_EX_TOOLWINDOW=0x00000080u,
+           WS_EX_CLIENTEDGE=0x00000200u, WS_EX_STATICEDGE=0x00020000u };
+    int adjust;
+    if ((ex & (WS_EX_STATICEDGE | WS_EX_DLGMODALFRAME)) == WS_EX_STATICEDGE) adjust = 1;
+    else if ((ex & WS_EX_DLGMODALFRAME) || (style & (WS_THICKFRAME | WS_DLGFRAME))) adjust = 2;
+    else adjust = 0;
+    if (style & WS_THICKFRAME) adjust += (int)u32_sysmetric(32) - (int)u32_sysmetric(7);
+    if ((style & (WS_BORDER | WS_DLGFRAME)) || (ex & WS_EX_DLGMODALFRAME)) adjust += 1;
+    int cl = adjust, ct = adjust, cr = adjust, cb = adjust;
+    if ((style & WS_CAPTION) == WS_CAPTION)
+        ct += (int)((ex & WS_EX_TOOLWINDOW) ? u32_sysmetric(51) : u32_sysmetric(4));
+    ct += u32_win_menu_h(i);   /* SM_CYMENU band when the window bears a menu (0 otherwise) */
+    if (ex & WS_EX_CLIENTEDGE) {
+        int cx = (int)u32_sysmetric(45), cy = (int)u32_sysmetric(46);
+        cl += cx; cr += cx; ct += cy; cb += cy;
+    }
+    *l = cl; *t = ct; *r = cr; *b = cb;
+}
+
+/* Client rect in WINDOW coordinates, scrollbar bands excluded — Wine's
+ * get_window_rects(COORDS_WINDOW, &client). */
+static void u32_client_in_window(int i, int32_t *cr /* l,t,r,b */) {
+    enum { WS_HSCROLL=0x00100000u, WS_VSCROLL=0x00200000u };
+    int l, t, r, b; u32_ncinsets(i, &l, &t, &r, &b);
+    cr[0] = l; cr[1] = t;
+    cr[2] = g_u32_win[i].w - r - ((g_u32_win[i].style & WS_VSCROLL) ? (int)u32_sysmetric(2) : 0);
+    cr[3] = g_u32_win[i].h - b - ((g_u32_win[i].style & WS_HSCROLL) ? (int)u32_sysmetric(3) : 0);
+}
+
+static int gdi_muldiv(long long a, long long b, long long c);   /* round-to-nearest MulDiv (below) */
+
+/* get_scroll_bar_rect: fills rc (window coords), *arrow, *thumb_size, *thumb_pos.
+ * Returns 1 if vertical. bar: SB_HORZ=0 / SB_VERT=1 / SB_CTL=2. */
+static int u32_scrollbar_rect(int i, int bar, int32_t *rc, int *arrow, int *thumb_sz, int *thumb_pos) {
+    enum { WS_HSCROLL=0x00100000u, WS_VSCROLL=0x00200000u };
+    const int cxv = (int)u32_sysmetric(2);   /* SM_CXVSCROLL — Wine uses this on both axes */
+    const int cyh = (int)u32_sysmetric(3);   /* SM_CYHSCROLL */
+    const int SCROLL_MIN_RECT = 4, SCROLL_MIN_THUMB = 8;
+    int vertical, pixels;
+    int32_t c[4]; u32_client_in_window(i, c);
+    if (bar == 1 /*SB_VERT*/) {
+        rc[0]=c[0]; rc[1]=c[1]; rc[2]=c[2]; rc[3]=c[3];
+        rc[0] = rc[2]; rc[2] += cxv;                  /* right-side band (no WS_EX_LEFTSCROLLBAR) */
+        if (g_u32_win[i].style & WS_HSCROLL) rc[3]++;
+        vertical = 1;
+    } else if (bar == 0 /*SB_HORZ*/) {
+        rc[0]=c[0]; rc[1]=c[1]; rc[2]=c[2]; rc[3]=c[3];
+        rc[1] = rc[3]; rc[3] += cyh;                  /* bottom band */
+        if (g_u32_win[i].style & WS_VSCROLL) rc[2]++;
+        vertical = 0;
+    } else { /* SB_CTL — the scrollbar IS the window; client rect == {0,0,w,h} (ARET model) */
+        rc[0]=0; rc[1]=0; rc[2]=g_u32_win[i].w; rc[3]=g_u32_win[i].h;
+        vertical = (g_u32_win[i].style & 0x1u /*SBS_VERT*/) != 0;
+    }
+    pixels = vertical ? (rc[3]-rc[1]) : (rc[2]-rc[0]);
+    int b = (bar <= 2) ? bar : 0;
+    if (pixels <= 2*cxv + SCROLL_MIN_RECT) {
+        *arrow = (pixels > SCROLL_MIN_RECT) ? (pixels - SCROLL_MIN_RECT)/2 : 0;
+        *thumb_pos = *thumb_sz = 0;
+    } else {
+        int mn = g_u32_win[i].scroll[b].min, mx = g_u32_win[i].scroll[b].max;
+        int page = g_u32_win[i].scroll[b].page, cur = g_u32_win[i].scroll[b].pos;
+        *arrow = cxv;
+        pixels -= 2*cxv;
+        if (page) {
+            *thumb_sz = (int)gdi_muldiv(pixels, page, (long long)mx - mn + 1);
+            if (*thumb_sz < SCROLL_MIN_THUMB) *thumb_sz = SCROLL_MIN_THUMB;  /* DPI=96 */
+        } else *thumb_sz = cxv;
+        if ((pixels -= *thumb_sz) < 0) {
+            *thumb_pos = *thumb_sz = 0;
+        } else {
+            int max = mx - (page-1 > 0 ? page-1 : 0);
+            if (mn >= max) *thumb_pos = *arrow;
+            else *thumb_pos = *arrow + (int)gdi_muldiv(pixels, (long long)cur - mn, (long long)max - mn);
+        }
+    }
+    return vertical;
+}
+
+uint32_t aret_GetScrollBarInfo(uint32_t esp) {
+    uint32_t hwnd = WU(0), id = WU(1);
+    uint8_t *p = (uint8_t *)WP(2);
+    if (!p) return 0;
+    int bar;
+    if      (id == 0xFFFFFFFCu /*OBJID_CLIENT*/)  bar = 2; /* SB_CTL */
+    else if (id == 0xFFFFFFFAu /*OBJID_HSCROLL*/) bar = 0; /* SB_HORZ */
+    else if (id == 0xFFFFFFFBu /*OBJID_VSCROLL*/) bar = 1; /* SB_VERT */
+    else return 0;
+    if (*(const uint32_t *)(p + 0) != 60u /*sizeof(SCROLLBARINFO)*/) return 0;
+    int i = u32_win_idx(hwnd);
+    if (i < 0) return 0;
+
+    int32_t rc[4], arrow, thumb_sz, thumb_pos;
+    u32_scrollbar_rect(i, bar, rc, &arrow, &thumb_sz, &thumb_pos);
+    /* Offset to screen coords by the window origin (Wine: OffsetRect by GetWindowRect). */
+    int sx, sy; u32_screen_origin(i, &sx, &sy);
+    *(int32_t *)(p + 4)  = rc[0] + sx;   /* rcScrollBar.left   */
+    *(int32_t *)(p + 8)  = rc[1] + sy;   /* rcScrollBar.top    */
+    *(int32_t *)(p + 12) = rc[2] + sx;   /* rcScrollBar.right  */
+    *(int32_t *)(p + 16) = rc[3] + sy;   /* rcScrollBar.bottom */
+    *(int32_t *)(p + 20) = thumb_sz;     /* dxyLineButton == thumb size (Wine's field order) */
+    *(int32_t *)(p + 24) = thumb_pos;    /* xyThumbTop                                        */
+    *(int32_t *)(p + 28) = thumb_pos + thumb_sz;  /* xyThumbBottom                            */
+    *(int32_t *)(p + 32) = 0;            /* reserved */
+
+    /* rgstate[0] (@36): INVISIBLE if the style bit is absent; else UNAVAILABLE (or OFFSCREEN
+     * when invisible) when the range collapses. Other bits (pressed/hot) are display-only. */
+    enum { WS_HSCROLL=0x00100000u, WS_VSCROLL=0x00200000u };
+    uint32_t style = g_u32_win[i].style, st = 0;
+    if ((bar == 0 && !(style & WS_HSCROLL)) || (bar == 1 && !(style & WS_VSCROLL)))
+        st |= 0x00008000u;   /* STATE_SYSTEM_INVISIBLE */
+    {
+        int b = (bar <= 2) ? bar : 0;
+        int page = g_u32_win[i].scroll[b].page;
+        int lim = g_u32_win[i].scroll[b].max - (page-1 > 0 ? page-1 : 0);
+        if (g_u32_win[i].scroll[b].min >= lim)
+            st |= (st & 0x00008000u) ? 0x00010000u /*OFFSCREEN*/ : 0x00000001u /*UNAVAILABLE*/;
+    }
+    *(uint32_t *)(p + 36) = st;
+    for (int k = 1; k < 6; k++) *(uint32_t *)(p + 36 + 4*k) = 0;  /* rgstate[1..5] */
+
+    if (getenv("ARET_GUI_TRACE"))
+        fprintf(stderr, "[GUI] GetScrollBarInfo id=%d bar=%d rc=(%d,%d,%d,%d) dxy=%d tt=%d tb=%d st=%#x\n",
+                g_u32_win[i].ctrl_id, bar, rc[0], rc[1], rc[2], rc[3], thumb_sz, thumb_pos,
+                thumb_pos+thumb_sz, st);
+    return 1;
+}
 /* GetWindow(hwnd, cmd) -> HWND: navigate the window hierarchy. Children/siblings share
  * a parent and are ordered by creation (the g_u32_win index), which matches Wine's
  * default child Z-order (measured: create c1,c2,c3 under a -> GW_CHILD=c1,
@@ -7308,6 +7462,16 @@ static uint32_t u32_sysmetric(int idx) {
     case 17: return U32_SCREEN_H;           /* SM_CYFULLSCREEN (approx) */
     case 2:  return 16;   /* SM_CXVSCROLL */
     case 3:  return 16;   /* SM_CYHSCROLL */
+    /* Scroll-box (thumb) and cross-axis arrow-button dimensions. All 16 in the classic
+     * (unthemed) look ARET commits to — square arrow buttons, thumb width == bar width.
+     * MEASURED vs Wine forced to classic (Control Panel\Desktop\WindowMetrics ScrollWidth
+     * = -240 twips -> 16px): winecorpus/user32_scrollbar reports every one as 16. The
+     * themed default is 17 (Wine's ScrollWidth -255), which ARET does NOT adopt — see
+     * KN-0112 (classic theme decision) — hence the oracle prefix is pinned classic too. */
+    case 9:  return 16;   /* SM_CYVTHUMB — height of vertical scroll box */
+    case 10: return 16;   /* SM_CXHTHUMB — width of horizontal scroll box */
+    case 20: return 16;   /* SM_CYVSCROLL — height of vertical scrollbar arrow button */
+    case 21: return 16;   /* SM_CXHSCROLL — width of horizontal scrollbar arrow button */
     case 4:  return 26;   /* SM_CYCAPTION — MEASURED vs wine-9.0 (was a stray 19, matching
                            * neither Wine's 26 nor its NCM iCaptionHeight 25). Latent: no
                            * fixture probed it until user32_adjustwindowrect. */
