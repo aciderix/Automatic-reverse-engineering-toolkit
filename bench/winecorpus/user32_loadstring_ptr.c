@@ -46,6 +46,13 @@ int main(void) {
     int z = LoadStringW(h, 9999, (LPWSTR)&q, 0);
     printf("missing z=%d\n", z);
 
+    /* ANSI variant: cch==0 canNOT return a pointer to a narrow copy of a Unicode
+     * resource, so Wine returns -1 and leaves the buffer untouched. */
+    char ab[64]; int an = LoadStringA(h, 100, ab, 64);
+    printf("A copy n=%d [%s]\n", an, ab);
+    int az = LoadStringA(h, 100, ab, 0);
+    printf("A cch0 ret=%d\n", az);
+
     printf("done\n");
     return 0;
 }

@@ -3932,7 +3932,12 @@ uint32_t aret_LoadStringA(uint32_t esp) {
     uint32_t uID = WU(1);
     char *buf = (char *)WP(2);
     uint32_t cch = WU(3);
-    if (!buf || cch == 0) return 0;
+    /* cchBufferMax==0: unlike LoadStringW (which returns a read-only pointer to the
+     * Unicode resource), the ANSI variant cannot hand back a pointer to a narrow copy,
+     * so Wine returns -1 and leaves the buffer untouched (measured). Match it exactly —
+     * ARET previously returned 0 here (§0: a wrong value presented as correct). */
+    if (cch == 0) return (uint32_t)-1;
+    if (!buf) return 0;
     const uint8_t *de = u32_rsrc_data_entry(6 /* RT_STRING */, uID / 16 + 1);
     if (!de) { buf[0] = 0; return 0; }
     const uint16_t *p = (const uint16_t *)(uintptr_t)(aret_image_lo + *(const uint32_t *)de);
