@@ -4435,11 +4435,38 @@ static uint32_t u32_class_brush(uint32_t cref) {
         if (g_u32_class[i].used && u32_weq(g_u32_class[i].name, name)) return g_u32_class[i].hbr_bg;
     return 0;
 }
-/* CW_USEDEFAULT: the caller leaves placement to the OS. We pick a fixed default so
- * geometry is deterministic; explicit coords (the common, oracle-tested case) pass
- * through unchanged. */
-static int u32_coord(uint32_t v, int dflt) {
-    return (v == 0x80000000u) ? dflt : (int)(int32_t)v;
+/* The work area — single source of truth, shared with SPI_GETWORKAREA. A drift between
+ * the two would silently misplace every CW_USEDEFAULT window. */
+static void u32_workarea(int32_t wa[4]) { wa[0] = 0; wa[1] = 0; wa[2] = U32_SCREEN_W; wa[3] = U32_SCREEN_H; }
+
+/* CW_USEDEFAULT (0x80000000): the caller leaves placement to the OS. Measured against Wine
+ * on five screen sizes, including non-exact divisions (1001x701 -> 750x525, 803x603 ->
+ * 602x452): an OVERLAPPED window starts at the work-area origin and its WINDOW rect is
+ * bounded at THREE QUARTERS of the work area, truncated:
+ *     right = wa.left + (wa.width * 3) / 4      bottom = wa.top + (wa.height * 3) / 4
+ * The default is a BOUND, not a size — an explicit x keeps that same right, so
+ * cx = right - x (measured: x=10 on a 1000x700 screen -> cx = 750 - 10 = 740). A
+ * WS_CHILD/WS_POPUP window collapses to 0 instead (also measured).
+ *
+ * Before this, CW_USEDEFAULT mapped to 0, so every such window was 0x0 — a silently wrong
+ * geometry (§0.1), not an abort. Deterministic here because the screen is the documented
+ * virtual invariant (doc 72 4.5); Wine reports the REAL screen, so the fixture asserts the
+ * FORMULA recomputed from each engine's own work area, never absolute pixels. */
+static void u32_resolve_placement(uint32_t style, uint32_t x, uint32_t y, uint32_t w, uint32_t h,
+                                  int *ox, int *oy, int *ow, int *oh) {
+    const uint32_t DEF = 0x80000000u;
+    int32_t wa[4]; u32_workarea(wa);
+    if (style & (0x40000000u /*WS_CHILD*/ | 0x80000000u /*WS_POPUP*/)) {
+        *ox = (x == DEF) ? 0 : (int)(int32_t)x;
+        *oy = (y == DEF) ? 0 : (int)(int32_t)y;
+        *ow = (w == DEF) ? 0 : (int)(int32_t)w;
+        *oh = (h == DEF) ? 0 : (int)(int32_t)h;
+        return;
+    }
+    *ox = (x == DEF) ? wa[0] : (int)(int32_t)x;
+    *oy = (y == DEF) ? wa[1] : (int)(int32_t)y;
+    *ow = (w == DEF) ? (wa[0] + ((wa[2] - wa[0]) * 3) / 4) - *ox : (int)(int32_t)w;
+    *oh = (h == DEF) ? (wa[1] + ((wa[3] - wa[1]) * 3) / 4) - *oy : (int)(int32_t)h;
 }
 /* A predefined USER32 control class (BUTTON/EDIT/…) has no app WNDPROC — the system
  * provides it. We model these as data-only control windows (state tracked, no
@@ -4494,10 +4521,8 @@ static uint32_t u32_window_create(uint32_t wndproc, uint32_t exstyle, uint32_t s
             g_u32_win[i].parent = parent;
             g_u32_win[i].exstyle = exstyle;
             g_u32_win[i].style = style;
-            g_u32_win[i].x = u32_coord(x, 0);
-            g_u32_win[i].y = u32_coord(y, 0);
-            g_u32_win[i].w = u32_coord(w, 0);
-            g_u32_win[i].h = u32_coord(h, 0);
+            u32_resolve_placement(style, x, y, w, h, &g_u32_win[i].x, &g_u32_win[i].y,
+                                  &g_u32_win[i].w, &g_u32_win[i].h);
             g_u32_win[i].visible = (style & 0x10000000u /* WS_VISIBLE */) ? 1 : 0;
             g_u32_win[i].enabled = (style & 0x08000000u /* WS_DISABLED */) ? 0 : 1;
             g_u32_win[i].userdata = 0;
@@ -7518,8 +7543,9 @@ static uint32_t u32_spi(uint32_t esp, int wide) {
     switch (action) {
     case 0x0029: return u32_get_ncm(pv, wide);  /* SPI_GETNONCLIENTMETRICS */
     case 0x0030:  /* SPI_GETWORKAREA -> RECT{0,0,W,H} (no taskbar reserved) */
-        if (pv) { int32_t *r = (int32_t *)(uintptr_t)pv;
-                  r[0] = 0; r[1] = 0; r[2] = U32_SCREEN_W; r[3] = U32_SCREEN_H; }
+        /* Same source of truth as CW_USEDEFAULT placement (u32_workarea): the two must
+         * never drift, or default-placed windows land off the reported work area. */
+        if (pv) u32_workarea((int32_t *)(uintptr_t)pv);
         return 1;
     case 0x0001: if (pv) *(int32_t *)(uintptr_t)pv = 1; return 1; /* SPI_GETBEEP           */
     case 0x0005: if (pv) *(int32_t *)(uintptr_t)pv = 1; return 1; /* SPI_GETBORDER         */
