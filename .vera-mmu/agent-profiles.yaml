@@ -1,0 +1,91 @@
+{
+  "format": "vera-agent-profiles/v1",
+  "profiles": [
+    {
+      "adapter": "claude-code-local",
+      "coverage": "COMPACTION_AWARE",
+      "events": [
+        "SessionStart",
+        "PreToolUse",
+        "PostToolUse",
+        "PreCompact",
+        "PostCompact",
+        "Stop"
+      ],
+      "format": "vera-agent-profile/v1",
+      "id": "claude-code-local",
+      "label": "Claude Code local",
+      "mode": "local"
+    },
+    {
+      "adapter": "claude-code-cloud",
+      "coverage": "CLOUD_STAGED_NOT_LIVE",
+      "events": [
+        "SessionStart",
+        "PreToolUse",
+        "PostToolUse",
+        "PreCompact",
+        "PostCompact",
+        "Stop"
+      ],
+      "format": "vera-agent-profile/v1",
+      "id": "claude-code-cloud",
+      "label": "Claude Code cloud",
+      "mode": "cloud"
+    },
+    {
+      "adapter": "codex",
+      "coverage": "PARTIAL_LOCAL_TOOLS",
+      "events": [
+        "SessionStart",
+        "PreToolUse",
+        "PostToolUse",
+        "PreCompact",
+        "PostCompact",
+        "Stop"
+      ],
+      "format": "vera-agent-profile/v1",
+      "id": "codex",
+      "label": "Codex",
+      "mode": "local"
+    },
+    {
+      "adapter": "gemini",
+      "coverage": "TOOL_GUARD_NO_POST_COMPACTION",
+      "events": [
+        "SessionStart",
+        "BeforeTool",
+        "AfterTool",
+        "PreCompress",
+        "SessionEnd"
+      ],
+      "format": "vera-agent-profile/v1",
+      "id": "gemini",
+      "label": "Gemini CLI",
+      "mode": "local"
+    },
+    {
+      "adapter": "antigravity",
+      "coverage": "TURN_GUARD_HARD",
+      "events": [
+        "PreInvocation",
+        "PreToolUse",
+        "PostToolUse",
+        "Stop"
+      ],
+      "format": "vera-agent-profile/v1",
+      "id": "antigravity",
+      "label": "Antigravity",
+      "mode": "local"
+    },
+    {
+      "adapter": "generic-mcp",
+      "coverage": "MCP_ONLY",
+      "events": [],
+      "format": "vera-agent-profile/v1",
+      "id": "generic-mcp",
+      "label": "MCP générique",
+      "mode": "universal"
+    }
+  ]
+}

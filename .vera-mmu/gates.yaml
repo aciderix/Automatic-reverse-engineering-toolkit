@@ -1,0 +1,20 @@
+format: vera-gate-catalog/v1
+gates:
+  - id: TESTS_RECORDED
+    name: "Suite de tests enregistrée"
+    capability_id: "test-suite-report"
+    required: true
+    expected:
+      verdict: PASS
+  - id: TESTS_RECORDED_FIELDS
+    name: "Champs de mesure complets"
+    capability_id: "software-fields-check"
+    required: true
+    expected:
+      verdict: PASS
+  - id: BUILD_INTEGRITY
+    name: "Intégrité du build vérifiée"
+    capability_id: "build-artifact-integrity"
+    required: true
+    expected:
+      verdict: PASS

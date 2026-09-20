@@ -1,0 +1,69 @@
+format: vera-capability-catalog/v1
+capabilities:
+  - id: "test-suite-report"
+    name: "Rapport de suite de tests"
+    description: "Enregistre le résultat déclaré d’une suite de tests du projet."
+    kind: COLLECTOR
+    version: "1.0.0"
+    runner: NOOP
+    network_policy: DENY_NETWORK
+    timeout_seconds: 120
+    parameter_schema:
+      type: object
+      properties:
+        suite: {type: string}
+        passed: {type: string}
+        failed: {type: string}
+      required: [suite, passed, failed]
+      additionalProperties: false
+    yields_proof: false
+    policy: READ_ONLY
+    inputs: [suite, passed, failed]
+    outputs: [verdict]
+    validator: EVIDENCE_FIELDS
+    artifacts: []
+    confirmation_required: false
+  - id: "software-fields-check"
+    name: "Contrôle des champs — rapport de suite de tests"
+    description: "Vérifie que l’evidence enregistrée porte les champs déclarés du domaine."
+    kind: CHECK
+    version: "1.0.0"
+    runner: EVIDENCE_FIELDS
+    network_policy: DENY_NETWORK
+    timeout_seconds: 120
+    parameter_schema:
+      type: object
+      properties:
+        validator_id: {type: string}
+        evidence_id: {type: string}
+      required: [validator_id, evidence_id]
+      additionalProperties: false
+    yields_proof: false
+    policy: READ_ONLY
+    inputs: [suite, passed, failed]
+    outputs: [verdict]
+    validator: EVIDENCE_FIELDS
+    artifacts: []
+    confirmation_required: false
+  - id: "build-artifact-integrity"
+    name: "Intégrité d’artefact de build"
+    description: "Vérifie qu’un artefact de build correspond exactement au hash attendu."
+    kind: CHECK
+    version: "1.0.0"
+    runner: EVIDENCE_HASH
+    network_policy: DENY_NETWORK
+    timeout_seconds: 120
+    parameter_schema:
+      type: object
+      properties:
+        validator_id: {type: string}
+        evidence_id: {type: string}
+      required: [validator_id, evidence_id]
+      additionalProperties: false
+    yields_proof: false
+    policy: READ_ONLY
+    inputs: []
+    outputs: [verdict]
+    validator: EVIDENCE_HASH
+    artifacts: []
+    confirmation_required: false

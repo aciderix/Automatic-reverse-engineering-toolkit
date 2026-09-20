@@ -1,0 +1,15 @@
+format: vera-policy-catalog/v1
+filesystem:
+  read: allow
+  write: confirm
+network:
+  default: deny
+process:
+  allowed_runners: [EVIDENCE_FIELDS, EVIDENCE_HASH, NOOP]
+git:
+  commit: confirm
+  push: confirm
+destructive:
+  default: confirm
+promotion:
+  proven_requires: [admissible_pass, technical_validation]

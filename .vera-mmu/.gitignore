@@ -1,0 +1,6 @@
+# VERA-MMU — Zero Pollution (§36).
+# Volatile SQLite sidecars: rebuilt by SQLite, never part of the memory.
+*.sqlite-wal
+*.sqlite-shm
+# Transient staging of a bundle restore, should a run be interrupted.
+runtime/
