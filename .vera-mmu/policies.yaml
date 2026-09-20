@@ -5,11 +5,17 @@ filesystem:
 network:
   default: deny
 process:
-  allowed_runners: [EVIDENCE_FIELDS, EVIDENCE_HASH, NOOP]
+  allowed_runners:
+  - EVIDENCE_FIELDS
+  - EVIDENCE_HASH
+  - NOOP
+  - OBSERVED_PROCESS
 git:
   commit: confirm
   push: confirm
 destructive:
   default: confirm
 promotion:
-  proven_requires: [admissible_pass, technical_validation]
+  proven_requires:
+  - admissible_pass
+  - technical_validation
