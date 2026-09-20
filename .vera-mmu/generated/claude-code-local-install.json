@@ -1,0 +1,115 @@
+{
+  "claudeCodeLocal": {
+    "adapter": {
+      "id": "claude-code-local-v1",
+      "maximum_guard_mode": "HARD",
+      "version": "1.0.0"
+    },
+    "adapterBindings": [
+      {
+        "adapter_id": "claude-code-local-deny-v1",
+        "capability_id": "aret-toolkit-oracle"
+      },
+      {
+        "adapter_id": "claude-code-local-deny-v1",
+        "capability_id": "build-artifact-integrity"
+      },
+      {
+        "adapter_id": "claude-code-local-deny-v1",
+        "capability_id": "software-fields-check"
+      },
+      {
+        "adapter_id": "claude-code-local-deny-v1",
+        "capability_id": "test-suite-report"
+      }
+    ],
+    "hooks": {
+      "PostCompact": [
+        {
+          "hooks": [
+            {
+              "command": "/home/user/verif-app/rc5/cli/vmmu claude-code-local-hook --profile \"${CLAUDE_PROJECT_DIR:-.}/.vera-mmu/project.yaml\" --event PostCompact",
+              "timeout": 10,
+              "type": "command"
+            }
+          ]
+        }
+      ],
+      "PostToolUse": [
+        {
+          "hooks": [
+            {
+              "command": "/home/user/verif-app/rc5/cli/vmmu claude-code-local-hook --profile \"${CLAUDE_PROJECT_DIR:-.}/.vera-mmu/project.yaml\" --event PostToolUse",
+              "timeout": 10,
+              "type": "command"
+            }
+          ],
+          "matcher": "mcp__vera-mmu-aret-toolkit__mmu_acknowledge_resume"
+        }
+      ],
+      "PreCompact": [
+        {
+          "hooks": [
+            {
+              "command": "/home/user/verif-app/rc5/cli/vmmu claude-code-local-hook --profile \"${CLAUDE_PROJECT_DIR:-.}/.vera-mmu/project.yaml\" --event PreCompact",
+              "timeout": 10,
+              "type": "command"
+            }
+          ]
+        }
+      ],
+      "PreToolUse": [
+        {
+          "hooks": [
+            {
+              "command": "/home/user/verif-app/rc5/cli/vmmu claude-code-local-hook --profile \"${CLAUDE_PROJECT_DIR:-.}/.vera-mmu/project.yaml\" --event PreToolUse",
+              "timeout": 10,
+              "type": "command"
+            }
+          ]
+        }
+      ],
+      "SessionStart": [
+        {
+          "hooks": [
+            {
+              "command": "/home/user/verif-app/rc5/cli/vmmu claude-code-local-hook --profile \"${CLAUDE_PROJECT_DIR:-.}/.vera-mmu/project.yaml\" --event SessionStart",
+              "timeout": 10,
+              "type": "command"
+            }
+          ]
+        }
+      ],
+      "Stop": [
+        {
+          "hooks": [
+            {
+              "command": "/home/user/verif-app/rc5/cli/vmmu claude-code-local-hook --profile \"${CLAUDE_PROJECT_DIR:-.}/.vera-mmu/project.yaml\" --event Stop",
+              "timeout": 10,
+              "type": "command"
+            }
+          ]
+        }
+      ]
+    },
+    "installation": {
+      "mcpTarget": ".mcp.json",
+      "mode": "OPT_IN",
+      "settingsTarget": ".claude/settings.json"
+    },
+    "mcpServer": {
+      "args": [
+        "--profile",
+        "${CLAUDE_PROJECT_DIR:-.}/.vera-mmu/project.yaml"
+      ],
+      "command": "/home/user/verif-app/rc5/cli/vmmu claude-code-local-mcp",
+      "env": {
+        "VERA_CLAUDE_CODE_LOCAL": "1",
+        "VERA_MCP_BUILD_HASH": "6f4d92f61abff47403f4a600e66c2f737e519b407dd890a9026f603f91e4c42e",
+        "VERA_MCP_INSTRUCTIONS_HASH": "9766a3ec9396ec28b91d529a179112d56e260c826bb656bfcf0f590f5cfc0a97",
+        "VERA_PROJECT_ID": "aret-toolkit"
+      },
+      "id": "vera-mmu-aret-toolkit"
+    }
+  }
+}
